@@ -53,6 +53,10 @@ pub struct OpDigest {
     pub ranges: Vec<Range>,
     #[serde(default)]
     pub round: u8,
+    /// The asker's roster fingerprints, one per bucket of the server's authority set
+    /// (DEVICE_PROOF_DESIGN section 9, `node::server_rosters`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rs: Option<Vec<String>>,
 }
 
 /// `SyncResponse.digest`: the answer to a digest ask.
@@ -68,6 +72,9 @@ pub struct DigestReply {
     /// The answerer cannot compare digests for this server: ask it with the state vector.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub vector: bool,
+    /// The answerer's (master, roster digest) pairs in the buckets whose `rs` differed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rd: Vec<(String, String)>,
 }
 
 /// A signed op this build keeps unread, as its author signed it.
@@ -124,11 +131,13 @@ struct SetStamp {
 pub struct Asker<'a> {
     pub bref: Option<&'a str>,
     pub covers: Option<&'a HlcTimestamp>,
+    /// The checkpoint `bref` names, as the asker sent it after we said we lacked it.
+    pub given: Option<&'a super::fold::Base>,
 }
 
 impl<'a> Asker<'a> {
     pub fn of(d: &'a OpDigest) -> Self {
-        Self { bref: d.bref.as_deref(), covers: d.base.as_ref() }
+        Self { bref: d.bref.as_deref(), covers: d.base.as_ref(), given: None }
     }
 }
 
@@ -225,7 +234,9 @@ pub fn entries<'a>(state: &'a ServerState, kept: &[KeptRef<'a>], asker: Option<A
     use std::hash::BuildHasher;
     let genesis = super::anchor::is_genesis_id(&state.server_id);
     let ours = state.base.as_ref().map(|b| b.hash_hex());
-    let other = asker.and_then(|a| a.bref).filter(|r| Some(*r) != ours.as_deref()).and_then(|r| state.base_by_hash(r));
+    let other = asker.and_then(|a| a.bref).filter(|r| Some(*r) != ours.as_deref()).and_then(|r| {
+        state.base_by_hash(r).or_else(|| asker.and_then(|a| a.given).filter(|g| g.hash_hex() == r).cloned())
+    });
     let legacy_covers = asker.filter(|a| a.bref.is_none()).and_then(|a| a.covers);
     let keeps = |op: &CrdtOp| -> bool {
         if matches!(op.payload, super::operations::CrdtPayload::ServerCheckpoint { .. }) {
@@ -242,7 +253,7 @@ pub fn entries<'a>(state: &'a ServerState, kept: &[KeptRef<'a>], asker: Option<A
     let compared: Vec<&'a CrdtOp> = state
         .op_log
         .iter()
-        .chain(state.stored.iter().filter(|(_, k)| !matches!(k, super::fold::RowKind::Parked(_))).map(|(o, _)| o))
+        .chain(state.stored.iter().filter(|(_, k)| k.served()).map(|(o, _)| o))
         .collect();
     let mut guard = state.id_memo.0.lock().unwrap_or_else(|e| e.into_inner());
     let memo = &mut *guard;
@@ -311,10 +322,10 @@ fn within<'s, 'a>(entries: &'s [Entry<'a>], lo: u64, hi: u64) -> &'s [Entry<'a>]
 /// The first ask: ranges doubling in size back from our newest op, and everything after it.
 pub fn first_ask(entries: &[Entry<'_>], ask: u64, salt: String, base: Option<HlcTimestamp>, bref: Option<String>) -> OpDigest {
     let Some(keyed) = Keyed::new(&salt) else {
-        return OpDigest { ask, salt, base, bref, from: Some(0), ranges: Vec::new(), round: 0 };
+        return OpDigest { ask, salt, base, bref, from: Some(0), ranges: Vec::new(), round: 0, rs: None };
     };
     let Some(top) = entries.last().map(|e| e.ms) else {
-        return OpDigest { ask, salt, base, bref, from: Some(0), ranges: Vec::new(), round: 0 };
+        return OpDigest { ask, salt, base, bref, from: Some(0), ranges: Vec::new(), round: 0, rs: None };
     };
     let mut bounds: Vec<u64> = vec![0];
     let mut back = 1usize;
@@ -333,7 +344,7 @@ pub fn first_ask(entries: &[Entry<'_>], ask: u64, salt: String, base: Option<Hlc
             Range(lo, hi, n, fp)
         })
         .collect();
-    OpDigest { ask, salt, base, bref, from: top.checked_add(1), ranges, round: 0 }
+    OpDigest { ask, salt, base, bref, from: top.checked_add(1), ranges, round: 0, rs: None }
 }
 
 /// The answer to a digest: what to hand over and the sub-ranges to compare again. `None`
@@ -383,7 +394,7 @@ pub fn answer<'s, 'a>(entries: &'s [Entry<'a>], d: &OpDigest) -> Option<(Vec<Ite
     if let Some(from) = d.from {
         take(&entries[entries.partition_point(|e| e.ms < from)..], &mut send);
     }
-    Some((send, DigestReply { ask: d.ask, round: d.round, groups, vector: false }))
+    Some((send, DigestReply { ask: d.ask, round: d.round, groups, vector: false, rd: Vec::new() }))
 }
 
 /// `ours` cut into at most `parts` sub-ranges of about equal count at distinct

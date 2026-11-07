@@ -6,7 +6,7 @@ use super::admin_lww::AdminLwwReg;
 use super::dominance::{newer, raise, ChannelStamps, Stamps};
 use super::hlc::{Hlc, HlcTimestamp};
 use super::members::MemberEvent;
-use super::operations::{CrdtOp, CrdtPayload, MemberRole, Permission};
+use super::operations::{CrdtOp, CrdtPayload, Endorsement, MemberRole, Permission};
 #[cfg(test)]
 use super::operations::OpReject;
 use crate::identity::native_identity::NativeKeypair;
@@ -18,12 +18,22 @@ use crate::identity::native_identity::NativeKeypair;
 pub(crate) struct OpSigner {
     keypair: NativeKeypair,
     pk_b64: String,
+    /// This device's own key: the proof of section 6, made in the lane its HLC mints in.
+    device: Option<NativeKeypair>,
 }
 
 impl std::fmt::Debug for OpSigner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("OpSigner(<redacted>)")
     }
+}
+
+/// The founding device of a server: its id (the HLC lane), its key for the device proof,
+/// and the founder's recovery key for the committing nonce.
+pub(crate) struct Founder<'a> {
+    pub device_peer_id: &'a str,
+    pub device: Option<&'a NativeKeypair>,
+    pub r_pub: Option<&'a str>,
 }
 
 /// Type of channel within a server.
@@ -457,6 +467,39 @@ pub struct ServerState {
     /// it, so a stamped child never forgets what its unstamped ancestor decided.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cp_floor: Option<HlcTimestamp>,
+    /// In a 0.14 checkpoint's own state (DEVICE_PROOF_DESIGN section 7): its last 64
+    /// ancestors by content id, nearest first; the clock of the first stamped checkpoint
+    /// of its lineage (`None` = its own clock); the id of the newest settling on its line.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cp_lineage: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cp_cut: Option<HlcTimestamp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cp_settled: Option<String>,
+    /// In a 0.14 checkpoint's own state: the content ids of the `DeviceRetired` ops its
+    /// writer folded since its parent (section 8.2). A retire this or the parent lists is
+    /// decided.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cp_retired: Vec<String>,
+    /// In a 0.14 checkpoint's own state: the endorsements it carries (section 8.2), each
+    /// naming only ops this checkpoint does not decide; at most `MAX_ENDORSED_REFS` refs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cp_endorsed: Vec<Endorsement>,
+    /// In a 0.14 checkpoint's own state: the newest post window per removed device
+    /// (section 8.2, read by section 13's gate).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cp_posts_until: Vec<super::operations::PostsUntil>,
+    /// In a 0.14 owner checkpoint's own state: one entry per re-folded (member, device)
+    /// pair and the owner's review of it (section 8.3).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cp_refolded: Vec<super::refold::Refolded>,
+    /// In a settling checkpoint's own state (section 8.3): its stamp, and the owner's
+    /// compacted roster holding the removal, which every replica holding the settling
+    /// merges into its view (`authority::held_cp_rosters`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cp_settles: Option<super::operations::SettleStamp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) cp_roster: Option<crate::identity::roster::Roster>,
     /// Fingerprint of the ops this state folded: a restart that classifies its rows into
     /// the same set skips the refold.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -495,6 +538,57 @@ pub struct ServerState {
     /// its byte bound) costs a whole serialization, so it is not retried every tick.
     #[serde(skip)]
     pub(crate) cp_retry_at_ms: u64,
+    /// Who counts for this server, as this replica's own store says (DEVICE_PROOF_DESIGN
+    /// section 10): set by the node before every ingest, author and restore.
+    #[serde(skip)]
+    pub(crate) authority: std::sync::Arc<super::authority::AuthorityView>,
+    /// The cut is in force (section 7): a fact of held ops, so monotone.
+    #[serde(skip)]
+    pub(crate) cut: bool,
+    /// The ops held `DeviceRetired`s name, from a directly counted retire (section 10,
+    /// steps 3 and 6): computed before each fold.
+    #[serde(skip)]
+    pub(crate) endorsed: std::sync::Arc<super::verdict::Endorsed>,
+    #[serde(skip)]
+    pub(crate) view_source: Option<super::verdict::ViewSource>,
+    /// Tail retires that rebuilt, per author and window, and whether one waits for the
+    /// node's coalesced rebuild (section 14).
+    #[serde(skip)]
+    pub(crate) retire_rebuilds: Box<super::fold::RetireRebuilds>,
+    /// When this replica first folded each checkpoint as its base (content id hex ->
+    /// ms; `cp_seen`, loaded by the node before the restore): what picks restore points.
+    #[serde(skip)]
+    pub(crate) first_folds: std::sync::Arc<HashMap<String, u64>>,
+    /// The `cp_roster` of every held checkpoint that verifies as a base, as the last
+    /// plan found them.
+    #[serde(skip)]
+    pub(crate) cp_rosters: std::sync::Arc<Vec<crate::identity::roster::Roster>>,
+    /// Only on a settling's scratch fold (`crdt::settle`): the restore point it folds on.
+    #[serde(skip)]
+    pub(crate) settle_base: Option<[u8; 32]>,
+    /// Counted settlings off the base's line naming devices it does not drop (section
+    /// 8.3, two at once), as the last plan found them.
+    #[serde(skip)]
+    pub(crate) rival_settles: std::sync::Arc<Vec<super::operations::SettleStamp>>,
+    /// When each of our own `Own` rows was first dominated (`own_kept`, loaded by the
+    /// node before the restore).
+    #[serde(skip)]
+    pub(crate) own_since: std::sync::Arc<HashMap<super::fold::OwnKey, u64>>,
+    /// A recovery in progress at this replica (`crdt::hold`, section 8.8): the
+    /// `floor_pending` row, loaded by the node before the restore.
+    #[serde(skip)]
+    pub(crate) recovery: Option<std::sync::Arc<super::hold::Recovery>>,
+    /// The base is eligible by rule 4 alone, as the last plan found it (section 8.8).
+    #[serde(skip)]
+    pub(crate) floor_base: bool,
+    /// Owner answers to re-fold reviews this device took and its base does not carry yet
+    /// (section 8.3, "Confirm"). Local, never sent, never in a checkpoint.
+    #[serde(skip)]
+    pub(crate) refold_answers: Vec<super::refold_write::LocalAnswer>,
+    /// (member, channel) whose post or change the post gate refused while the view held
+    /// no roster of that member: the node asks for the roster (`crdt_resync`). Local.
+    #[serde(skip)]
+    pub(crate) post_rosters_wanted: std::sync::Arc<std::sync::Mutex<std::collections::BTreeSet<(String, String)>>>,
     /// Set by the node right after `set_hlc` on any state that authors ops.
     /// Never persisted and never sent: it is our own secret.
     #[serde(skip)]
@@ -518,9 +612,9 @@ impl ServerState {
             settings, role_permissions, banned_members, muted_members,
             channel_grants, labels, label_assignments, emotes, stickers, deleted,
             member_record, join_secret, join_lock, owner_pin, checkpoint_hlc, member_events, stamps,
-            cp_generation, cp_parent, cp_stamped, cp_floor, retained_print,
+            cp_generation, cp_parent, cp_stamped, cp_floor, cp_lineage, cp_cut, cp_settled, cp_retired, cp_endorsed, cp_posts_until, cp_refolded, cp_settles: _, cp_roster: _, retained_print,
             op_log: _, hlc: _, op_log_dedup: _, held: _, id_memo: _, stored: _, base: _, parent: _, signer: _,
-            quota: _, ahead: _, cp_retry_at_ms: _,
+            quota: _, ahead: _, cp_retry_at_ms: _, authority: _, cut: _, endorsed: _, view_source: _, retire_rebuilds: _, first_folds: _, cp_rosters: _, settle_base: _, rival_settles: _, own_since: _, recovery: _, floor_base: _, refold_answers: _, post_rosters_wanted: _,
         } = self;
         // Judged against this replica's own checkpoint: a snapshot or a new checkpoint
         // made from it carries none.
@@ -556,6 +650,15 @@ impl ServerState {
             cp_parent: cp_parent.clone(),
             cp_stamped: *cp_stamped,
             cp_floor: cp_floor.clone(),
+            cp_lineage: cp_lineage.clone(),
+            cp_cut: cp_cut.clone(),
+            cp_settled: cp_settled.clone(),
+            cp_retired: cp_retired.clone(),
+            cp_endorsed: cp_endorsed.clone(),
+            cp_posts_until: cp_posts_until.clone(),
+            cp_refolded: cp_refolded.clone(),
+            cp_settles: None,
+            cp_roster: None,
             retained_print: if self.anchor() == Anchor::Legacy { retained_print.clone() } else { Some(self.current_print()) },
             op_log: Vec::new(),
             hlc: None,
@@ -568,6 +671,20 @@ impl ServerState {
             quota: Default::default(),
             ahead: None,
             cp_retry_at_ms: 0,
+            authority: Default::default(),
+            cut: false,
+            endorsed: Default::default(),
+            retire_rebuilds: Default::default(),
+            first_folds: Default::default(),
+            cp_rosters: Default::default(),
+            rival_settles: Default::default(),
+            recovery: None,
+            floor_base: false,
+            refold_answers: Vec::new(),
+            post_rosters_wanted: Default::default(),
+            own_since: Default::default(),
+            settle_base: None,
+            view_source: None,
             signer: None,
         }
     }
@@ -607,6 +724,15 @@ impl ServerState {
             cp_parent: None,
             cp_stamped: false,
             cp_floor: None,
+            cp_lineage: Vec::new(),
+            cp_cut: None,
+            cp_settled: None,
+            cp_retired: Vec::new(),
+            cp_endorsed: Vec::new(),
+            cp_posts_until: Vec::new(),
+            cp_refolded: Vec::new(),
+            cp_settles: None,
+            cp_roster: None,
             retained_print: None,
             op_log: Vec::new(),
             hlc: None,
@@ -619,6 +745,20 @@ impl ServerState {
             quota: Default::default(),
             ahead: None,
             cp_retry_at_ms: 0,
+            authority: Default::default(),
+            cut: false,
+            endorsed: Default::default(),
+            retire_rebuilds: Default::default(),
+            first_folds: Default::default(),
+            cp_rosters: Default::default(),
+            rival_settles: Default::default(),
+            recovery: None,
+            floor_base: false,
+            refold_answers: Vec::new(),
+            post_rosters_wanted: Default::default(),
+            own_since: Default::default(),
+            settle_base: None,
+            view_source: None,
             signer: None,
         }
     }
@@ -640,20 +780,36 @@ impl ServerState {
     #[cfg(test)]
     pub(crate) fn found(name: String, owner_peer_id: String, keypair: NativeKeypair, pk_b64: String) -> (Self, CrdtOp) {
         let device = owner_peer_id.clone();
-        Self::found_on(name, owner_peer_id, &device, keypair, pk_b64)
+        Self::found_on(name, owner_peer_id, Founder { device_peer_id: &device, device: None, r_pub: None }, keypair, pk_b64)
     }
 
     /// Found a new server with a self-certifying id: the founder's signed
     /// `ServerCreated`, already applied, is the first op of its log.
-    pub(crate) fn found_on(name: String, owner_peer_id: String, device_peer_id: &str, keypair: NativeKeypair, pk_b64: String) -> (Self, CrdtOp) {
-        let nonce = super::anchor::new_nonce();
+    /// `device` signs the device proof; `r_pub`, the founder's recovery key when its
+    /// roster has one, makes the founding nonce commit to it (section 5).
+    pub(crate) fn found_on(
+        name: String,
+        owner_peer_id: String,
+        device: Founder<'_>,
+        keypair: NativeKeypair,
+        pk_b64: String,
+    ) -> (Self, CrdtOp) {
+        let nonce = match device.r_pub {
+            Some(r) if !r.is_empty() => super::authority::committing_nonce(&owner_peer_id, r),
+            _ => super::anchor::new_nonce(),
+        };
         let server_id = super::anchor::derive_server_id(&owner_peer_id, &nonce);
         let mut s = Self::skeleton(server_id);
-        s.set_hlc(Hlc::for_device(owner_peer_id.clone(), device_peer_id));
+        s.set_hlc(Hlc::for_device(owner_peer_id.clone(), device.device_peer_id));
         s.set_signer(keypair, pk_b64);
+        if let Some(kp) = device.device {
+            s.set_device_signer(kp.clone());
+        }
+        let committed = super::authority::nonce_commitment(&nonce).is_some();
         let op = s.create_op(CrdtPayload::ServerCreated { name, owner_peer_id, nonce });
         debug_assert!(s.op_allowed(&op), "a fresh founding op must pass its own rule");
         let _ = s.apply_op(&op);
+        s.cut = committed;
         (s, op)
     }
 
@@ -729,6 +885,12 @@ impl ServerState {
         if !super::members::insert(&mut events, event) {
             return;
         }
+        self.rederive(master, events, at);
+    }
+
+    /// Take `events` as `master`'s whole record and fold its spans again, with what a span
+    /// closing or opening later implies; the re-fold's membership revert runs it too (R33-3).
+    pub(crate) fn rederive(&mut self, master: &str, events: Vec<MemberEvent>, at: &HlcTimestamp) {
         let open_of = |spans: Option<&Vec<MemberSpan>>| spans.and_then(|s| s.last()).filter(|s| s.until_ms == u64::MAX).cloned();
         let before = open_of(self.member_record.get(master));
         let spans = super::members::derive(&events);
@@ -845,7 +1007,20 @@ impl ServerState {
     /// with `set_hlc`: a state that can author an op must be able to sign it, or every
     /// peer rejects what it produces.
     pub(crate) fn set_signer(&mut self, keypair: NativeKeypair, pk_b64: String) {
-        self.signer = Some(OpSigner { keypair, pk_b64 });
+        self.signer = Some(OpSigner { keypair, pk_b64, device: None });
+    }
+
+    /// Install this device's key beside the master's, so every op it authors carries
+    /// the device proof (DEVICE_PROOF_DESIGN section 6). The HLC must mint in its lane.
+    pub(crate) fn set_device_signer(&mut self, device: NativeKeypair) {
+        if let Some(s) = self.signer.as_mut() {
+            s.device = Some(device);
+        }
+    }
+
+    /// This device's key, when installed.
+    pub(crate) fn device_signer(&self) -> Option<&NativeKeypair> {
+        self.signer.as_ref().and_then(|s| s.device.as_ref())
     }
 
     /// Fold any per-member entry keyed by a DEVICE id into its MASTER identity, so one
@@ -991,6 +1166,10 @@ impl ServerState {
     /// The signer is `expect`ed exactly the way the HLC is: an unsigned op is refused by
     /// every peer, so a missing signer must fail loudly rather than emit ops that
     /// silently vanish on the network.
+    pub(crate) fn signer_set(&self) -> bool {
+        self.signer.is_some()
+    }
+
     pub fn create_op(&mut self, payload: CrdtPayload) -> CrdtOp {
         self.ensure_dedup();
         let hlc = self
@@ -1011,12 +1190,17 @@ impl ServerState {
             author: hlc.actor().to_string(),
             payload,
             auth: None,
+            dev: None,
         };
         let signer = self
             .signer
             .as_ref()
             .expect("signer must be set before creating ops");
         op.sign(&signer.keypair, &signer.pk_b64);
+        if let Some(device) = &signer.device {
+            op.sign_device(device);
+            debug_assert!(op.proven_device().is_some(), "the HLC mints outside this device's lane");
+        }
         op
     }
 
@@ -1062,7 +1246,7 @@ impl ServerState {
             stickers: _, deleted: _, member_record: _, owner_pin: _,
             checkpoint_hlc: _, op_log: _, hlc: _, op_log_dedup: _, held: _,
             id_memo: _, stored: _, base: _, parent: _, signer: _, member_events: _,
-            cp_generation: _, cp_parent: _, cp_stamped: _, cp_floor, retained_print: _, quota: _, ahead: _, cp_retry_at_ms: _,
+            cp_generation: _, cp_parent: _, cp_stamped: _, cp_floor, cp_lineage: _, cp_cut: _, cp_settled: _, cp_retired: _, cp_endorsed: _, cp_posts_until: _, cp_refolded: _, cp_settles: _, cp_roster: _, retained_print: _, quota: _, ahead: _, cp_retry_at_ms: _, authority: _, cut: _, endorsed: _, view_source: _, retire_rebuilds: _, first_folds: _, cp_rosters: _, settle_base: _, rival_settles: _, own_since: _, recovery: _, floor_base: _, refold_answers: _, post_rosters_wanted: _,
         } = self;
 
         if name.clamp_hlc(max_ms) {
@@ -1539,6 +1723,8 @@ impl ServerState {
                     self.stickers.remove(hash);
                 }
             }
+            // Read by the verdict (`endorsements`) and the settle marks, never folded into state.
+            CrdtPayload::DeviceRetired { .. } | CrdtPayload::SettleSign { .. } | CrdtPayload::FloorMark { .. } => {}
         }
     }
 
@@ -1634,7 +1820,7 @@ impl ServerState {
             member_record, join_secret, join_lock, member_events, stamps,
             owner_pin: _, checkpoint_hlc: _, op_log: _, hlc: _, op_log_dedup: _,
             held: _, id_memo: _, stored: _, base: _, parent: _, signer: _,
-            cp_generation: _, cp_parent: _, cp_stamped, cp_floor, retained_print: _, quota: _, ahead: _, cp_retry_at_ms: _,
+            cp_generation: _, cp_parent: _, cp_stamped, cp_floor, cp_lineage: _, cp_cut: _, cp_settled: _, cp_retired: _, cp_endorsed: _, cp_posts_until: _, cp_refolded: _, cp_settles: _, cp_roster: _, retained_print: _, quota: _, ahead: _, cp_retry_at_ms: _, authority: _, cut: _, endorsed: _, view_source: _, retire_rebuilds: _, first_folds: _, cp_rosters: _, settle_base: _, rival_settles: _, own_since: _, recovery: _, floor_base: _, refold_answers: _, post_rosters_wanted: _,
         } = base;
         self.name = name;
         self.channels = channels;
@@ -1688,7 +1874,7 @@ impl ServerState {
             member_record, join_secret, join_lock, checkpoint_hlc, member_events, stamps,
             owner_pin: _, op_log: _, hlc: _, op_log_dedup: _, held: _, id_memo: _,
             stored: _, base: _, parent: _, signer: _,
-            cp_generation: _, cp_parent: _, cp_stamped: _, cp_floor, retained_print: _, quota: _, ahead: _, cp_retry_at_ms: _,
+            cp_generation: _, cp_parent: _, cp_stamped: _, cp_floor, cp_lineage: _, cp_cut: _, cp_settled: _, cp_retired: _, cp_endorsed: _, cp_posts_until: _, cp_refolded: _, cp_settles: _, cp_roster: _, retained_print: _, quota: _, ahead: _, cp_retry_at_ms: _, authority: _, cut: _, endorsed: _, view_source: _, retire_rebuilds: _, first_folds: _, cp_rosters: _, settle_base: _, rival_settles: _, own_since: _, recovery: _, floor_base: _, refold_answers: _, post_rosters_wanted: _,
         } = fresh;
         self.name = name;
         self.channels = channels;
@@ -1885,12 +2071,50 @@ impl ServerState {
         let Some(owner) = self.anchor_owner() else { return false };
         role.priority() >= MemberRole::Moderator.priority()
             && (!link.is_base() || (*role == MemberRole::Owner && op.author == owner))
-            && self.join_lock.link_allowed(&self.server_id, link, &owner)
+            && self.join_lock.link_allowed(&self.server_id, link, &owner, &|m: &str, d: &str| {
+                !self.cut || self.authority.device_verdict(m, d) == super::authority::DeviceVerdict::Counted
+            })
             && door.is_none_or(|d| super::lock_state::door_matches(d, link))
             && grants.len() <= 64
-            && grants.iter().all(|(master, grant)| {
-                crate::node::join_lock::grant_shape(grant) && self.holds_moderation(master)
+            && grants.iter().all(|(key, grant)| {
+                // A 0.13 grant sealed to a master stands only before the cut (section 16, R1).
+                crate::node::join_lock::grant_shape(grant)
+                    && (!self.cut || crate::node::join_lock::grant_device(key).is_some())
+                    && self.holds_moderation(crate::node::join_lock::grant_holder(key))
             })
+            && per_holder_at_most(grants, crate::node::join_lock::GRANT_DEVICES)
+    }
+
+    /// Section 8.2: a member names one device of its own statements and at most
+    /// `MAX_RETIRED_REFS` well-formed refs in strict order; only a member's lost-or-stolen
+    /// retire names a restore point.
+    fn retire_allowed(
+        &self,
+        op: &CrdtOp,
+        device: &str,
+        refs: &[super::operations::OpRef],
+        posts_until_ms: Option<i64>,
+        restore: Option<&str>,
+    ) -> bool {
+        let hex64 = |h: &str| h.len() == 64 && h.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+        !device.is_empty()
+            && device.len() <= 128
+            && self.states_device(&op.author, device)
+            && refs.len() <= super::operations::MAX_RETIRED_REFS
+            && refs.windows(2).all(|w| w[0] < w[1])
+            && refs.iter().all(|r| hex64(&r.h))
+            && posts_until_ms.is_none_or(|ms| ms >= 0)
+            && restore.is_none_or(|h| hex64(h) && self.anchor_owner().is_some_and(|o| o != op.author))
+    }
+
+    /// A `SettleSign`'s own shape (section 7): a well-formed stamp of this server with
+    /// exactly one signature, by the device the op's proof names, that verifies.
+    pub(crate) fn settle_sign_shape(&self, op: &CrdtOp, stamp: &super::operations::SettleStamp) -> bool {
+        let [sig] = stamp.sigs.as_slice() else { return false };
+        stamp.server == self.server_id
+            && stamp.well_formed()
+            && op.proven_device() == Some(sig.device.as_str())
+            && stamp.sig_verifies(sig)
     }
 
     fn author_priority(&self, author: &str) -> u8 {
@@ -2049,6 +2273,12 @@ impl ServerState {
     /// other peers during join and sync fan-out. Override-aware (`permissions_of`, not
     /// `default_permissions()`).
     pub fn op_allowed(&self, op: &CrdtOp) -> bool {
+        self.device_counts_here(op) && self.op_allowed_by_rules(op)
+    }
+
+    /// [`Self::op_allowed`] with the device clause skipped: what tells a parked op from
+    /// a dropped one (DEVICE_PROOF_DESIGN section 7, H3).
+    pub(crate) fn op_allowed_by_rules(&self, op: &CrdtOp) -> bool {
         match &op.payload {
             CrdtPayload::ServerCreated { owner_peer_id, nonce, .. } => {
                 return self.founding_allowed(op, owner_peer_id, nonce);
@@ -2097,6 +2327,12 @@ impl ServerState {
             CrdtPayload::ServerRenamed { .. } => has(Permission::MANAGE_SERVER),
             CrdtPayload::JoinKeySet { secret } => role == MemberRole::Owner && join_secret_shape(&secret.0).is_some(),
             CrdtPayload::JoinLock { link, door, grants } => self.join_lock_allowed(op, &role, link, door.as_ref(), grants),
+            CrdtPayload::DeviceRetired { device, ops, posts_until_ms, restore } => {
+                self.retire_allowed(op, device, ops, *posts_until_ms, restore.as_deref())
+            }
+            CrdtPayload::SettleSign { stamp } => role == MemberRole::Owner && self.settle_sign_shape(op, stamp),
+            // Judged by the plan before any rule (section 8.8), never folded.
+            CrdtPayload::FloorMark { .. } => false,
             CrdtPayload::ServerSettingChanged { key, value } => {
                 self.setting_allowed_for(&role, perms, key, value)
             }
@@ -2522,6 +2758,17 @@ impl ServerState {
     }
 }
 
+/// A join lock op seals the change key to at most `cap` devices of each identity (0.14:
+/// every grant is filed by device, never by master).
+fn per_holder_at_most(grants: &std::collections::BTreeMap<String, String>, cap: usize) -> bool {
+    let mut per: HashMap<&str, usize> = HashMap::new();
+    grants.keys().all(|k| {
+        let n = per.entry(crate::node::join_lock::grant_holder(k)).or_default();
+        *n += 1;
+        *n <= cap
+    })
+}
+
 /// Where an op sits in the fold: the founding op, then the base (the only checkpoint a
 /// log folds), then every other op by clock.
 pub(super) fn fold_order(a: &CrdtOp, b: &CrdtOp) -> std::cmp::Ordering {
@@ -2899,50 +3146,65 @@ mod tests {
     /// removal or a demotion makes it due to move; a newer door settles that.
     #[test]
     fn a_join_lock_op_is_judged_by_who_may_move_the_lock() {
-        use crate::node::join_lock::{mint_base, mint_next};
+        use crate::node::join_lock::{grant_key, mint_owner_base, mint_successor};
+        let dev = crate::identity::native_identity::NativeKeypair::from_secret_bytes(&[42; 32]);
+        let moder = keys(5).1;
         let (owner_kp, owner, _) = keys(1);
         let server = "0123456789abcdef0123456789abcdef".to_string();
         let mut s = test_state(server.clone(), "S".into(), owner.clone());
-        for id in ["moder", "alice", "bob"] {
+        for id in [moder.as_str(), "alice", "bob"] {
             let op = s.create_op(CrdtPayload::MemberAdded { peer_id: id.into(), display_name: id.into(), follow: None, ask: None });
             let _ = s.apply_op(&op);
         }
-        let op = s.create_op(CrdtPayload::RoleChanged { peer_id: "moder".into(), role: MemberRole::Moderator, priority: 3 });
+        let op = s.create_op(CrdtPayload::RoleChanged { peer_id: moder.clone(), role: MemberRole::Moderator, priority: 3 });
         let _ = s.apply_op(&op);
         let door_of = |lock: &crate::node::join_lock::NewLock| Some(JoinSecret(hex::encode(lock.door.as_slice())));
         let grant = format!("{}={}", "A".repeat(43), format_args!(".{}", "B".repeat(64)));
-        let grants = |to: &str| std::collections::BTreeMap::from([(to.to_string(), grant.clone())]);
+        let grants = |to: &str| std::collections::BTreeMap::from([(grant_key(to, &dev.peer_id()), grant.clone())]);
+        let master_grant = |to: &str| std::collections::BTreeMap::from([(to.to_string(), grant.clone())]);
         let lock_op = |s: &mut ServerState, author: &str, link: &crate::node::join_lock::LockLink, door, grants| {
             op_by(s, author, CrdtPayload::JoinLock { link: link.clone(), door, grants })
         };
 
-        let first = mint_base(&server, 1, &owner_kp, None).unwrap();
-        let by_mod = lock_op(&mut s, "moder", &first.link, door_of(&first), grants("moder"));
+        let first = mint_owner_base(&server, 1, &owner_kp, None, &dev).unwrap();
+        let by_mod = lock_op(&mut s, &moder, &first.link, door_of(&first), grants(&moder));
         assert!(!s.op_allowed(&by_mod), "an owner-signed link comes from the owner only");
-        let base = lock_op(&mut s, &owner, &first.link, door_of(&first), grants("moder"));
+        let to_master = lock_op(&mut s, &owner, &first.link, door_of(&first), master_grant(&moder));
+        assert!(s.op_allowed(&to_master), "before the cut a 0.13 grant sealed to a master is judged as today (section 16)");
+        let mut after_cut = s.clone();
+        after_cut.cut = true;
+        assert!(!after_cut.op_allowed(&to_master), "after the cut a change key is sealed to a device, never a master (R1)");
+        let devices = |n: u8| -> std::collections::BTreeMap<String, String> {
+            (0..n).map(|i| (grant_key(&moder, &keys(100 + i).1), grant.clone())).collect()
+        };
+        let eight = lock_op(&mut s, &owner, &first.link, door_of(&first), devices(8));
+        assert!(s.op_allowed(&eight), "eight devices of one identity");
+        let nine = lock_op(&mut s, &owner, &first.link, door_of(&first), devices(9));
+        assert!(!s.op_allowed(&nine), "never a ninth");
+        let base = lock_op(&mut s, &owner, &first.link, door_of(&first), grants(&moder));
         assert!(s.op_allowed(&base));
         let _ = s.apply_op(&base);
         assert!(s.join_lock.has_lock());
         assert_eq!(s.join_lock.newest_door().map(|(n, _, _)| n), Some(1));
         assert!(!s.join_lock.rotation_due());
 
-        let next = mint_next(&server, &first.link, &first.change).unwrap();
+        let next = mint_successor(&server, &first.link, &first.change, &moder, &dev).unwrap();
         let by_member = lock_op(&mut s, "alice", &next.link, door_of(&next), Default::default());
         assert!(!s.op_allowed(&by_member), "a plain member moves nothing");
-        let stray = mint_next(&server, &first.link, &crate::node::sealed_box::new_secret().unwrap());
+        let stray = mint_successor(&server, &first.link, &crate::node::sealed_box::new_secret().unwrap(), &moder, &dev);
         assert!(stray.is_none(), "only the change key signs a successor");
-        let wrong_door = lock_op(&mut s, "moder", &next.link, door_of(&first), Default::default());
+        let wrong_door = lock_op(&mut s, &moder, &next.link, door_of(&first), Default::default());
         assert!(!s.op_allowed(&wrong_door), "a door is only its own secret");
-        let to_member = lock_op(&mut s, "moder", &next.link, door_of(&next), grants("alice"));
+        let to_member = lock_op(&mut s, &moder, &next.link, door_of(&next), grants("alice"));
         assert!(!s.op_allowed(&to_member), "the change key goes to owners, admins and mods only");
-        let skipped = mint_next(&server, &next.link, &next.change).unwrap();
-        let ahead = lock_op(&mut s, "moder", &skipped.link, door_of(&skipped), Default::default());
+        let skipped = mint_successor(&server, &next.link, &next.change, &moder, &dev).unwrap();
+        let ahead = lock_op(&mut s, &moder, &skipped.link, door_of(&skipped), Default::default());
         assert!(!s.op_allowed(&ahead), "no successor of a lock we do not hold");
 
         let leave = op_by(&mut s, "bob", CrdtPayload::MemberRemoved { peer_id: "bob".into(), seen: None });
         let _ = s.apply_op(&leave);
         assert!(s.join_lock.rotation_due(), "a leave makes the lock due to move");
-        let moved = lock_op(&mut s, "moder", &next.link, door_of(&next), grants("moder"));
+        let moved = lock_op(&mut s, &moder, &next.link, door_of(&next), grants(&moder));
         assert!(s.op_allowed(&moved));
         let _ = s.apply_op(&moved);
         assert!(!s.join_lock.rotation_due(), "the newer door settles it");
@@ -2952,12 +3214,12 @@ mod tests {
         let ban = op_by(&mut s, &owner, CrdtPayload::MemberBanned { peer_id: "alice".into(), seen: None });
         let _ = s.apply_op(&ban);
         assert!(s.join_lock.rotation_due(), "a ban makes it due to move");
-        let third = mint_next(&server, &next.link, &next.change).unwrap();
-        let settled = lock_op(&mut s, "moder", &third.link, door_of(&third), grants("moder"));
+        let third = mint_successor(&server, &next.link, &next.change, &moder, &dev).unwrap();
+        let settled = lock_op(&mut s, &moder, &third.link, door_of(&third), grants(&moder));
         let _ = s.apply_op(&settled);
         assert!(!s.join_lock.rotation_due());
 
-        let demote = s.create_op(CrdtPayload::RoleChanged { peer_id: "moder".into(), role: MemberRole::Member, priority: 3 });
+        let demote = s.create_op(CrdtPayload::RoleChanged { peer_id: moder.clone(), role: MemberRole::Member, priority: 3 });
         let _ = s.apply_op(&demote);
         assert!(s.join_lock.rotation_due(), "a demoted mod still holds the change key");
         assert!(!format!("{s:?}").contains(&hex::encode(next.door.as_slice())), "no door ever prints");
@@ -4668,6 +4930,7 @@ mod tests {
                 nonce: String::new(),
             },
             auth: None,
+            dev: None,
         };
         state.apply_op(&op).unwrap();
         assert_eq!(state.name(), "Real Name");
@@ -4721,6 +4984,7 @@ mod tests {
                 priority: MemberRole::Admin.priority(),
             },
             auth: None,
+            dev: None,
         };
         assert_eq!(judge(&state, &op), (Err(OpReject::MissingSignature), false));
     }
@@ -4750,6 +5014,7 @@ mod tests {
                 nickname: "M".into(),
             },
             auth: None,
+            dev: None,
         };
         op.sign(&member.0, &member.2);
         assert_eq!(judge(&state, &op), (Err(OpReject::ActorMismatch), false));
@@ -4770,6 +5035,7 @@ mod tests {
                 priority: MemberRole::Admin.priority(),
             },
             auth: None,
+            dev: None,
         };
         op.sign(&member.0, &member.2);
         assert_eq!(judge(&state, &op), (Err(OpReject::AuthorMismatch), false));

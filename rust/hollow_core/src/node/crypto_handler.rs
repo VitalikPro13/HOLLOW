@@ -1775,13 +1775,18 @@ pub(crate) fn backfill_author_allowed(
     allowed
 }
 
-/// E4 over one backfilled page: a post stays only if its author was a member when
-/// it was written, and a reaction riding it only if its reactor was one at its own time.
+/// E4 over one backfilled page of channel `cid`: a post stays only if its author was a
+/// member when it was written and section 13's device gate takes it, and a reaction
+/// riding it only if its reactor was one at its own time.
 pub(crate) fn backfill_filter(
     state: Option<&crate::crdt::server_state::ServerState>,
+    cid: &str,
     messages: &mut Vec<SyncMessageItem>,
 ) {
     messages.retain(|m| backfill_author_allowed(state, &m.s, m.ts));
+    if let Some(s) = state {
+        super::post_proof::filter_page(state, &s.server_id, cid, messages, "backfilled");
+    }
     for m in messages.iter_mut() {
         m.reactions.retain(|r| backfill_author_allowed(state, &r.p, r.ts));
     }
@@ -3875,8 +3880,9 @@ pub(crate) fn handle_epoch_hint(
         );
     };
 
-    // Membership gate: only members of this server get epoch SERVICE.
-    if !state.members.keys().any(|m| super::resolver::same_identity(m, from_peer)) {
+    // Membership gate: only members of this server get epoch SERVICE (during a
+    // recovery, KEEP too: 8.8 class 3, R34-11).
+    if !(state.members.keys().any(|m| super::resolver::same_identity(m, from_peer)) || state.keeps_peer(from_peer)) {
         hollow_log!("[HOLLOW-MLS] No epoch service for non-member {from_peer} for {group_key}");
         // ...but their hint may be the only evidence that WE are behind, and acting on
         // it costs one throttled probe to a peer we ALREADY trust. This is the
@@ -6219,6 +6225,30 @@ mod tests {
             assert!(body.contains("backfill_filter("), "swarm.rs: {arm} skips the author and reactor filter");
             assert!(body.contains("channel_known("), "swarm.rs: {arm} notes a hole for a channel the server lacks");
         }
+        // Section 13: a guest cannot judge a post's device, so the public answer serves
+        // only what our own gate takes, and every live arm hands the proof to the ingest.
+        let served = between(&swarm, "HavenMessage::PublicChannelSyncRequest { server_id, channel_id, before_timestamp } => {", "HavenMessage::PublicChannelSyncResponse {");
+        assert!(served.contains("post_proof::filter_page("), "swarm.rs: the public sync answer serves posts or changes no device proves");
+        assert!(served.contains("attach_change_proofs("), "swarm.rs: the public sync answer serves changes without their proofs");
+        for handler in ["handle_envelope_delete_message(", "handle_envelope_add_reaction(", "handle_envelope_remove_reaction(", "handle_envelope_link_preview_set("] {
+            assert!(between(&ops, &format!("pub(crate) async fn {handler}"), "\n}\n").contains("post_proof::change_refused("), "message_ops.rs: {handler} is not judged by its device");
+        }
+        for arm in [
+            "Ok(MessageEnvelope::DeleteMessage {", "Ok(MessageEnvelope::AddReaction {", "Ok(MessageEnvelope::RemoveReaction {", "Ok(MessageEnvelope::LinkPreviewSet {",
+            "MessageEnvelope::DeleteMessage { mid, ts, sig, pk, sid, cid, dev } => {", "MessageEnvelope::AddReaction { mid, emoji, ts, sig, pk, sid, cid, dev } => {",
+            "MessageEnvelope::RemoveReaction { mid, emoji, ts, sig, pk, sid, cid, dev } => {", "MessageEnvelope::LinkPreviewSet { mid, lp, ts, sig, pk, sid, cid, dev } => {",
+            "HavenMessage::PublicChannelDelete {", "HavenMessage::PublicChannelAddReaction {", "HavenMessage::PublicChannelRemoveReaction {", "HavenMessage::PublicLinkPreviewSet {",
+        ] {
+            assert!(between(&swarm, arm, ").await;").contains(" dev,"), "swarm.rs: {arm} drops the change's proof");
+        }
+        assert!(between(&ops, "pub(crate) async fn handle_envelope_channel_message(", "persist_incoming_channel_message(").contains("post_proof::refused("));
+        for arm in ["Ok(MessageEnvelope::ChannelMessage { inner }) => {", "MessageEnvelope::ChannelMessage { inner } => {", "HavenMessage::PublicChannelMessage { server_id,"] {
+            assert!(between(&swarm, arm, ").await;").contains(", dev,"), "swarm.rs: {arm} drops the post's proof");
+        }
+        assert!(between(&ops, "pub(crate) async fn handle_envelope_edit_message(", "edit_channel_message(").contains("post_proof::refused("), "message_ops.rs: a live edit is not judged by its device");
+        for arm in ["Ok(MessageEnvelope::EditMessage {", "MessageEnvelope::EditMessage { mid, text: new_text, ts, sig, pk, sid, cid, dev } => {", "HavenMessage::PublicChannelEdit {"] {
+            assert!(between(&swarm, arm, ").await;").contains(" dev,"), "swarm.rs: {arm} drops the edit's proof");
+        }
         for (arm, until) in [
             ("Ok(MessageEnvelope::DmSyncBatch {", "Ok(MessageEnvelope::DmSiblingSyncBatch {"),
             ("Ok(MessageEnvelope::DmSiblingSyncBatch {", "Ok(MessageEnvelope::EditMessage {"),
@@ -6305,7 +6335,7 @@ mod tests {
             inner: Box::new(ChannelMessagePayload {
                 sid: sid.into(), cid: cid.into(), text: "hi".into(), ts: 1, sig: None, pk: None,
                 mid: Some("m".into()), reply_to: None, file_id: None, link_preview: None,
-                order_us: Some(1_000), album: None,
+                order_us: Some(1_000), album: None, dev: None,
             }),
         };
 
@@ -6326,7 +6356,7 @@ mod tests {
         assert!(fits(&typing, "srv", None), "typing rides the server group by design");
 
         let dm_edit = MessageEnvelope::EditMessage {
-            mid: "m".into(), text: "x".into(), ts: 1, sig: None, pk: None, sid: None, cid: None,
+            mid: "m".into(), text: "x".into(), ts: 1, sig: None, pk: None, sid: None, cid: None, dev: None,
         };
         assert!(!fits(&dm_edit, "srv", None));
         assert!(!fits(&MessageEnvelope::SessionAck, "srv", None));

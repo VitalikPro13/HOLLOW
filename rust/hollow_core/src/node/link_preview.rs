@@ -46,6 +46,24 @@ fn embed_proxy_base() -> Option<String> {
         .and_then(|g| g.clone())
 }
 
+/// The largest thumbnail a received card may carry (base64 WebP), well past what our
+/// own fetch makes at `THUMB_MAX_DIM_LARGE`.
+pub(crate) const MAX_CARD_THUMB_B64: usize = 512 * 1_024;
+/// The largest URL or rich field a received card may carry.
+const MAX_CARD_FIELD: usize = 4 * 1_024;
+
+/// Whether a card someone else made fits what our own fetch would write: text within
+/// the fetch's caps, a bounded thumbnail. A card is free text and an image whoever
+/// signs it, so a receiver bounds it before storing or showing it.
+pub(crate) fn card_within_bounds(lp: &crate::node::LinkPreviewRef) -> bool {
+    let rich = lp.rich.as_deref();
+    lp.title.chars().count() <= MAX_TITLE_CHARS
+        && lp.description.chars().count() <= MAX_DESC_CHARS
+        && [lp.url.as_str(), lp.domain.as_str(), lp.site_name.as_str()].iter().all(|f| f.len() <= MAX_CARD_FIELD)
+        && lp.thumb_webp_b64.as_ref().is_none_or(|t| t.len() <= MAX_CARD_THUMB_B64)
+        && rich.is_none_or(|r| [&r.kind, &r.author, &r.video_url].iter().all(|f| f.as_ref().is_none_or(|v| v.len() <= MAX_CARD_FIELD)))
+}
+
 /// Set (or clear) the social-preview proxy base; an empty string clears it.
 /// Validated by the FFI setter before Dart persists it, like the GIF proxy's.
 pub fn set_embed_proxy_base(base: Option<String>) {
@@ -871,6 +889,18 @@ fn truncate_chars(s: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A card someone else made is refused past our own fetch's caps.
+    #[test]
+    fn a_received_card_stays_within_our_own_caps() {
+        let card = |title: usize, thumb: usize| crate::node::LinkPreviewRef {
+            url: "https://example.com/".into(), title: "t".repeat(title), description: String::new(), domain: "example.com".into(),
+            site_name: String::new(), thumb_webp_b64: Some("a".repeat(thumb)), thumb_w: None, thumb_h: None, rich: None,
+        };
+        assert!(card_within_bounds(&card(MAX_TITLE_CHARS, MAX_CARD_THUMB_B64)));
+        assert!(!card_within_bounds(&card(MAX_TITLE_CHARS + 1, 10)), "a title past the cap");
+        assert!(!card_within_bounds(&card(10, MAX_CARD_THUMB_B64 + 1)), "a thumbnail past the cap");
+    }
 
     #[test]
     fn parses_full_og_metadata() {

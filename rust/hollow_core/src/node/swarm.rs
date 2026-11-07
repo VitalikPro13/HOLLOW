@@ -408,8 +408,9 @@ pub(super) fn on_verified_sibling(
     // The MEMBERSHIP filter matters as much as the tombstone: announcing a shell
     // retained after our own LEAVE makes the sibling re-ADD our identity to a
     // server we left, real members reject that op, and the actor's devices fork.
+    // The recovery hold (8.8 class 3) keeps a held server announced.
     for (sid, st) in server_states.iter() {
-        if st.is_deleted() || !st.is_member(local_peer_str) { continue; }
+        if st.is_deleted() || !st.keeps_peer(local_peer_str) { continue; }
         super::olm_lane::carry(
             ws_cmd_tx, peer_id, Some(&own_inbox),
             &HavenMessage::SiblingServerAnnounce { server_id: sid.clone(), owner: st.anchor_owner(), join_key: st.join_public_text(), fresh: false },
@@ -419,7 +420,7 @@ pub(super) fn on_verified_sibling(
     hollow_log!(
         "[HOLLOW-CRDT] Re-announced {} server(s) to verified sibling {peer_id}",
         server_states.values()
-            .filter(|s| !s.is_deleted() && s.is_member(local_peer_str))
+            .filter(|s| !s.is_deleted() && s.keeps_peer(local_peer_str))
             .count()
     );
 
@@ -1034,8 +1035,9 @@ async fn run_event_loop(
     // Server states keyed by server_id. Reload from DB so servers survive restarts.
     // Whether every server row was read, and those whose state did not load: the MLS
     // groups of neither may be forgotten below.
+    let owed_settlings = super::settle_owed::hold_at_start(&db_path, &db_passphrase, &local_peer_str);
     let (mut server_states, server_rows_read, unreadable_servers) = load_server_states(
-        &db_path, &db_passphrase, &local_peer_str, &device_peer_id, &bundle_keypair, &crdt_store, &ws_cmd_tx,
+        &db_path, &db_passphrase, &local_peer_str, &device_peer_id, &bundle_keypair, &device_keypair, &crdt_store, &ws_cmd_tx,
     );
 
     // Ops an older build skipped: read again from what we kept, or fetched again whole.
@@ -1048,6 +1050,7 @@ async fn run_event_loop(
         Err(_) => super::crdt_resync::CrdtResync::load_none(crdt_store.clone(), crate::api::updater::APP_VERSION),
     };
     crdt_resync.op_sync.set_local(&device_peer_id);
+    crdt_resync.op_sync.set_store(&db_path, &db_passphrase, &local_peer_str);
 
     // -- MLS state --
     let mut mls: Option<MlsManager> = {
@@ -1254,7 +1257,7 @@ async fn run_event_loop(
             let rows = store.load_pending_joins().unwrap_or_default();
             if !rows.is_empty() {
                 // ONE build for all of them: this opens the DB.
-                let device_list = super::roster_book::own_roster(&master_keypair.peer_id(), &db_path, &db_passphrase);
+                let device_list = super::roster_book::join_roster(&master_keypair.peer_id(), &device_peer_id, &db_path, &db_passphrase);
                 let card = super::profile_card::own_card(&master_keypair, &db_path, &db_passphrase);
                 let mut restored = 0usize;
                 for row in rows {
@@ -1353,6 +1356,16 @@ async fn run_event_loop(
     let mut mls_turn = crate::node::crypto_handler::MlsTurn::default();
     let mut turn_book = crate::node::mls_turns::TurnBook::default();
     let mut repair_budget = crate::node::mls_turns::RepairBudget::default();
+    let mut view_dirty = super::authority_view::ViewDirty::default();
+    super::settle_owed::settle_at_start(
+        owed_settlings, &mut server_states, &mut crdt_resync, &mut mls, &ws_cmd_tx, &ws_room_peers, &mut gossip_overlays,
+        &event_tx, &local_peer_str, &device_keypair, &crypto_store, &crdt_store, &db_path, &db_passphrase,
+    ).await;
+    let mut retire_rounds = super::retire_round::RetireRounds::default();
+    let mut merged_settlings: std::collections::HashSet<String> = std::collections::HashSet::new();
+    if let Ok(store) = crate::storage::MessageStore::lease(&db_path, &db_passphrase) {
+        retire_rounds.resume(super::retire_round::load_held(&store), std::time::Instant::now());
+    }
     let mut mls_batch_interval = Duration::from_secs(2);
     let mut mls_batch_timer = tokio::time::interval(mls_batch_interval);
     mls_batch_timer.tick().await; // consume immediate first tick
@@ -1624,7 +1637,7 @@ async fn run_event_loop(
                         message_ops::handle_send_channel_message(
                             &mut olm, &crypto_store, &mut mls, &server_states,
                             &event_tx, &ws_cmd_tx, &ws_room_peers,
-                            &bundle_keypair, &pub_key_b64, &local_peer_str,
+                            &bundle_keypair, &device_keypair, &pub_key_b64, &local_peer_str,
                             server_id, channel_id, text, message_id, reply_to_mid, link_preview,
                             &db_path, &db_passphrase,
                         ).await;
@@ -1634,9 +1647,10 @@ async fn run_event_loop(
 
                     NodeCommand::CreateServer { name } => {
                         let before: std::collections::HashSet<String> = server_states.keys().cloned().collect();
+                        let r_pub = super::roster_book::own_roster(&local_peer_str, &db_path, &db_passphrase).map(|r| r.r_pub);
                         sync_handler::handle_create_server(
                             &mut server_states, &mut mls, &event_tx, &ws_cmd_tx,
-                            &bundle_keypair, &local_peer_str, &device_peer_id, name,
+                            &bundle_keypair, &device_keypair, r_pub.as_deref(), (&db_path, &db_passphrase), &local_peer_str, &device_peer_id, name,
                             &crypto_store, &crdt_store,
                         ).await;
                         // Its first join lock, before any invite can be used.
@@ -1722,6 +1736,7 @@ async fn run_event_loop(
                         }
                         join_invites.insert(server_id.clone(), (join_key.clone(), owner_pin.clone()));
                         let ask_floor = leave_book.ask_floor(&server_id);
+                        let sid = server_id.clone();
                         sync_handler::handle_join_server(
                             &mut pending_server_joins, &ws_cmd_tx,
                             &ws_room_peers, &cmd_tx,
@@ -1730,6 +1745,11 @@ async fn run_event_loop(
                             &mls, &crypto_store, None, None, ask_floor,
                             &db_path, &db_passphrase,
                         ).await;
+                        if pending_server_joins.contains_key(&sid)
+                            && super::shared_servers::recovering(&local_peer_str, &db_path, &db_passphrase)
+                        {
+                            crdt_resync.room_notices.start(&sid, std::time::Instant::now());
+                        }
                     }
 
                     NodeCommand::ChangeRole { server_id, peer_id, new_role } => {
@@ -1765,13 +1785,82 @@ async fn run_event_loop(
                     }
 
                     NodeCommand::RevokeDevice { device_peer_id: target, mode, with_dependents } => {
+                        let lost_t_ms = match mode {
+                            super::roster_book::RemoveMode::Lost { t_ms } => Some(t_ms.max(0)),
+                            super::roster_book::RemoveMode::Retire => None,
+                        };
+                        // M4 and section 8.3 step 1: a removal waits for its round, unless the
+                        // round released it. A retire still waiting gives way to a lost removal.
+                        if !retire_rounds.take_released(&target) {
+                            if lost_t_ms.is_some() {
+                                retire_rounds.cancel(&target);
+                            }
+                            let asked = sync_handler::ask_retire_round(
+                                &server_states, &mut crdt_resync, &mut frame_budget, &ws_cmd_tx, &ws_room_peers,
+                                &local_peer_str, &device_peer_id, &target, lost_t_ms.map(|t| t as u64),
+                            );
+                            let removal = super::retire_round::Removal { device: target.clone(), with_dependents, lost_t_ms };
+                            if let Ok(store) = crate::storage::MessageStore::lease(&db_path, &db_passphrase) {
+                                super::retire_round::save_held(&store, &removal);
+                            }
+                            if retire_rounds.start(removal, asked, std::time::Instant::now()).is_none() {
+                                continue;
+                            }
+                        }
+                        if mode == super::roster_book::RemoveMode::Retire {
+                            let posts = crate::storage::MessageStore::lease(&db_path, &db_passphrase).ok();
+                            let posts_of = |sid: &str| posts.as_ref().and_then(|s| s.newest_post_of_device(sid, &local_peer_str, &target));
+                            sync_handler::retire_device_ops(
+                                &mut server_states, &mut mls, &ws_cmd_tx, &ws_room_peers, &mut gossip_overlays,
+                                &event_tx, &local_peer_str, &device_keypair, &target, None, &posts_of, &crypto_store, &crdt_store,
+                            );
+                        }
                         let keys = super::lock_keeper::LockKeys { master: &master_keypair, device: &device_keypair };
                         lock_keeper.move_before_removal(&server_states, keys, &ws_cmd_tx);
-                        if let Some(revoked) = Box::pin(sync_handler::handle_revoke_device(
-                            &event_tx, &ws_cmd_tx, &ws_room_peers, &server_states, &master_keypair,
-                            &device_keypair, &master_peer_str, &local_peer_str, &device_peer_id,
-                            is_invisible, target, mode, with_dependents, &db_path, &db_passphrase,
-                        )).await {
+                        // Section 8.3: what counted before the removal, for the settlings.
+                        let views_before: HashMap<String, std::sync::Arc<crate::crdt::authority::AuthorityView>> =
+                            server_states.iter().map(|(sid, s)| (sid.clone(), s.authority.clone())).collect();
+                        let owed = super::settle_owed::lost_key(&target);
+                        if lost_t_ms.is_some()
+                            && let Ok(store) = crate::storage::MessageStore::lease(&db_path, &db_passphrase)
+                            && let Some(before) = super::roster_book::load(&store, &local_peer_str)
+                        {
+                            super::settle_owed::note(&store, &owed, &before, lost_t_ms);
+                        }
+                        let revoked = Box::pin(sync_handler::revoke_device_locally(
+                            &event_tx, &master_keypair, &device_keypair, &target, mode, with_dependents, &db_path, &db_passphrase,
+                        )).await;
+                        #[cfg(test)]
+                        if super::settle_owed::stalls_for_test(&db_path) {
+                            std::future::pending::<()>().await;
+                        }
+                        if revoked.is_none()
+                            && let Ok(store) = crate::storage::MessageStore::lease(&db_path, &db_passphrase)
+                        {
+                            super::settle_owed::forget_if_nothing_dropped(&store, &owed, &local_peer_str, &device_peer_id);
+                            super::retire_round::clear_held(&store, &target);
+                        }
+                        if let Some(revoked) = revoked {
+                            if let super::roster_book::RemoveMode::Lost { t_ms } = mode {
+                                let settled = sync_handler::settle_lost_devices(
+                                    &mut server_states, &views_before, &mut mls, &ws_cmd_tx, &ws_room_peers, &mut gossip_overlays,
+                                    &event_tx, &local_peer_str, &device_keypair, &revoked, t_ms.max(0) as u64,
+                                    &crypto_store, &crdt_store, &db_path, &db_passphrase,
+                                );
+                                for (sid, masters, ops) in settled {
+                                    crdt_resync.floor.note_settled(&sid, masters, ops, std::time::Instant::now());
+                                }
+                            }
+                            // Held and owed until what the removal wrote is on disk.
+                            crdt_store.committed().await;
+                            if let Ok(store) = crate::storage::MessageStore::lease(&db_path, &db_passphrase) {
+                                super::settle_owed::forget(&store, &owed);
+                                super::retire_round::clear_held(&store, &target);
+                            }
+                            Box::pin(sync_handler::publish_revocation(
+                                &event_tx, &ws_cmd_tx, &ws_room_peers, &server_states, &master_keypair,
+                                &master_peer_str, &local_peer_str, &device_peer_id, is_invisible, &revoked, &db_path, &db_passphrase,
+                            )).await;
                             // Drop our Olm session to the removed device + (coordinator)
                             // remove its MLS leaf from shared servers: the same enforcement
                             // a friend runs when it ingests the removal.
@@ -1819,9 +1908,69 @@ async fn run_event_loop(
                         )).await;
                     }
 
+                    NodeCommand::ChooseRestore { server_id, cp, reply } => {
+                        let chosen = super::restore_flow::choose(
+                            &mut crdt_resync, &server_states, &mut frame_budget, &ws_cmd_tx, &local_peer_str, &device_peer_id,
+                            &server_id, cp, &db_path, &db_passphrase,
+                        );
+                        let _ = reply.send(chosen);
+                    }
+
+                    NodeCommand::RefoldReviews { server_id, reply } => {
+                        let reviews = server_states
+                            .get(&server_id)
+                            .map(|s| crate::api::device_proof::reviews_of(s, &local_peer_str))
+                            .ok_or_else(|| "This server is not here.".to_string());
+                        let _ = reply.send(reviews);
+                    }
+
+                    NodeCommand::AnswerRefold { server_id, member, device, below, chosen, put_back, reply } => {
+                        let taken = server_states
+                            .get_mut(&server_id)
+                            .ok_or_else(|| "This server is not here.".to_string())
+                            .and_then(|s| s.take_refold_answer(&local_peer_str, &member, &device, below, &chosen, &put_back));
+                        if let (true, Some(s)) = (taken.is_ok(), server_states.get(&server_id)) {
+                            sync_handler::keep_refold_answers(&crdt_store, s);
+                        }
+                        let ok = taken.is_ok();
+                        let _ = reply.send(taken);
+                        if ok {
+                            sync_handler::author_due_checkpoints(
+                                &mut server_states, &mut mls, &ws_cmd_tx, &ws_room_peers,
+                                &mut gossip_overlays, &event_tx, &local_peer_str, &crypto_store, &crdt_store, &crdt_resync,
+                            ).await;
+                        }
+                    }
+
                     NodeCommand::RosterChanged { newly_revoked } => {
                         // A recovery typed here drops devices without removing them.
                         super::lock_keeper::note_dropped_devices(&local_peer_str, &newly_revoked);
+                        // Section 8.1: they are lost or stolen since the recovery's T, so the
+                        // servers this device held before it settle as a lost removal does.
+                        let held = (!newly_revoked.is_empty())
+                            .then(|| crate::storage::MessageStore::lease(&db_path, &db_passphrase).ok())
+                            .flatten()
+                            .and_then(|store| super::restore_flow::held_before_recovery(&server_states, &store, &local_peer_str, &newly_revoked));
+                        // Read under the roster from before the change: judge by the new one now.
+                        if let Ok(store) = crate::storage::MessageStore::lease(&db_path, &db_passphrase) {
+                            super::authority_view::release_own(&store, &local_peer_str);
+                        }
+                        if let Some((views_before, t_ms)) = held {
+                            let settled = sync_handler::settle_lost_devices(
+                                &mut server_states, &views_before, &mut mls, &ws_cmd_tx, &ws_room_peers, &mut gossip_overlays,
+                                &event_tx, &local_peer_str, &device_keypair, &newly_revoked, t_ms,
+                                &crypto_store, &crdt_store, &db_path, &db_passphrase,
+                            );
+                            for (sid, masters, ops) in settled {
+                                crdt_resync.floor.note_settled(&sid, masters, ops, std::time::Instant::now());
+                            }
+                        }
+                        if !newly_revoked.is_empty() {
+                            crdt_store.committed().await;
+                            if let Ok(store) = crate::storage::MessageStore::lease(&db_path, &db_passphrase) {
+                                super::settle_owed::forget_changes_settled(&store, &newly_revoked, &local_peer_str, &device_peer_id);
+                            }
+                        }
                         enforce_device_revocations(
                             &newly_revoked, &mut olm, &crypto_store, mls.as_ref(), &server_states,
                             &local_peer_str, &ws_room_peers, &mut pending_mls_removals,
@@ -1831,8 +1980,11 @@ async fn run_event_loop(
                             &local_peer_str, &device_peer_id, is_invisible, &newly_revoked,
                             &db_path, &db_passphrase,
                         );
+                        // The server rooms heard it from `announce_roster_change`; the rooms
+                        // of servers we are still joining (a recovery's) hear it here.
                         super::roster_book::announce_phrase_change(
-                            &ws_cmd_tx, &local_peer_str, server_states.keys(), &db_path, &db_passphrase,
+                            &ws_cmd_tx, &local_peer_str, pending_server_joins.keys().filter(|s| !server_states.contains_key(*s)),
+                            &db_path, &db_passphrase,
                         );
                         if let Some((_, state)) = super::roster_book::own(&local_peer_str, &db_path, &db_passphrase) {
                             super::roster_book::announce_own_state(
@@ -2449,7 +2601,7 @@ async fn run_event_loop(
                         message_ops::handle_edit_channel_message(
                             &mut olm, &crypto_store, &mut mls, &server_states,
                             &event_tx, &ws_cmd_tx, &ws_room_peers,
-                            &bundle_keypair, &pub_key_b64, &local_peer_str,
+                            &bundle_keypair, &pub_key_b64, &local_peer_str, &device_keypair,
                             server_id, channel_id, message_id, new_text,
                             &db_path, &db_passphrase,
                         ).await;
@@ -2468,7 +2620,7 @@ async fn run_event_loop(
                         message_ops::handle_attach_channel_link_preview(
                             &mut olm, &crypto_store, &mut mls, &server_states, &event_tx,
                             &ws_cmd_tx, &ws_room_peers,
-                            &bundle_keypair, &pub_key_b64, &local_peer_str,
+                            &bundle_keypair, &pub_key_b64, &local_peer_str, &device_keypair,
                             server_id, channel_id, message_id, preview,
                             &db_path, &db_passphrase,
                         ).await;
@@ -2487,7 +2639,7 @@ async fn run_event_loop(
                         message_ops::handle_delete_channel_message(
                             &mut olm, &crypto_store, &mut mls, &server_states,
                             &event_tx, &ws_cmd_tx, &ws_room_peers,
-                            &bundle_keypair, &pub_key_b64, &local_peer_str,
+                            &bundle_keypair, &pub_key_b64, &local_peer_str, &device_keypair,
                             server_id, channel_id, message_id,
                             &db_path, &db_passphrase,
                         ).await;
@@ -2507,7 +2659,7 @@ async fn run_event_loop(
                         message_ops::handle_add_channel_reaction(
                             &mut olm, &crypto_store, &mut mls, &server_states,
                             &event_tx, &ws_cmd_tx, &ws_room_peers,
-                            &bundle_keypair, &pub_key_b64, &local_peer_str,
+                            &bundle_keypair, &pub_key_b64, &local_peer_str, &device_keypair,
                             server_id, channel_id, message_id, emoji,
                             &db_path, &db_passphrase,
                         ).await;
@@ -2527,7 +2679,7 @@ async fn run_event_loop(
                         message_ops::handle_remove_channel_reaction(
                             &mut olm, &crypto_store, &mut mls, &server_states,
                             &event_tx, &ws_cmd_tx, &ws_room_peers,
-                            &bundle_keypair, &pub_key_b64, &local_peer_str,
+                            &bundle_keypair, &pub_key_b64, &local_peer_str, &device_keypair,
                             server_id, channel_id, message_id, emoji,
                             &db_path, &db_passphrase,
                         ).await;
@@ -3557,6 +3709,10 @@ async fn run_event_loop(
 
                     NodeCommand::NotifyShutdown => {
                         hollow_log!("[HOLLOW-SWARM] Notifying peers of shutdown");
+                        for r in retire_rounds.release_all() {
+                            let mode = r.mode();
+                            let _ = cmd_tx.try_send(NodeCommand::RevokeDevice { device_peer_id: r.device, mode, with_dependents: r.with_dependents });
+                        }
 
                         // Unregister from signaling server so peers don't see us as online.
                         if let Some(room) = active_room.as_ref() {
@@ -3739,7 +3895,8 @@ async fn run_event_loop(
                             );
                             if std::mem::take(&mut announce_first_roster) {
                                 super::roster_book::announce_phrase_change(
-                                    &ws_cmd_tx, &local_peer_str, server_states.keys(), &db_path, &db_passphrase,
+                                    &ws_cmd_tx, &local_peer_str, server_states.keys().chain(pending_server_joins.keys()),
+                                    &db_path, &db_passphrase,
                                 );
                             }
                         }
@@ -4001,6 +4158,11 @@ async fn run_event_loop(
                             file_senders_back.insert(peer_id.clone(), std::time::Instant::now());
                         }
                         carry_unseen_ops(&mut crdt_resync, &server_states, &ws_cmd_tx, &ws_room_peers, &local_peer_str, &room);
+                        if arrived_here && peer_id != device_peer_id {
+                            super::shared_servers::ask_if_recovering(
+                                &ws_cmd_tx, &mut crdt_resync.shared_asks, Some(&room), &peer_id, &local_peer_str, &db_path, &db_passphrase,
+                            );
+                        }
 
                         // A holder we could not reach earlier just turned up:
                         // ask it for anything still pending on the asset rail.
@@ -4295,7 +4457,8 @@ async fn run_event_loop(
                                     // still triggers sync and MLS bootstrap. One or two asks per server: paced,
                                     // as a member of many servers would overrun the peer's bucket.
                                     for (sid, state) in server_states.iter() {
-                                        if state.members.keys().any(|k| super::resolver::same_identity(&peer_id, k)) {
+                                        // The recovery hold asks KEEP too (8.8 class 3).
+                                        if state.members.keys().any(|k| super::resolver::same_identity(&peer_id, k)) || state.keeps_peer(&peer_id) {
                                             // Olm, never MLS, for the post-reconnection SyncReq:
                                             // the peer's MLS epoch may be stale, causing silent decrypt failure.
                                             // The epoch hint lets the responder detect us (or itself) stale.
@@ -4608,6 +4771,11 @@ async fn run_event_loop(
                             Some(old) => room_set.difference(old).cloned().collect(),
                             None => room_set.clone(),
                         };
+                        for peer in &arrived {
+                            super::shared_servers::ask_if_recovering(
+                                &ws_cmd_tx, &mut crdt_resync.shared_asks, Some(&room), peer, &local_peer_str, &db_path, &db_passphrase,
+                            );
+                        }
                         // Our own first listing of our inbox on this session, not a resume's.
                         if room == format!("inbox:{local_peer_str}") && !ws_room_peers.contains_key(&room) {
                             sync_handler::ask_absent_siblings(&ws_cmd_tx, &local_peer_str, &device_peer_id, &room_set);
@@ -4875,7 +5043,7 @@ async fn run_event_loop(
                                     }
 
                                     for (sid, state) in server_states.iter() {
-                                        if state.is_member(pid_str) {
+                                        if state.keeps_peer(pid_str) {
                                             // Paced like the PeerJoined twin.
                                             let ask = crdt_resync.sync_ask(
                                                 state, pid_str, Some(join_hold.ask()), mls.as_ref().and_then(|m| m.epoch(sid).ok()),
@@ -5155,9 +5323,17 @@ async fn run_event_loop(
                         join_hold.ring_ended(&room, &channel);
                     }
                     WsEvent::LockChain { server, links, put } => {
-                        // A server we are in: keep the relay's chain where ours is.
-                        if let Some(state) = server_states.get(&server).filter(|s| s.is_member(&local_peer_str)) {
-                            if let Some(payload) = lock_keeper.on_chain(&server, links.clone(), put, state) {
+                        // A server we are in: keep the relay's chain where ours is. During a
+                        // recovery (8.8 class 2) a held or shell replica records the chain a
+                        // grant is checked against and authors nothing.
+                        if let Some(state) = server_states.get(&server).filter(|s| s.held_as_member(&local_peer_str)) {
+                            let counted = state.is_member(&local_peer_str);
+                            let tip_before = lock_keeper.relay_tip(&server).map(|t| t.n);
+                            let payload = lock_keeper.on_chain(&server, links.clone(), put, state).filter(|_| counted);
+                            if lock_keeper.relay_tip(&server).map(|t| t.n) > tip_before {
+                                crdt_resync.floor.reset_shell(&server, std::time::Instant::now());
+                            }
+                            if let Some(payload) = payload {
                                 sync_handler::author_join_lock_op(
                                     &mut server_states, &mut mls, &ws_cmd_tx, &ws_room_peers, &mut gossip_overlays,
                                     &event_tx, &local_peer_str, &device_peer_id, &crypto_store, &crdt_store, &server, payload,
@@ -5170,6 +5346,7 @@ async fn run_event_loop(
                             }
                             let next = server_states
                                 .get(&server)
+                                .filter(|_| counted)
                                 .and_then(|state| {
                                     let keys = super::lock_keeper::LockKeys { master: &master_keypair, device: &device_keypair };
                                     let leaves = |s: &str| super::lock_keeper::server_leaves(mls.as_ref(), s);
@@ -5854,8 +6031,92 @@ async fn run_event_loop(
                 arm_started = Some(("timer", "mls_batch", std::time::Instant::now()));
                 let landed = leave_book.drive(&olm, &ws_room_peers, &ws_cmd_tx);
                 release_leave_rooms(landed, leave_book.rooms(), &mut door_rooms, &server_states, &pending_server_joins, &ws_cmd_tx);
+                // Section 8.8: trigger leaves of new recoveries, and every banner change.
+                super::floor::note_trigger_leaves(&mut server_states, &mls, &crdt_store);
+                let marks = super::floor::drive(
+                    &mut crdt_resync, &mut server_states, &mut frame_budget, &ws_cmd_tx, &ws_room_peers,
+                    &local_peer_str, &device_peer_id, &crdt_store, std::time::Instant::now(),
+                );
+                super::floor::drive_shells(
+                    &mut crdt_resync, &server_states, &mut frame_budget, &ws_cmd_tx, &ws_room_peers,
+                    &local_peer_str, &device_peer_id, std::time::Instant::now(),
+                );
+                super::floor::drive_grants(&mut crdt_resync, &server_states, &ws_cmd_tx, &ws_room_peers, &device_peer_id, std::time::Instant::now());
+                for (server_id, ops) in marks {
+                    let Some(state) = server_states.get(&server_id) else { continue };
+                    for op in &ops {
+                        sync_handler::broadcast_op_mls_first(
+                            &mut mls, &ws_cmd_tx, &ws_room_peers, &mut gossip_overlays, &event_tx, state, &local_peer_str, &server_id, op, &crypto_store,
+                        );
+                    }
+                    super::floor::carry_marks_to_keep(state, &ops, &ws_cmd_tx, &ws_room_peers, &local_peer_str);
+                }
+                for server_id in super::floor::publish(&server_states, &device_peer_id) {
+                    let _ = event_tx.send(NetworkEvent::ServerUpdated { server_id }).await;
+                }
+                // A roster saved since the last tick may change who counts (device proof, section 10).
+                for server_id in view_dirty.due(&mut server_states, &db_path, &db_passphrase) {
+                    let Some(state) = server_states.get_mut(&server_id) else { continue };
+                    let was_member = state.is_member(&local_peer_str);
+                    let ingested = state.rebuild_now();
+                    crdt_store.persist(ingested.delta(&server_id));
+                    crdt_store.save_state_snapshot(server_id.clone(), state);
+                    // A view that no longer counts what admitted us ends our membership as
+                    // a kick would, unless our own admission waits to be asked again (M2).
+                    let evicted = was_member
+                        && !state.is_member(&local_peer_str)
+                        && !state.is_deleted()
+                        && !state.refused_own_admission(&local_peer_str)
+                        && !pending_server_joins.contains_key(&server_id);
+                    if evicted {
+                        leave_evicted_server(&mut server_states, &mut mls, &crypto_store, &crdt_store, &ws_cmd_tx, &event_tx, &server_id).await;
+                    } else {
+                        let _ = event_tx.send(NetworkEvent::ServerUpdated { server_id }).await;
+                    }
+                }
+                // Section 8.4: a fresh install's restores (asks, judgment, chosen settlings).
+                super::restore_flow::tick(
+                    &mut crdt_resync, &mut server_states, &mut frame_budget, &mut mls, &mut gossip_overlays, &ws_cmd_tx, &ws_room_peers,
+                    &event_tx, &local_peer_str, &device_keypair, &crypto_store, &crdt_store, &db_path, &db_passphrase,
+                );
+                // M4: retires whose round ended (two identities, or the bound) go out now.
+                let heard = |sid: &str, since: std::time::Instant| {
+                    crdt_resync.op_sync.ended_since(sid, since).iter().filter(|id| !super::resolver::same_identity(id, &local_peer_str)).count()
+                };
+                for step in retire_rounds.due(std::time::Instant::now(), &heard) {
+                    match step {
+                        super::retire_round::RetireStep::Remove(r) => {
+                            let mode = r.mode();
+                            if cmd_tx.try_send(NodeCommand::RevokeDevice { device_peer_id: r.device.clone(), mode, with_dependents: r.with_dependents }).is_err() {
+                                retire_rounds.requeue(r);
+                            }
+                        }
+                        super::retire_round::RetireStep::Restart(r) => {
+                            let mode = r.mode();
+                            if cmd_tx.try_send(NodeCommand::RevokeDevice { device_peer_id: r.device.clone(), mode, with_dependents: r.with_dependents }).is_err() {
+                                retire_rounds.resume(vec![r], std::time::Instant::now());
+                            }
+                        }
+                        super::retire_round::RetireStep::Again { server, device } => {
+                            let posts = crate::storage::MessageStore::lease(&db_path, &db_passphrase).ok();
+                            let posts_of = |sid: &str| posts.as_ref().and_then(|s| s.newest_post_of_device(sid, &local_peer_str, &device));
+                            sync_handler::retire_device_ops(
+                                &mut server_states, &mut mls, &ws_cmd_tx, &ws_room_peers, &mut gossip_overlays,
+                                &event_tx, &local_peer_str, &device_keypair, &device, Some(&server), &posts_of, &crypto_store, &crdt_store,
+                            );
+                        }
+                    }
+                }
+                sync_handler::merge_rival_settlings(
+                    &mut server_states, &mut mls, &ws_cmd_tx, &ws_room_peers, &mut gossip_overlays, &event_tx,
+                    &local_peer_str, &device_keypair, &crypto_store, &crdt_store, &db_path, &db_passphrase, &mut merged_settlings,
+                );
                 // M2: a rebuild that refused our own admission asks to join again, no prompt.
                 silent_reask_refused(&mut silent_reasks, &server_states, &pending_server_joins, &local_peer_str, &cmd_tx);
+                sync_handler::ask_checkpoint_witnesses(
+                    &server_states, &mut crdt_resync, &mut frame_budget, &ws_cmd_tx, &ws_room_peers,
+                    &local_peer_str, &device_peer_id, std::time::Instant::now(),
+                );
                 // Owner checkpoints (design E): one comparison per server when none is due.
                 sync_handler::author_due_checkpoints(
                     &mut server_states, &mut mls, &ws_cmd_tx, &ws_room_peers,
@@ -6397,8 +6658,9 @@ async fn run_event_loop(
                         // Only reconcile peers we actually have a relationship with: a shared-server
                         // member, an accepted friend, a peer with queued DMs, or one with a
                         // half-built session. Avoids spamming co-room strangers such as guests.
+                        // KEEP counts during a recovery: the Olm twin needs sessions with held members.
                         let is_member = server_states.values()
-                            .any(|s| s.is_member(peer));
+                            .any(|s| s.keeps_peer(peer));
                         let is_friend = accepted_friends.contains(&super::resolver::resolve(peer));
                         let has_pending = pending_messages.contains_key(peer);
                         let half_session = olm.has_unconfirmed_session(peer);
@@ -6471,6 +6733,33 @@ async fn run_event_loop(
             // and are ready to dispatch channel sync probes across peers.
             _ = sync_dispatch_timer.tick() => {
                 arm_started = Some(("timer", "sync_dispatch", std::time::Instant::now()));
+                let now = std::time::Instant::now();
+                for entry in crdt_resync.shared_joins.due(now) {
+                    let sid = entry.server_id.clone();
+                    super::shared_servers::start_reentry(
+                        &mut pending_server_joins, &ws_cmd_tx, entry, &local_peer_str, &device_peer_id, &db_path, &db_passphrase,
+                    );
+                    if pending_server_joins.contains_key(&sid) {
+                        crdt_resync.room_notices.start(&sid, now);
+                    }
+                }
+                let notices = crdt_resync.room_notices.due(now);
+                super::shared_servers::send_room_notices(&ws_cmd_tx, &notices, &local_peer_str, &db_path, &db_passphrase);
+                for sid in crdt_resync.shared_joins.lapsed(&db_path, now, &|sid| server_states.contains_key(sid)) {
+                    if pending_server_joins.get(&sid).is_some_and(|p| p.reentry) {
+                        pending_server_joins.remove(&sid);
+                        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::LeaveRoom { room_code: sid });
+                    }
+                }
+                if crdt_resync.rosters_aged_at.is_none_or(|at| at.elapsed() >= Duration::from_secs(3600))
+                    && let Ok(store) = crate::storage::MessageStore::lease(&db_path, &db_passphrase)
+                {
+                    crdt_resync.rosters_aged_at = Some(std::time::Instant::now());
+                    super::server_rosters::age_out(&store, server_states.values(), super::roster_book::now_ms());
+                }
+                for sid in crdt_resync.roster_round.due(std::time::Instant::now()) {
+                    view_dirty.mark(&sid);
+                }
                 let ready = sync_coordinator.collect_ready();
                 for (server_id, peers, channels) in &ready {
                     hollow_log!(
@@ -6516,6 +6805,31 @@ async fn run_event_loop(
 
                 sync_coordinator.cleanup_stale();
 
+                for (sid, state) in server_states.iter() {
+                    let wanted = state.take_post_rosters_wanted();
+                    if !wanted.is_empty() {
+                        crdt_resync.want_post_rosters(state, &wanted, ws_room_peers.get(sid), &local_peer_str, std::time::Instant::now());
+                    }
+                }
+                let owed = crdt_resync.roster_round.take_catch_ups(std::time::Instant::now());
+                if !owed.is_empty()
+                    && let Ok(store) = crate::storage::MessageStore::lease(&db_path, &db_passphrase)
+                {
+                    for (sid, cid, device) in owed {
+                        let state = server_states.get(&sid).filter(|s| s.channels.contains_key(&cid));
+                        if !super::crypto_handler::sync_partner(state, &device, Some(&cid)) {
+                            continue;
+                        }
+                        // Beside any catch-up in flight: that one may have been refused the post.
+                        channel_asks.asked_aside(&sid, &cid, &device, std::time::Instant::now());
+                        hollow_log!("[HOLLOW-SYNC] A roster asked for a refused post landed: catching up {cid} in {sid} from {device}");
+                        let request = sync_handler::channel_sync_request(&store, &sid, &cid, true);
+                        super::frame_budget::pace_carried(&mut frame_budget, &ws_cmd_tx, &device_peer_id, &device, &request);
+                    }
+                }
+                for (device, ask) in crdt_resync.take_roster_asks() {
+                    super::frame_budget::pace_carried(&mut frame_budget, &ws_cmd_tx, &device_peer_id, &device, &ask);
+                }
                 let resync_asks = crdt_resync.tick(
                     std::time::Instant::now(), &server_states, &ws_room_peers, &local_peer_str, &device_peer_id,
                     &|device| frame_budget.lane_holds(device),
@@ -6532,7 +6846,7 @@ async fn run_event_loop(
                     match step {
                         super::op_sync::Silent::Again(sid, device, ask) => {
                             // A device that left the server, or that no room reaches now, is not asked.
-                            if server_states.get(&sid).is_some_and(|s| s.is_member(&device))
+                            if server_states.get(&sid).is_some_and(|s| s.keeps_peer(&device))
                                 && super::crypto_handler::send_room_for_peer(&ws_room_peers, &device).is_some()
                             {
                                 super::frame_budget::pace_carried(&mut frame_budget, &ws_cmd_tx, &device_peer_id, &device, &ask);
@@ -6551,9 +6865,9 @@ async fn run_event_loop(
                     }
                 }
                 for sid in joined {
-                    let Some(state) = server_states.get(&sid).filter(|s| s.is_member(&local_peer_str)) else { continue };
+                    let Some(state) = server_states.get(&sid).filter(|s| s.held_as_member(&local_peer_str)) else { continue };
                     let mut devices: Vec<String> = ws_room_peers.get(&sid).into_iter().flatten()
-                        .filter(|d| !super::resolver::same_identity(d, &local_peer_str) && state.is_member(d))
+                        .filter(|d| !super::resolver::same_identity(d, &local_peer_str) && state.keeps_peer(d))
                         .cloned()
                         .collect();
                     devices.sort();
@@ -7291,7 +7605,7 @@ fn build_dm_sync_items(
         let reactions = m.message_id.as_ref()
             .and_then(|mid| reactions_map.get(mid))
             .map(|rs| rs.iter().map(|(e, p, ts, sig, pk)| SyncReactionItem {
-                e: e.clone(), p: p.clone(), ts: *ts, sig: sig.clone(), pk: pk.clone(),
+                e: e.clone(), p: p.clone(), ts: *ts, sig: sig.clone(), pk: pk.clone(), dev: None,
             }).collect())
             .unwrap_or_default();
         let file_meta = m.file_id.as_ref().and_then(|fid| {
@@ -7389,6 +7703,30 @@ async fn land_admitted_join_asks(
     }
 }
 
+/// A digest round with `device` finished: one identity for the H4 wait, as our view
+/// places it (`server_rosters::round_identity`).
+fn note_round_answered(
+    crdt_resync: &mut super::crdt_resync::CrdtResync,
+    state: &ServerState,
+    device: &str,
+    local_master: &str,
+    db_path: &str,
+    db_passphrase: &str,
+) {
+    let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) else { return };
+    if let Some(identity) = super::server_rosters::round_identity(&store, db_path, state, device, local_master) {
+        crdt_resync.roster_round.answered(&state.server_id, &identity);
+    }
+}
+
+/// Hand the union list of `server_id` to the witness desk (DEVICE_PROOF_DESIGN 8.7, step 6):
+/// a contact is an accepted friend.
+fn note_union_members(crdt_resync: &mut super::crdt_resync::CrdtResync, server_id: &str, local_master: &str, store: &crate::storage::MessageStore) {
+    let contacts = super::union_list::contacts(store);
+    let members = crdt_resync.union.sources(server_id, &|m| contacts.contains(m), local_master);
+    crdt_resync.witness.note_members(server_id, members);
+}
+
 /// Enforce device revocations just learned from an ingested device list. For
 /// each freshly-revoked device id:
 /// - **Olm (every node):** drop the in-RAM session AND delete the persisted
@@ -7457,6 +7795,8 @@ fn adopt_join_snapshot(
     local_peer_str: &str,
     device_peer_id: &str,
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
+    device_keypair: &crate::identity::native_identity::NativeKeypair,
+    store_at: (&str, &str),
     crdt_store: &super::crdt_store::CrdtStore,
     peer_str: &str,
 ) {
@@ -7480,7 +7820,8 @@ fn adopt_join_snapshot(
     match parsed {
         Ok(mut snap) => {
             snap.set_hlc(Hlc::for_device(local_peer_str.to_string(), device_peer_id));
-            install_op_signer(&mut snap, bundle_keypair);
+            install_op_signer(&mut snap, bundle_keypair, device_keypair);
+            super::authority_view::install(&mut snap, store_at.0, store_at.1);
             // SECURITY (CRDT-2): a snapshot is adopted wholesale from ONE
             // responder, so its registers are only as honest as that peer.
             // Pull any stamped past the drift bound back to it, or one hostile
@@ -7518,7 +7859,7 @@ fn silent_reask_refused(
     let now = std::time::Instant::now();
     silent_reasks.retain(|sid, _| server_states.get(sid).is_some_and(|s| !s.is_member(local_peer_str)));
     for (sid, state) in server_states {
-        if pending_server_joins.contains_key(sid) || !state.refused_own_admission(local_peer_str) {
+        if pending_server_joins.contains_key(sid) || !state.may_reask_admission(local_peer_str) {
             continue;
         }
         let (asked, next) = silent_reasks.entry(sid.clone()).or_insert((0, now));
@@ -7547,6 +7888,7 @@ fn load_server_states(
     local_peer_str: &str,
     device_peer_id: &str,
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
+    device_keypair: &crate::identity::native_identity::NativeKeypair,
     crdt_store: &super::crdt_store::CrdtStore,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
 ) -> (HashMap<String, ServerState>, bool, Vec<String>) {
@@ -7561,19 +7903,31 @@ fn load_server_states(
                     match serde_json::from_str::<ServerState>(&json) {
                         Ok(mut state) => {
                             state.set_hlc(Hlc::for_device(local_peer_str.to_string(), device_peer_id));
-                            install_op_signer(&mut state, bundle_keypair);
+                            install_op_signer(&mut state, bundle_keypair, device_keypair);
+                            super::authority_view::install(&mut state, db_path, db_passphrase);
                             // Restore op_log from crdt_ops table (no longer serialized in state JSON).
                             // An anchored server is rebuilt from every op since its anchor.
                             // The base comes from the rows, never the state JSON (F11).
                             if state.op_log.is_empty()
                                 && let Ok(rows) = store.load_op_rows(&server_id)
                             {
+                                state.first_folds = std::sync::Arc::new(store.cp_first_folds(&server_id));
+                                state.own_since = std::sync::Arc::new(store.own_kept_since(&server_id));
+                                state.recovery = store.floor_pending(&server_id).and_then(|j| crate::crdt::hold::Recovery::from_json(&j)).map(std::sync::Arc::new);
+                                if let Ok(Some(j)) = store.load_server_blob(&server_id, crate::crdt::refold_write::ANSWERS_BLOB) {
+                                    state.restore_refold_answers(&j);
+                                }
                                 let restored = state.restore_op_log(rows);
-                                if !restored.dropped.is_empty() {
+                                let base = restored.refolded.then(|| state.base.as_ref().map(|b| b.hash_hex())).flatten();
+                                if !restored.dropped.is_empty() || base.is_some() {
                                     crdt_store.persist(Some(crate::crdt::fold::OpDelta {
                                         server_id: server_id.clone(),
                                         rows: Vec::new(),
                                         dropped: restored.dropped,
+                                        seen_keep: base.is_some().then(|| state.first_folds.keys().cloned().collect()),
+                                        own_since: Vec::new(),
+                                        base,
+                                        recovery: None,
                                     }));
                                 }
                                 if restored.refolded {
@@ -7621,7 +7975,16 @@ fn load_server_states(
 pub(crate) fn install_op_signer(
     state: &mut ServerState,
     master: &crate::identity::native_identity::NativeKeypair,
+    device: &crate::identity::native_identity::NativeKeypair,
 ) {
+    let pk_b64 = base64::engine::general_purpose::STANDARD.encode(master.public_key_protobuf());
+    state.set_signer(master.clone(), pk_b64);
+    state.set_device_signer(device.clone());
+}
+
+/// [`install_op_signer`] without the device proof, for a test state whose clock has no lane.
+#[cfg(test)]
+pub(crate) fn install_master_signer_for_test(state: &mut ServerState, master: &crate::identity::native_identity::NativeKeypair) {
     let pk_b64 = base64::engine::general_purpose::STANDARD.encode(master.public_key_protobuf());
     state.set_signer(master.clone(), pk_b64);
 }
@@ -7654,6 +8017,9 @@ async fn take_resync_page(
 ) {
     let took = super::crdt_resync::ingest_page(server_states, &server_id, ops_json, local_peer_str).await;
     crdt_resync.note_skipped(&server_id, took.unread);
+    if let Some(state) = server_states.get(&server_id) {
+        crdt_resync.want_rosters(state, &took.wanted, peer_str, ws_room_peers.get(&server_id), local_peer_str, std::time::Instant::now());
+    }
     let folded = !took.admitted.is_empty() || took.rebuilt;
     // A page can bring rows the fold keeps unfolded (dormant) and nothing else.
     crdt_store.persist(took.delta);
@@ -7705,6 +8071,10 @@ async fn leave_evicted_server(
     event_tx: &mpsc::Sender<NetworkEvent>,
     server_id: &str,
 ) {
+    if super::floor::holds_server(server_states, mls, crypto_store, crdt_store, server_id) {
+        let _ = event_tx.send(NetworkEvent::ServerUpdated { server_id: server_id.to_string() }).await;
+        return;
+    }
     hollow_log!("[HOLLOW-CRDT] Our state no longer lists us in {server_id}: durable teardown");
     let sub_cids: Vec<String> = server_states.get(server_id)
         .map(|s| s.subgroup_channel_ids())
@@ -7886,6 +8256,7 @@ async fn apply_remote_crdt_op_inner(
         let ingested = state.ingest_remote(std::slice::from_ref(&op));
         let op_is_new = ingested.admitted.iter().any(|o| o.author == op.author && o.hlc == op.hlc);
         crdt_store.persist(ingested.delta(&server_id));
+        crdt_resync.want_rosters(state, &ingested.wanted, peer_str, ws_room_peers.get(&server_id), local_peer_str, std::time::Instant::now());
         if !ingested.admitted.is_empty() || ingested.rebuilt {
             crdt_store.save_state_snapshot(server_id.clone(), state);
         }
@@ -7928,6 +8299,8 @@ async fn apply_remote_crdt_op_inner(
             // Set when a MemberRemoved or MemberBanned op evicts OUR OWN identity — the durable
             // teardown runs AFTER the match (the `state` borrow spans the match).
             let mut self_evict_teardown = false;
+            // Section 8.8: a recovery in progress keeps the server through a removal of us.
+            let held_now = state.recovery_teardown(local_peer_str) != crate::crdt::hold::Teardown::Go;
             match &op.payload {
                 CrdtPayload::ChannelAdded { channel_id, name, channel_type, .. } => {
                     let _ = event_tx.send(NetworkEvent::ChannelAdded {
@@ -7965,7 +8338,8 @@ async fn apply_remote_crdt_op_inner(
                     // Guarded on !pending so a rejoin replaying the old removal op cannot nuke it.
                     let self_evicted = super::resolver::same_identity(peer_id, &local_peer_str)
                         && !pending_server_joins.contains_key(&server_id)
-                        && !state.is_member(&local_peer_str);
+                        && !state.is_member(&local_peer_str)
+                        && !held_now;
                     if self_evicted {
                         self_evict_teardown = true; // teardown after the match
                         // Queued before the event: Dart re-reads the server list on it.
@@ -7995,7 +8369,7 @@ async fn apply_remote_crdt_op_inner(
                 CrdtPayload::MemberBanned { peer_id, .. } => {
                     // A ban of our identity takes us out as a removal does.
                     let us = super::resolver::same_identity(peer_id, local_peer_str);
-                    if us && !pending_server_joins.contains_key(&server_id) && !state.is_member(local_peer_str) {
+                    if us && !pending_server_joins.contains_key(&server_id) && !state.is_member(local_peer_str) && !held_now {
                         self_evict_teardown = true;
                         crdt_store.delete_server(server_id.clone());
                         let _ = event_tx.send(NetworkEvent::ServerDeleted {
@@ -8078,6 +8452,10 @@ async fn apply_remote_crdt_op_inner(
             // Durable self-eviction teardown (flag set in the MemberRemoved arm;
             // runs here because the `state` borrow spans the match). Removing the
             // state FIRST also makes the subgroup reconcile below skip the server.
+            let names_us = crate::crdt::hold::removal_target(&op).is_some_and(|t| super::resolver::same_identity(t, local_peer_str));
+            if held_now && names_us && super::floor::holds_server(server_states, mls, crypto_store, crdt_store, &server_id) {
+                let _ = event_tx.send(NetworkEvent::ServerUpdated { server_id: server_id.clone() }).await;
+            }
             if self_evict_teardown {
                 hollow_log!("[HOLLOW-CRDT] Self removal or ban for {server_id} — durable teardown (sibling leave / kick / ban)");
                 let sub_cids: Vec<String> = server_states.get(&server_id)
@@ -8435,6 +8813,797 @@ async fn handle_incoming_request(
         request, frame_ts_ms, carried_out,
     ))
     .await
+}
+
+/// A `SyncResponse`: out of line so its locals stay out of `handle_incoming_request`'s
+/// frame, which the event loop's worker stack holds on every frame.
+#[allow(clippy::too_many_arguments)]
+async fn handle_sync_response(
+    olm: &mut OlmManager,
+    crypto_store: &CryptoStore,
+    crdt_store: &super::crdt_store::CrdtStore,
+    crdt_resync: &mut super::crdt_resync::CrdtResync,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    frame_budget: &mut super::frame_budget::FrameBudget,
+    key_request_in_flight: &mut HashMap<String, std::time::Instant>,
+    server_states: &mut HashMap<String, ServerState>,
+    bundle_keypair: &crate::identity::native_identity::NativeKeypair,
+    device_keypair: &crate::identity::native_identity::NativeKeypair,
+    master_peer_str: &str,
+    device_peer_id: &str,
+    pending_server_joins: &mut HashMap<String, PendingJoin>,
+    leave_book: &mut super::leave_book::LeaveBook,
+    awaiting_mls_after_parked_join: &mut std::collections::HashSet<String>,
+    mls: &mut Option<MlsManager>,
+    mls_bootstrap_requested: &mut HashMap<String, std::time::Instant>,
+    mls_welcome_grace: &mut HashMap<String, std::time::Instant>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    gossip_overlays: &mut HashMap<String, super::gossip::GossipOverlay>,
+    voice_channel_participants: &mut HashMap<String, std::collections::HashSet<String>>,
+    voice_channel_gossip_mode: &mut HashMap<String, bool>,
+    db_path: &str,
+    db_passphrase: &str,
+    local_peer_str: &str,
+    peer_str: &str,
+    server_id: String,
+    ops_json: String,
+    nonce: Option<u64>,
+    page: Option<super::crdt_resync::FullPage>,
+    mut digest: Option<crate::crdt::digest::DigestReply>,
+    dg: Option<u8>,
+    x: Option<Box<super::sync_ext::ReplyExt>>,
+) {
+        hollow_log!("[HOLLOW-CRDT] SyncResponse from {peer_str} for server {server_id}");
+        if crdt_resync.op_sync.is_old() {
+            digest = None;
+        } else if (dg.is_some() || digest.is_some()) && server_states.values().any(|s| s.keeps_peer(peer_str)) {
+            crdt_resync.op_sync.learn(peer_str, true);
+        }
+        let digest_sid = digest.as_ref().map(|_| server_id.clone());
+
+        // A witness for a server we are recovering: track C1 judges it, whoever sent it.
+        if let Some(w) = x.as_ref().and_then(|x| x.witness.clone())
+            && (server_states.contains_key(&server_id) || pending_server_joins.contains_key(&server_id))
+        {
+            let cp = x.as_ref().and_then(|x| x.witness_cp.as_deref()).and_then(super::sync_ext::read_base_op);
+            crdt_resync.witness.receive(peer_str, w, cp, super::types::now_ms());
+        }
+        // Rosters before ops (DEVICE_PROOF_DESIGN section 9): what the answer says about
+        // rosters, from a member only.
+        if let Some(x) = x.as_deref()
+            && server_states.get(&server_id).is_some_and(|s| s.is_member(peer_str))
+        {
+            let epoch = mls.as_ref().and_then(|m| m.epoch(&server_id).ok());
+            let mut again = std::mem::take(&mut crdt_resync.roster_again);
+            let out = super::sync_rosters::on_reply(
+                db_path, db_passphrase, crdt_resync, &mut again, server_states.get(&server_id), peer_str, nonce, epoch, x,
+            );
+            crdt_resync.roster_again = again;
+            if !out.changed.is_empty() {
+                crdt_resync.roster_round.changed(&server_id, std::time::Instant::now());
+            }
+            if let Some(op) = out.floor_base
+                && let Some(state) = server_states.get(&server_id)
+                && let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase)
+            {
+                let identity = super::server_rosters::place(&store, db_path, state, peer_str);
+                crdt_resync.floor.candidate(&server_id, peer_str, identity, master_peer_str, op);
+            }
+            for ask in out.again {
+                super::frame_budget::pace_carried(frame_budget, ws_cmd_tx, device_peer_id, peer_str, &ask);
+            }
+            if x.roster_needed || x.base_unknown {
+                hollow_log!("[HOLLOW-CRDT] {peer_str} could not use our sync ask for {server_id}: asked again");
+            }
+        }
+
+        // A page of a whole log counts only as the answer to the page we asked that
+        // device for; any other is dropped, never taken as a delta.
+        match crdt_resync.claim(&server_id, peer_str, nonce, page.as_ref(), std::time::Instant::now()) {
+            super::crdt_resync::Claim::Page(next) => {
+                Box::pin(take_resync_page(
+                    crdt_resync, server_states, crdt_store, frame_budget, mls, crypto_store,
+                    ws_cmd_tx, ws_room_peers, event_tx, bundle_keypair,
+                    voice_channel_participants, voice_channel_gossip_mode, gossip_overlays,
+                    pending_server_joins, local_peer_str, device_peer_id, peer_str,
+                    server_id, ops_json, next,
+                ))
+                .await;
+                return;
+            }
+            super::crdt_resync::Claim::Unrelated if page.is_some() => {
+                hollow_log!("[HOLLOW-SECURITY] Dropped a page of {server_id}'s op log from {peer_str} that answers no ask of ours");
+                return;
+            }
+            // A refusal or a busy answer carries no ops.
+            _ if page.is_some() => return,
+            _ => {}
+        }
+
+        // Room gating: only accept sync for servers we already know about
+        // or are actively trying to join.
+        let is_known = server_states.contains_key(&server_id);
+        let is_pending_join = pending_server_joins.contains_key(&server_id);
+        if !is_known && !is_pending_join {
+            if leave_book.on_answer(&server_id, &ops_json, nonce, peer_str, local_peer_str) {
+                let _ = ws_cmd_tx.send(super::ws_client::WsCommand::LeaveRoom { room_code: server_id.clone() });
+                return;
+            }
+            hollow_log!("[HOLLOW-CRDT] Ignoring SyncResponse for unknown server {server_id} (not joined)");
+            return;
+        }
+
+        // Tolerant parse: a NEWER client's op variant skips just that op,
+        // never the whole batch.
+        let crate::crdt::operations::TolerantParse { ops: incoming_ops, unread, .. } =
+            crate::crdt::operations::parse_ops_tolerant(&ops_json);
+        let unread_in = (!unread.is_empty()).then(|| server_id.clone());
+        if !incoming_ops.is_empty() {
+            let state = server_states.entry(server_id.clone()).or_insert_with(|| {
+                // Skeleton for a pending join: ownerless, so only the anchor can
+                // found it (the op a self-certifying id proves, or the invite's
+                // pinned owner). The responder is just our sync source.
+                let mut s = ServerState::skeleton(server_id.clone());
+                s.owner_pin = pending_server_joins.get(&server_id).and_then(|p| p.owner_pin.clone());
+                s.set_hlc(Hlc::for_device(local_peer_str.to_string(), device_peer_id));
+                install_op_signer(&mut s, bundle_keypair, device_keypair);
+                super::authority_view::install(&mut s, db_path, db_passphrase);
+                s
+            });
+
+            // SECURITY: every op in the batch passes `ingest_remote` inside
+            // `merge_ops_with`: the author's signature, the clock bound, then the
+            // permission matrix using OUR role map and never the relayer's word.
+            // That covers the destructive `ServerDeleted` tombstone along with
+            // every other payload.
+            //
+            // Persist exactly what the fold admitted, and drop the rows a
+            // checkpoint in the batch overwrote: op_log is NOT in the state JSON,
+            // so the crdt_ops table is what a restart rebuilds it from.
+
+            // Capture membership BEFORE merge so we can detect a kick-while-offline
+            // (we were a member, the synced ops remove us → self-evict on reconnect).
+            let was_member_before = state.is_member(local_peer_str);
+
+            // A stranger joiner holds no roster of whoever admits it, and has no Olm
+            // session to ask with yet: the answer's own rosters, kept by the joining
+            // state's authority set (section 9).
+            let join_x = super::sync_rosters::join_reply(x.as_deref(), pending_server_joins.contains_key(&server_id), state.is_member(peer_str));
+            if let Some(jx) = join_x {
+                super::sync_rosters::keep_join_rosters(db_path, db_passphrase, state, jx);
+            }
+
+            let mut deltas = Vec::new();
+            let mut admitted = Vec::new();
+            let mut wanted = std::collections::BTreeSet::new();
+            let mut keep = |i: &crate::crdt::fold::Ingested| {
+                admitted.extend(i.admitted.iter().cloned());
+                deltas.push(i.delta(&server_id));
+                wanted.extend(i.wanted.iter().cloned());
+            };
+            let merged = crdt_sync::merge_ops_with(state, &incoming_ops, &mut keep);
+            let mut refolded = None;
+            if let Some(jx) = join_x
+                && !super::sync_rosters::keep_join_rosters(db_path, db_passphrase, state, jx).is_empty()
+            {
+                let i = state.rebuild_now();
+                keep(&i);
+                refolded = Some(i.wanted);
+            }
+            // A join folds in our identity's own leave of the server: a membership from
+            // before the leave answers no join of ours.
+            let left_here = match leave_book.left_op(&server_id).filter(|_| pending_server_joins.contains_key(&server_id)) {
+                Some(left) => {
+                    let _ = crdt_sync::merge_ops_with(state, std::slice::from_ref(&left), &mut keep);
+                    !state.is_member(local_peer_str) && state.left_at(local_peer_str).is_some()
+                }
+                None => false,
+            };
+            for delta in deltas {
+                crdt_store.persist(delta);
+            }
+            // A refold judged the whole log again: only what it still refused is wanted.
+            let wanted = refolded.unwrap_or(wanted);
+            crdt_resync.want_rosters(state, &wanted, peer_str, ws_room_peers.get(&server_id), local_peer_str, std::time::Instant::now());
+            // Each answer to a join of ours is one source of whom a recovery asks
+            // (`union_list`): the stolen device may answer with puppets, never alone.
+            if pending_server_joins.contains_key(&server_id)
+                && let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase)
+            {
+                let contacts = super::union_list::contacts(&store);
+                crdt_resync.union.state_named(&server_id, state.members.keys().cloned(), &|m| contacts.contains(m));
+                note_union_members(crdt_resync, &server_id, master_peer_str, &store);
+            }
+            if let Ok(report) = &merged {
+                if report.rejected > 0 {
+                    hollow_log!("[HOLLOW-SECURITY] Dropped {} unadmitted op(s) from a SyncResponse for {server_id} from {peer_str}", report.rejected);
+                }
+            }
+            if left_here {
+                hollow_log!("[HOLLOW-CRDT] A membership from before our leave of {server_id} answered our join");
+                if pending_server_joins.get(&server_id).is_some_and(|p| p.from_sibling) {
+                    sync_handler::end_join_we_left(
+                        pending_server_joins, server_states, mls, crypto_store, crdt_store, ws_cmd_tx,
+                        leave_book.holds_room(&server_id), &server_id,
+                    );
+                    return;
+                }
+            } else if pending_server_joins.contains_key(&server_id) && state.is_member(local_peer_str) {
+                leave_book.forget_left(&server_id);
+            }
+            match merged {
+                // Run even when 0 ops applied if a join is pending: the joiner
+                // may have adopted a ServerStateSnapshot already (the
+                // responder's op log can be compacted), and the join must complete.
+                // An anchored joiner completes only once the fold admitted us: a
+                // batch that founds nothing or admits someone else is no join.
+                Ok(report) if (report.applied > 0 || pending_server_joins.contains_key(&server_id))
+                    && !left_here
+                    && (!pending_server_joins.contains_key(&server_id)
+                        || state.anchor() == crate::crdt::server_state::Anchor::Legacy
+                        || state.is_member(local_peer_str)) => {
+                    let applied = report.applied;
+                    hollow_log!("[HOLLOW-CRDT] Applied {applied} ops for server {server_id}");
+
+                    // Multi-device (Step 6): fold any device-keyed members a
+                    // not-yet-upgraded peer's ops introduced into their master.
+                    // Anchored servers are master-keyed from their first op.
+                    if state.anchor() == crate::crdt::server_state::Anchor::Legacy {
+                        state.canonicalize_members(|id| super::resolver::resolve(id));
+                    }
+
+                    crdt_store.save_state_snapshot(server_id.clone(), state);
+
+                    if let Some(completed) = pending_server_joins.remove(&server_id) {
+                        // A member again: a leave of ours from before must never land.
+                        leave_book.drop_pending(&server_id);
+                        let server_name = state.name().to_string();
+                        hollow_log!("[HOLLOW-CRDT] Server join completed: {server_id}");
+                        // An op a member authored while our admission was in flight
+                        // named no seat of ours: ask more members shortly.
+                        crdt_resync.op_sync.joined(&server_id);
+
+                        // The persisted tile is done with. A PARKED join owes
+                        // the UI two more beats: admitted (said BEFORE
+                        // ServerJoined so the tile turns into a server rather
+                        // than blinking out), then READY once the MLS leaf that
+                        // lets it read the channel actually forms.
+                        crdt_store.delete_pending_join(server_id.clone());
+                        if completed.parked || completed.refused.is_some() {
+                            let _ = event_tx.send(NetworkEvent::PendingJoinUpdated {
+                                server_id: server_id.clone(),
+                                state: "admitted".to_string(),
+                                reason: String::new(),
+                            }).await;
+                            awaiting_mls_after_parked_join.insert(server_id.clone());
+                        }
+
+                        // Drop stale MLS group from before ban/leave — forces fresh
+                        // KeyPackage exchange so the rejoining peer gets a clean epoch.
+                        if let Some(mls_mgr) = mls.as_mut() {
+                            if mls_mgr.has_group(&server_id) {
+                                hollow_log!("[HOLLOW-MLS] Dropping stale MLS group for {server_id} on rejoin");
+                                mls_mgr.remove_group(&server_id);
+                                persist_mls_state(mls_mgr, crypto_store);
+                            }
+                        }
+
+                        // Join the WS relay room for this server so we receive MLS broadcasts.
+                        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
+                            room_code: server_id.clone(),
+                        });
+
+                        let _ = event_tx.send(NetworkEvent::ServerJoined {
+                            server_id: server_id.clone(),
+                            name: server_name,
+                            quiet: completed.quiet,
+                            from_sibling: completed.from_sibling,
+                        }).await;
+
+                        // Our other devices learn of a server we joined as of one we made.
+                        // One announced to us went to all of them already.
+                        if !completed.from_sibling {
+                            sync_handler::announce_server_to_own_devices(
+                                ws_cmd_tx, local_peer_str, device_peer_id, &server_id, state,
+                            );
+                        }
+
+                        // Backfill profiles of OFFLINE members from the
+                        // responder's cache. Online members are covered by the
+                        // per-peer ProfileRequest on sync, but during a pending
+                        // join this server was not in server_states yet.
+                        {
+                            if let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) {
+                                let mut proxy_count = 0u32;
+                                for member_id in state.members.keys() {
+                                    if proxy_count >= 10 { break; }
+                                    if member_id == local_peer_str || member_id == peer_str { continue; }
+                                    let is_online = ws_room_peers.values()
+                                        .any(|peers| peers.contains(member_id.as_str()));
+                                    if is_online { continue; }
+                                    if let Ok(Some(_)) = store.load_profile_light(member_id) { continue; }
+                                    hollow_log!("[HOLLOW-PROFILE] Post-join proxy profile request for {member_id} via {peer_str}");
+                                    super::olm_lane::carry(
+                                        ws_cmd_tx, peer_str, None,
+                                        &HavenMessage::ProfileRequestFor { target_peer_id: member_id.clone() },
+                                        super::olm_lane::NoSession::Queue,
+                                    );
+                                    proxy_count += 1;
+                                }
+                            }
+                        }
+
+                        {
+                            let local_peer = local_peer_str.to_string();
+                            let pledge_op = (state.get_storage_pledge(&local_peer) == 0)
+                                .then(|| {
+                                    let min_pledge_bytes = state.min_pledge_mb().saturating_mul(1024 * 1024);
+                                    hollow_log!("[HOLLOW-VAULT] Auto-pledging {} MB for server {server_id}", min_pledge_bytes / (1024 * 1024));
+                                    state.author_checked(CrdtPayload::StoragePledgeChanged {
+                                        peer_id: local_peer.clone(),
+                                        pledge_bytes: min_pledge_bytes,
+                                    })
+                                })
+                                .flatten();
+                            if let Some(pledge_op) = pledge_op {
+                                crdt_store.insert_op(pledge_op.clone());
+                                crdt_store.save_state_snapshot(server_id.clone(), state);
+
+                                // Broadcast the pledge op to connected members: MLS when we hold
+                                // the group, PLUS the plaintext `CrdtOpBroadcast` twin
+                                // UNCONDITIONALLY. A CRDT op is author-signed and idempotent, so a
+                                // member with a working leaf just applies it twice, while a member
+                                // with NO leaf or at a skewed epoch is otherwise invisible here.
+                                //
+                                // `StoragePledgeChanged` does not touch `members`, so reading the
+                                // target list after `apply_op` is safe, unlike `ServerDeleted`.
+                                if let Ok(op_json) = serde_json::to_string(&pledge_op) {
+                                    let mls_ok = mls.as_ref().is_some_and(|m| m.has_group(&server_id));
+                                    if mls_ok {
+                                        let envelope = MessageEnvelope::CrdtOp { sid: server_id.clone(), op_json: op_json.clone() };
+                                        if let Err(e) = send_mls_broadcast(mls.as_mut().unwrap(), ws_cmd_tx, &server_id, &envelope, crypto_store, Some(&*state)) {
+                                            hollow_log!("[HOLLOW-MLS] CrdtOp pledge broadcast failed: {e}");
+                                        }
+                                    }
+                                    let pledge = HavenMessage::CrdtOpBroadcast {
+                                        server_id: server_id.clone(),
+                                        op_json: op_json.clone(),
+                                    };
+                                    if let Some(json) = super::olm_lane::carried_json(&pledge) {
+                                        super::olm_lane::carry_to_identities(
+                                            ws_cmd_tx, ws_room_peers, state.members.keys(), &local_peer, &json,
+                                            super::olm_lane::NoSession::Queue,
+                                        );
+                                    }
+                                    // No receiver forwards it on: our siblings hear it from us, and
+                                    // the members of a room we are only now joining once it is listed.
+                                    super::olm_lane::carry_to_own_siblings(
+                                        ws_cmd_tx, ws_room_peers, &local_peer, device_peer_id, &pledge,
+                                        super::olm_lane::NoSession::Queue,
+                                    );
+                                    let sees_a_member = ws_room_peers.get(&server_id).is_some_and(|peers| {
+                                        peers.iter().any(|d| !super::resolver::same_identity(d, &local_peer) && state.is_member(d))
+                                    });
+                                    if !sees_a_member {
+                                        crdt_resync.op_sync.carry_when_listed(&server_id, pledge.clone());
+                                    }
+                                }
+                            }
+                        }
+
+                        // Establish an Olm session with every server member we are
+                        // connected to but lack one for. Members are master-keyed, so
+                        // bootstrap with each online DEVICE of every member.
+                        for member in state.members_list() {
+                            if super::resolver::same_identity(&member.peer_id, &local_peer_str) { continue; }
+                            for dev in crate::node::crypto_handler::online_devices_for(ws_room_peers, &member.peer_id) {
+                                // Ensure the device shows as online in UI.
+                                let _ = event_tx.send(NetworkEvent::PeerDiscovered {
+                                    peer: DiscoveredPeer { peer_id: dev.clone(), addresses: vec![] },
+                                }).await;
+                                if !olm.has_confirmed_session(&dev)
+                                    && !key_request_is_fresh(key_request_in_flight, &dev)
+                                {
+                                    hollow_log!("[HOLLOW-SWARM] No confirmed Olm session with server member device {dev}, sending KeyRequest");
+                                    send_message_to_peer(ws_cmd_tx, ws_room_peers, &dev, signed_key_request(device_keypair, device_peer_id, &dev));
+                                    key_request_in_flight.insert(dev.clone(), std::time::Instant::now());
+                                }
+                            }
+                        }
+
+                        // MLS: we hold the server but not a leaf in its group, so
+                        // ask for one.
+                        //
+                        // Exactly ONE KeyPackage may leave here. A second from the
+                        // same device straddling a batch tick is a remove + re-add:
+                        // two commits, the removal evicting the leaf the first
+                        // Welcome just gave us, and the eviction path then asks for
+                        // a third.
+                        //
+                        // The target is the one every other bootstrap path uses
+                        // (`server_bootstrap_target`), because the receiving handler
+                        // only ACTS as the owner or as a group holder. When that send
+                        // lands we STAMP the throttle, which stops the
+                        // message-triggered rescue firing a duplicate.
+                        let want_leaf = mls.as_ref().is_some_and(|m| !m.has_group(&server_id));
+                        if want_leaf && completed.parked && completed.key_package.is_some() {
+                            // Rung 2: the ring copy of this request CARRIED a
+                            // KeyPackage, so the member that admitted us has already
+                            // seated our leaf and the Welcome waits in our own relay
+                            // buffer, behind the SyncResponse we are handling. Asking
+                            // again would mint a second package and turn that Welcome
+                            // into a remove + re-add. Expecting a Welcome is what the
+                            // eviction grace already means, so if none arrives inside
+                            // it the batch tick asks once through the ordinary path.
+                            mls_bootstrap_requested.insert(server_id.clone(), std::time::Instant::now());
+                            mls_welcome_grace.insert(server_id.clone(), std::time::Instant::now());
+                            hollow_log!("[HOLLOW-MLS] Parked join for {server_id} carried a KeyPackage; expecting a buffered Welcome");
+                        } else if want_leaf
+                            && let Some(mls_mgr) = mls.as_ref()
+                            && let Ok(kp_bytes) = crate::node::crypto_handler::mint_group_key_package(mls_mgr, crypto_store, &server_id, false)
+                        {
+                            // ONE package per attempt, minted before we know which
+                            // of the two addresses it will go to. Every mint writes
+                            // private init and leaf-encryption keys into persisted
+                            // MLS storage that only a Welcome consumes, and the
+                            // frame is byte-identical either way.
+                            if crate::node::crypto_handler::send_join_leaf_ask(
+                                mls_mgr, crypto_store, ws_cmd_tx, ws_room_peers, state, &server_id, local_peer_str,
+                                device_peer_id, peer_str, kp_bytes,
+                            ) {
+                                mls_bootstrap_requested.insert(server_id.clone(), std::time::Instant::now());
+                            }
+                        }
+                    }
+
+                    // Reconcile changes that happened while we were OFFLINE, now that
+                    // the grow-only sync delivered the ops: a DELETION tombstone, a
+                    // BAN, or a plain KICK or our own LEAVE fanned by a sibling.
+                    let deleted_now = state.is_deleted();
+                    let kicked_now = was_member_before && !state.is_member(local_peer_str);
+                    let banned_now = state.is_banned(&local_peer_str);
+                    let evicted_sub_cids: Vec<String> = state.subgroup_channel_ids();
+                    let pending = pending_server_joins.contains_key(&server_id);
+                    // Section 8.8: a stepped-back answer never tears a server in recovery down.
+                    let (banned_now, kicked_now) = if !deleted_now && (banned_now || kicked_now)
+                        && super::floor::holds_server(server_states, mls, crypto_store, crdt_store, &server_id)
+                    {
+                        (false, false)
+                    } else {
+                        (banned_now, kicked_now)
+                    };
+                    if deleted_now || banned_now || (kicked_now && !pending) {
+                        voice_handler::auto_leave_invisible_voice_channels(
+                            mls, ws_cmd_tx, ws_room_peers, server_states,
+                            bundle_keypair, crypto_store,
+                            voice_channel_participants, voice_channel_gossip_mode,
+                            gossip_overlays, local_peer_str, device_peer_id, &server_id, event_tx,
+                        ).await;
+                    }
+                    if deleted_now {
+                        // Owner tombstoned the server while we were offline. Leave the
+                        // MLS group; keep the shell so we relay the tombstone onward.
+                        if let Some(mls_mgr) = mls.as_mut() {
+                            if mls_mgr.has_group(&server_id) {
+                                mls_mgr.remove_group(&server_id);
+                                persist_mls_state(mls_mgr, crypto_store);
+                            }
+                        }
+                        let _ = event_tx.send(NetworkEvent::ServerDeleted {
+                            server_id,
+                        }).await;
+                    } else if banned_now || (kicked_now && !pending) {
+                        // Self-eviction reconciled from sync: tear down DURABLY, not just
+                        // the UI event. Without removing the state and DB row the shell
+                        // reloads on restart, re-lists the server, and the sibling
+                        // re-announce path can even re-ADD us to a server we left,
+                        // authored by a non-member, so real members reject it and we fork.
+                        hollow_log!("[HOLLOW-CRDT] Offline-reconciled self-eviction from {server_id} (banned={banned_now}) — durable teardown");
+                        server_states.remove(&server_id);
+                        crdt_store.delete_server(server_id.clone());
+                        if let Some(mls_mgr) = mls.as_mut() {
+                            if mls_mgr.has_group(&server_id) {
+                                mls_mgr.remove_group(&server_id);
+                            }
+                            for cid in &evicted_sub_cids {
+                                let gk = crate::crypto::subgroup_id(&server_id, cid);
+                                if mls_mgr.has_group(&gk) {
+                                    mls_mgr.remove_group(&gk);
+                                }
+                            }
+                            persist_mls_state(mls_mgr, crypto_store);
+                        }
+                        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::LeaveRoom {
+                            room_code: server_id.clone(),
+                        });
+                        let _ = event_tx.send(NetworkEvent::MemberLeft {
+                            server_id,
+                            peer_id: local_peer_str.to_string(),
+                        }).await;
+                    } else {
+                        let _ = event_tx.send(NetworkEvent::SyncCompleted {
+                            server_id,
+                            ops_applied: applied as u32,
+                        }).await;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let Some(sid) = unread_in
+            && let Some(state) = server_states.get(&sid)
+        {
+            let vouched = unread.into_iter().filter(|u| super::crdt_resync::vouched(u, state)).collect();
+            crdt_resync.note_skipped(&sid, vouched);
+        }
+
+        // A digest answer that split ranges: compare them against what we hold now and
+        // ask again, only for the ask it names.
+        if let (Some(reply), Some(sid)) = (&digest, &digest_sid)
+            && let Some(state) = server_states.get(sid)
+        {
+            match crdt_resync.digest_answered(state, peer_str, reply, mls.as_ref().and_then(|m| m.epoch(sid).ok())) {
+                super::op_sync::Step::Again(next) => {
+                    super::frame_budget::pace_carried(frame_budget, ws_cmd_tx, device_peer_id, peer_str, &next);
+                }
+                super::op_sync::Step::Unasked => {
+                    hollow_log!("[HOLLOW-CRDT] Dropped a digest answer for {sid} from {peer_str} that continues no open ask");
+                }
+                super::op_sync::Step::Malformed => {
+                    hollow_log!("[HOLLOW-SECURITY] Dropped a malformed digest answer for {sid} from {peer_str}");
+                }
+                super::op_sync::Step::Rosters(ask) => {
+                    note_round_answered(crdt_resync, state, peer_str, master_peer_str, db_path, db_passphrase);
+                    super::frame_budget::pace_carried(frame_budget, ws_cmd_tx, device_peer_id, peer_str, &ask);
+                }
+                super::op_sync::Step::Done => {
+                    note_round_answered(crdt_resync, state, peer_str, master_peer_str, db_path, db_passphrase);
+                }
+            }
+        }
+}
+
+/// A `SyncRequest`: out of line for the same reason as [`handle_sync_response`].
+#[allow(clippy::too_many_arguments)]
+async fn handle_sync_request(
+    olm: &mut OlmManager,
+    crypto_store: &CryptoStore,
+    crdt_resync: &mut super::crdt_resync::CrdtResync,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    frame_budget: &mut super::frame_budget::FrameBudget,
+    server_states: &mut HashMap<String, ServerState>,
+    device_keypair: &crate::identity::native_identity::NativeKeypair,
+    master_peer_str: &str,
+    device_peer_id: &str,
+    mls: &mut Option<MlsManager>,
+    pending_mls_removals: &mut HashMap<String, Vec<String>>,
+    mls_epoch_hint_cooldown: &mut HashMap<String, std::time::Instant>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    db_path: &str,
+    db_passphrase: &str,
+    local_peer_str: &str,
+    peer_str: &str,
+    server_id: String,
+    state_vector_json: String,
+    mls_epoch: Option<u64>,
+    nonce: Option<u64>,
+    full: Option<super::crdt_resync::FullAsk>,
+    mut digest: Option<crate::crdt::digest::OpDigest>,
+    dg: Option<u8>,
+    x: Option<Box<super::sync_ext::AskExt>>,
+) {
+        hollow_log!("[HOLLOW-CRDT] SyncRequest from {peer_str} for server {server_id}");
+        if crdt_resync.op_sync.is_old() {
+            digest = None;
+        }
+
+        // A request without the digest mark comes from an older build: our open
+        // digest asks to that device go again in the form it reads.
+        // Only a member of a server we hold teaches us what its device reads.
+        let heard: Vec<(String, Option<u64>, Option<u64>)> = if server_states.values().any(|s| s.keeps_peer(peer_str)) {
+            crdt_resync.op_sync.heard_request(peer_str, dg, &|sid| mls.as_ref().and_then(|m| m.epoch(sid).ok()))
+        } else {
+            Vec::new()
+        };
+        for (sid, ask_nonce, ask_epoch) in heard {
+            if let Some(state) = server_states.get(&sid) {
+                super::frame_budget::pace_carried(
+                    frame_budget, ws_cmd_tx, device_peer_id, peer_str,
+                    &super::op_sync::vector_ask(state, ask_nonce, ask_epoch),
+                );
+            }
+        }
+
+        // Rosters before ops (DEVICE_PROOF_DESIGN section 9): the asker's own roster
+        // first, for a master this server names; then nothing is served to a device our
+        // view does not count, and one no roster places hears what we need.
+        // Kept only when it counts the device that sent it: the asker speaks for itself.
+        // The owner's also goes to `server_rosters`, where the key its founding commits
+        // to wins over one our book saw first (section 5).
+        let asker_roster = x.as_ref().and_then(|a| a.asker_roster.clone()).filter(|roster| {
+            server_states.get(&server_id).is_some_and(|s| super::roster_book::server_names_master(s, &roster.master))
+                && roster.verified(super::types::now_ms()).authority().counts(peer_str)
+        });
+        let own_roster = asker_roster.is_some();
+        if let Some(roster) = asker_roster {
+            let owners_changed = server_states.get(&server_id).is_some_and(|state| {
+                state.anchor_owner().as_deref() == Some(roster.master.as_str())
+                    && crate::storage::MessageStore::lease(db_path, db_passphrase).is_ok_and(|store| {
+                        super::server_rosters::keep(&store, db_path, state, &roster, super::types::now_ms())
+                            == super::server_rosters::Kept::Changed
+                    })
+            });
+            if owners_changed {
+                crdt_resync.roster_round.changed(&server_id, std::time::Instant::now());
+            }
+            let outcome = Box::pin(super::roster_book::ingest_notice(
+                event_tx, ws_cmd_tx, master_peer_str, device_peer_id, peer_str,
+                roster, server_states, db_path, db_passphrase,
+            )).await;
+            enforce_device_revocations(
+                &outcome.newly_revoked, olm, crypto_store, mls.as_ref(), server_states,
+                local_peer_str, ws_room_peers, pending_mls_removals,
+            );
+        }
+        let verdict = server_states
+            .get(&server_id)
+            .map(|state| super::sync_rosters::asker_verdict(db_path, db_passphrase, state, peer_str, own_roster));
+        if verdict == Some(super::sync_rosters::AskerVerdict::Silent) {
+            hollow_log!("[HOLLOW-SECURITY] Answered nothing of {server_id} to {peer_str}: no roster places that device");
+            return;
+        }
+        if verdict == Some(super::sync_rosters::AskerVerdict::RosterNeeded) {
+            hollow_log!("[HOLLOW-SECURITY] Served nothing of {server_id} to {peer_str}: our view does not count that device; asked for its roster");
+            // An older build reads no `roster_needed`: an echoed nonce would tell it it
+            // has caught up (`join_hold`).
+            let nonce = nonce.filter(|_| dg.is_some_and(|v| v >= super::op_sync::DG));
+            super::olm_lane::carry(
+                ws_cmd_tx, peer_str, None,
+                &HavenMessage::SyncResponse {
+                    server_id: server_id.clone(), ops_json: "[]".into(), nonce, page: None, digest: None,
+                    dg: crdt_resync.op_sync.mark(),
+                    x: super::sync_ext::ReplyExt { roster_needed: true, ..Default::default() }.boxed(),
+                },
+                super::olm_lane::NoSession::Queue,
+            );
+            return;
+        }
+
+        // A member asking for one page of our whole log, to get back ops its older
+        // build skipped (`crdt_resync`).
+        if let Some(ask) = &full
+            && let Some(state) = server_states.get(&server_id)
+            && state.keeps_peer(peer_str)
+        {
+            let (ops_json, page) = crdt_resync.serve(state, ask, peer_str, std::time::Instant::now());
+            super::frame_budget::pace_answer(
+                frame_budget, ws_cmd_tx, device_peer_id, peer_str,
+                &HavenMessage::SyncResponse {
+                    server_id: server_id.clone(), ops_json, nonce, page: Some(page), digest: None, dg: crdt_resync.op_sync.mark(), x: None,
+                },
+            );
+            return;
+        }
+
+        // The op log is the whole server (names, roles, bans, restricted channels), so
+        // only a member gets it. A tombstone has no members left: anyone asking gets
+        // just the owner's deletion op, all a reconnecting former member needs. A
+        // former member of a live server gets the op that removed it and the ranks
+        // its own fold needs to admit that op (HOL-SEC-114).
+        if let Some(state) = server_states.get(&server_id) {
+            // During a recovery KEEP is served too, a shell never (8.8 class 3, R33-4).
+            let member = state.keeps_peer(peer_str);
+            let reply_to = |ask: &crate::crdt::digest::OpDigest, vector: bool| crate::crdt::digest::DigestReply {
+                ask: ask.ask, round: ask.round, groups: Vec::new(), vector,
+                rd: Vec::new(),
+            };
+            let ask_x = x.as_deref();
+            if member && super::op_sync::is_roster_ask(digest.as_ref(), full.is_some(), &state_vector_json, ask_x) {
+                let serve = Some((&mut crdt_resync.roster_serve, peer_str));
+                let reply = super::sync_rosters::reply_ext_within(db_path, db_passphrase, state, ask_x, None, None, serve);
+                super::frame_budget::pace_answer(
+                    frame_budget, ws_cmd_tx, device_peer_id, peer_str,
+                    &HavenMessage::SyncResponse {
+                        server_id: server_id.clone(), ops_json: "[]".into(), nonce, page: None, digest: None,
+                        dg: crdt_resync.op_sync.mark(), x: reply.boxed(),
+                    },
+                );
+                return;
+            }
+            let given = member.then(|| crdt_resync.base_told.given(state, peer_str, digest.as_ref(), ask_x, std::time::Instant::now())).flatten();
+            let mut reply_x = member.then(|| {
+                let serve = Some((&mut crdt_resync.roster_serve, peer_str));
+                super::sync_rosters::reply_ext_within(db_path, db_passphrase, state, ask_x, digest.as_ref(), given.as_ref(), serve)
+            });
+            // A fresh install's witness ask (section 8.4): track C1 judges the asker and
+            // picks the checkpoint.
+            if let (Some(rx), Some(w)) = (reply_x.as_mut(), ask_x.and_then(|a| a.witness.as_ref()))
+                && let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase)
+            {
+                let co = |m: &str| super::server_rosters::co_member_rosters(&store, &state.server_id, m);
+                let view = super::authority_view::view_for(&store, db_path, state, &co);
+                if let Some((witness, cp)) = crdt_resync.witness.answer(&store, state, &view, w, peer_str, device_keypair, super::types::now_ms()) {
+                    rx.witness = Some(witness);
+                    rx.witness_cp = cp.and_then(|op| serde_json::to_string(&op).ok());
+                }
+            }
+            if let Some(rx) = reply_x.as_ref().filter(|r| r.base_unknown) {
+                if let Some(bref) = digest.as_ref().and_then(|d| d.bref.as_deref()) {
+                    crdt_resync.base_told.told(&server_id, peer_str, bref, std::time::Instant::now());
+                }
+                super::olm_lane::carry(
+                    ws_cmd_tx, peer_str, None,
+                    &HavenMessage::SyncResponse {
+                        server_id: server_id.clone(), ops_json: "[]".into(), nonce, page: None, digest: None,
+                        dg: crdt_resync.op_sync.mark(), x: rx.clone().boxed(),
+                    },
+                    super::olm_lane::NoSession::Queue,
+                );
+                return;
+            }
+            let answer: Option<(String, Option<crate::crdt::digest::DigestReply>)> = match &digest {
+                // A legacy log applies in arrival order and is capped: only the vector
+                // says what such a replica may hand over.
+                Some(ask) if member && state.anchor() == crate::crdt::server_state::Anchor::Legacy => {
+                    Some(("[]".to_string(), Some(reply_to(ask, true))))
+                }
+                Some(ask) if member => match crdt_resync.answer_digest(state, ask, given.as_ref()) {
+                    Some((ops_json, mut reply)) => {
+                        reply.rd = super::sync_rosters::rd_for(db_path, db_passphrase, state, ask);
+                        Some((ops_json, Some(reply)))
+                    }
+                    None => {
+                        hollow_log!("[HOLLOW-SECURITY] Left a malformed sync digest from {peer_str} for {server_id} unanswered");
+                        None
+                    }
+                },
+                // A non-member is never told counts or fingerprints of the log.
+                Some(ask) => {
+                    let ops = former_member_ops(state, peer_str, &|_| true);
+                    (!ops.is_empty()).then(|| (serde_json::to_string(&ops).unwrap_or_default(), Some(reply_to(ask, false))))
+                }
+                None => serde_json::from_str::<StateVector>(&state_vector_json).ok().and_then(|their_vector| {
+                    let ops = if member {
+                        crdt_sync::compute_delta(&state.op_log, &their_vector)
+                    } else {
+                        former_member_ops(state, peer_str, &crdt_sync::vector_lacks(&their_vector))
+                    };
+                    // A member hears back even when nothing is missing: that answer is
+                    // how a member just back knows it has caught up (`join_hold`).
+                    (member || !ops.is_empty()).then(|| (serde_json::to_string(&ops).unwrap_or_default(), None))
+                }),
+            };
+            let mark = crdt_resync.op_sync.mark();
+            if let Some((ops_json, reply)) = answer {
+                hollow_log!("[HOLLOW-CRDT] Answering {peer_str}'s sync of {server_id} ({} bytes of ops)", ops_json.len());
+                super::olm_lane::carry(
+                    ws_cmd_tx, peer_str, None,
+                    &HavenMessage::SyncResponse {
+                        server_id: server_id.clone(), ops_json, nonce, page: None, digest: reply, dg: mark,
+                        x: reply_x.and_then(super::sync_ext::ReplyExt::boxed),
+                    },
+                    super::olm_lane::NoSession::Queue,
+                );
+            }
+
+            // No bidirectional SyncRequest here — both peers trigger
+            // sync in ConnectionEstablished, so both sides already initiate.
+        }
+
+        // Epoch hint (join-order SFrame race fix): the first-contact sync
+        // doubles as the stale-group detector — serve a commit catch-up /
+        // repair when the sender is behind, self-probe when it's ahead.
+        if let (Some(their_epoch), Some(mls_mgr)) = (mls_epoch, mls.as_mut()) {
+            crate::node::crypto_handler::handle_epoch_hint(
+                mls_mgr, ws_cmd_tx, ws_room_peers, server_states,
+                mls_epoch_hint_cooldown,
+                &server_id, None, their_epoch, None, peer_str, local_peer_str,
+                false, // incidental hint on a sync — elect one responder
+                false,
+            );
+        }
 }
 
 /// The body of [`handle_incoming_request`].
@@ -8915,7 +10084,7 @@ async fn handle_incoming_request_inner(
             }
             match envelope {
                 Ok(MessageEnvelope::ChannelMessage { inner }) => {
-                    let ChannelMessagePayload { sid, cid, text, ts, sig, pk, mid, reply_to, file_id, link_preview, order_us, album } = *inner;
+                    let ChannelMessagePayload { sid, cid, text, ts, sig, pk, mid, reply_to, file_id, link_preview, order_us, album, dev } = *inner;
                     // The Olm fallback (no MLS group yet, offline replay) takes the same ingest
                     // as MLS, with the sender's DEVICE resolved to the MASTER that signs it.
                     let Some(state) = server_states.get(&sid) else {
@@ -8925,7 +10094,7 @@ async fn handle_incoming_request_inner(
                     message_ops::handle_envelope_channel_message(
                         event_tx, bundle_keypair, Some(state), slow_mode_clock, local_peer_str,
                         super::resolver::resolve(peer_str), sid, cid, text, ts,
-                        sig, pk, mid, reply_to, file_id, link_preview, order_us, album,
+                        sig, pk, mid, reply_to, file_id, link_preview, order_us, album, dev,
                         db_path, db_passphrase,
                     ).await;
                 }
@@ -8935,7 +10104,7 @@ async fn handle_incoming_request_inner(
                         return;
                     }
                     let page_end = if has_more == Some(true) { super::sync_handler::ChannelPageEnd::of(&messages) } else { None };
-                    crypto_handler::backfill_filter(server_states.get(&sid), &mut messages);
+                    crypto_handler::backfill_filter(server_states.get(&sid), &cid, &mut messages);
                     let received_count = messages.len() as u32;
                     let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) else { return };
                     let known = super::sync_handler::channel_known(server_states.get(&sid), &cid);
@@ -9622,7 +10791,7 @@ async fn handle_incoming_request_inner(
                         }).await;
                     }
                 }
-                Ok(MessageEnvelope::EditMessage { mid, text: new_text, ts, sig, pk, sid, cid }) => {
+                Ok(MessageEnvelope::EditMessage { mid, text: new_text, ts, sig, pk, sid, cid, dev }) => {
                     hollow_log!("[HOLLOW-EDIT] Received edit for message {mid} from {peer_str}");
                     if message_ops::olm_change_for_unknown_server(server_states, sid.as_deref(), "edit") {
                         return;
@@ -9632,7 +10801,7 @@ async fn handle_incoming_request_inner(
                             event_tx, bundle_keypair,
                             sid.as_deref().and_then(|s| server_states.get(s)),
                             &super::resolver::resolve(peer_str),
-                            mid, new_text, ts, sig, pk, sid, cid,
+                            mid, new_text, ts, sig, pk, sid, cid, dev,
                             db_path, db_passphrase,
                         ).await;
                     } else {
@@ -9643,7 +10812,7 @@ async fn handle_incoming_request_inner(
                         ).await;
                     }
                 }
-                Ok(MessageEnvelope::LinkPreviewSet { mid, lp, ts, sig, pk, sid, cid }) => {
+                Ok(MessageEnvelope::LinkPreviewSet { mid, lp, ts, sig, pk, sid, cid, dev }) => {
                     hollow_log!("[HOLLOW-LP] Received link preview for message {mid} from {peer_str}");
                     if message_ops::olm_change_for_unknown_server(server_states, sid.as_deref(), "link preview") {
                         return;
@@ -9652,19 +10821,20 @@ async fn handle_incoming_request_inner(
                         event_tx,
                         sid.as_deref().and_then(|s| server_states.get(s)),
                         peer_str, master_peer_str,
-                        mid, lp, ts, sig, pk, sid, cid, frame_ts_ms,
+                        mid, lp, ts, sig, pk, sid, cid, dev, frame_ts_ms,
                         db_path, db_passphrase,
                     ).await;
                 }
-                Ok(MessageEnvelope::DeleteMessage { mid, ts, sig, pk, sid, cid }) => {
+                Ok(MessageEnvelope::DeleteMessage { mid, ts, sig, pk, sid, cid, dev }) => {
                     hollow_log!("[HOLLOW-DELETE] Received delete for message {mid} from {peer_str}");
                     if message_ops::olm_change_for_unknown_server(server_states, sid.as_deref(), "delete") {
                         return;
                     }
                     if sid.is_some() {
+                        let state = sid.as_deref().and_then(|s| server_states.get(s));
                         message_ops::handle_envelope_delete_message(
-                            event_tx, bundle_keypair, &super::resolver::resolve(peer_str),
-                            mid, ts, sig, pk, sid, cid,
+                            event_tx, bundle_keypair, state, &super::resolver::resolve(peer_str),
+                            mid, ts, sig, pk, sid, cid, dev,
                             db_path, db_passphrase,
                         ).await;
                     } else {
@@ -9675,7 +10845,7 @@ async fn handle_incoming_request_inner(
                         ).await;
                     }
                 }
-                Ok(MessageEnvelope::AddReaction { mid, emoji, ts, sig, pk, sid, cid }) => {
+                Ok(MessageEnvelope::AddReaction { mid, emoji, ts, sig, pk, sid, cid, dev }) => {
                     hollow_log!("[HOLLOW-REACTION] Received reaction on {mid} from {peer_str}");
                     if message_ops::olm_change_for_unknown_server(server_states, sid.as_deref(), "reaction") {
                         return;
@@ -9687,7 +10857,7 @@ async fn handle_incoming_request_inner(
                         message_ops::handle_envelope_add_reaction(
                             event_tx, bundle_keypair,
                             sid.as_deref().and_then(|s| server_states.get(s)),
-                            &reactor, mid, emoji, ts, sig, pk, sid, cid,
+                            &reactor, mid, emoji, ts, sig, pk, sid, cid, dev,
                             db_path, db_passphrase,
                         ).await;
                     } else if !emotes::valid_reaction_emoji(&emoji) {
@@ -9715,16 +10885,17 @@ async fn handle_incoming_request_inner(
                         }
                     }
                 }
-                Ok(MessageEnvelope::RemoveReaction { mid, emoji, ts, sig, pk, sid, cid }) => {
+                Ok(MessageEnvelope::RemoveReaction { mid, emoji, ts, sig, pk, sid, cid, dev }) => {
                     hollow_log!("[HOLLOW-REACTION] Received remove reaction {emoji} on {mid} from {peer_str}");
                     if message_ops::olm_change_for_unknown_server(server_states, sid.as_deref(), "reaction removal") {
                         return;
                     }
                     let reactor = super::resolver::resolve(peer_str);
                     if sid.is_some() {
+                        let state = sid.as_deref().and_then(|s| server_states.get(s));
                         message_ops::handle_envelope_remove_reaction(
-                            event_tx, bundle_keypair, &reactor,
-                            mid, emoji, ts, sig, pk, sid, cid,
+                            event_tx, bundle_keypair, state, &reactor,
+                            mid, emoji, ts, sig, pk, sid, cid, dev,
                             db_path, db_passphrase,
                         ).await;
                     } else if !message_ops::reaction_sig_rejected(
@@ -9746,7 +10917,7 @@ async fn handle_incoming_request_inner(
                 }
                 // -- File transfer receive handlers --
                 Ok(MessageEnvelope::FileHeader { inner }) => {
-                    let FileHeaderPayload { fid, name, ext, mime, size, chunks, img, w, h, mid, sid, cid, ts, sig, pk, aes_key, aes_nonce, vthumb, share_ref, order_us, album, inline_bytes, thumb, voice, author, sha256, .. } = *inner;
+                    let FileHeaderPayload { fid, name, ext, mime, size, chunks, img, w, h, mid, sid, cid, ts, sig, pk, aes_key, aes_nonce, vthumb, share_ref, order_us, album, inline_bytes, thumb, voice, author, sha256, meta_dev, .. } = *inner;
                     // Envelope-borne thumb: image blur placeholder or video
                     // poster, size-capped — see accept_header_thumb.
                     let thumb = file_handler::accept_header_thumb(thumb, img, &mime);
@@ -9871,7 +11042,11 @@ async fn handle_incoming_request_inner(
                     // not that the `file_id` inside is theirs to relabel.
                     let mut meta_written = false;
                     if let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) {
-                        meta_written = file_handler::file_meta_write_allowed(&store, &fid, &peer_str);
+                        let digest = super::post_proof::file_meta_digest(&fid, &mime, img, w, h, thumb.as_deref());
+                        let place = sid.as_deref().zip(cid.as_deref()).zip(mid.as_deref());
+                        let Ok(meta_proof) = file_handler::header_meta_judged(&store, server_states, place, &card_owner, ts, &digest, meta_dev) else { return };
+                        meta_written = file_handler::file_meta_write_allowed(&store, &fid, peer_str)
+                            && !file_handler::meta_swap_refused(&store, &fid, meta_proof.is_some());
                         if meta_written {
                             let _ = store.insert_file_metadata(
                                 &fid, &name, &ext, &mime,
@@ -9881,6 +11056,9 @@ async fn handle_incoming_request_inner(
                                 &card_owner, false, ts,
                                 vthumb.as_ref(), thumb.as_deref(), sha256.as_deref(),
                             );
+                            if sid.is_some() {
+                                file_handler::keep_meta_proof(&store, &fid, &digest, meta_proof.as_deref());
+                            }
                             // Persist the share back-reference (issue #41) so a
                             // manual download can rejoin the share swarm after a
                             // restart — the key otherwise lives only in Dart RAM.
@@ -10674,549 +11852,33 @@ async fn handle_incoming_request_inner(
 
         // -- CRDT sync message handlers --
 
-        HavenMessage::SyncRequest { server_id, state_vector_json, mls_epoch, nonce, full, mut digest, dg } => {
-            hollow_log!("[HOLLOW-CRDT] SyncRequest from {peer_str} for server {server_id}");
-            if crdt_resync.op_sync.is_old() {
-                digest = None;
-            }
-
-            // A request without the digest mark comes from an older build: our open
-            // digest asks to that device go again in the form it reads.
-            // Only a member of a server we hold teaches us what its device reads.
-            let heard: Vec<(String, Option<u64>, Option<u64>)> = if server_states.values().any(|s| s.is_member(peer_str)) {
-                crdt_resync.op_sync.heard_request(peer_str, dg, &|sid| mls.as_ref().and_then(|m| m.epoch(sid).ok()))
-            } else {
-                Vec::new()
-            };
-            for (sid, ask_nonce, ask_epoch) in heard {
-                if let Some(state) = server_states.get(&sid) {
-                    super::frame_budget::pace_carried(
-                        frame_budget, ws_cmd_tx, device_peer_id, peer_str,
-                        &super::op_sync::vector_ask(state, ask_nonce, ask_epoch),
-                    );
-                }
-            }
-
-            // A member asking for one page of our whole log, to get back ops its older
-            // build skipped (`crdt_resync`).
-            if let Some(ask) = &full
-                && let Some(state) = server_states.get(&server_id)
-                && state.is_member(peer_str)
-            {
-                let (ops_json, page) = crdt_resync.serve(state, ask, peer_str, std::time::Instant::now());
-                super::frame_budget::pace_answer(
-                    frame_budget, ws_cmd_tx, device_peer_id, peer_str,
-                    &HavenMessage::SyncResponse {
-                        server_id: server_id.clone(), ops_json, nonce, page: Some(page), digest: None, dg: crdt_resync.op_sync.mark(),
-                    },
-                );
-                return;
-            }
-
-            // The op log is the whole server (names, roles, bans, restricted channels), so
-            // only a member gets it. A tombstone has no members left: anyone asking gets
-            // just the owner's deletion op, all a reconnecting former member needs. A
-            // former member of a live server gets the op that removed it and the ranks
-            // its own fold needs to admit that op (HOL-SEC-114).
-            if let Some(state) = server_states.get(&server_id) {
-                let member = state.is_member(peer_str);
-                let reply_to = |ask: &crate::crdt::digest::OpDigest, vector: bool| crate::crdt::digest::DigestReply {
-                    ask: ask.ask, round: ask.round, groups: Vec::new(), vector,
-                };
-                let answer: Option<(String, Option<crate::crdt::digest::DigestReply>)> = match &digest {
-                    // A legacy log applies in arrival order and is capped: only the vector
-                    // says what such a replica may hand over.
-                    Some(ask) if member && state.anchor() == crate::crdt::server_state::Anchor::Legacy => {
-                        Some(("[]".to_string(), Some(reply_to(ask, true))))
-                    }
-                    Some(ask) if member => match crdt_resync.answer_digest(state, ask) {
-                        Some((ops_json, reply)) => Some((ops_json, Some(reply))),
-                        None => {
-                            hollow_log!("[HOLLOW-SECURITY] Left a malformed sync digest from {peer_str} for {server_id} unanswered");
-                            None
-                        }
-                    },
-                    // A non-member is never told counts or fingerprints of the log.
-                    Some(ask) => {
-                        let ops = former_member_ops(state, peer_str, &|_| true);
-                        (!ops.is_empty()).then(|| (serde_json::to_string(&ops).unwrap_or_default(), Some(reply_to(ask, false))))
-                    }
-                    None => serde_json::from_str::<StateVector>(&state_vector_json).ok().and_then(|their_vector| {
-                        let ops = if member {
-                            crdt_sync::compute_delta(&state.op_log, &their_vector)
-                        } else {
-                            former_member_ops(state, peer_str, &crdt_sync::vector_lacks(&their_vector))
-                        };
-                        // A member hears back even when nothing is missing: that answer is
-                        // how a member just back knows it has caught up (`join_hold`).
-                        (member || !ops.is_empty()).then(|| (serde_json::to_string(&ops).unwrap_or_default(), None))
-                    }),
-                };
-                let mark = crdt_resync.op_sync.mark();
-                if let Some((ops_json, reply)) = answer {
-                    hollow_log!("[HOLLOW-CRDT] Answering {peer_str}'s sync of {server_id} ({} bytes of ops)", ops_json.len());
-                    super::olm_lane::carry(
-                        ws_cmd_tx, peer_str, None,
-                        &HavenMessage::SyncResponse {
-                            server_id: server_id.clone(), ops_json, nonce, page: None, digest: reply, dg: mark,
-                        },
-                        super::olm_lane::NoSession::Queue,
-                    );
-                }
-
-                // No bidirectional SyncRequest here — both peers trigger
-                // sync in ConnectionEstablished, so both sides already initiate.
-            }
-
-            // Epoch hint (join-order SFrame race fix): the first-contact sync
-            // doubles as the stale-group detector — serve a commit catch-up /
-            // repair when the sender is behind, self-probe when it's ahead.
-            if let (Some(their_epoch), Some(mls_mgr)) = (mls_epoch, mls.as_mut()) {
-                crate::node::crypto_handler::handle_epoch_hint(
-                    mls_mgr, ws_cmd_tx, ws_room_peers, server_states,
-                    mls_epoch_hint_cooldown,
-                    &server_id, None, their_epoch, None, peer_str, local_peer_str,
-                    false, // incidental hint on a sync — elect one responder
-                    false,
-                );
-            }
+        HavenMessage::SyncRequest { server_id, state_vector_json, mls_epoch, nonce, full, digest, dg, x } => {
+            Box::pin(handle_sync_request(
+                olm, crypto_store, crdt_resync, event_tx, frame_budget, server_states, device_keypair,
+                master_peer_str, device_peer_id, mls, pending_mls_removals, mls_epoch_hint_cooldown, ws_cmd_tx,
+                ws_room_peers, db_path, db_passphrase, local_peer_str, peer_str, server_id, state_vector_json,
+                mls_epoch, nonce, full, digest, dg, x,
+            ))
+            .await;
         }
 
         HavenMessage::ServerStateSnapshot { server_id, state_json } => {
             adopt_join_snapshot(
                 server_id, &state_json, pending_server_joins, server_states, local_peer_str, device_peer_id,
-                bundle_keypair, crdt_store, peer_str,
+                bundle_keypair, device_keypair, (db_path, db_passphrase), crdt_store, peer_str,
             );
         }
 
-        HavenMessage::SyncResponse { server_id, ops_json, nonce, page, mut digest, dg } => {
-            hollow_log!("[HOLLOW-CRDT] SyncResponse from {peer_str} for server {server_id}");
-            if crdt_resync.op_sync.is_old() {
-                digest = None;
-            } else if (dg.is_some() || digest.is_some()) && server_states.values().any(|s| s.is_member(peer_str)) {
-                crdt_resync.op_sync.learn(peer_str, true);
-            }
-            let digest_sid = digest.as_ref().map(|_| server_id.clone());
-
-            // A page of a whole log counts only as the answer to the page we asked that
-            // device for; any other is dropped, never taken as a delta.
-            match crdt_resync.claim(&server_id, peer_str, nonce, page.as_ref(), std::time::Instant::now()) {
-                super::crdt_resync::Claim::Page(next) => {
-                    Box::pin(take_resync_page(
-                        crdt_resync, server_states, crdt_store, frame_budget, mls, crypto_store,
-                        ws_cmd_tx, ws_room_peers, event_tx, bundle_keypair,
-                        voice_channel_participants, voice_channel_gossip_mode, gossip_overlays,
-                        pending_server_joins, local_peer_str, device_peer_id, peer_str,
-                        server_id, ops_json, next,
-                    ))
-                    .await;
-                    return;
-                }
-                super::crdt_resync::Claim::Unrelated if page.is_some() => {
-                    hollow_log!("[HOLLOW-SECURITY] Dropped a page of {server_id}'s op log from {peer_str} that answers no ask of ours");
-                    return;
-                }
-                // A refusal or a busy answer carries no ops.
-                _ if page.is_some() => return,
-                _ => {}
-            }
-
-            // Room gating: only accept sync for servers we already know about
-            // or are actively trying to join.
-            let is_known = server_states.contains_key(&server_id);
-            let is_pending_join = pending_server_joins.contains_key(&server_id);
-            if !is_known && !is_pending_join {
-                if leave_book.on_answer(&server_id, &ops_json, nonce, peer_str, local_peer_str) {
-                    let _ = ws_cmd_tx.send(super::ws_client::WsCommand::LeaveRoom { room_code: server_id.clone() });
-                    return;
-                }
-                hollow_log!("[HOLLOW-CRDT] Ignoring SyncResponse for unknown server {server_id} (not joined)");
-                return;
-            }
-
-            // Tolerant parse: a NEWER client's op variant skips just that op,
-            // never the whole batch.
-            let crate::crdt::operations::TolerantParse { ops: incoming_ops, unread, .. } =
-                crate::crdt::operations::parse_ops_tolerant(&ops_json);
-            let unread_in = (!unread.is_empty()).then(|| server_id.clone());
-            if !incoming_ops.is_empty() {
-                let state = server_states.entry(server_id.clone()).or_insert_with(|| {
-                    // Skeleton for a pending join: ownerless, so only the anchor can
-                    // found it (the op a self-certifying id proves, or the invite's
-                    // pinned owner). The responder is just our sync source.
-                    let mut s = ServerState::skeleton(server_id.clone());
-                    s.owner_pin = pending_server_joins.get(&server_id).and_then(|p| p.owner_pin.clone());
-                    s.set_hlc(Hlc::for_device(local_peer_str.to_string(), device_peer_id));
-                    install_op_signer(&mut s, bundle_keypair);
-                    s
-                });
-
-                // SECURITY: every op in the batch passes `ingest_remote` inside
-                // `merge_ops_with`: the author's signature, the clock bound, then the
-                // permission matrix using OUR role map and never the relayer's word.
-                // That covers the destructive `ServerDeleted` tombstone along with
-                // every other payload.
-                //
-                // Persist exactly what the fold admitted, and drop the rows a
-                // checkpoint in the batch overwrote: op_log is NOT in the state JSON,
-                // so the crdt_ops table is what a restart rebuilds it from.
-
-                // Capture membership BEFORE merge so we can detect a kick-while-offline
-                // (we were a member, the synced ops remove us → self-evict on reconnect).
-                let was_member_before = state.is_member(local_peer_str);
-
-                let mut deltas = Vec::new();
-                let mut admitted = Vec::new();
-                let mut keep = |i: &crate::crdt::fold::Ingested| {
-                    admitted.extend(i.admitted.iter().cloned());
-                    deltas.push(i.delta(&server_id));
-                };
-                let merged = crdt_sync::merge_ops_with(state, &incoming_ops, &mut keep);
-                // A join folds in our identity's own leave of the server: a membership from
-                // before the leave answers no join of ours.
-                let left_here = match leave_book.left_op(&server_id).filter(|_| pending_server_joins.contains_key(&server_id)) {
-                    Some(left) => {
-                        let _ = crdt_sync::merge_ops_with(state, std::slice::from_ref(&left), &mut keep);
-                        !state.is_member(local_peer_str) && state.left_at(local_peer_str).is_some()
-                    }
-                    None => false,
-                };
-                for delta in deltas {
-                    crdt_store.persist(delta);
-                }
-                if let Ok(report) = &merged {
-                    if report.rejected > 0 {
-                        hollow_log!("[HOLLOW-SECURITY] Dropped {} unadmitted op(s) from a SyncResponse for {server_id} from {peer_str}", report.rejected);
-                    }
-                }
-                if left_here {
-                    hollow_log!("[HOLLOW-CRDT] A membership from before our leave of {server_id} answered our join");
-                    if pending_server_joins.get(&server_id).is_some_and(|p| p.from_sibling) {
-                        sync_handler::end_join_we_left(
-                            pending_server_joins, server_states, mls, crypto_store, crdt_store, ws_cmd_tx,
-                            leave_book.holds_room(&server_id), &server_id,
-                        );
-                        return;
-                    }
-                } else if pending_server_joins.contains_key(&server_id) && state.is_member(local_peer_str) {
-                    leave_book.forget_left(&server_id);
-                }
-                match merged {
-                    // Run even when 0 ops applied if a join is pending: the joiner
-                    // may have adopted a ServerStateSnapshot already (the
-                    // responder's op log can be compacted), and the join must complete.
-                    // An anchored joiner completes only once the fold admitted us: a
-                    // batch that founds nothing or admits someone else is no join.
-                    Ok(report) if (report.applied > 0 || pending_server_joins.contains_key(&server_id))
-                        && !left_here
-                        && (!pending_server_joins.contains_key(&server_id)
-                            || state.anchor() == crate::crdt::server_state::Anchor::Legacy
-                            || state.is_member(local_peer_str)) => {
-                        let applied = report.applied;
-                        hollow_log!("[HOLLOW-CRDT] Applied {applied} ops for server {server_id}");
-
-                        // Multi-device (Step 6): fold any device-keyed members a
-                        // not-yet-upgraded peer's ops introduced into their master.
-                        // Anchored servers are master-keyed from their first op.
-                        if state.anchor() == crate::crdt::server_state::Anchor::Legacy {
-                            state.canonicalize_members(|id| super::resolver::resolve(id));
-                        }
-
-                        crdt_store.save_state_snapshot(server_id.clone(), state);
-
-                        if let Some(completed) = pending_server_joins.remove(&server_id) {
-                            // A member again: a leave of ours from before must never land.
-                            leave_book.drop_pending(&server_id);
-                            let server_name = state.name().to_string();
-                            hollow_log!("[HOLLOW-CRDT] Server join completed: {server_id}");
-                            // An op a member authored while our admission was in flight
-                            // named no seat of ours: ask more members shortly.
-                            crdt_resync.op_sync.joined(&server_id);
-
-                            // The persisted tile is done with. A PARKED join owes
-                            // the UI two more beats: admitted (said BEFORE
-                            // ServerJoined so the tile turns into a server rather
-                            // than blinking out), then READY once the MLS leaf that
-                            // lets it read the channel actually forms.
-                            crdt_store.delete_pending_join(server_id.clone());
-                            if completed.parked || completed.refused.is_some() {
-                                let _ = event_tx.send(NetworkEvent::PendingJoinUpdated {
-                                    server_id: server_id.clone(),
-                                    state: "admitted".to_string(),
-                                    reason: String::new(),
-                                }).await;
-                                awaiting_mls_after_parked_join.insert(server_id.clone());
-                            }
-
-                            // Drop stale MLS group from before ban/leave — forces fresh
-                            // KeyPackage exchange so the rejoining peer gets a clean epoch.
-                            if let Some(mls_mgr) = mls.as_mut() {
-                                if mls_mgr.has_group(&server_id) {
-                                    hollow_log!("[HOLLOW-MLS] Dropping stale MLS group for {server_id} on rejoin");
-                                    mls_mgr.remove_group(&server_id);
-                                    persist_mls_state(mls_mgr, crypto_store);
-                                }
-                            }
-
-                            // Join the WS relay room for this server so we receive MLS broadcasts.
-                            let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
-                                room_code: server_id.clone(),
-                            });
-
-                            let _ = event_tx.send(NetworkEvent::ServerJoined {
-                                server_id: server_id.clone(),
-                                name: server_name,
-                                quiet: completed.quiet,
-                                from_sibling: completed.from_sibling,
-                            }).await;
-
-                            // Our other devices learn of a server we joined as of one we made.
-                            // One announced to us went to all of them already.
-                            if !completed.from_sibling {
-                                sync_handler::announce_server_to_own_devices(
-                                    ws_cmd_tx, local_peer_str, device_peer_id, &server_id, state,
-                                );
-                            }
-
-                            // Backfill profiles of OFFLINE members from the
-                            // responder's cache. Online members are covered by the
-                            // per-peer ProfileRequest on sync, but during a pending
-                            // join this server was not in server_states yet.
-                            {
-                                if let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) {
-                                    let mut proxy_count = 0u32;
-                                    for member_id in state.members.keys() {
-                                        if proxy_count >= 10 { break; }
-                                        if member_id == local_peer_str || member_id == peer_str { continue; }
-                                        let is_online = ws_room_peers.values()
-                                            .any(|peers| peers.contains(member_id.as_str()));
-                                        if is_online { continue; }
-                                        if let Ok(Some(_)) = store.load_profile_light(member_id) { continue; }
-                                        hollow_log!("[HOLLOW-PROFILE] Post-join proxy profile request for {member_id} via {peer_str}");
-                                        super::olm_lane::carry(
-                                            ws_cmd_tx, peer_str, None,
-                                            &HavenMessage::ProfileRequestFor { target_peer_id: member_id.clone() },
-                                            super::olm_lane::NoSession::Queue,
-                                        );
-                                        proxy_count += 1;
-                                    }
-                                }
-                            }
-
-                            {
-                                let local_peer = local_peer_str.to_string();
-                                let pledge_op = (state.get_storage_pledge(&local_peer) == 0)
-                                    .then(|| {
-                                        let min_pledge_bytes = state.min_pledge_mb().saturating_mul(1024 * 1024);
-                                        hollow_log!("[HOLLOW-VAULT] Auto-pledging {} MB for server {server_id}", min_pledge_bytes / (1024 * 1024));
-                                        state.author_checked(CrdtPayload::StoragePledgeChanged {
-                                            peer_id: local_peer.clone(),
-                                            pledge_bytes: min_pledge_bytes,
-                                        })
-                                    })
-                                    .flatten();
-                                if let Some(pledge_op) = pledge_op {
-                                    crdt_store.insert_op(pledge_op.clone());
-                                    crdt_store.save_state_snapshot(server_id.clone(), state);
-
-                                    // Broadcast the pledge op to connected members: MLS when we hold
-                                    // the group, PLUS the plaintext `CrdtOpBroadcast` twin
-                                    // UNCONDITIONALLY. A CRDT op is author-signed and idempotent, so a
-                                    // member with a working leaf just applies it twice, while a member
-                                    // with NO leaf or at a skewed epoch is otherwise invisible here.
-                                    //
-                                    // `StoragePledgeChanged` does not touch `members`, so reading the
-                                    // target list after `apply_op` is safe, unlike `ServerDeleted`.
-                                    if let Ok(op_json) = serde_json::to_string(&pledge_op) {
-                                        let mls_ok = mls.as_ref().is_some_and(|m| m.has_group(&server_id));
-                                        if mls_ok {
-                                            let envelope = MessageEnvelope::CrdtOp { sid: server_id.clone(), op_json: op_json.clone() };
-                                            if let Err(e) = send_mls_broadcast(mls.as_mut().unwrap(), ws_cmd_tx, &server_id, &envelope, crypto_store, Some(&*state)) {
-                                                hollow_log!("[HOLLOW-MLS] CrdtOp pledge broadcast failed: {e}");
-                                            }
-                                        }
-                                        let pledge = HavenMessage::CrdtOpBroadcast {
-                                            server_id: server_id.clone(),
-                                            op_json: op_json.clone(),
-                                        };
-                                        if let Some(json) = super::olm_lane::carried_json(&pledge) {
-                                            super::olm_lane::carry_to_identities(
-                                                ws_cmd_tx, ws_room_peers, state.members.keys(), &local_peer, &json,
-                                                super::olm_lane::NoSession::Queue,
-                                            );
-                                        }
-                                        // No receiver forwards it on: our siblings hear it from us, and
-                                        // the members of a room we are only now joining once it is listed.
-                                        super::olm_lane::carry_to_own_siblings(
-                                            ws_cmd_tx, ws_room_peers, &local_peer, device_peer_id, &pledge,
-                                            super::olm_lane::NoSession::Queue,
-                                        );
-                                        let sees_a_member = ws_room_peers.get(&server_id).is_some_and(|peers| {
-                                            peers.iter().any(|d| !super::resolver::same_identity(d, &local_peer) && state.is_member(d))
-                                        });
-                                        if !sees_a_member {
-                                            crdt_resync.op_sync.carry_when_listed(&server_id, pledge.clone());
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Establish an Olm session with every server member we are
-                            // connected to but lack one for. Members are master-keyed, so
-                            // bootstrap with each online DEVICE of every member.
-                            for member in state.members_list() {
-                                if super::resolver::same_identity(&member.peer_id, &local_peer_str) { continue; }
-                                for dev in crate::node::crypto_handler::online_devices_for(ws_room_peers, &member.peer_id) {
-                                    // Ensure the device shows as online in UI.
-                                    let _ = event_tx.send(NetworkEvent::PeerDiscovered {
-                                        peer: DiscoveredPeer { peer_id: dev.clone(), addresses: vec![] },
-                                    }).await;
-                                    if !olm.has_confirmed_session(&dev)
-                                        && !key_request_is_fresh(key_request_in_flight, &dev)
-                                    {
-                                        hollow_log!("[HOLLOW-SWARM] No confirmed Olm session with server member device {dev}, sending KeyRequest");
-                                        send_message_to_peer(ws_cmd_tx, ws_room_peers, &dev, signed_key_request(device_keypair, device_peer_id, &dev));
-                                        key_request_in_flight.insert(dev.clone(), std::time::Instant::now());
-                                    }
-                                }
-                            }
-
-                            // MLS: we hold the server but not a leaf in its group, so
-                            // ask for one.
-                            //
-                            // Exactly ONE KeyPackage may leave here. A second from the
-                            // same device straddling a batch tick is a remove + re-add:
-                            // two commits, the removal evicting the leaf the first
-                            // Welcome just gave us, and the eviction path then asks for
-                            // a third.
-                            //
-                            // The target is the one every other bootstrap path uses
-                            // (`server_bootstrap_target`), because the receiving handler
-                            // only ACTS as the owner or as a group holder. When that send
-                            // lands we STAMP the throttle, which stops the
-                            // message-triggered rescue firing a duplicate.
-                            let want_leaf = mls.as_ref().is_some_and(|m| !m.has_group(&server_id));
-                            if want_leaf && completed.parked && completed.key_package.is_some() {
-                                // Rung 2: the ring copy of this request CARRIED a
-                                // KeyPackage, so the member that admitted us has already
-                                // seated our leaf and the Welcome waits in our own relay
-                                // buffer, behind the SyncResponse we are handling. Asking
-                                // again would mint a second package and turn that Welcome
-                                // into a remove + re-add. Expecting a Welcome is what the
-                                // eviction grace already means, so if none arrives inside
-                                // it the batch tick asks once through the ordinary path.
-                                mls_bootstrap_requested.insert(server_id.clone(), std::time::Instant::now());
-                                mls_welcome_grace.insert(server_id.clone(), std::time::Instant::now());
-                                hollow_log!("[HOLLOW-MLS] Parked join for {server_id} carried a KeyPackage; expecting a buffered Welcome");
-                            } else if want_leaf
-                                && let Some(mls_mgr) = mls.as_ref()
-                                && let Ok(kp_bytes) = crate::node::crypto_handler::mint_group_key_package(mls_mgr, crypto_store, &server_id, false)
-                            {
-                                // ONE package per attempt, minted before we know which
-                                // of the two addresses it will go to. Every mint writes
-                                // private init and leaf-encryption keys into persisted
-                                // MLS storage that only a Welcome consumes, and the
-                                // frame is byte-identical either way.
-                                if crate::node::crypto_handler::send_join_leaf_ask(
-                                    mls_mgr, crypto_store, ws_cmd_tx, ws_room_peers, state, &server_id, local_peer_str,
-                                    device_peer_id, peer_str, kp_bytes,
-                                ) {
-                                    mls_bootstrap_requested.insert(server_id.clone(), std::time::Instant::now());
-                                }
-                            }
-                        }
-
-                        // Reconcile changes that happened while we were OFFLINE, now that
-                        // the grow-only sync delivered the ops: a DELETION tombstone, a
-                        // BAN, or a plain KICK or our own LEAVE fanned by a sibling.
-                        let deleted_now = state.is_deleted();
-                        let kicked_now = was_member_before && !state.is_member(local_peer_str);
-                        let banned_now = state.is_banned(&local_peer_str);
-                        let evicted_sub_cids: Vec<String> = state.subgroup_channel_ids();
-                        let pending = pending_server_joins.contains_key(&server_id);
-                        if deleted_now || banned_now || (kicked_now && !pending) {
-                            voice_handler::auto_leave_invisible_voice_channels(
-                                mls, ws_cmd_tx, ws_room_peers, server_states,
-                                bundle_keypair, crypto_store,
-                                voice_channel_participants, voice_channel_gossip_mode,
-                                gossip_overlays, local_peer_str, device_peer_id, &server_id, event_tx,
-                            ).await;
-                        }
-                        if deleted_now {
-                            // Owner tombstoned the server while we were offline. Leave the
-                            // MLS group; keep the shell so we relay the tombstone onward.
-                            if let Some(mls_mgr) = mls.as_mut() {
-                                if mls_mgr.has_group(&server_id) {
-                                    mls_mgr.remove_group(&server_id);
-                                    persist_mls_state(mls_mgr, crypto_store);
-                                }
-                            }
-                            let _ = event_tx.send(NetworkEvent::ServerDeleted {
-                                server_id,
-                            }).await;
-                        } else if banned_now || (kicked_now && !pending) {
-                            // Self-eviction reconciled from sync: tear down DURABLY, not just
-                            // the UI event. Without removing the state and DB row the shell
-                            // reloads on restart, re-lists the server, and the sibling
-                            // re-announce path can even re-ADD us to a server we left,
-                            // authored by a non-member, so real members reject it and we fork.
-                            hollow_log!("[HOLLOW-CRDT] Offline-reconciled self-eviction from {server_id} (banned={banned_now}) — durable teardown");
-                            server_states.remove(&server_id);
-                            crdt_store.delete_server(server_id.clone());
-                            if let Some(mls_mgr) = mls.as_mut() {
-                                if mls_mgr.has_group(&server_id) {
-                                    mls_mgr.remove_group(&server_id);
-                                }
-                                for cid in &evicted_sub_cids {
-                                    let gk = crate::crypto::subgroup_id(&server_id, cid);
-                                    if mls_mgr.has_group(&gk) {
-                                        mls_mgr.remove_group(&gk);
-                                    }
-                                }
-                                persist_mls_state(mls_mgr, crypto_store);
-                            }
-                            let _ = ws_cmd_tx.send(super::ws_client::WsCommand::LeaveRoom {
-                                room_code: server_id.clone(),
-                            });
-                            let _ = event_tx.send(NetworkEvent::MemberLeft {
-                                server_id,
-                                peer_id: local_peer_str.to_string(),
-                            }).await;
-                        } else {
-                            let _ = event_tx.send(NetworkEvent::SyncCompleted {
-                                server_id,
-                                ops_applied: applied as u32,
-                            }).await;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            if let Some(sid) = unread_in
-                && let Some(state) = server_states.get(&sid)
-            {
-                let vouched = unread.into_iter().filter(|u| super::crdt_resync::vouched(u, state)).collect();
-                crdt_resync.note_skipped(&sid, vouched);
-            }
-
-            // A digest answer that split ranges: compare them against what we hold now and
-            // ask again, only for the ask it names.
-            if let (Some(reply), Some(sid)) = (&digest, &digest_sid)
-                && let Some(state) = server_states.get(sid)
-            {
-                match crdt_resync.digest_answered(state, peer_str, reply, mls.as_ref().and_then(|m| m.epoch(sid).ok())) {
-                    super::op_sync::Step::Again(next) => {
-                        super::frame_budget::pace_carried(frame_budget, ws_cmd_tx, device_peer_id, peer_str, &next);
-                    }
-                    super::op_sync::Step::Unasked => {
-                        hollow_log!("[HOLLOW-CRDT] Dropped a digest answer for {sid} from {peer_str} that continues no open ask");
-                    }
-                    super::op_sync::Step::Malformed => {
-                        hollow_log!("[HOLLOW-SECURITY] Dropped a malformed digest answer for {sid} from {peer_str}");
-                    }
-                    super::op_sync::Step::Done => {}
-                }
-            }
+        HavenMessage::SyncResponse { server_id, ops_json, nonce, page, digest, dg, x } => {
+            Box::pin(handle_sync_response(
+                olm, crypto_store, crdt_store, crdt_resync, event_tx, frame_budget, key_request_in_flight,
+                server_states, bundle_keypair, device_keypair, master_peer_str, device_peer_id,
+                pending_server_joins, leave_book, awaiting_mls_after_parked_join, mls, mls_bootstrap_requested,
+                mls_welcome_grace, ws_cmd_tx, ws_room_peers, gossip_overlays, voice_channel_participants,
+                voice_channel_gossip_mode, db_path, db_passphrase, local_peer_str, peer_str, server_id, ops_json,
+                nonce, page, digest, dg, x,
+            ))
+            .await;
         }
 
         HavenMessage::CrdtOpBroadcast { server_id, op_json } => {
@@ -11462,6 +12124,20 @@ async fn handle_incoming_request_inner(
             if !answers {
                 return;
             }
+            // A member's device, ours or another's, gets the server again only when our
+            // view counts it (DEVICE_PROOF_DESIGN section 9, responders): ID-1's fold of the
+            // carried roster counts pending devices and backups still waiting. Judged
+            // after the ingest above, so a recovering device whose join box carries its
+            // placing subset is counted.
+            if (already_member || is_sibling)
+                && !server_states.get(&server_id).is_some_and(|state| {
+                    crate::storage::MessageStore::lease(db_path, db_passphrase)
+                        .is_ok_and(|store| super::server_rosters::server_counts(&store, db_path, state, &member_master, peer_str))
+                })
+            {
+                hollow_log!("[HOLLOW-SECURITY] Left {peer_str}'s join ask for {server_id} unanswered: our view does not count that device of {member_master}");
+                return;
+            }
 
             if let Some(state) = server_states.get_mut(&server_id) {
                 // Every answer is sealed to the reply key the request carried, from our
@@ -11686,6 +12362,7 @@ async fn handle_incoming_request_inner(
                 };
                 if let Ok(ops_json) = serde_json::to_string(&all_ops) {
                     hollow_log!("[HOLLOW-CRDT] Sending snapshot + {} ops to joiner {peer_str}", all_ops.len());
+                    let rosters = super::sync_rosters::join_answer_rosters(db_path, db_passphrase, state, all_ops.iter().copied());
                     answer.reply(ws_cmd_tx, &HavenMessage::SyncResponse {
                         server_id: server_id.clone(),
                         ops_json,
@@ -11693,6 +12370,7 @@ async fn handle_incoming_request_inner(
                         page: None,
                         digest: None,
                         dg: None,
+                        x: super::sync_ext::ReplyExt { rosters, ..Default::default() }.boxed(),
                     });
                 }
 
@@ -12073,7 +12751,7 @@ async fn handle_incoming_request_inner(
                 twitch_proof_json: None,
                 nsfw_confirmed: true,
                 owner_pin: owner,
-                device_list: super::roster_book::own_roster(&master_keypair.peer_id(), db_path, db_passphrase),
+                device_list: super::roster_book::join_roster(&master_keypair.peer_id(), device_peer_id, db_path, db_passphrase),
                 join_key,
                 reply_secret: super::join_lane::ReplySecret::new(),
                 from_sibling: true,
@@ -12225,65 +12903,67 @@ async fn handle_incoming_request_inner(
 
                         match envelope {
                             MessageEnvelope::ChannelMessage { inner } => {
-                                let ChannelMessagePayload { sid, cid, text, ts, sig, pk, mid, reply_to, file_id, link_preview, order_us, album } = *inner;
+                                let ChannelMessagePayload { sid, cid, text, ts, sig, pk, mid, reply_to, file_id, link_preview, order_us, album, dev } = *inner;
                                 let mod_state = server_states.get(&sid);
                                 message_ops::handle_envelope_channel_message(
                                     event_tx, bundle_keypair, mod_state, slow_mode_clock, &local_peer,
                                     sender_master.clone(), sid, cid, text, ts,
-                                    sig, pk, mid, reply_to, file_id, link_preview, order_us, album,
+                                    sig, pk, mid, reply_to, file_id, link_preview, order_us, album, dev,
                                     db_path, db_passphrase,
                                 ).await;
                             }
-                            MessageEnvelope::EditMessage { mid, text: new_text, ts, sig, pk, sid, cid } => {
+                            MessageEnvelope::EditMessage { mid, text: new_text, ts, sig, pk, sid, cid, dev } => {
                                 let mod_state = sid.as_deref().and_then(|s| server_states.get(s));
                                 message_ops::handle_envelope_edit_message(
                                     event_tx, bundle_keypair, mod_state, &sender_master,
-                                    mid, new_text, ts, sig, pk, sid, cid,
+                                    mid, new_text, ts, sig, pk, sid, cid, dev,
                                     db_path, db_passphrase,
                                 ).await;
                             }
-                            MessageEnvelope::LinkPreviewSet { mid, lp, ts, sig, pk, sid, cid } => {
+                            MessageEnvelope::LinkPreviewSet { mid, lp, ts, sig, pk, sid, cid, dev } => {
                                 if sid.is_none() {
                                     return; // DM cards ride Olm only.
                                 }
                                 let mod_state = sid.as_deref().and_then(|s| server_states.get(s));
                                 message_ops::handle_envelope_link_preview_set(
                                     event_tx, mod_state, &sender_master, &local_peer,
-                                    mid, lp, ts, sig, pk, sid, cid, frame_ts_ms,
+                                    mid, lp, ts, sig, pk, sid, cid, dev, frame_ts_ms,
                                     db_path, db_passphrase,
                                 ).await;
                             }
-                            MessageEnvelope::DeleteMessage { mid, ts, sig, pk, sid, cid } => {
+                            MessageEnvelope::DeleteMessage { mid, ts, sig, pk, sid, cid, dev } => {
+                                let mod_state = sid.as_deref().and_then(|s| server_states.get(s));
                                 message_ops::handle_envelope_delete_message(
-                                    event_tx, bundle_keypair, &sender_master,
-                                    mid, ts, sig, pk, sid, cid,
+                                    event_tx, bundle_keypair, mod_state, &sender_master,
+                                    mid, ts, sig, pk, sid, cid, dev,
                                     db_path, db_passphrase,
                                 ).await;
                             }
-                            MessageEnvelope::AddReaction { mid, emoji, ts, sig, pk, sid, cid } => {
+                            MessageEnvelope::AddReaction { mid, emoji, ts, sig, pk, sid, cid, dev } => {
                                 let mod_state = sid.as_deref().and_then(|s| server_states.get(s));
                                 message_ops::handle_envelope_add_reaction(
                                     event_tx, bundle_keypair, mod_state, &sender_master,
-                                    mid, emoji, ts, sig, pk, sid, cid,
+                                    mid, emoji, ts, sig, pk, sid, cid, dev,
                                     db_path, db_passphrase,
                                 ).await;
                             }
-                            MessageEnvelope::RemoveReaction { mid, emoji, ts, sig, pk, sid, cid } => {
+                            MessageEnvelope::RemoveReaction { mid, emoji, ts, sig, pk, sid, cid, dev } => {
+                                let mod_state = sid.as_deref().and_then(|s| server_states.get(s));
                                 message_ops::handle_envelope_remove_reaction(
-                                    event_tx, bundle_keypair, &sender_master,
-                                    mid, emoji, ts, sig, pk, sid, cid,
+                                    event_tx, bundle_keypair, mod_state, &sender_master,
+                                    mid, emoji, ts, sig, pk, sid, cid, dev,
                                     db_path, db_passphrase,
                                 ).await;
                             }
                             MessageEnvelope::FileHeader { inner } => {
-                                let FileHeaderPayload { fid, name, ext, mime, size, chunks, img, w, h, mid, sid, cid, ts, aes_key, aes_nonce, vthumb, share_ref, thumb, voice, author, sha256, .. } = *inner;
+                                let FileHeaderPayload { fid, name, ext, mime, size, chunks, img, w, h, mid, sid, cid, ts, aes_key, aes_nonce, vthumb, share_ref, thumb, voice, author, sha256, meta_dev, .. } = *inner;
                                 file_handler::handle_envelope_file_header(
                                     server_states, pending_file_streams, pending_shard_streams,
                                     early_file_streams, bundle_keypair, event_tx,
                                     &server_id, sender_peer_id,
                                     fid, name, ext, mime, size, chunks, img, w, h,
                                     mid, sid, cid, ts, aes_key, aes_nonce, vthumb, share_ref,
-                                    thumb, voice, author, sha256, false,
+                                    thumb, voice, author, sha256, meta_dev, false,
                                     requested_file_receipts, declined_file_ids,
                                     ws_cmd_tx, ws_room_peers, device_peer_id,
                                     db_path, db_passphrase,
@@ -12340,6 +13020,7 @@ async fn handle_incoming_request_inner(
                                     sid.clone(), op_json,
                                     crdt_store,
                                     ws_cmd_tx,
+                                    &sender_peer_id, ws_room_peers, local_peer_str,
                                 ).await;
 
                                 let self_evicted = was_member_before
@@ -12442,7 +13123,7 @@ async fn handle_incoming_request_inner(
                             MessageEnvelope::ChannelSyncBatch { sid, cid, mut messages, total, has_more, held_from, .. } => {
                                 if crypto_handler::channel_backfill_allowed_from(server_states.get(&sid), &sender_master, &cid) {
                                     let page_end = if has_more == Some(true) { sync_handler::ChannelPageEnd::of(&messages) } else { None };
-                                    crypto_handler::backfill_filter(server_states.get(&sid), &mut messages);
+                                    crypto_handler::backfill_filter(server_states.get(&sid), &cid, &mut messages);
                                     let landed = match crate::storage::MessageStore::lease(db_path, db_passphrase) {
                                         Ok(store) => {
                                             let known = sync_handler::channel_known(server_states.get(&sid), &cid);
@@ -13074,8 +13755,9 @@ async fn handle_incoming_request_inner(
             // Replay of commit frames we missed on the unbuffered 0x03 broadcast.
             // Every frame goes through the SAME judged apply path as a live
             // MlsCommit, and each must be exactly one epoch ahead of us.
+            // During a recovery KEEP is heard too; the commits are still judged (8.8 class 3).
             let is_member = server_states.get(&server_id).is_some_and(|s| {
-                s.members.keys().any(|m| super::resolver::same_identity(m, peer_str))
+                s.members.keys().any(|m| super::resolver::same_identity(m, peer_str)) || s.keeps_peer(peer_str)
             });
             if !is_member {
                 hollow_log!("[HOLLOW-MLS] Ignoring MlsCommitCatchup from non-member {peer_str} for {server_id}");
@@ -13154,7 +13836,7 @@ async fn handle_incoming_request_inner(
             let Some(state) = server_states.get(&server_id) else { return };
             if super::conference::is_conference_sid(&server_id)
                 || pending_server_joins.contains_key(&server_id)
-                || !state.members.contains_key(local_peer_str)
+                || !state.keeps_peer(local_peer_str)
             {
                 hollow_log!("[HOLLOW-SECURITY] REJECTED MlsKeyPackageRequest from {peer_str} for {group_key}: not a server of ours");
                 return;
@@ -13163,11 +13845,13 @@ async fn handle_incoming_request_inner(
                 .and_then(|m| m.group_leaves(&group_key).into_iter().find(|l| l.id() == peer_str))
                 .and_then(|l| l.bound().map(|b| b.master.clone()))
                 .unwrap_or_else(|| super::resolver::resolve(peer_str));
-            if !state.members.contains_key(&requester_master) || state.is_banned(&requester_master) {
+            // A committer may come from KEEP during a recovery (8.8 class 3).
+            if !state.keeps_peer(&requester_master) || state.is_banned(&requester_master) {
                 hollow_log!("[HOLLOW-SECURITY] REJECTED MlsKeyPackageRequest from {peer_str} for {group_key}: {requester_master} is not a member");
                 return;
             }
-            if kpr_channel_id.as_deref().is_some_and(|cid| !state.can_see_channel(local_peer_str, cid)) {
+            let sees = |cid: &str| state.can_see_channel(local_peer_str, cid) || state.recovery_hold(Some(cid), local_peer_str) != crate::crdt::hold::Hold::Out;
+            if kpr_channel_id.as_deref().is_some_and(|cid| !sees(cid)) {
                 hollow_log!("[HOLLOW-MLS] Ignoring MlsKeyPackageRequest for {group_key}: we cannot see that channel");
                 return;
             }
@@ -13590,6 +14274,9 @@ async fn handle_incoming_request_inner(
             }
 
             hollow_log!("[HOLLOW-FRIENDS] Friend accepted by {peer_str}");
+            super::shared_servers::ask_if_recovering(
+                ws_cmd_tx, &mut crdt_resync.shared_asks, None, peer_str, master_peer_str, db_path, db_passphrase,
+            );
 
             // Register DM room code with signaling. Use the MASTER so both sides compute
             // the SAME pure dm_room_code.
@@ -14071,7 +14758,7 @@ async fn handle_incoming_request_inner(
             //    a shell kept after our own leave would re-ADD us to a server we left.
             let mut announced = 0u32;
             for (sid, st) in server_states.iter() {
-                if st.is_deleted() || !st.is_member(local_peer_str) { continue; }
+                if st.is_deleted() || !st.keeps_peer(local_peer_str) { continue; }
                 super::olm_lane::carry(
                     ws_cmd_tx, peer_str, None,
                     &HavenMessage::SiblingServerAnnounce { server_id: sid.clone(), owner: st.anchor_owner(), join_key: st.join_public_text(), fresh: false },
@@ -14131,7 +14818,7 @@ async fn handle_incoming_request_inner(
             }
         }
 
-        HavenMessage::PublicChannelMessage { server_id, channel_id, text, ts, sig, pk, mid, reply_to, file_id, link_preview, order_us, album, file_meta } => {
+        HavenMessage::PublicChannelMessage { server_id, channel_id, text, ts, sig, pk, mid, reply_to, file_id, link_preview, order_us, album, file_meta, dev } => {
             if peer_str == local_peer_str
                 || !message_ops::public_frame_accepted(
                     server_states.get(&server_id), guest_rooms.contains(&server_id),
@@ -14154,7 +14841,7 @@ async fn handle_incoming_request_inner(
                 &event_tx, &bundle_keypair, server_states.get(&server_id), slow_mode_clock, &local_peer_str,
                 sender_master.clone(),
                 server_id.clone(), channel_id.clone(), text, ts, sig, pk,
-                Some(mid.clone()), reply_to, file_id.clone(), link_preview, order_us, album.map(|a| *a),
+                Some(mid.clone()), reply_to, file_id.clone(), link_preview, order_us, album.map(|a| *a), dev,
                 store, db_passphrase,
             ).await;
             // GUEST live file card: we cannot decrypt the MLS FileHeader that
@@ -14187,7 +14874,7 @@ async fn handle_incoming_request_inner(
             }
         }
 
-        HavenMessage::PublicChannelEdit { server_id, channel_id, mid, text, ts, sig, pk } => {
+        HavenMessage::PublicChannelEdit { server_id, channel_id, mid, text, ts, sig, pk, dev } => {
             if peer_str == local_peer_str
                 || !message_ops::public_frame_accepted(
                     server_states.get(&server_id), guest_rooms.contains(&server_id),
@@ -14202,12 +14889,12 @@ async fn handle_incoming_request_inner(
             message_ops::handle_envelope_edit_message(
                 &event_tx, &bundle_keypair, server_states.get(&server_id), &sender_master,
                 mid, text, ts, sig, pk,
-                Some(server_id), Some(channel_id),
+                Some(server_id), Some(channel_id), dev,
                 store, db_passphrase,
             ).await;
         }
 
-        HavenMessage::PublicLinkPreviewSet { server_id, channel_id, mid, lp, ts, sig, pk } => {
+        HavenMessage::PublicLinkPreviewSet { server_id, channel_id, mid, lp, ts, sig, pk, dev } => {
             if peer_str == local_peer_str
                 || !message_ops::public_frame_accepted(
                     server_states.get(&server_id), guest_rooms.contains(&server_id),
@@ -14222,12 +14909,12 @@ async fn handle_incoming_request_inner(
             message_ops::handle_envelope_link_preview_set(
                 &event_tx, server_states.get(&server_id), &sender_master, local_peer_str,
                 mid, lp, ts, sig, pk,
-                Some(server_id), Some(channel_id), frame_ts_ms,
+                Some(server_id), Some(channel_id), dev, frame_ts_ms,
                 store, db_passphrase,
             ).await;
         }
 
-        HavenMessage::PublicChannelDelete { server_id, channel_id, mid, ts, sig, pk } => {
+        HavenMessage::PublicChannelDelete { server_id, channel_id, mid, ts, sig, pk, dev } => {
             if peer_str == local_peer_str
                 || !message_ops::public_frame_accepted(
                     server_states.get(&server_id), guest_rooms.contains(&server_id),
@@ -14240,14 +14927,14 @@ async fn handle_incoming_request_inner(
             let store = guest_rooms.store_for(server_states.contains_key(&server_id), db_path);
             let sender_master = super::resolver::resolve(peer_str);
             message_ops::handle_envelope_delete_message(
-                &event_tx, &bundle_keypair, &sender_master,
+                &event_tx, &bundle_keypair, server_states.get(&server_id), &sender_master,
                 mid, ts, sig, pk,
-                Some(server_id), Some(channel_id),
+                Some(server_id), Some(channel_id), dev,
                 store, db_passphrase,
             ).await;
         }
 
-        HavenMessage::PublicChannelAddReaction { server_id, channel_id, mid, emoji, ts, sig, pk } => {
+        HavenMessage::PublicChannelAddReaction { server_id, channel_id, mid, emoji, ts, sig, pk, dev } => {
             if peer_str == local_peer_str
                 || !message_ops::public_frame_accepted(
                     server_states.get(&server_id), guest_rooms.contains(&server_id),
@@ -14262,12 +14949,12 @@ async fn handle_incoming_request_inner(
             message_ops::handle_envelope_add_reaction(
                 &event_tx, &bundle_keypair, server_states.get(&server_id), &sender_master,
                 mid, emoji, ts, sig, pk,
-                Some(server_id), Some(channel_id),
+                Some(server_id), Some(channel_id), dev,
                 store, db_passphrase,
             ).await;
         }
 
-        HavenMessage::PublicChannelRemoveReaction { server_id, channel_id, mid, emoji, ts, sig, pk } => {
+        HavenMessage::PublicChannelRemoveReaction { server_id, channel_id, mid, emoji, ts, sig, pk, dev } => {
             if peer_str == local_peer_str
                 || !message_ops::public_frame_accepted(
                     server_states.get(&server_id), guest_rooms.contains(&server_id),
@@ -14280,9 +14967,9 @@ async fn handle_incoming_request_inner(
             let store = guest_rooms.store_for(server_states.contains_key(&server_id), db_path);
             let sender_master = super::resolver::resolve(peer_str);
             message_ops::handle_envelope_remove_reaction(
-                &event_tx, &bundle_keypair, &sender_master,
+                &event_tx, &bundle_keypair, server_states.get(&server_id), &sender_master,
                 mid, emoji, ts, sig, pk,
-                Some(server_id), Some(channel_id),
+                Some(server_id), Some(channel_id), dev,
                 store, db_passphrase,
             ).await;
         }
@@ -14355,6 +15042,8 @@ async fn handle_incoming_request_inner(
                         let reactions_map = store.load_reactions_for_sync(&msg_ids).unwrap_or_default();
                         let file_ids: Vec<&str> = msgs.iter().filter_map(|m| m.file_id.as_deref()).collect();
                         let file_meta_map = store.get_file_metadata_batch(&file_ids).unwrap_or_default();
+                        let mids: Vec<&str> = msg_ids.iter().map(String::as_str).collect();
+                        let proofs = store.channel_post_proofs(&mids);
 
                         let mut budget = super::sync_handler::PreviewBudget::new();
                         let mut items: Vec<SyncMessageItem> = Vec::with_capacity(msgs.len());
@@ -14377,7 +15066,7 @@ async fn handle_incoming_request_inner(
                             let reactions = m.message_id.as_ref()
                                 .and_then(|mid| reactions_map.get(mid))
                                 .map(|rs| rs.iter().map(|(e, p, ts, sig, pk)| SyncReactionItem {
-                                    e: e.clone(), p: p.clone(), ts: *ts, sig: sig.clone(), pk: pk.clone(),
+                                    e: e.clone(), p: p.clone(), ts: *ts, sig: sig.clone(), pk: pk.clone(), dev: None,
                                 }).collect())
                                 .unwrap_or_default();
                             let file_meta = m.file_id.as_ref().and_then(|fid| {
@@ -14407,8 +15096,15 @@ async fn handle_incoming_request_inner(
                                 album: m.album_id.clone(),
                                 lp: m.link_preview.clone().map(Box::new),
                                 reactions,
+                                dev: m.message_id.as_ref().and_then(|mid| proofs.get(mid)).cloned().map(Box::new),
+                                hidden_dev: None,
+                                lp_dev: None,
                             });
                         }
+                        // A guest cannot judge a post's device: we serve only what our own
+                        // ingest would take (section 13).
+                        super::sync_handler::attach_change_proofs(&store, &mut items);
+                        super::post_proof::filter_page(Some(state), &server_id, &channel_id, &mut items, "served public");
                         let has_more = truncated || msgs.len() as i32 >= limit || below_floor;
 
                         let unique_senders: std::collections::HashSet<&str> = items.iter().map(|m| m.s.as_str()).collect();
@@ -14581,7 +15277,7 @@ async fn handle_incoming_request_inner(
                 mid, Some(sid.clone()), Some(cid), ts,
                 Some(aes_key), Some(aes_nonce),
                 None, None,
-                None, false, author, sha256, true,
+                None, false, author, sha256, None, true,
                 requested_file_receipts, declined_file_ids,
                 ws_cmd_tx, ws_room_peers, device_peer_id,
                 db_path, db_passphrase,
@@ -15011,7 +15707,7 @@ async fn handle_incoming_request_inner(
                                 if requester_is_member {
                                     // Members / DM parties: Olm-wrapped header (existing path).
                                     let header = MessageEnvelope::FileHeader {
-                                        inner: Box::new(FileHeaderPayload {
+                                        inner: Box::new(FileHeaderPayload { meta_dev: None,
                                             fid: file_id.clone(),
                                             name: file_meta.file_name.clone(),
                                             ext: file_meta.file_ext.clone(),
@@ -15405,11 +16101,52 @@ async fn handle_incoming_request_inner(
             );
         }
 
+        HavenMessage::SharedServers { ask, servers, pad, .. } => {
+            if ask {
+                match super::shared_servers::answer(db_path, db_passphrase, device_peer_id, peer_str, server_states.values()) {
+                    Some(frames) => {
+                        hollow_log!("[HOLLOW-SERVER] Told {peer_str} which servers we share");
+                        for frame in frames {
+                            super::olm_lane::carry(ws_cmd_tx, peer_str, None, &frame, super::olm_lane::NoSession::Queue);
+                        }
+                    }
+                    None => hollow_log!("[HOLLOW-SECURITY] Left {peer_str}'s shared-servers ask unanswered: not a friend device we count, or asked again too soon"),
+                }
+                return;
+            }
+            if !super::shared_servers::frame_fits(&servers, &pad) {
+                hollow_log!("[HOLLOW-SECURITY] Dropped a shared-servers answer from {peer_str} larger than any honest one");
+                return;
+            }
+            if !crdt_resync.shared_asks.take_frame(peer_str) {
+                hollow_log!("[HOLLOW-SECURITY] Dropped a shared-servers answer from {peer_str} that answers no ask of ours");
+                return;
+            }
+            if !super::shared_servers::recovering(master_peer_str, db_path, db_passphrase) {
+                return;
+            }
+            let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) else { return };
+            let ours = super::ws_client::relay_domain().unwrap_or_default();
+            let friend = super::resolver::resolve(peer_str);
+            for entry in super::shared_servers::accepted(&store, db_path, peer_str, &servers) {
+                crdt_resync.union.friend_named(&entry.server_id, &friend, &entry.members);
+                note_union_members(crdt_resync, &entry.server_id, master_peer_str, &store);
+                if server_states.contains_key(&entry.server_id) || pending_server_joins.contains_key(&entry.server_id) {
+                    continue;
+                }
+                crdt_resync.shared_joins.offer(db_path, entry, &friend, &ours);
+            }
+        }
+
         HavenMessage::RosterNotice { roster } | HavenMessage::RosterSync { roster, .. } => {
+            let subject = roster.master.clone();
             let outcome = super::roster_book::ingest_notice(
                 event_tx, ws_cmd_tx, master_peer_str, device_peer_id, peer_str,
                 roster, server_states, db_path, db_passphrase,
             ).await;
+            if outcome.changed {
+                crdt_resync.floor.reset_shells_of_owner(server_states, &subject, std::time::Instant::now());
+            }
             if outcome.asks_again {
                 super::roster_book::ask_again(
                     event_tx, ws_cmd_tx, master_keypair, device_keypair, server_states.keys(), db_path, db_passphrase,

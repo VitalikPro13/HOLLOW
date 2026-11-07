@@ -68,6 +68,22 @@ fn frame(sealed: sealed_box::Sealed, n: u64, door: String) -> Option<Vec<u8>> {
     serde_json::to_vec(&HavenMessage::JoinSealed { eph: sealed.eph, ct: sealed.ct, n, door }).ok()
 }
 
+/// The sizes every box to the members pads to (DEVICE_PROOF_DESIGN 8.7, R31-7), so the
+/// relay cannot tell a recovering joiner by its size; past the last, the next power of two.
+pub(crate) const BOX_BUCKETS: [usize; 3] = [2 << 10, 8 << 10, 32 << 10];
+
+/// The size a plaintext of `len` bytes pads to.
+pub(crate) fn bucket_for(len: usize) -> usize {
+    BOX_BUCKETS.iter().copied().find(|b| len <= *b).unwrap_or_else(|| len.next_power_of_two())
+}
+
+/// Trailing spaces up to the bucket: JSON readers skip them, so an old member reads the
+/// box as before.
+fn pad_to_bucket(plain: &mut Vec<u8>) {
+    let to = bucket_for(plain.len());
+    plain.resize(to, b' ');
+}
+
 /// The frame bytes of `msg` sealed to door `n` and the invite key, sent by `sender_device`.
 pub(crate) fn seal_to_members(
     door: &[u8; 32],
@@ -77,7 +93,8 @@ pub(crate) fn seal_to_members(
     sender_device: &str,
     msg: &HavenMessage,
 ) -> Option<Vec<u8>> {
-    let plain = serde_json::to_vec(msg).ok()?;
+    let mut plain = serde_json::to_vec(msg).ok()?;
+    pad_to_bucket(&mut plain);
     frame(sealed_box::seal_to_both(door, invite, JOIN_DOMAIN, &join_aad(server_id, sender_device, n), &plain)?, n, String::new())
 }
 
@@ -103,7 +120,7 @@ pub(crate) fn seal_to_joiner(
 pub(crate) fn request_frame(server_id: &str, our_device: &str, pending: &PendingJoin, parked: bool) -> Option<Vec<u8>> {
     let invite = sealed_box::key_from_text(pending.join_key.as_deref()?)?;
     let door = pending.lock.as_ref()?.newest()?;
-    let request = HavenMessage::ServerJoinRequest {
+    let mut request = HavenMessage::ServerJoinRequest {
         server_id: server_id.to_string(),
         twitch_proof_json: pending.twitch_proof_json.clone(),
         nsfw_confirmed: pending.nsfw_confirmed,
@@ -119,7 +136,26 @@ pub(crate) fn request_frame(server_id: &str, our_device: &str, pending: &Pending
         ask: pending.ask.clone(),
         follows_leave: pending.follows_leave.clone(),
     };
+    omit_roster_past_the_box(&mut request);
     seal_to_members(&door.door_key()?, &invite, door.n, server_id, our_device, &request)
+}
+
+/// A roster that would take the box past its largest bucket rides nothing: the box is
+/// never refused for it, and the members ask for it (`roster_needed`) or hear our room
+/// notice (R31-7). The avatar is the person's card, measured apart.
+fn omit_roster_past_the_box(request: &mut HavenMessage) {
+    let HavenMessage::ServerJoinRequest { device_list, avatar_b64, .. } = request else { return };
+    if device_list.is_none() {
+        return;
+    }
+    let avatar = std::mem::take(avatar_b64);
+    let len = serde_json::to_vec(&*request).map_or(usize::MAX, |v| v.len());
+    let HavenMessage::ServerJoinRequest { device_list, avatar_b64, .. } = request else { return };
+    if len > BOX_BUCKETS[BOX_BUCKETS.len() - 1] {
+        hollow_log!("[HOLLOW-CRDT] Our roster does not fit a join box ({len} B): the members ask for it");
+        *device_list = None;
+    }
+    *avatar_b64 = avatar;
 }
 
 /// Send our join request to one member device in the server's room. `false` when it
@@ -269,7 +305,7 @@ mod tests {
     }
 
     fn sync(server_id: &str) -> HavenMessage {
-        HavenMessage::SyncResponse { server_id: server_id.into(), ops_json: "[]".into(), nonce: None, page: None, digest: None, dg: None }
+        HavenMessage::SyncResponse { server_id: server_id.into(), ops_json: "[]".into(), nonce: None, page: None, digest: None, dg: None, x: None }
     }
 
     fn resolved(server_id: &str) -> HavenMessage {
@@ -299,6 +335,66 @@ mod tests {
     fn as_member(frame: &[u8], invite: &[u8; 32], door: &Zeroizing<[u8; 32]>, room: &str, from: &str) -> Option<HavenMessage> {
         let (eph, ct, n) = parts(frame);
         open_for_members(invite, std::slice::from_ref(door), room, from, n, &eph, &ct)
+    }
+
+    fn roster_of(devices: u8) -> crate::identity::roster::Roster {
+        let master = crate::identity::native_identity::NativeKeypair::from_secret_bytes(&[3; 32]);
+        let mut r = crate::identity::roster::Roster::new(&master.peer_id());
+        for i in 0..devices {
+            let d = crate::identity::native_identity::NativeKeypair::from_secret_bytes(&[i.wrapping_add(10); 32]);
+            r.consents.push(crate::identity::roster::sign_consent(&d, &master.peer_id()));
+        }
+        r
+    }
+
+    fn with_roster(reply: &str, roster: crate::identity::roster::Roster, avatar: usize) -> HavenMessage {
+        let mut msg = request("srv", reply);
+        if let HavenMessage::ServerJoinRequest { device_list, avatar_b64, .. } = &mut msg {
+            *device_list = Some(roster);
+            *avatar_b64 = "A".repeat(avatar);
+        }
+        msg
+    }
+
+    #[test]
+    fn join_boxes_pad_to_fixed_sizes() {
+        let (invite_s, invite) = key();
+        let (door_s, door) = key();
+        let reply = ReplySecret::new().unwrap().public_text();
+        let ct_len = |msg: &HavenMessage| parts(&seal_to_members(&door, &invite, 1, "srv", "dev", msg).unwrap()).1.len();
+        let small = ct_len(&request("srv", &reply));
+        assert_eq!(small, ct_len(&with_roster(&reply, roster_of(2), 0)), "a roster in the box shows in its size");
+        assert_ne!(small, ct_len(&with_roster(&reply, roster_of(30), 0)), "a 2 KiB box held an 8 KiB request");
+        assert_eq!(bucket_for(1), 2048);
+        assert_eq!(bucket_for(2049), 8192);
+        assert_eq!(bucket_for(20_000), 32 << 10);
+        assert_eq!(bucket_for(40_000), 64 << 10);
+        let padded = with_roster(&reply, roster_of(2), 0);
+        assert!(
+            matches!(as_member(&seal_to_members(&door, &invite, 1, "srv", "dev", &padded).unwrap(), &invite_s, &door_s, "srv", "dev"),
+                Some(HavenMessage::ServerJoinRequest { device_list: Some(_), .. })),
+            "a padded box does not read",
+        );
+    }
+
+    #[test]
+    fn a_joiner_with_a_flooded_roster_still_joins() {
+        let reply = ReplySecret::new().unwrap().public_text();
+        let mut fits = with_roster(&reply, roster_of(4), 100_000);
+        omit_roster_past_the_box(&mut fits);
+        assert!(
+            matches!(&fits, HavenMessage::ServerJoinRequest { device_list: Some(_), avatar_b64, .. } if avatar_b64.len() == 100_000),
+            "the avatar pushed the roster out, or was lost",
+        );
+        let mut flooded = with_roster(&reply, roster_of(200), 0);
+        omit_roster_past_the_box(&mut flooded);
+        assert!(matches!(flooded, HavenMessage::ServerJoinRequest { device_list: None, .. }), "a roster past the box rode it");
+        let (invite_s, invite) = key();
+        let (door_s, door) = key();
+        assert!(
+            as_member(&seal_to_members(&door, &invite, 1, "srv", "dev", &flooded).unwrap(), &invite_s, &door_s, "srv", "dev").is_some(),
+            "the box was refused for its roster",
+        );
     }
 
     #[test]

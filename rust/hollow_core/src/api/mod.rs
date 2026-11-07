@@ -3,6 +3,7 @@ pub mod at_rest;
 pub mod catalog;
 pub mod conference;
 pub mod crdt;
+pub mod device_proof;
 pub mod emotes;
 pub mod gifs;
 pub mod identity;

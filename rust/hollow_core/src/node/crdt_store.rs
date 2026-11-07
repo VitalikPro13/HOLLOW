@@ -499,6 +499,7 @@ mod tests {
             author: "a".into(),
             payload: crate::crdt::operations::CrdtPayload::ServerRenamed { new_name: "x".into() },
             auth: None,
+            dev: None,
         });
         actor.delete_server("gone".into());
         let _ = read.await;

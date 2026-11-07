@@ -14,6 +14,7 @@ fn op_at(tag: u8, sid: &str, ms: u64, counter: u32, payload: CrdtPayload) -> Crd
         author: id,
         payload,
         auth: None,
+        dev: None,
     };
     op.sign(&kp, &pk);
     op
@@ -116,7 +117,7 @@ fn reconcile(r: &mut ServerState, r_kept: &mut Kept, p: &ServerState, p_kept: &K
         stats.splits += 1;
         let kept = refs(r_kept);
         let ranges = follow_up(&entries(r, &kept, None), &salt, &asked, &reply).expect("an honest reply");
-        ask = OpDigest { ask: 7, salt: salt.clone(), base: base.clone(), bref: bref.clone(), from: None, ranges, round: reply.round + 1 };
+        ask = OpDigest { ask: 7, salt: salt.clone(), base: base.clone(), bref: bref.clone(), from: None, ranges, round: reply.round + 1, rs: None };
     }
 }
 
@@ -401,7 +402,7 @@ fn digest_split_budget_bounds_both_sides() {
     let ranges: Vec<Range> =
         (0..40u64).map(|k| Range(t + 1 + k * 100, t + 100 + k * 100, 0, "AAAAAAAAAAAAAAAAAAAAAA".into())).collect();
     let salt = new_salt();
-    let ask = OpDigest { ask: 1, salt: salt.clone(), base: None, bref: None, from: None, ranges, round: 0 };
+    let ask = OpDigest { ask: 1, salt: salt.clone(), base: None, bref: None, from: None, ranges, round: 0, rs: None };
     let (_, reply) = answer(&entries(&p, &[], None), &ask).unwrap();
     let subs: usize = reply.groups.iter().map(Vec::len).sum();
     assert!(subs <= SPLIT_BUDGET && !reply.groups.is_empty(), "{subs} sub-ranges");
@@ -458,7 +459,7 @@ fn review_answer_refuses_overlapping_whole_log_ranges() {
     let (p, _, _) = big_log(10_000);
     let es = entries(&p, &[], None);
     let ranges = vec![Range(0, u64::MAX - 1, 1, "AAAAAAAAAAAAAAAAAAAAAA".into()); SPLIT_BUDGET];
-    let ask = OpDigest { ask: 1, salt: new_salt(), base: None, bref: None, from: None, ranges, round: 0 };
+    let ask = OpDigest { ask: 1, salt: new_salt(), base: None, bref: None, from: None, ranges, round: 0, rs: None };
     assert!(answer(&es, &ask).is_none(), "overlapping ranges were answered");
     let reversed = OpDigest { ranges: vec![Range(10, 5, 0, String::new())], ..ask.clone() };
     assert!(answer(&es, &reversed).is_none(), "a range with lo > hi was answered");
@@ -472,7 +473,7 @@ fn review_follow_up_bounds_the_sub_ranges_it_compares() {
     let salt = new_salt();
     let asked = [(0, u64::MAX - 1)];
     let group = vec![Range(0, u64::MAX - 1, 1, "AAAAAAAAAAAAAAAAAAAAAA".into()); 5_000];
-    let reply = DigestReply { ask: 1, round: 0, groups: vec![group], vector: false };
+    let reply = DigestReply { ask: 1, round: 0, groups: vec![group], vector: false, rd: Vec::new() };
     let t0 = std::time::Instant::now();
     assert!(follow_up(&es, &salt, &asked, &reply).is_none(), "a hostile reply was followed");
     assert!(t0.elapsed() < std::time::Duration::from_millis(50), "follow_up spent {:?} on one hostile reply", t0.elapsed());

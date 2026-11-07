@@ -481,7 +481,7 @@ impl ReplayGuard {
         }
         let known = master == local_master
             || self.friends.contains(&master)
-            || server_states.values().any(|s| !s.is_deleted() && s.is_member(&master) && s.is_member(local_master));
+            || server_states.values().any(|s| !s.is_deleted() && s.seats_peer(&master) && s.seats_peer(local_master));
         known.then_some(master)
     }
 

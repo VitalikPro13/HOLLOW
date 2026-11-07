@@ -930,13 +930,23 @@ pub(crate) struct PendingJoin {
     /// When the sibling sealed the announce that started this join: only a leave of
     /// ours made after it ends the join on arrival.
     pub(crate) announced_at: i64,
+    /// A friend said we share this server (`shared_servers`): it signs no ask, so only a
+    /// member's state that already lists us completes it, and it keeps no row.
+    pub(crate) reentry: bool,
+}
+
+impl PendingJoin {
+    /// Nobody asked on this device: the join signs no ask, keeps no row, shows no refusal.
+    pub(crate) fn unasked(&self) -> bool {
+        self.from_sibling || self.reentry
+    }
 }
 
 impl PendingJoin {
     /// A new nonce for this join, and our master's ask signed over it; a join another
     /// device of ours announced keeps neither.
     pub(crate) fn ask_again(&mut self, server_id: &str, at: i64, master: &crate::identity::native_identity::NativeKeypair) {
-        if self.from_sibling {
+        if self.unasked() {
             return;
         }
         // Never back past the first ask: it may sit past our own last leave.
@@ -1471,6 +1481,22 @@ pub(crate) enum NodeCommand {
     OverlaySetOwnLook { look_json: String, reply: tokio::sync::oneshot::Sender<Result<String, String>> },
     /// The people list or a field changed outside the node: look again at whom to ask.
     OverlayRefresh,
+    /// The person chose how to restore a server after a phrase recovery (section 8.4):
+    /// a witnessed point, or `None` for "I don't know".
+    ChooseRestore { server_id: String, cp: Option<String>, reply: tokio::sync::oneshot::Sender<Result<(), String>> },
+    /// The owner's re-fold review lists of one server (section 8.3).
+    RefoldReviews { server_id: String, reply: tokio::sync::oneshot::Sender<Result<crate::api::device_proof::RefoldReviews, String>> },
+    /// The owner answered one re-fold review: per chosen item and put-back channel,
+    /// whether it still stood when the answer was taken.
+    AnswerRefold {
+        server_id: String,
+        member: String,
+        device: String,
+        below: Option<crate::crdt::hlc::HlcTimestamp>,
+        chosen: Vec<String>,
+        put_back: Vec<String>,
+        reply: tokio::sync::oneshot::Sender<Result<crate::crdt::refold_write::Outcomes, String>>,
+    },
 }
 
 impl NodeCommand {
@@ -1654,6 +1680,9 @@ impl NodeCommand {
             Self::OverlaySetFlags { .. } => "OverlaySetFlags",
             Self::OverlaySetOwnLook { .. } => "OverlaySetOwnLook",
             Self::OverlayRefresh => "OverlayRefresh",
+            Self::ChooseRestore { .. } => "ChooseRestore",
+            Self::RefoldReviews { .. } => "RefoldReviews",
+            Self::AnswerRefold { .. } => "AnswerRefold",
         }
     }
 }
@@ -1803,6 +1832,9 @@ pub(crate) enum HavenMessage {
         /// Set by a sender that reads digests (`op_sync::DG`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         dg: Option<u8>,
+        /// Rosters, the floor round and the witness ask (`sync_ext`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        x: Option<Box<super::sync_ext::AskExt>>,
     },
 
     #[serde(rename = "sync_response")]
@@ -1821,6 +1853,9 @@ pub(crate) enum HavenMessage {
         /// Set by a sender that reads digests (`op_sync::DG`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         dg: Option<u8>,
+        /// Rosters, a dropped base, the floor candidate and a witness (`sync_ext`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        x: Option<Box<super::sync_ext::ReplyExt>>,
     },
 
     /// Full server state snapshot, sent alongside the op log when serving a join.
@@ -2637,6 +2672,9 @@ pub(crate) enum HavenMessage {
         /// their metadata from the MLS header.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         file_meta: Option<SyncFileMetaItem>,
+        /// The sending device's proof of the post (`post_proof`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dev: Option<Box<crate::crdt::operations::DevProof>>,
     },
 
     #[serde(rename = "pub_ch_edit")]
@@ -2650,6 +2688,9 @@ pub(crate) enum HavenMessage {
         sig: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pk: Option<String>,
+        /// The editing device's proof (`post_proof`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dev: Option<Box<crate::crdt::operations::DevProof>>,
     },
 
     /// Attach (or clear) a link preview on an existing PUBLIC channel message.
@@ -2669,6 +2710,9 @@ pub(crate) enum HavenMessage {
         sig: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pk: Option<String>,
+        /// The device proof of the change (`post_proof::Change`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dev: Option<Box<CardProof>>,
     },
 
     #[serde(rename = "pub_ch_del")]
@@ -2681,6 +2725,9 @@ pub(crate) enum HavenMessage {
         sig: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pk: Option<String>,
+        /// The device proof of the change (`post_proof::Change`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dev: Option<Box<crate::crdt::operations::DevProof>>,
     },
 
     #[serde(rename = "pub_ch_react")]
@@ -2694,6 +2741,9 @@ pub(crate) enum HavenMessage {
         sig: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pk: Option<String>,
+        /// The device proof of the change (`post_proof::Change`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dev: Option<Box<crate::crdt::operations::DevProof>>,
     },
 
     #[serde(rename = "pub_ch_unreact")]
@@ -2707,6 +2757,9 @@ pub(crate) enum HavenMessage {
         sig: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pk: Option<String>,
+        /// The device proof of the change (`post_proof::Change`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dev: Option<Box<crate::crdt::operations::DevProof>>,
     },
 
     // -- Guest sync (Public Channels Phase 3) --
@@ -3185,6 +3238,21 @@ pub(crate) enum HavenMessage {
         roster: crate::identity::roster::Roster,
     },
 
+    /// Which servers a friend shares with our identity (DEVICE_PROOF_DESIGN 8.7): `ask` from
+    /// a fresh install after a phrase recovery, answered in four frames of one size by a
+    /// friend device that counts the asker (`shared_servers`). Olm only.
+    #[serde(rename = "shared_servers")]
+    SharedServers {
+        #[serde(default)]
+        ask: bool,
+        #[serde(default)]
+        servers: Vec<super::shared_servers::SharedServer>,
+        #[serde(default)]
+        part: u8,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        pad: String,
+    },
+
     /// The sender's view of `roster.master`'s roster, over Olm only (AR-29): sent when a
     /// DM's roster digest showed the two views differ, or the one we hold went unconfirmed
     /// too long. `reply` asks for the receiver's view back; `waiting` says a DM waits for
@@ -3472,6 +3540,9 @@ pub(crate) struct ChannelMessagePayload {
     /// Album grouping id (hyphenated UUID), bound by the v3 message signature.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub album: Option<String>,
+    /// The sending device's proof of the post (`post_proof`, DEVICE_PROOF_DESIGN 13).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dev: Option<Box<crate::crdt::operations::DevProof>>,
 }
 
 /// What a meeting host's frame proves about its sender: the meeting id hashes from
@@ -3553,6 +3624,9 @@ pub(crate) struct FileHeaderPayload {
     pub author: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sha256: Option<String>,
+    /// The author device's proof of the card's metadata (`post_proof`, channel files).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meta_dev: Option<Box<crate::crdt::operations::DevProof>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3644,6 +3718,9 @@ pub(crate) enum MessageEnvelope {
         /// Channel ID (present for channel edits, absent for DM edits).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cid: Option<String>,
+        /// The editing device's proof of a channel edit (`post_proof`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dev: Option<Box<crate::crdt::operations::DevProof>>,
     },
     /// Attach (or clear) a link preview on an existing message, WITHOUT touching
     /// its text and WITHOUT stamping it edited (issue #45).
@@ -3672,6 +3749,9 @@ pub(crate) enum MessageEnvelope {
         /// Channel ID (present for channel messages, absent for DMs).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cid: Option<String>,
+        /// The device proof of a channel change (`post_proof::Change`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dev: Option<Box<CardProof>>,
     },
     /// Delete (hide) an existing message (channel or DM).
     #[serde(rename = "delete")]
@@ -3690,6 +3770,9 @@ pub(crate) enum MessageEnvelope {
         /// Channel ID (present for channel deletions, absent for DM).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cid: Option<String>,
+        /// The device proof of a channel change (`post_proof::Change`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dev: Option<Box<crate::crdt::operations::DevProof>>,
     },
     /// Add an emoji reaction to a message.
     #[serde(rename = "reaction")]
@@ -3708,6 +3791,9 @@ pub(crate) enum MessageEnvelope {
         /// Channel ID (present for channel reactions, absent for DM).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cid: Option<String>,
+        /// The device proof of a channel change (`post_proof::Change`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dev: Option<Box<crate::crdt::operations::DevProof>>,
     },
     /// Remove an emoji reaction from a message.
     #[serde(rename = "unreaction")]
@@ -3723,6 +3809,9 @@ pub(crate) enum MessageEnvelope {
         sid: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cid: Option<String>,
+        /// The device proof of a channel change (`post_proof::Change`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dev: Option<Box<crate::crdt::operations::DevProof>>,
     },
 
     // -- File sharing --
@@ -4421,6 +4510,7 @@ impl HavenMessage {
             Self::KeyRequest { .. }
             | Self::KeyBundle { .. }
             | Self::DoorAsk { .. }
+            | Self::SharedServers { .. }
             | Self::ServerJoinRequest { parked: false, .. }
             | Self::MlsKeyPackage { .. }
             | Self::SyncRequest { .. }
@@ -4569,6 +4659,7 @@ impl HavenMessage {
             | Self::ProfileRelay { .. }
             | Self::ProfileCard { .. }
             | Self::RosterSync { .. }
+            | Self::SharedServers { .. }
             | Self::IdentityDestroyed { .. }
             | Self::MlsKeyPackage { .. }
             | Self::MlsKeyPackageForward { .. }
@@ -5006,9 +5097,33 @@ pub(crate) struct SyncMessageItem {
     /// cloned and matched inside the swarm's async state machines.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lp: Option<Box<LinkPreviewRef>>,
+    /// The device proof the post's row keeps (`post_proof`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dev: Option<Box<crate::crdt::operations::DevProof>>,
     /// Reactions on this message (synced alongside the message).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reactions: Vec<SyncReactionItem>,
+    /// The deleting device's proof of `hidden_at` (`post_proof::Change`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hidden_dev: Option<Box<crate::crdt::operations::DevProof>>,
+    /// The device proof of `lp`, with the card's date (`post_proof::Change`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lp_dev: Option<Box<CardProof>>,
+}
+
+/// A device's proof of a link card on a channel post, with the date it signed: cards
+/// carry no date of their own, and a later card replaces an older one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct CardProof {
+    pub device: String,
+    pub sig: String,
+    pub at: i64,
+}
+
+impl CardProof {
+    pub(crate) fn proof(&self) -> crate::crdt::operations::DevProof {
+        crate::crdt::operations::DevProof { device: self.device.clone(), sig: self.sig.clone() }
+    }
 }
 
 /// A single reaction in a sync batch.
@@ -5021,6 +5136,9 @@ pub(crate) struct SyncReactionItem {
     pub sig: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pk: Option<String>,
+    /// The reacting device's proof (`post_proof::Change`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dev: Option<Box<crate::crdt::operations::DevProof>>,
 }
 
 /// File metadata bundled with a sync message so late joiners can create file cards.
@@ -5051,6 +5169,9 @@ pub(crate) struct SyncFileMetaItem {
     /// author is the item's verified signer, never `sender`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sha256: Option<String>,
+    /// The author device's proof of what the file id does not commit to (`post_proof`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dev: Option<Box<crate::crdt::operations::DevProof>>,
 }
 
 impl SyncFileMetaItem {
@@ -5071,6 +5192,7 @@ impl SyncFileMetaItem {
             vthumb: f.video_thumb.clone(),
             thumb: f.thumb_b64.clone(),
             sha256: f.sha256.clone(),
+            dev: None,
         }
     }
 }
@@ -5503,7 +5625,7 @@ mod epoch_catchup_wire_tests {
     fn sync_request_without_epoch_parses_to_none() {
         let json = r#"{"type":"sync_request","server_id":"srv1","state_vector_json":"{}"}"#;
         match serde_json::from_str::<HavenMessage>(json) {
-            Ok(HavenMessage::SyncRequest { server_id, state_vector_json, mls_epoch, nonce: None, full: None, digest: None, dg: None }) => {
+            Ok(HavenMessage::SyncRequest { server_id, state_vector_json, mls_epoch, nonce: None, full: None, digest: None, dg: None, x: None }) => {
                 assert_eq!(server_id, "srv1");
                 assert_eq!(state_vector_json, "{}");
                 assert!(mls_epoch.is_none());
@@ -5524,6 +5646,7 @@ mod epoch_catchup_wire_tests {
             full: None,
             digest: None,
             dg: None,
+            x: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert_eq!(json, r#"{"type":"sync_request","server_id":"s","state_vector_json":"{}"}"#);
@@ -5543,10 +5666,11 @@ mod epoch_catchup_wire_tests {
         }
         let digest = crate::crdt::digest::OpDigest {
             ask: 1, salt: crate::crdt::digest::new_salt(), base: None, bref: None, from: Some(0), ranges: Vec::new(), round: 0,
+            rs: None,
         };
         let ask = HavenMessage::SyncRequest {
             server_id: "s".into(), state_vector_json: String::new(), mls_epoch: Some(3), nonce: Some(9), full: None,
-            digest: Some(digest), dg: Some(1),
+            digest: Some(digest), dg: Some(1), x: None,
         };
         match serde_json::from_str::<Old>(&serde_json::to_string(&ask).unwrap()).unwrap() {
             Old::SyncRequest { state_vector_json } => {
@@ -5556,8 +5680,9 @@ mod epoch_catchup_wire_tests {
         }
         let reply = HavenMessage::SyncResponse {
             server_id: "s".into(), ops_json: "[]".into(), nonce: Some(9), page: None,
-            digest: Some(crate::crdt::digest::DigestReply { ask: 1, round: 0, groups: Vec::new(), vector: false }),
+            digest: Some(crate::crdt::digest::DigestReply { ask: 1, round: 0, groups: Vec::new(), vector: false, rd: Vec::new() }),
             dg: Some(1),
+            x: None,
         };
         match serde_json::from_str::<Old>(&serde_json::to_string(&reply).unwrap()).unwrap() {
             Old::SyncResponse { ops_json, nonce } => assert_eq!((ops_json.as_str(), nonce), ("[]", Some(9))),
@@ -5575,6 +5700,7 @@ mod epoch_catchup_wire_tests {
             full: None,
             digest: None,
             dg: None,
+            x: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains(r#""mls_epoch":6"#), "epoch missing from wire: {json}");

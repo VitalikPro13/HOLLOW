@@ -98,12 +98,17 @@ fn save_rows(
     local_master: &str,
     local_device: &str,
 ) -> Result<(), String> {
+    if super::authority_view::book_refused_for_test(local_device, &roster.master) {
+        return Ok(());
+    }
     let json = serde_json::to_string(roster).map_err(|e| format!("roster json: {e}"))?;
     let members: Vec<String> = state.members.iter().cloned().collect();
     if roster.master == local_master {
         date_held_before_upgrade(store, local_master)?;
     }
     store.save_device_list(&roster.master, &json, 0, &members, now_ms())?;
+    super::server_rosters::touched_master(&roster.master);
+    super::authority_view::note_saved(store, &roster.master);
     super::security_alerts::resolve_departed(store, &roster.master, &state.members, |device| {
         roster.removals.iter().any(|r| r.device == device && r.by == local_device)
     });
@@ -443,6 +448,22 @@ pub(crate) fn own(master: &str, db_path: &str, db_passphrase: &str) -> Option<(R
 /// unavailable; the carrier then goes without one.
 pub(crate) fn own_roster(master: &str, db_path: &str, db_passphrase: &str) -> Option<Roster> {
     own(master, db_path, db_passphrase).map(|(r, _)| r)
+}
+
+/// Roster bytes a join box carries whole; past it only the placing subset.
+const JOIN_ROSTER_WHOLE_BYTES: usize = 16 * 1024;
+
+/// The roster a join box carries (DEVICE_PROOF_DESIGN 8.7, R31-7): the whole one while it
+/// fits, so members learn every device of ours (our siblings' joins rely on it), else only
+/// what makes this device counted. `None` when nothing counts it yet; a member then asks
+/// for the rest (`roster_needed`) or hears our room notice.
+pub(crate) fn join_roster(master: &str, device: &str, db_path: &str, db_passphrase: &str) -> Option<Roster> {
+    let roster = own_roster(master, db_path, db_passphrase)?;
+    let whole = serde_json::to_vec(&roster).is_ok_and(|v| v.len() <= JOIN_ROSTER_WHOLE_BYTES);
+    if whole {
+        return Some(roster);
+    }
+    roster.placing_subset(device)
 }
 
 /// The room only holders of our master key can name. Every device of the identity
@@ -989,11 +1010,19 @@ fn fan_out<'a>(
         let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom { room_code: room.clone() });
         let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendToRoom { room_code: room, data: data.clone() });
     }
-    for sid in server_ids {
-        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendToRoom {
-            room_code: sid.clone(),
-            data: data.clone(),
-        });
+    notice_into_server_rooms(ws_cmd_tx, &data, server_ids);
+}
+
+/// A `RosterNotice` (its frame bytes) into each server room, live only (DEVICE_PROOF_DESIGN
+/// section 9): a socket the room hides still reaches its provers. A meeting's room is
+/// no server's.
+pub(crate) fn notice_into_server_rooms<'a>(
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    data: &[u8],
+    server_ids: impl Iterator<Item = &'a String>,
+) {
+    for sid in server_ids.filter(|s| !super::conference::is_conference_sid(s)) {
+        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SendToRoom { room_code: sid.clone(), data: data.to_vec() });
     }
 }
 
@@ -1011,6 +1040,8 @@ pub(crate) struct Ingested {
     /// Our own roster moved to a base that leaves this device out and not yet
     /// asking: the caller asks again ([`ask_again`]), as only it holds the keys.
     pub asks_again: bool,
+    /// The held roster of this master changed.
+    pub changed: bool,
 }
 
 /// Fold a roster someone delivered into ours for that master.
@@ -1324,6 +1355,7 @@ async fn ingest_inner(
         newly_revoked,
         added: if master == local_master { added } else { Vec::new() },
         asks_again,
+        changed,
     }
 }
 

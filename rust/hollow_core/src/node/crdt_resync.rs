@@ -226,6 +226,30 @@ pub(crate) struct CrdtResync {
     next_tick: Option<Instant>,
     /// Digest asks and what each peer device reads (`op_sync`).
     pub(crate) op_sync: super::op_sync::OpSync,
+    /// Rebuilds a roster trade waits on (H4) and roster asks for uncounted authors.
+    pub(crate) roster_round: super::roster_round::RosterRound,
+    /// Asks sent again with our roster or base (`sync_rosters`).
+    pub(crate) roster_again: super::sync_rosters::Again,
+    /// What the rosters our sync answers hand over may still cost (section 9).
+    pub(crate) roster_serve: super::sync_rosters::RosterServe,
+    /// The bases we told askers we lack (`sync_rosters`).
+    pub(crate) base_told: super::sync_rosters::BaseTold,
+    /// Servers a friend said we share, on their way in (`shared_servers`).
+    pub(crate) shared_joins: super::shared_servers::Joins,
+    /// Whom a recovery asks about each server (`union_list`).
+    pub(crate) union: super::union_list::UnionList,
+    /// The shared-servers asks a recovering device sent (`shared_servers`).
+    pub(crate) shared_asks: super::shared_servers::Asks,
+    /// Server rooms owed a recovering device's roster notice (`shared_servers`).
+    pub(crate) room_notices: super::shared_servers::RoomNotices,
+    /// When `server_rosters` last aged out.
+    pub(crate) rosters_aged_at: Option<Instant>,
+    /// Witness answers given and taken (track C1's `witness`), the node's one desk.
+    pub(crate) witness: super::witness::WitnessDesk,
+    /// Floor candidates answers carried (track C1's `floor`), the node's one desk.
+    pub(crate) floor: super::floor::FloorDesk,
+    /// Roster asks for authors an ingest could not count, sent on the next sync tick.
+    roster_asks: Vec<(String, HavenMessage)>,
 }
 
 impl CrdtResync {
@@ -311,6 +335,11 @@ impl CrdtResync {
         Self::with_marks(Some(store), build, HashMap::new())
     }
 
+    #[cfg(test)]
+    pub(crate) fn for_test() -> Self {
+        Self::with_marks(None, "test", HashMap::new())
+    }
+
     fn with_marks(store: Option<CrdtStore>, build: &str, marks: HashMap<String, Mark>) -> Self {
         Self {
             store,
@@ -323,7 +352,74 @@ impl CrdtResync {
             serving: ServeBudget::default(),
             next_tick: None,
             op_sync: Default::default(),
+            roster_round: Default::default(),
+            roster_again: Default::default(),
+            roster_serve: Default::default(),
+            base_told: Default::default(),
+            shared_joins: Default::default(),
+            union: Default::default(),
+            shared_asks: Default::default(),
+            room_notices: Default::default(),
+            rosters_aged_at: None,
+            witness: Default::default(),
+            floor: Default::default(),
+            roster_asks: Vec::new(),
         }
+    }
+
+    /// The authors whose ops an ingest from `carrier` read `Missing` or `Uncounted`
+    /// (`Ingested.wanted`): their rosters are asked of the carrier and of one room device of
+    /// another member identity (section 9), at most once per (server, master) per
+    /// [`super::roster_round::UNCOUNTED_EVERY`], so the queue stays bounded.
+    pub(crate) fn want_rosters(
+        &mut self,
+        state: &ServerState,
+        wanted: &std::collections::BTreeSet<String>,
+        carrier: &str,
+        room: Option<&HashSet<String>>,
+        us: &str,
+        now: Instant,
+    ) {
+        if wanted.is_empty() {
+            return;
+        }
+        let other = other_member_device(state, room, carrier, us);
+        for master in wanted.iter().filter(|m| m.as_str() != us) {
+            let asks = self.roster_round.uncounted_seen(&state.server_id, master, carrier, other.as_deref(), now);
+            if !asks.is_empty() {
+                hollow_log!("[HOLLOW-CRDT] {master}'s ops in {} read uncounted here: asking {} device(s) for its roster", state.server_id, asks.len());
+            }
+            self.roster_asks.extend(asks);
+        }
+    }
+
+    /// Rosters of members whose post or change the post gate refused with no roster held
+    /// (`ServerState::take_post_rosters_wanted`): asked of one device of ANOTHER member
+    /// identity, never the author's (whoever holds the author's master key could mint
+    /// the roster that counts it), paced per (server, member) by `roster_round`.
+    pub(crate) fn want_post_rosters(
+        &mut self,
+        state: &ServerState,
+        wanted: &std::collections::BTreeSet<(String, String)>,
+        room: Option<&HashSet<String>>,
+        us: &str,
+        now: Instant,
+    ) {
+        for (master, channel) in wanted {
+            if master == us || !state.is_member(master) {
+                continue;
+            }
+            let Some(device) = other_member_device(state, room, master, us) else { continue };
+            if let Some(ask) = self.roster_round.post_refused(&state.server_id, master, channel, &device, now) {
+                hollow_log!("[HOLLOW-CRDT] A post of {master} in {} was refused with no roster of it here: asking {device}", state.server_id);
+                self.roster_asks.push(ask);
+            }
+        }
+    }
+
+    /// The roster asks [`Self::want_rosters`] queued, for the tick to pace out.
+    pub(crate) fn take_roster_asks(&mut self) -> Vec<(String, HavenMessage)> {
+        std::mem::take(&mut self.roster_asks)
     }
 
     /// The signed ops of `server_id` we keep unread: part of what a digest compares.
@@ -340,6 +436,31 @@ impl CrdtResync {
     pub(crate) fn sync_ask(&mut self, state: &ServerState, device: &str, nonce: Option<u64>, mls_epoch: Option<u64>) -> HavenMessage {
         let kept = Self::kept_refs(&self.kept, &state.server_id);
         self.op_sync.ask(state, &kept, device, nonce, mls_epoch)
+    }
+
+    /// A digest ask whose base reference is `base`, a restore point or a witnessed
+    /// checkpoint (sections 8.3, 8.4), carrying `extra` (a witness ask, our roster).
+    /// [`Self::sync_ask`] carrying a witness ask (section 8.4).
+    pub(crate) fn witness_ask(&mut self, state: &ServerState, device: &str, ask: crate::crdt::authority::WitnessAsk) -> HavenMessage {
+        let mut msg = self.sync_ask(state, device, None, None);
+        if let HavenMessage::SyncRequest { x, .. } = &mut msg {
+            let mut ext = x.take().map(|b| *b).unwrap_or_default();
+            ext.witness = Some(ask);
+            *x = ext.boxed();
+        }
+        msg
+    }
+
+    pub(crate) fn sync_ask_on_base(
+        &mut self,
+        state: &ServerState,
+        device: &str,
+        nonce: Option<u64>,
+        base: &CrdtOp,
+        extra: super::sync_ext::AskExt,
+    ) -> HavenMessage {
+        let kept = Self::kept_refs(&self.kept, &state.server_id);
+        self.op_sync.ask_on_base(state, &kept, device, nonce, base, extra)
     }
 
     /// The next step after a digest answer from `device`.
@@ -360,9 +481,11 @@ impl CrdtResync {
         &self,
         state: &ServerState,
         ask: &crate::crdt::digest::OpDigest,
+        given: Option<&crate::crdt::fold::Base>,
     ) -> Option<(String, crate::crdt::digest::DigestReply)> {
         let kept = Self::kept_refs(&self.kept, &state.server_id);
-        let entries = crate::crdt::digest::entries(state, &kept, Some(crate::crdt::digest::Asker::of(ask)));
+        let asker = crate::crdt::digest::Asker { given, ..crate::crdt::digest::Asker::of(ask) };
+        let entries = crate::crdt::digest::entries(state, &kept, Some(asker));
         let (items, reply) = crate::crdt::digest::answer(&entries, ask)?;
         Some((crate::crdt::digest::items_json(&items), reply))
     }
@@ -477,7 +600,8 @@ impl CrdtResync {
             let Some(state) = states.get(sid) else { continue };
             // A legacy replica applies in arrival order: a whole log would replay drained
             // ops over newer state. It waits for its owner's checkpoint (AR-10).
-            if state.anchor() == Anchor::Legacy || state.is_deleted() || !state.is_member(us) {
+            // 8.8 class 3: the hold or a shell still asks during a recovery.
+            if state.anchor() == Anchor::Legacy || state.is_deleted() || !state.held_as_member(us) {
                 continue;
             }
             let Some(device) = room_peers.get(sid).and_then(|peers| self.pick(sid, state, peers, our_device, now)) else {
@@ -504,7 +628,7 @@ impl CrdtResync {
         let counted = self.marks.get(sid).map(|m| m.partial_from.as_slice()).unwrap_or_default();
         peers
             .iter()
-            .filter(|d| d.as_str() != our_device && !super::resolver::is_bare_master(d) && state.is_member(d))
+            .filter(|d| d.as_str() != our_device && !super::resolver::is_bare_master(d) && state.keeps_peer(d))
             .filter(|d| self.tried.get(&(sid.to_string(), (*d).clone())).is_none_or(|until| now >= *until))
             .filter(|d| !counted.contains(&super::resolver::resolve(d)))
             .min_by_key(|d| {
@@ -576,7 +700,7 @@ impl CrdtResync {
         if !self.asks.contains_key(server_id) {
             return None;
         }
-        if !states.get(server_id).is_some_and(|s| s.is_member(us) && !s.is_deleted()) {
+        if !states.get(server_id).is_some_and(|s| s.held_as_member(us) && !s.is_deleted()) {
             self.forget(server_id);
             return None;
         }
@@ -787,6 +911,7 @@ fn request(server_id: &str, state_vector_json: String, nonce: u64, after: Option
         full: Some(FullAsk { after }),
         digest: None,
         dg: Some(super::op_sync::DG),
+        x: None,
     }
 }
 
@@ -794,6 +919,19 @@ fn fresh_nonce() -> u64 {
     let mut b = [0u8; 8];
     let _ = getrandom::fill(&mut b);
     u64::from_le_bytes(b)
+}
+
+/// One room device of a member identity other than ours and the carrier's, the lowest id:
+/// the second source a roster ask goes to.
+fn other_member_device(state: &ServerState, room: Option<&HashSet<String>>, carrier: &str, us: &str) -> Option<String> {
+    let mut devices: Vec<&String> = room?
+        .iter()
+        .filter(|d| !super::resolver::is_bare_master(d))
+        .filter(|d| !super::resolver::same_identity(d, us) && !super::resolver::same_identity(d, carrier))
+        .filter(|d| state.is_member(&super::resolver::resolve(d)))
+        .collect();
+    devices.sort();
+    devices.first().map(|d| d.to_string())
 }
 
 /// One page of `log` (in fold order) after `after`: at most `PAGE_OPS` ops or about
@@ -830,6 +968,8 @@ pub(crate) struct PageIngest {
     /// The signed ops of members it skipped, unreadable to this build.
     pub unread: Vec<UnreadOp>,
     pub was_member: bool,
+    /// Authors whose rosters to ask for (`Ingested.wanted`).
+    pub wanted: std::collections::BTreeSet<String>,
 }
 
 /// Fold one page into `server_id`'s state on a blocking thread: the parse, every op's
@@ -849,7 +989,7 @@ pub(crate) async fn ingest_page(server_states: &mut ServerStates, server_id: &st
         let ingested = state.ingest_remote(&parsed.ops);
         let unread = parsed.unread.into_iter().filter(|u| vouched(u, &state)).collect();
         let delta = ingested.delta(&state.server_id);
-        (state, Some(PageIngest { ok: true, admitted: ingested.admitted, rebuilt: ingested.rebuilt, delta, unread, was_member }))
+        (state, Some(PageIngest { ok: true, admitted: ingested.admitted, rebuilt: ingested.rebuilt, delta, unread, was_member, wanted: ingested.wanted }))
     });
     match job.await {
         Ok((state, out)) => {
@@ -866,6 +1006,20 @@ pub(crate) async fn ingest_page(server_states: &mut ServerStates, server_id: &st
 
 #[cfg(test)]
 mod tests {
+    /// The other member a roster ask goes to is never a device of ours, even one the
+    /// room lists first.
+    #[test]
+    fn the_other_member_asked_for_a_roster_is_never_one_of_ours() {
+        let _g = crate::node::resolver::test_lock();
+        let (state, _, member) = crate::crdt::verdict::tests::uncounted_member_op();
+        let owner = state.anchor_owner().expect("anchored");
+        crate::node::resolver::update("0-our-own-device", &member);
+        let room: HashSet<String> = ["0-our-own-device".to_string(), owner.clone(), "carrier-device".to_string()].into();
+        let other = super::other_member_device(&state, Some(&room), "carrier-device", &member);
+        crate::node::resolver::forget_for_test("0-our-own-device");
+        assert_eq!(other.as_deref(), Some(owner.as_str()), "our own device was asked");
+    }
+
     use super::*;
     use crate::crdt::operations::CrdtPayload;
     use crate::crdt::server_state::MemberInfo;
@@ -1096,6 +1250,7 @@ mod tests {
             author,
             payload: CrdtPayload::ServerRenamed { new_name: "n".into() },
             auth: None,
+            dev: None,
         };
         op.sign(&kp, &pk);
         let mut v = serde_json::to_value(&op).unwrap();

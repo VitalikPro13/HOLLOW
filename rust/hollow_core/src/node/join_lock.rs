@@ -391,23 +391,6 @@ pub(crate) fn owner_signed(
     device_signed(server_id, base, &owner.peer_id(), device)
 }
 
-/// A 0.13 owner base, with no device proof: what an old client makes. Tests only.
-#[cfg(test)]
-pub(crate) fn mint_base(server_id: &str, n: u64, owner: &NativeKeypair, nonce: Option<&str>) -> Option<NewLock> {
-    let mut lock = mint_owner_base(server_id, n, owner, nonce, owner)?;
-    lock.link.dev = None;
-    Some(lock)
-}
-
-/// A 0.13 successor, with no device proof. Tests only.
-#[cfg(test)]
-pub(crate) fn mint_next(server_id: &str, prev: &LockLink, prev_change: &[u8; 32]) -> Option<NewLock> {
-    let signer = NativeKeypair::from_secret_bytes(prev_change);
-    let mut lock = mint_successor(server_id, prev, prev_change, &signer.peer_id(), &signer)?;
-    lock.link.dev = None;
-    Some(lock)
-}
-
 /// A new lock the owner signs: the first one, or a reset past a fork.
 pub(crate) fn mint_owner_base(
     server_id: &str,
@@ -457,7 +440,6 @@ pub(crate) fn grant_key(master: &str, device: &str) -> String {
 
 /// The identity a grant is filed under: a device grant's master, or the master a 0.13
 /// grant names. The fold's rule reads it (REQUESTS R1).
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn grant_holder(key: &str) -> &str {
     key.split_once('/').map_or(key, |(master, _)| master)
 }
@@ -475,11 +457,6 @@ fn grant_aad(server_id: &str, change: &str, key: &str) -> Vec<u8> {
 pub(crate) fn seal_grant(server_id: &str, change: &str, master: &str, device: &str, change_secret: &[u8; 32]) -> Option<(String, String)> {
     let key = grant_key(master, device);
     Some((key.clone(), seal_to(server_id, change, &key, device, change_secret)?))
-}
-
-/// The 0.13 grant, sealed to the master: only while the fold refuses device keys.
-pub(crate) fn seal_master_grant(server_id: &str, change: &str, master: &str, change_secret: &[u8; 32]) -> Option<String> {
-    seal_to(server_id, change, master, master, change_secret)
 }
 
 fn seal_to(server_id: &str, change: &str, key: &str, recipient: &str, change_secret: &[u8; 32]) -> Option<String> {
@@ -872,9 +849,6 @@ mod tests {
         let (_, lie) = seal_grant(&server, &lock.link.change, &mod_master.peer_id(), &mod_dev().peer_id(), &other.change).unwrap();
         assert!(open_grant(&server, &lock.link.change, &key, &mod_dev(), &lie).is_none(), "a secret that is not the named key");
 
-        let old = seal_master_grant(&server, &lock.link.change, &mod_master.peer_id(), &lock.change).unwrap();
-        assert!(open_grant(&server, &lock.link.change, &mod_master.peer_id(), &mod_master, &old).is_some(), "a 0.13 grant opens with the master");
-        assert!(open_grant(&server, &lock.link.change, &mod_master.peer_id(), &mod_dev(), &old).is_none());
     }
 
     /// Two links from fixed keys: the vector `relay-uws/test/test_join_lock.cpp` pins

@@ -974,7 +974,6 @@ impl Roster {
     /// with the consents along it. Each verifies alone; it rides a join ask (R31-7),
     /// where a member judges it merged with what it holds, so a removal it omits still
     /// counts there.
-    #[allow(dead_code)] // the join box's asker roster, built by track C (section 8.7)
     pub(crate) fn placing_subset(&self, device: &str) -> Option<Roster> {
         let (auth, paths) = self.authority_with_paths();
         if !auth.counts(device) {

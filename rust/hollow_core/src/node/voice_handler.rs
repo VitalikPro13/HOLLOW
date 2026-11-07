@@ -97,7 +97,7 @@ pub(crate) fn data_channel_peer_known(
     }
     server_states
         .values()
-        .any(|s| !s.is_deleted() && s.is_member(peer) && s.is_member(local_master))
+        .any(|s| !s.is_deleted() && s.seats_peer(peer) && s.seats_peer(local_master))
         .then_some(true)
 }
 
@@ -1347,9 +1347,12 @@ async fn auto_leave_invisible_voice_channels_inner(
             // owner's delete, which drains every member), its state is already torn
             // down, or a restricted channel's visibility now excludes us. Both
             // checks collapse device to master.
+            // During a recovery (8.8 class 3) the hold keeps us and the pre-trigger
+            // state judges a channel the stepped-back state lacks.
             server_states.get(server_id).is_none_or(|s| {
-                !s.is_member(local_peer_str)
-                    || (s.channel_uses_subgroup(cid) && !s.can_see_channel(local_peer_str, cid))
+                let judged = s.liveness_state(local_peer_str);
+                !s.keeps_peer(local_peer_str)
+                    || (judged.channel_uses_subgroup(cid) && !judged.can_see_channel(local_peer_str, cid))
             })
         })
         .collect();
@@ -1402,7 +1405,7 @@ pub(crate) fn unqualified_seats(
         let Some((sid, cid)) = vc_key.split_once(':') else { continue };
         let Some(state) = server_states.get(sid) else { continue };
         for device in devices.iter().filter(|d| *d != local_peer_str && *d != device_peer_id) {
-            if let Some(reason) = voice_join_refusal(Some(state), device, cid) {
+            if let Some(reason) = seat_refusal(Some(state), device, cid, crate::crdt::hold::Hold::Keep) {
                 gone.push((sid.to_string(), cid.to_string(), device.clone(), reason));
             }
         }
@@ -2028,14 +2031,24 @@ pub(crate) fn voice_join_refusal(
     sender: &str,
     cid: &str,
 ) -> Option<&'static str> {
+    seat_refusal(state, sender, cid, crate::crdt::hold::Hold::Seat)
+}
+
+/// [`voice_join_refusal`] at a hold `level` (8.8 class 3): during a recovery an existing
+/// seat needs KEEP and a join SEAT, judged in the pre-trigger state.
+fn seat_refusal(
+    state: Option<&ServerState>,
+    sender: &str,
+    cid: &str,
+    level: crate::crdt::hold::Hold,
+) -> Option<&'static str> {
     let Some(state) = state else { return Some("a server we do not hold") };
     if super::resolver::is_revoked(sender) || super::resolver::is_bare_master(sender) {
         return Some("a device its roster does not count");
     }
     let master = super::resolver::resolve(sender);
-    if !state.is_member(&master) {
-        Some("not a member")
-    } else if !state.channels.get(cid).is_some_and(|ch| ch.channel_type == crate::crdt::server_state::ChannelType::Voice) {
+    let Some(state) = state.judged_for(&master, level) else { return Some("not a member") };
+    if !state.channels.get(cid).is_some_and(|ch| ch.channel_type == crate::crdt::server_state::ChannelType::Voice) {
         Some("not a voice channel")
     } else if !state.can_see_channel(&master, cid) {
         Some("cannot see the channel")

@@ -89,12 +89,17 @@ fn tier(state: &ServerState, master: &str) -> u8 {
 /// `masters` ordered by standing, first = leads: role tier, position, the member's own
 /// opening clock, then the id.
 pub(crate) fn rank_masters(state: &ServerState, masters: impl IntoIterator<Item = String>) -> Vec<String> {
-    let pos = positions(state);
-    let mut keyed: Vec<((u8, Pos, HlcTimestamp), String)> = masters
+    // Section 8.8 (RC32-8): a recovery with no floor ranks by the pre-trigger state over
+    // the server group's SEAT, so a puppet with a ground id never leads a founding-op state.
+    let held = state.recovery.as_deref().filter(|_| !state.floor_holds());
+    let judged: &ServerState = held.map(|r| &*r.pre).unwrap_or(state);
+    let pos = positions(judged);
+    let mut keyed: Vec<((bool, u8, Pos, HlcTimestamp), String)> = masters
         .into_iter()
         .map(|m| {
             let p = pos.get(&m).cloned().unwrap_or(Pos::Max);
-            ((tier(state, &m), p, opened_at(state, &m)), m)
+            let unseated = held.is_some() && state.recovery_hold(None, &m) != crate::crdt::hold::Hold::Seat;
+            ((unseated, tier(judged, &m), p, opened_at(judged, &m)), m)
         })
         .collect();
     keyed.sort();

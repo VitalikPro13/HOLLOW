@@ -218,6 +218,9 @@ pub fn payload_name(payload: &super::operations::CrdtPayload) -> &'static str {
         P::EmojiRemoved { .. } => "EmojiRemoved",
         P::StickerAdded { .. } => "StickerAdded",
         P::StickerRemoved { .. } => "StickerRemoved",
+        P::DeviceRetired { .. } => "DeviceRetired",
+        P::SettleSign { .. } => "SettleSign",
+        P::FloorMark { .. } => "FloorMark",
     }
 }
 
@@ -418,6 +421,7 @@ mod tests {
             author: id,
             payload,
             auth: None,
+            dev: None,
         };
         op.sign(&kp, &pk);
         op

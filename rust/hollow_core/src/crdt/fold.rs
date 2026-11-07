@@ -24,7 +24,7 @@ const HELD_TTL: Duration = Duration::from_secs(600);
 
 /// An anchored log this long gets a compaction checkpoint from its owner.
 const CHECKPOINT_AFTER_OPS: usize = 2000;
-const CHECKPOINT_MIN_GAP_MS: u64 = 3600 * 1000;
+pub(super) const CHECKPOINT_MIN_GAP_MS: u64 = 3600 * 1000;
 
 /// How long a row a rebuild refuses stays stored, judged again at every rebuild.
 pub(crate) const PARK_MS: u64 = 30 * 24 * 3600 * 1000;
@@ -61,6 +61,95 @@ pub(crate) const QUOTA_LEADER_BYTES: usize = 64 << 10;
 /// kick naming 1,024 grants about 36 KB).
 pub(crate) const MAX_OP_BYTES: usize = 1 << 20;
 pub(crate) const MAX_CHECKPOINT_BYTES: usize = 16 << 20;
+/// Undominated `DeviceRetired` ops one author keeps (section 14).
+pub(crate) const MAX_UNDOMINATED_RETIRES: usize = 64;
+/// Tail retires one author may rebuild the state with per window; the rest wait in
+/// `held` for the node's coalesced rebuild (section 14).
+pub(crate) const RETIRE_REBUILDS_PER_AUTHOR: u32 = 4;
+const RETIRE_REBUILD_WINDOW_MS: u64 = 60_000;
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct RetireRebuilds {
+    window_ms: u64,
+    spent: HashMap<String, u32>,
+    due: bool,
+}
+
+impl RetireRebuilds {
+    /// Whether a tail retire by `author` may rebuild now (charged when it may).
+    fn charge(&mut self, author: &str, now_ms: u64) -> bool {
+        if now_ms.saturating_sub(self.window_ms) >= RETIRE_REBUILD_WINDOW_MS {
+            self.window_ms = now_ms;
+            self.spent.clear();
+        }
+        let spent = self.spent.entry(author.to_string()).or_default();
+        if *spent >= RETIRE_REBUILDS_PER_AUTHOR {
+            self.due = true;
+            return false;
+        }
+        *spent += 1;
+        true
+    }
+}
+
+/// Settle marks a server keeps, and signatures per mark (section 14).
+pub(crate) const MAX_SETTLE_MARKS: usize = 32;
+pub(crate) const MAX_SETTLE_SIGS: usize = 8;
+/// Bytes of the checkpoints held only as the marks' pinned parents, per server.
+#[cfg(not(test))]
+pub(crate) const SETTLE_PIN_BYTES: usize = 32 << 20;
+#[cfg(test)]
+pub(crate) const SETTLE_PIN_BYTES: usize = 32 << 10;
+
+/// The settle marks of one plan (section 7).
+#[derive(Debug, Default)]
+struct Marks {
+    /// `SettleSign` entries stored as rows.
+    kept: HashSet<usize>,
+    /// Parent checkpoints the kept marks pin.
+    pins: HashSet<[u8; 32]>,
+    /// The greatest counted mark: its id, its parent, and the parent's lineage.
+    line: Option<(String, [u8; 32], HashSet<String>)>,
+}
+
+/// Floor marks one author keeps, distinct checkpoints they may name, authors per server
+/// (section 8.8 items 3 and 7).
+pub(crate) const MAX_FLOOR_MARKS_PER_AUTHOR: usize = 4;
+pub(crate) const MAX_FLOOR_CPS: usize = 32;
+#[cfg(not(test))]
+pub(crate) const MAX_FLOOR_AUTHORS: usize = 512;
+#[cfg(test)]
+pub(crate) const MAX_FLOOR_AUTHORS: usize = 16;
+#[cfg(not(test))]
+pub(crate) const FLOOR_PIN_BYTES: usize = 64 << 20;
+#[cfg(test)]
+pub(crate) const FLOOR_PIN_BYTES: usize = 64 << 10;
+
+/// One floor mark in a plan: its index, the checkpoint it names, whether it counts.
+type FloorEntry<'a> = (usize, &'a Base, bool);
+
+/// The floor marks of one plan (section 8.8).
+#[derive(Debug, Default)]
+struct Floor {
+    /// `FloorMark` entries stored as rows.
+    kept: HashSet<usize>,
+    /// Checkpoints the kept marks name.
+    pins: HashSet<[u8; 32]>,
+    /// The floor F0 and its held ancestors: eligible by rule 4 alone.
+    eligible: HashSet<[u8; 32]>,
+}
+
+#[derive(Debug)]
+struct Mark {
+    id: String,
+    generation: u64,
+    parent: String,
+    /// (entry index, signing device), counted signers first, then by device.
+    sigs: Vec<(usize, String)>,
+    counted: Vec<String>,
+    pin_bytes: usize,
+}
+
 /// Rebuild passes that drop removals refused at their own point (`install`).
 const VOID_PASSES: usize = 4;
 
@@ -76,6 +165,46 @@ const POOL: &str = "";
 
 /// An op's dedup key.
 pub type OpKey = (String, HlcTimestamp);
+/// An own row's key as the store keeps it: (author, clock ms, counter).
+pub type OwnKey = (String, u64, u32);
+
+/// Own rows a server keeps at most (section 14, decision 2, revision 3.1).
+pub(crate) const OWN_MAX_OPS: usize = 16_384;
+pub(crate) const OWN_MAX_BYTES: usize = 64 << 20;
+/// How long an own row outlives its first domination.
+pub(crate) const OWN_KEEP_MS: u64 = 30 * 86_400_000;
+
+/// Of own rows `(first dominated ms, bytes)`, the indexes that go so at most `max_ops`
+/// and `max_bytes` stay: the earliest dominated first.
+/// Two checkpoints on one line by `cp_lineage` (section 8.8 item 5).
+fn one_line(a: &Base, b: &Base) -> bool {
+    a.hash == b.hash || a.state.cp_lineage.contains(&b.hash_hex()) || b.state.cp_lineage.contains(&a.hash_hex())
+}
+
+/// The lowest pair, in `sorted`'s order, of checkpoints not on one line.
+fn lowest_off_line(sorted: &[&Base]) -> Option<(usize, usize)> {
+    (1..sorted.len()).find_map(|j| (0..j).find(|&i| !one_line(sorted[i], sorted[j])).map(|i| (i, j)))
+}
+
+pub(crate) fn own_over_bound(rows: &[(u64, usize)], max_ops: usize, max_bytes: usize) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..rows.len()).collect();
+    order.sort_by_key(|&i| (rows[i].0, i));
+    let (mut n, mut bytes) = (rows.len(), rows.iter().map(|r| r.1).sum::<usize>());
+    let mut out = Vec::new();
+    for i in order {
+        if n <= max_ops && bytes <= max_bytes {
+            break;
+        }
+        n -= 1;
+        bytes -= rows[i].1;
+        out.push(i);
+    }
+    out.sort_unstable();
+    out
+}
+
+/// What a stored row is written with: content hash, parked mark, proving device.
+type RowMark = ([u8; 32], Option<u64>, Option<String>);
 
 /// A stored row the fold does not apply.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,6 +215,28 @@ pub enum RowKind {
     Dormant,
     /// Once admitted and refused now, until this epoch ms: judged again at every rebuild.
     Parked(u64),
+    /// The lowest owner-signed stamped checkpoint the base order would drop: what keeps
+    /// the cut a fact of held rows (DEVICE_PROOF_DESIGN section 7). Compared, never folded.
+    CutMark,
+    /// A checkpoint this replica once folded as its base, kept as a restore point
+    /// (section 7): local, never folded, never in the digest or a page.
+    Restore,
+    /// One device's signature of a settling (`CrdtPayload::SettleSign`): with the others
+    /// of its settling id, the settle mark (section 7). Never folded.
+    SettleSign,
+    /// The parent checkpoint a held settle mark names, kept while the mark is.
+    SettlePin,
+    /// A member's floor mark (`CrdtPayload::FloorMark`, section 8.8). Never folded.
+    FloorMark,
+    /// The checkpoint a held floor mark names, kept while the mark is.
+    FloorPin,
+    /// R or the DR an unanswered `cp_refolded` entry of the base names (section 8.3); the
+    /// DR also for 30 days after its entry's `at`.
+    RefoldPin,
+    /// Our own identity's op both the base and its parent decide, kept on our own
+    /// devices for 30 days from its first domination (section 7, N6): what folds again
+    /// after a step back. Never folded or served.
+    Own,
 }
 
 impl RowKind {
@@ -96,6 +247,35 @@ impl RowKind {
             _ => None,
         }
     }
+
+    /// Whether the digest and whole-log pages compare and serve the row.
+    pub fn served(&self) -> bool {
+        !matches!(self, Self::Parked(_) | Self::Restore | Self::Own)
+    }
+}
+
+const DAY_MS: u64 = 86_400_000;
+
+/// Section 7: of the checkpoints a replica folded as its base, `(index, first_fold_ms)`,
+/// the newest and the oldest first folded in each window of age: the last day, 1 to 7
+/// days, 7 to 30 days, older.
+pub(crate) fn restore_picks(candidates: &[(usize, u64)], now_ms: u64) -> Vec<usize> {
+    let window = |first: u64| match now_ms.saturating_sub(first) {
+        a if a < DAY_MS => 0,
+        a if a < 7 * DAY_MS => 1,
+        a if a < 30 * DAY_MS => 2,
+        _ => 3,
+    };
+    let mut picks = Vec::new();
+    for w in 0..4 {
+        let mut inside: Vec<&(usize, u64)> = candidates.iter().filter(|(_, f)| window(*f) == w).collect();
+        inside.sort_by_key(|(i, f)| (*f, *i));
+        picks.extend(inside.first().map(|(i, _)| *i));
+        picks.extend(inside.last().map(|(i, _)| *i));
+    }
+    picks.sort_unstable();
+    picks.dedup();
+    picks
 }
 
 /// A checkpoint as a fold base, its state parsed once.
@@ -116,7 +296,17 @@ impl Base {
     }
 
     pub(crate) fn judge(&self) -> Judge<'_> {
-        Judge { state: &self.state, covers: (!self.state.cp_stamped).then_some(&self.covers), floor: self.state.cp_floor.as_ref() }
+        Judge {
+            state: &self.state,
+            covers: (!self.state.cp_stamped).then_some(&self.covers),
+            floor: self.state.cp_floor.as_ref(),
+            parent_retired: &[],
+        }
+    }
+
+    /// `judge` for this base standing on `parent`, which decides the retires it lists too.
+    pub(crate) fn judge_over<'a>(&'a self, parent: Option<&'a Base>) -> Judge<'a> {
+        Judge { parent_retired: parent.map_or(&[][..], |p| p.state.cp_retired.as_slice()), ..self.judge() }
     }
 
     pub fn hash_hex(&self) -> String {
@@ -131,11 +321,19 @@ pub struct OpDelta {
     pub server_id: String,
     pub rows: Vec<(CrdtOp, Option<u64>)>,
     pub dropped: Vec<OpKey>,
+    /// The base after a rebuild (content id hex): its first fold is noted once (`cp_seen`).
+    pub base: Option<String>,
+    /// The first folds still kept after a rebuild; every other `cp_seen` row goes.
+    pub seen_keep: Option<Vec<String>>,
+    /// Own rows' first domination (`own_kept`): set, or cleared with `None`.
+    pub own_since: Vec<(OwnKey, Option<u64>)>,
+    /// The `floor_pending` row (section 8.8): written, or cleared with `None`.
+    pub recovery: Option<Option<String>>,
 }
 
 impl OpDelta {
     pub fn is_empty(&self) -> bool {
-        self.rows.is_empty() && self.dropped.is_empty()
+        self.rows.is_empty() && self.dropped.is_empty() && self.base.is_none() && self.recovery.is_none()
     }
 }
 
@@ -161,12 +359,31 @@ pub struct Ingested {
     pub rejected: usize,
     /// The state was rebuilt from its anchor, so anything may have changed.
     pub rebuilt: bool,
+    /// Authors whose ops the device clause refused as `Missing` or `Uncounted`: whose
+    /// rosters to ask for (section 9).
+    pub wanted: std::collections::BTreeSet<String>,
+    /// A rebuild's base (content id hex).
+    pub base: Option<String>,
+    /// The first folds a rebuild keeps (section 14: the base's lineage and the restore points).
+    pub seen_keep: Option<Vec<String>>,
+    /// What the rebuild changed in our own rows' first domination.
+    pub own_since: Vec<(OwnKey, Option<u64>)>,
+    /// A recovery began here (the row) or ended (`Some(None)`), section 8.8.
+    pub recovery: Option<Option<String>>,
 }
 
 impl Ingested {
     /// The store rows to change, `None` when nothing does.
     pub fn delta(&self, server_id: &str) -> Option<OpDelta> {
-        let d = OpDelta { server_id: server_id.to_string(), rows: self.rows.clone(), dropped: self.dropped.clone() };
+        let d = OpDelta {
+            server_id: server_id.to_string(),
+            rows: self.rows.clone(),
+            dropped: self.dropped.clone(),
+            base: self.base.clone(),
+            seen_keep: self.seen_keep.clone(),
+            own_since: self.own_since.clone(),
+            recovery: self.recovery.clone(),
+        };
         (!d.is_empty()).then_some(d)
     }
 }
@@ -190,6 +407,19 @@ struct Plan {
     base: Option<Base>,
     parent: Option<Base>,
     quota: Quota,
+    cut: bool,
+    /// The `cp_roster` of every held checkpoint that verifies as a base.
+    rosters: Vec<crate::identity::roster::Roster>,
+    /// Counted settlings off the base's line naming devices it does not drop.
+    rivals: Vec<super::operations::SettleStamp>,
+    /// Own rows first dominated in this plan, dated.
+    own_new: Vec<(OwnKey, u64)>,
+    /// The base before this plan is still eligible in it (section 8.8's trigger).
+    old_eligible: bool,
+    /// A counted settle mark decides eligibility.
+    settled: bool,
+    /// The base is eligible by rule 4 alone (section 8.8 item 6).
+    floor_base: bool,
 }
 
 /// A tail op's quota verdict, the one a rebuild of the same set gives.
@@ -483,7 +713,7 @@ fn fill(items: &[(&str, usize)], avail: usize, floor: usize) -> Vec<usize> {
 /// Whether a checkpoint carrying `state` signs within `MAX_CHECKPOINT_BYTES`: the state
 /// rides as a JSON string (each quote and backslash escaped once more) next to the
 /// server id, clock, author and covers, far inside the margin.
-fn checkpoint_fits(state: &str) -> bool {
+pub(super) fn checkpoint_fits(state: &str) -> bool {
     const MARGIN: usize = 16 << 10;
     let escapes = state.bytes().filter(|b| matches!(b, b'"' | b'\\')).count();
     state.len() + escapes + MARGIN <= MAX_CHECKPOINT_BYTES
@@ -500,6 +730,8 @@ impl ServerState {
         let me = self.hlc.as_ref().map(|h| h.actor().to_string()).unwrap_or_default();
         let payload = self.with_seen(payload, &me);
         let op = self.create_op(payload);
+        let probe = op.clone();
+        self.fill_view(std::iter::once(&probe));
         if !self.op_allowed(&op) {
             crate::hollow_log!(
                 "[HOLLOW-CRDT] Not authoring {} in {}: our own rules refuse it",
@@ -512,7 +744,10 @@ impl ServerState {
         }
         // Our own op is charged like anyone's: past our share it would be folded here and
         // held everywhere else.
-        if self.anchor() != Anchor::Legacy {
+        // A retire ranks first in our group (section 14): the next ingest's rebuild places it.
+        if matches!(op.payload, CrdtPayload::DeviceRetired { .. }) {
+            self.quota.computed = false;
+        } else if self.anchor() != Anchor::Legacy {
             match if self.quota_ready() { self.quota.tail(&op) } else { Tail::Rebuild } {
                 Tail::Over => {
                     crate::hollow_log!("[HOLLOW-CRDT] Not authoring {} in {}: over our share", payload_name(&op.payload), self.server_id);
@@ -571,8 +806,9 @@ impl ServerState {
             Anchor::Legacy => true,
             _ if self.base.as_ref().is_some_and(|b| !b.state.cp_stamped) => true,
             _ => {
-                self.op_log.len() > CHECKPOINT_AFTER_OPS
-                    && self.base.as_ref().is_none_or(|b| now_ms.saturating_sub(b.hlc.physical_ms) > CHECKPOINT_MIN_GAP_MS)
+                (self.op_log.len() > CHECKPOINT_AFTER_OPS
+                    && self.base.as_ref().is_none_or(|b| now_ms.saturating_sub(b.hlc.physical_ms) > CHECKPOINT_MIN_GAP_MS))
+                    || self.refold_due(now_ms)
             }
         }
     }
@@ -677,12 +913,22 @@ impl ServerState {
             Some(b) => {
                 base.cp_generation = b.generation.checked_add(1)?;
                 base.cp_parent = Some(b.hash_hex());
+                base.cp_lineage = lineage_after(b);
+                base.cp_cut = cut_after(b);
+                base.cp_settled = b.state.cp_settled.clone();
             }
             None => {
                 base.cp_generation = 0;
                 base.cp_parent = None;
+                base.cp_lineage = Vec::new();
+                base.cp_cut = None;
+                base.cp_settled = None;
             }
         }
+        (base.cp_retired, base.cp_endorsed) = self.carried_retires();
+        base.cp_posts_until = self.carried_posts_until();
+        base.cp_refolded = self.carried_refolded();
+        self.write_refolds(&mut base, now_ms);
         // The owner is fixed: a co-owner an older client minted is an admin here.
         for (id, reg) in base.roles.iter_mut() {
             if id != me && *reg.read() == super::operations::MemberRole::Owner {
@@ -771,14 +1017,25 @@ impl ServerState {
         self.ensure_dedup();
         self.expire_held();
         let now = super::hlc::wall_clock_ms();
-        let mut batch: HashMap<OpKey, (CrdtOp, [u8; 32])> = HashMap::new();
-        let mut rival = false;
+        let mut passed: Vec<CrdtOp> = Vec::with_capacity(ops.len());
         for op in ops {
             if let Err(reason) = self.stateless_check(op, now) {
                 out.rejected += 1;
                 log_refusal(op, &reason);
                 continue;
             }
+            let mut op = op.clone();
+            op.strip_bad_proof();
+            passed.push(op);
+        }
+        // The view is read only for authors an op of this replica or this batch admits:
+        // a stranger's op costs no store read and no entry (section 14).
+        let judged = self.judged_authors(&passed);
+        self.fill_view(judged.iter().map(|&i| &passed[i]));
+        let mut batch: HashMap<OpKey, (CrdtOp, [u8; 32])> = HashMap::new();
+        let mut rival = false;
+        let mut refold = false;
+        for op in passed {
             let key = (op.author.clone(), op.hlc.clone());
             let hash = op.content_hash();
             let held = self.op_log_dedup.get(&key).copied().or_else(|| {
@@ -786,25 +1043,26 @@ impl ServerState {
             });
             if let Some(h) = held {
                 if h == hash {
+                    refold |= self.take_better_proof(&op, hash, &mut out);
                     continue;
                 }
-                log_equivocation(op);
-                if hash > h {
+                log_equivocation(&op);
+                if self.held_copy_mut(&op).map(|o| o.clone()).is_some_and(|o| self.copy_rank(&op, hash) > self.copy_rank(&o, h)) {
                     continue;
                 }
                 rival = true;
             }
-            if batch.get(&key).is_some_and(|(_, h)| *h <= hash) {
+            if batch.get(&key).is_some_and(|(o, h)| self.copy_rank(o, *h) <= self.copy_rank(&op, hash)) {
                 continue;
             }
-            batch.insert(key, (op.clone(), hash));
+            batch.insert(key, (op, hash));
         }
         if batch.is_empty() {
-            return out;
+            return if refold { self.fold_all(Vec::new(), out) } else { out };
         }
         let mut fresh: Vec<CrdtOp> = batch.into_values().map(|(op, _)| op).collect();
         fresh.sort_by(fold_order);
-        if rival {
+        if rival || refold {
             return self.fold_all(fresh, out);
         }
 
@@ -824,7 +1082,8 @@ impl ServerState {
         let genesis = super::anchor::is_genesis_id(&self.server_id);
         let mut keep = Vec::with_capacity(fresh.len());
         for op in fresh {
-            if matches!(op.payload, CrdtPayload::ServerCheckpoint { .. }) {
+            // A floor mark is judged by the plan before the door (8.8, RC32-6).
+            if matches!(op.payload, CrdtPayload::ServerCheckpoint { .. } | CrdtPayload::FloorMark { .. }) {
                 keep.push(op);
                 continue;
             }
@@ -856,6 +1115,16 @@ impl ServerState {
                 log_refusal(op, &OpReject::NotAllowed);
                 continue;
             }
+            // What a retire endorses can move ops already held, and it ranks first in its
+            // author's group: the rebuild judges it, coalesced past the author's budget.
+            if matches!(op.payload, CrdtPayload::DeviceRetired { .. } | CrdtPayload::SettleSign { .. } | CrdtPayload::FloorMark { .. }) {
+                if self.retire_rebuilds.charge(&op.author, super::hlc::wall_clock_ms()) {
+                    return self.fold_all(keep[i..].to_vec(), out);
+                }
+                self.held.push((op.clone(), Instant::now()));
+                self.trim_held();
+                continue;
+            }
             let verdict = if self.quota_ready() { self.quota.tail(op) } else { Tail::Rebuild };
             match verdict {
                 Tail::Rebuild => return self.fold_all(keep[i..].to_vec(), out),
@@ -865,12 +1134,16 @@ impl ServerState {
                         return self.fold_all(keep[i..].to_vec(), out);
                     }
                     enabling |= enables_others(&op.payload);
+                    self.cut |= genesis && commits_to_a_key(op, &self.server_id);
                     self.apply_payload(op);
                     self.log_admitted(op.clone());
                     out.rows.push((op.clone(), None));
                     out.admitted.push(op.clone());
                 }
-                Tail::Within => self.hold(op.clone(), &mut out),
+                Tail::Within => match self.device_refusal(op) {
+                    Some(parkable) => self.park_refused(op, parkable, &mut out),
+                    None => self.hold(op.clone(), &mut out),
+                },
             }
         }
         if enabling && !self.held.is_empty() {
@@ -897,9 +1170,45 @@ impl ServerState {
     /// F8: an op waits in `held` (or counts at all at the tail) only from an author the
     /// state knows: one with a record, or one an admission we hold names. Identities are
     /// free, so fairness per author alone would not bound strangers.
-    fn known_author(&self, op: &CrdtOp) -> bool {
+    /// What every held retire (any row kind, held, or `fresh`) endorses: fixed before the
+    /// plan, so eligibility and the fold read one set (section 10, step 3).
+    fn refresh_endorsed(&mut self, fresh: &[CrdtOp]) {
+        let retire = |o: &&CrdtOp| matches!(o.payload, CrdtPayload::DeviceRetired { .. });
+        let held = self.op_log.iter().chain(self.stored.iter().map(|(o, _)| o)).chain(self.held.iter().map(|(o, _)| o));
+        let all: Vec<&CrdtOp> = held.chain(fresh.iter()).filter(retire).collect();
+        let endorsed = self.endorsements(all);
+        if *self.endorsed != endorsed {
+            self.endorsed = Arc::new(endorsed);
+        }
+    }
+
+    /// The owner, when the cut is in force, a checkpoint waits and the view holds none of
+    /// the owner's statements: whose roster ends the wait.
+    fn owner_missing(&self, plan: &Plan) -> Option<String> {
+        let waits = plan.ops.iter().any(|(op, _, class, _)| matches!(op.payload, CrdtPayload::ServerCheckpoint { .. }) && matches!(class, Class::Held));
+        let owner = self.fold_owner(&plan.ops)?;
+        (plan.cut && waits && self.authority.is_set() && self.authority.entry(&owner).and_then(|e| e.auth.as_ref()).is_none()).then_some(owner)
+    }
+
+    /// The ops of `ops` whose author is known here or admitted by a known author's op in
+    /// the same batch.
+    fn judged_authors(&self, ops: &[CrdtOp]) -> Vec<usize> {
+        let admitted: HashSet<&str> = ops
+            .iter()
+            .filter(|o| self.known_author(o))
+            .filter_map(|o| match &o.payload {
+                CrdtPayload::MemberAdded { peer_id, .. } => Some(peer_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        (0..ops.len()).filter(|&i| admitted.contains(ops[i].author.as_str()) || self.known_author(&ops[i])).collect()
+    }
+
+    pub(super) fn known_author(&self, op: &CrdtOp) -> bool {
         matches!(op.payload, CrdtPayload::ServerCreated { .. } | CrdtPayload::ServerCheckpoint { .. })
             || self.member_record.contains_key(&op.author)
+            // A floor mark's author is usually no member of a stepped-back state (8.8).
+            || (matches!(op.payload, CrdtPayload::FloorMark { .. }) && self.floor_author_known(&op.author))
             || self.held.iter().map(|(o, _)| o).chain(self.stored.iter().map(|(o, _)| o)).any(|o| {
                 matches!(&o.payload, CrdtPayload::MemberAdded { peer_id, .. } if *peer_id == op.author)
             })
@@ -909,7 +1218,7 @@ impl ServerState {
     /// unfolded (decided by the base, not by its parent), or nowhere.
     fn door(&self, op: &CrdtOp, genesis: bool) -> Class {
         let Some(base) = &self.base else { return Class::Fold };
-        if !base.judge().dominates(op, genesis) {
+        if !base.judge_over(self.parent.as_deref()).dominates(op, genesis) {
             return Class::Fold;
         }
         match &self.parent {
@@ -1022,7 +1331,416 @@ impl ServerState {
         Some(Base { hash, hlc: op.hlc.clone(), covers: covers.clone(), generation: parsed.cp_generation, parent, state: parsed })
     }
 
-    /// Every op this replica holds, the lowest content hash per key, classified against
+    /// An op the device clause refused at the tail: parked as a row when the rules admit it
+    /// and its author has a span, held when a roster may still end the rules' refusal
+    /// (`refusal_may_end`), else dropped; its author's roster is wanted unless the refusal
+    /// is for a missing proof.
+    fn park_refused(&mut self, op: &CrdtOp, parkable: bool, out: &mut Ingested) {
+        if self.wants_roster(op, self.cut) {
+            out.wanted.insert(op.author.clone());
+        }
+        if !parkable {
+            if self.refusal_may_end(op, self.holds_skipped()) {
+                self.hold(op.clone(), out);
+            }
+            return;
+        }
+        if !self.park_fits(op) {
+            return;
+        }
+        let until = super::hlc::wall_clock_ms().saturating_add(PARK_MS);
+        self.op_log_dedup.insert((op.author.clone(), op.hlc.clone()), op.content_hash());
+        self.stored.push((op.clone(), RowKind::Parked(until)));
+        out.rows.push((op.clone(), Some(until)));
+    }
+
+    /// Section 7's eligibility over the held checkpoints, never the base: the core's
+    /// parent rule, and after the cut a writer device the owner's view counts (rule 1) or
+    /// a place in an eligible checkpoint's `cp_lineage` (rule 3, a least fixed point).
+    /// While the owner's statements count no device, the device rule takes nothing away
+    /// (the freeze, N2). While the view holds no owner statements at all (`Missing`), the
+    /// state stays where it folded: only the current base and its lineage stay eligible,
+    /// until the owner's roster arrives.
+    /// The settle marks `all` holds (section 7, RC32-4, RC32-9, R33-6): each owner
+    /// `SettleSign` whose one signature verifies and whose parent checkpoint is held,
+    /// the lower (ms, counter, content id) per (settling id, device), at most 8 per mark
+    /// and 32 marks; past that, marks no counted signer signed go first, then each mark is
+    /// charged to its lightest counted signer and the device charged the most loses its
+    /// smallest (generation, id). A mark counts with a counted signer and a parent that
+    /// verifies as a base one generation below.
+    fn settle_marks(&self, all: &[(CrdtOp, [u8; 32], Class, bool)], bases: &[(usize, Base)], owner: Option<&str>) -> Marks {
+        let held: HashMap<String, usize> = all
+            .iter()
+            .filter(|e| matches!(e.0.payload, CrdtPayload::ServerCheckpoint { .. }))
+            .map(|e| (hex::encode(e.1), e.0.signing_payload().len()))
+            .collect();
+        let mut best: HashMap<(String, String), usize> = HashMap::new();
+        for (i, (op, h, ..)) in all.iter().enumerate() {
+            let CrdtPayload::SettleSign { stamp } = &op.payload else { continue };
+            if owner != Some(op.author.as_str()) || !self.settle_sign_shape(op, stamp) || !held.contains_key(&stamp.parent) {
+                continue;
+            }
+            let key = (stamp.id(), stamp.sigs[0].device.clone());
+            let rank = |j: usize| (all[j].0.hlc.physical_ms, all[j].0.hlc.counter, all[j].1);
+            match best.get(&key) {
+                Some(&j) if rank(j) <= (op.hlc.physical_ms, op.hlc.counter, *h) => {}
+                _ => {
+                    best.insert(key, i);
+                }
+            }
+        }
+        let counts = |d: &str| owner.is_some_and(|o| self.authority.counts(o, d));
+        let mut by_id: HashMap<String, Mark> = HashMap::new();
+        for ((id, device), i) in best {
+            let CrdtPayload::SettleSign { stamp } = &all[i].0.payload else { continue };
+            let mark = by_id.entry(id.clone()).or_insert_with(|| Mark {
+                id,
+                generation: stamp.generation,
+                parent: stamp.parent.clone(),
+                sigs: Vec::new(),
+                counted: Vec::new(),
+                pin_bytes: held.get(&stamp.parent).copied().unwrap_or(0),
+            });
+            mark.sigs.push((i, device));
+        }
+        let mut marks: Vec<Mark> = by_id.into_values().collect();
+        for m in &mut marks {
+            m.sigs.sort_by(|a, b| (!counts(&a.1), &a.1).cmp(&(!counts(&b.1), &b.1)));
+            m.sigs.truncate(MAX_SETTLE_SIGS);
+            m.counted = m.sigs.iter().map(|(_, d)| d.clone()).filter(|d| counts(d)).collect();
+        }
+        let pinned = |marks: &[Mark]| -> usize {
+            let parents: HashMap<&str, usize> = marks.iter().map(|m| (m.parent.as_str(), m.pin_bytes)).collect();
+            parents.values().sum()
+        };
+        while marks.len() > MAX_SETTLE_MARKS || (marks.len() > 1 && pinned(&marks) > SETTLE_PIN_BYTES) {
+            let order = |m: &Mark| (m.generation, m.id.clone());
+            let gone = if let Some(i) = (0..marks.len()).filter(|&i| marks[i].counted.is_empty()).min_by_key(|&i| order(&marks[i])) {
+                i
+            } else {
+                let mut signed: HashMap<&str, usize> = HashMap::new();
+                for m in &marks {
+                    for d in &m.counted {
+                        *signed.entry(d.as_str()).or_default() += 1;
+                    }
+                }
+                let lightest = |m: &Mark| m.counted.iter().min_by_key(|d| (signed[d.as_str()], (*d).clone())).cloned().unwrap_or_default();
+                let mut charged: HashMap<String, Vec<usize>> = HashMap::new();
+                for (i, m) in marks.iter().enumerate() {
+                    charged.entry(lightest(m)).or_default().push(i);
+                }
+                let heaviest = charged.iter().max_by(|a, b| a.1.len().cmp(&b.1.len()).then_with(|| b.0.cmp(a.0))).map(|(_, v)| v.clone()).unwrap_or_default();
+                heaviest.into_iter().min_by_key(|&i| order(&marks[i])).unwrap_or(0)
+            };
+            marks.swap_remove(gone);
+        }
+        let mut out = Marks::default();
+        for m in &marks {
+            out.kept.extend(m.sigs.iter().map(|(i, _)| *i));
+            if let Ok(p) = <[u8; 32]>::try_from(hex::decode(&m.parent).unwrap_or_default().as_slice()) {
+                out.pins.insert(p);
+            }
+        }
+        out.line = marks
+            .iter()
+            .filter(|m| !m.counted.is_empty())
+            .filter_map(|m| {
+                let (_, p) = bases.iter().find(|(_, b)| b.hash_hex() == m.parent)?;
+                (p.generation.checked_add(1) == Some(m.generation)).then_some((m, p))
+            })
+            .max_by(|a, b| (a.0.generation, &a.0.id).cmp(&(b.0.generation, &b.0.id)))
+            .map(|(m, p)| (m.id.clone(), p.hash, p.state.cp_lineage.iter().cloned().collect()));
+        out
+    }
+
+    /// The floor marks `all` holds and the floor they make (section 8.8 items 2 to 7):
+    /// marks by a member of the checkpoint they name, that checkpoint held as a base; at
+    /// most `MAX_FLOOR_MARKS_PER_AUTHOR` per author, counted first, then the lowest named.
+    /// Each author's first counted mark is its chosen one. The floor is decided over EVERY
+    /// author's chosen mark naming a checkpoint rules 1 to 3 do not make eligible, before
+    /// any bound: on one line, the oldest with its ancestors; off one line, none. The bounds
+    /// (`MAX_FLOOR_CPS` checkpoints, `MAX_FLOOR_AUTHORS` authors) then keep that evidence
+    /// first, so the kept set decides the same: free identities that fill every slot never
+    /// push out the mark that ends a fabricated floor. Nothing is kept once a counted settle
+    /// mark is held, or an eligible checkpoint is or descends from every named one.
+    fn floor_marks(&self, all: &[(CrdtOp, [u8; 32], Class, bool)], bases: &[(usize, Base)], eligible: &HashSet<[u8; 32]>, settled: bool, owner: Option<&str>) -> Floor {
+        if settled {
+            return Floor::default();
+        }
+        let named_base = |cp: &str| bases.iter().find(|(_, b)| b.hash_hex() == cp).map(|(_, b)| b);
+        let mut by_author: HashMap<&str, Vec<FloorEntry<'_>>> = HashMap::new();
+        for (i, (op, ..)) in all.iter().enumerate() {
+            let CrdtPayload::FloorMark { cp } = &op.payload else { continue };
+            if owner == Some(op.author.as_str()) {
+                continue;
+            }
+            let Some(b) = named_base(cp).filter(|b| b.state.is_member(&op.author)) else { continue };
+            let counted = self.verdict(op) == super::authority::Verdict::Counted;
+            by_author.entry(op.author.as_str()).or_default().push((i, b, counted));
+        }
+        let rank = |m: &(usize, &Base, bool)| (!m.2, m.1.generation, m.1.hash, all[m.0].1);
+        let mut authors: Vec<(&str, Vec<FloorEntry<'_>>)> = by_author.into_iter().collect();
+        for (_, marks) in authors.iter_mut() {
+            marks.sort_by_key(|m| rank(m));
+            marks.truncate(MAX_FLOOR_MARKS_PER_AUTHOR);
+        }
+        let head = |marks: &[FloorEntry<'_>]| marks.iter().find(|m| m.2).map(|m| m.1.hash);
+        let chosen = |marks: &[FloorEntry<'_>]| head(marks).filter(|h| !eligible.contains(h));
+        // The evidence, before any bound: the lowest counted pair off one line, else the
+        // oldest counted checkpoint (the floor).
+        let mut counted: Vec<&Base> = Vec::new();
+        for (_, marks) in &authors {
+            if let Some(h) = chosen(marks)
+                && !counted.iter().any(|b| b.hash == h)
+                && let Some(b) = marks.iter().find(|m| m.1.hash == h)
+            {
+                counted.push(b.1);
+            }
+        }
+        counted.sort_by_key(|b| (b.generation, b.hash));
+        let counted_fork = lowest_off_line(&counted);
+        let evidence: Vec<&Base> = match counted_fork {
+            Some((i, j)) => vec![counted[i], counted[j]],
+            None => counted.first().copied().into_iter().collect(),
+        };
+        // `keep(held)` over the distinct named checkpoints, the evidence first.
+        let mut named: Vec<&Base> = Vec::new();
+        for m in authors.iter().flat_map(|(_, ms)| ms.iter()) {
+            if !named.iter().any(|b| b.hash == m.1.hash) {
+                named.push(m.1);
+            }
+        }
+        named.sort_by_key(|b| (b.generation, b.hash));
+        let mut keep: Vec<&Base> = evidence.clone();
+        if let Some((i, j)) = lowest_off_line(&named) {
+            for b in [named[i], named[j]] {
+                if !keep.iter().any(|k| k.hash == b.hash) {
+                    keep.push(b);
+                }
+            }
+        }
+        let pin_bytes = |b: &Base| all.iter().find(|e| e.1 == b.hash).map(|e| e.0.signing_payload().len()).unwrap_or(0);
+        let mut bytes: usize = keep.iter().map(|b| pin_bytes(b)).sum();
+        for b in &named {
+            if keep.len() >= MAX_FLOOR_CPS {
+                break;
+            }
+            if keep.iter().any(|k| k.hash == b.hash) || bytes.saturating_add(pin_bytes(b)) > FLOOR_PIN_BYTES {
+                continue;
+            }
+            bytes += pin_bytes(b);
+            keep.push(b);
+        }
+        let kept_cps: HashSet<[u8; 32]> = keep.iter().map(|b| b.hash).collect();
+        // The author bound: a witness of the evidence first, then the authors this replica
+        // already knows, never the generation a mark names (a thief writes low ones).
+        let known = |a: &str| self.floor_author_known(a);
+        let witnesses: HashSet<&str> = evidence
+            .iter()
+            .filter_map(|e| {
+                authors.iter().filter(|(_, ms)| chosen(ms) == Some(e.hash)).map(|(a, _)| *a).min_by_key(|a| (!known(a), *a))
+            })
+            .collect();
+        authors.sort_by_cached_key(|(a, ms)| {
+            (!witnesses.contains(a), !known(a), head(ms).is_none(), !ms.iter().any(|m| kept_cps.contains(&m.1.hash)), *a)
+        });
+        authors.truncate(MAX_FLOOR_AUTHORS);
+        let descends_from_all =
+            bases.iter().any(|(_, e)| eligible.contains(&e.hash) && keep.iter().all(|n| n.hash == e.hash || e.state.cp_lineage.contains(&n.hash_hex())));
+        if keep.is_empty() || descends_from_all {
+            return Floor::default();
+        }
+        let mut out = Floor::default();
+        for (_, marks) in &authors {
+            for m in marks.iter().filter(|m| kept_cps.contains(&m.1.hash)) {
+                out.kept.insert(m.0);
+                out.pins.insert(m.1.hash);
+            }
+        }
+        if let Some(f0) = evidence.first().filter(|_| counted_fork.is_none()) {
+            out.eligible.insert(f0.hash);
+            out.eligible.extend(bases.iter().filter(|(_, b)| f0.state.cp_lineage.contains(&b.hash_hex())).map(|(_, b)| b.hash));
+        }
+        out
+    }
+
+    /// Own rows (section 7, N6): each dated by its first domination (the parent's first
+    /// fold, the base that decided it before), dropped 30 days after it, then the bound
+    /// (section 14), earliest dominated first. Returns the newly dated.
+    fn date_own_rows(&self, all: &mut [(CrdtOp, [u8; 32], Class, bool)], parent: Option<&Base>, now_ms: u64) -> Vec<(OwnKey, u64)> {
+        let dominated_at = parent.and_then(|p| self.first_folds.get(&p.hash_hex()).copied()).unwrap_or(now_ms);
+        let mut own_new = Vec::new();
+        let mut kept: Vec<(usize, u64, usize)> = Vec::new();
+        for (i, e) in all.iter_mut().enumerate() {
+            if e.2 != Class::Row(RowKind::Own) {
+                continue;
+            }
+            let key = (e.0.author.clone(), e.0.hlc.physical_ms, e.0.hlc.counter);
+            let since = self.own_since.get(&key).copied().unwrap_or(dominated_at);
+            if now_ms.saturating_sub(since) >= OWN_KEEP_MS {
+                e.2 = Class::Drop;
+                continue;
+            }
+            if !self.own_since.contains_key(&key) {
+                own_new.push((key, since));
+            }
+            kept.push((i, since, e.0.signing_payload().len()));
+        }
+        let rows: Vec<(u64, usize)> = kept.iter().map(|k| (k.1, k.2)).collect();
+        for j in own_over_bound(&rows, OWN_MAX_OPS, OWN_MAX_BYTES) {
+            all[kept[j].0].2 = Class::Drop;
+        }
+        let gone: HashSet<OwnKey> = kept
+            .iter()
+            .filter(|k| all[k.0].2 == Class::Drop)
+            .map(|k| (all[k.0].0.author.clone(), all[k.0].0.hlc.physical_ms, all[k.0].0.hlc.counter))
+            .collect();
+        own_new.retain(|(k, _)| !gone.contains(k));
+        own_new
+    }
+
+    /// The installed plan's own rows replace the dates held: new ones added, the rest gone.
+    fn keep_own_since(&mut self, ops: &[(CrdtOp, [u8; 32], Class, bool)], own_new: Vec<(OwnKey, u64)>) -> Vec<(OwnKey, Option<u64>)> {
+        let own: HashSet<OwnKey> =
+            ops.iter().filter(|e| e.2 == Class::Row(RowKind::Own)).map(|e| (e.0.author.clone(), e.0.hlc.physical_ms, e.0.hlc.counter)).collect();
+        let mut changes: Vec<(OwnKey, Option<u64>)> = self.own_since.keys().filter(|k| !own.contains(*k)).map(|k| (k.clone(), None)).collect();
+        changes.extend(own_new.iter().map(|(k, v)| (k.clone(), Some(*v))));
+        if !changes.is_empty() {
+            let map = Arc::make_mut(&mut self.own_since);
+            map.retain(|k, _| own.contains(k));
+            map.extend(own_new);
+        }
+        changes
+    }
+
+    /// Section 8.3, two settlings at once: every settling a counted device of the owner
+    /// wrote off `base`'s line, keeping only the devices our view no longer counts that
+    /// the base's own settling does not drop (a rival never drops a device we count).
+    fn rival_settlings(
+        &self,
+        all: &[(CrdtOp, [u8; 32], Class, bool)],
+        bases: &[(usize, Base)],
+        base: Option<&Base>,
+        owner: Option<&str>,
+    ) -> Vec<super::operations::SettleStamp> {
+        let (Some(base), Some(owner)) = (base, owner) else { return Vec::new() };
+        let line: HashSet<String> = std::iter::once(base.hash_hex()).chain(base.state.cp_lineage.iter().cloned()).collect();
+        let dropped: HashSet<&String> = base.state.cp_settles.iter().flat_map(|st| st.devices.iter()).collect();
+        let mut out: Vec<super::operations::SettleStamp> = bases
+            .iter()
+            .filter(|(i, b)| !line.contains(&b.hash_hex()) && self.verdict(&all[*i].0) == super::authority::Verdict::Counted)
+            .filter_map(|(_, b)| b.state.cp_settles.clone())
+            .filter_map(|mut st| {
+                st.devices.retain(|d| !dropped.contains(d) && !self.authority.counts(owner, d));
+                (!st.devices.is_empty()).then_some(st)
+            })
+            .collect();
+        out.sort_by_key(|st| st.id());
+        out.dedup_by_key(|st| st.id());
+        out
+    }
+
+    fn eligible_bases(&self, all: &[(CrdtOp, [u8; 32], Class, bool)], bases: &[(usize, Base)], cut: bool, owner: Option<&str>) -> HashSet<[u8; 32]> {
+        let parent_ok = |b: &Base| match b.parent {
+            None => b.generation == 0,
+            Some(p) => bases.iter().any(|(_, q)| q.hash == p && q.generation.checked_add(1) == Some(b.generation)),
+        };
+        let judged = cut && self.authority.is_set();
+        let statements = owner.and_then(|o| self.authority.entry(o)).and_then(|e| e.auth.as_ref());
+        let mut ok: HashSet<[u8; 32]> = if judged && statements.is_none() {
+            let standing: HashSet<String> =
+                self.base.iter().flat_map(|b| std::iter::once(b.hash_hex()).chain(b.state.cp_lineage.iter().cloned())).collect();
+            bases.iter().filter(|(_, b)| parent_ok(b) && standing.contains(&b.hash_hex())).map(|(_, b)| b.hash).collect()
+        } else {
+            let frozen = !judged || statements.is_some_and(|a| a.counted.is_empty());
+            bases
+                .iter()
+                .filter(|(i, b)| parent_ok(b) && (frozen || self.verdict(&all[*i].0) == super::authority::Verdict::Counted))
+                .map(|(_, b)| b.hash)
+                .collect()
+        };
+        loop {
+            let named: HashSet<&str> =
+                bases.iter().filter(|(_, b)| ok.contains(&b.hash)).flat_map(|(_, b)| b.state.cp_lineage.iter().map(String::as_str)).collect();
+            // Rule 2's carried half: an eligible checkpoint's endorsement by a counted signer.
+            let endorsed: Vec<&super::operations::Endorsement> = bases
+                .iter()
+                .filter(|(_, b)| ok.contains(&b.hash))
+                .flat_map(|(_, b)| b.state.cp_endorsed.iter())
+                .filter(|e| owner == Some(e.author.as_str()) && self.authority.counts(&e.author, &e.by))
+                .collect();
+            let carried = |i: usize, b: &Base| {
+                let dev = all[i].0.dev.as_deref().map(|d| d.device.as_str());
+                endorsed.iter().any(|e| dev == Some(e.device.as_str()) && e.refs.iter().any(|r| r.names(&all[i].0, &b.hash)))
+            };
+            let more: Vec<[u8; 32]> = bases
+                .iter()
+                .filter(|(i, b)| !ok.contains(&b.hash) && parent_ok(b) && (named.contains(b.hash_hex().as_str()) || carried(*i, b)))
+                .map(|(_, b)| b.hash)
+                .collect();
+            if more.is_empty() {
+                return ok;
+            }
+            ok.extend(more);
+        }
+    }
+
+    /// Fold everything held again from the anchor: after a change of the view.
+    pub(crate) fn rebuild_now(&mut self) -> Ingested {
+        self.refresh_view();
+        self.fold_all(Vec::new(), Ingested::default())
+    }
+
+    /// Keep the plan's `cp_roster`s (section 10 step 2: statements are facts once held);
+    /// true when they changed, so the view is judged again before the plan is used.
+    fn took_cp_rosters(&mut self, plan: &Plan) -> bool {
+        if *self.cp_rosters == plan.rosters {
+            return false;
+        }
+        self.cp_rosters = Arc::new(plan.rosters.clone());
+        self.view_source.is_some()
+    }
+
+    /// Whether a retire waits in `held` for the coalesced rebuild; any rebuild clears it.
+    pub(crate) fn retire_rebuild_due(&self) -> bool {
+        self.retire_rebuilds.due
+    }
+
+    #[cfg(test)]
+    pub(crate) fn hold_retire_for_test(&mut self) {
+        self.retire_rebuilds.due = true;
+    }
+
+    /// A copy of an op we hold whose proof ranks higher replaces the held proof, in RAM
+    /// and in the row (section 6: the best proof wins).
+    /// True when the copy was kept unfolded and its verdict rose: the rebuild judges it again.
+    fn take_better_proof(&mut self, op: &CrdtOp, hash: [u8; 32], out: &mut Ingested) -> bool {
+        if op.dev.is_none() {
+            return false;
+        }
+        let new_rank = { let r = self.copy_rank(op, hash); (r.0, r.2.to_string()) };
+        let Some(held) = self.held_copy_mut(op).map(|o| o.clone()) else { return false };
+        let old_rank = { let r = self.copy_rank(&held, hash); (r.0, r.2.to_string()) };
+        if new_rank >= old_rank {
+            return false;
+        }
+        let rose = new_rank.0 < old_rank.0;
+        let parked = self.stored.iter().find(|(o, _)| o.author == op.author && o.hlc == op.hlc).map(|(_, k)| *k);
+        let is_held = self.held.iter().any(|(o, _)| o.author == op.author && o.hlc == op.hlc)
+            && parked.is_none()
+            && !self.op_log.iter().any(|o| o.author == op.author && o.hlc == op.hlc);
+        if let Some(copy) = self.held_copy_mut(op) {
+            copy.dev = op.dev.clone();
+        }
+        if !is_held {
+            out.rows.retain(|(o, _)| !(o.author == op.author && o.hlc == op.hlc));
+            out.rows.push((op.clone(), parked.and_then(|k| k.parked_until())));
+        }
+        rose && (is_held || matches!(parked, Some(RowKind::Parked(_))))
+    }
+
+    /// Every op this replica holds, the best copy per key (verdict, then the lowest
+    /// content hash, then the lower proving device), classified against
     /// the greatest checkpoint whose parent it holds.
     fn plan(&self, fresh: Vec<CrdtOp>, now_ms: u64) -> Plan {
         let genesis = super::anchor::is_genesis_id(&self.server_id);
@@ -1045,7 +1763,9 @@ impl ServerState {
             let h = op.content_hash();
             all.push((op, h, Class::Fold, false));
         }
-        all.sort_by(|a, b| a.0.author.cmp(&b.0.author).then_with(|| a.0.hlc.cmp(&b.0.hlc)).then(a.1.cmp(&b.1)));
+        all.sort_by(|a, b| {
+            a.0.author.cmp(&b.0.author).then_with(|| a.0.hlc.cmp(&b.0.hlc)).then_with(|| self.copy_rank(&a.0, a.1).cmp(&self.copy_rank(&b.0, b.1)))
+        });
         all.dedup_by(|later, first| {
             let same = later.0.author == first.0.author && later.0.hlc == first.0.hlc;
             if same {
@@ -1058,18 +1778,50 @@ impl ServerState {
         });
 
         let owner = self.fold_owner(&all);
-        let bases: Vec<(usize, Base)> = all
+        let mut bases: Vec<(usize, Base)> = all
             .iter()
             .enumerate()
             .filter_map(|(i, (op, h, ..))| self.base_of(op, *h, owner.as_deref()).map(|b| (i, b)))
             .collect();
-        let eligible = |b: &Base| match b.parent {
-            None => b.generation == 0,
-            Some(p) => bases.iter().any(|(_, q)| q.hash == p && q.generation.checked_add(1) == Some(b.generation)),
-        };
-        let base = bases.iter().filter(|(_, b)| eligible(b)).max_by(|a, b| a.1.key().cmp(&b.1.key())).cloned();
+        let stamped: HashSet<usize> = bases.iter().filter(|(_, b)| b.state.cp_stamped).map(|(i, _)| *i).collect();
+        let cut = !stamped.is_empty() || all.iter().any(|(op, ..)| genesis && commits_to_a_key(op, &self.server_id));
+        // A stamped checkpoint whose held parent says otherwise about what it copies is no base.
+        let disagree: HashSet<[u8; 32]> = bases
+            .iter()
+            .filter(|(_, b)| b.parent.is_some_and(|p| bases.iter().any(|(_, q)| q.hash == p && !agrees_with_parent(b, q))))
+            .map(|(_, b)| b.hash)
+            .collect();
+        bases.retain(|(_, b)| !disagree.contains(&b.hash));
+        let mut rosters: Vec<crate::identity::roster::Roster> = Vec::new();
+        for r in bases.iter().filter_map(|(_, b)| b.state.cp_roster.as_ref()) {
+            if !rosters.contains(r) {
+                rosters.push(r.clone());
+            }
+        }
+        let marks = self.settle_marks(&all, &bases, owner.as_deref());
+        let mut eligible = self.eligible_bases(&all, &bases, cut, owner.as_deref());
+        if let Some(r) = self.settle_base {
+            eligible = bases.iter().filter(|(_, b)| b.hash == r).map(|(_, b)| b.hash).collect();
+        }
+        let old_eligible = self.base.as_ref().is_some_and(|b| eligible.contains(&b.hash));
+        // Rule 4 (section 8.8): the floor, which a counted settle mark overrides below.
+        let floor = self.floor_marks(&all, &bases, &eligible, marks.line.is_some(), owner.as_deref());
+        let floor_only: HashSet<[u8; 32]> = floor.eligible.difference(&eligible).copied().collect();
+        eligible.extend(floor_only.iter().copied());
+        // Section 7: with a counted settle mark held, only its line stays eligible.
+        if let Some((id, parent, lineage)) = &marks.line {
+            eligible.retain(|h| {
+                *h == *parent
+                    || lineage.contains(&hex::encode(h))
+                    || bases.iter().any(|(_, b)| b.hash == *h && b.state.cp_settled.as_deref() == Some(id.as_str()))
+            });
+        }
+        let base = bases.iter().filter(|(_, b)| eligible.contains(&b.hash)).max_by(|a, b| a.1.key().cmp(&b.1.key())).cloned();
         let parent = base.as_ref().and_then(|(_, b)| b.parent).and_then(|p| bases.iter().find(|(_, q)| q.hash == p).cloned());
 
+        let refold_pins = base.as_ref().map(|(_, b)| refold_pins(&b.state, now_ms)).unwrap_or_default();
+        let rivals = self.rival_settlings(&all, &bases, base.as_ref().map(|(_, b)| b), owner.as_deref());
+        let me: Option<String> = self.hlc.as_ref().map(|h| h.actor().to_string());
         let base_at = base.as_ref().map(|(i, _)| *i);
         let parent_at = parent.as_ref().map(|(i, _)| *i);
         for (i, entry) in all.iter_mut().enumerate() {
@@ -1091,10 +1843,16 @@ impl ServerState {
                 }
             } else if genesis && matches!(op.payload, CrdtPayload::ServerCreated { .. }) {
                 Class::Founding
+            } else if matches!(op.payload, CrdtPayload::SettleSign { .. }) {
+                if marks.kept.contains(&i) { Class::Row(RowKind::SettleSign) } else { Class::Drop }
+            } else if matches!(op.payload, CrdtPayload::FloorMark { .. }) {
+                if floor.kept.contains(&i) { Class::Row(RowKind::FloorMark) } else { Class::Drop }
             } else {
                 match &base {
-                    Some((_, b)) if b.judge().dominates(op, genesis) => match &parent {
-                        Some((_, p)) if p.judge().dominates(op, genesis) => Class::Drop,
+                    Some((_, b)) if b.judge_over(parent.as_ref().map(|(_, p)| p)).dominates(op, genesis) => match &parent {
+                        Some((_, p)) if p.judge().dominates(op, genesis) => {
+                            if me.as_deref() == Some(op.author.as_str()) { Class::Row(RowKind::Own) } else { Class::Drop }
+                        }
                         _ => Class::Row(RowKind::Dormant),
                     },
                     _ if parked => entry.2,
@@ -1102,6 +1860,15 @@ impl ServerState {
                 }
             };
             entry.2 = class;
+        }
+        for entry in all.iter_mut() {
+            if matches!(entry.2, Class::Drop | Class::Held) && marks.pins.contains(&entry.1) && matches!(entry.0.payload, CrdtPayload::ServerCheckpoint { .. }) {
+                entry.2 = Class::Row(RowKind::SettlePin);
+            } else if matches!(entry.2, Class::Drop | Class::Held) && floor.pins.contains(&entry.1) && matches!(entry.0.payload, CrdtPayload::ServerCheckpoint { .. }) {
+                entry.2 = Class::Row(RowKind::FloorPin);
+            } else if matches!(entry.2, Class::Drop | Class::Held | Class::Row(RowKind::Dormant)) && refold_pins.contains(&hex::encode(entry.1)) {
+                entry.2 = Class::Row(RowKind::RefoldPin);
+            }
         }
         // F8: what is not a row waits only for an author the set knows.
         let mut known: HashSet<&str> = HashSet::new();
@@ -1128,7 +1895,42 @@ impl ServerState {
         for i in unknown {
             all[i].2 = Class::Drop;
         }
-        let mut plan = Plan { ops: all, base: base.map(|(_, b)| b), parent: parent.map(|(_, b)| b), quota: Quota::default() };
+        // Of the stamped checkpoints this plan stores nowhere (dropped by the base order or
+        // as disagreeing, or only held), the lowest stays as the cut's mark.
+        let cut_mark = all
+            .iter()
+            .enumerate()
+            .filter(|(i, e)| matches!(e.2, Class::Drop | Class::Held) && stamped.contains(i))
+            .min_by(|a, b| (&a.1 .0.hlc, a.1 .1).cmp(&(&b.1 .0.hlc, b.1 .1)))
+            .map(|(i, _)| i);
+        if let Some(i) = cut_mark {
+            all[i].2 = Class::Row(RowKind::CutMark);
+        }
+        let folded_once: Vec<(usize, u64)> = all
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| matches!(e.2, Class::Drop) && matches!(e.0.payload, CrdtPayload::ServerCheckpoint { .. }))
+            .filter_map(|(i, e)| self.first_folds.get(&hex::encode(e.1)).map(|f| (i, *f)))
+            .collect();
+        for i in restore_picks(&folded_once, now_ms) {
+            all[i].2 = Class::Row(RowKind::Restore);
+        }
+        let own_new = self.date_own_rows(&mut all, parent.as_ref().map(|(_, p)| p), now_ms);
+        let settled = marks.line.is_some();
+        let floor_base = base.as_ref().is_some_and(|(_, b)| floor_only.contains(&b.hash));
+        let mut plan = Plan {
+            ops: all,
+            base: base.map(|(_, b)| b),
+            parent: parent.map(|(_, b)| b),
+            quota: Quota::default(),
+            cut,
+            rosters,
+            rivals,
+            own_new,
+            old_eligible,
+            settled,
+            floor_base,
+        };
         self.allocate(&mut plan, now_ms);
         plan
     }
@@ -1170,6 +1972,23 @@ impl ServerState {
             .map(|(i, _)| i)
             .collect();
         undecided.sort_by(|&a, &b| fold_order(&plan.ops[a].0, &plan.ops[b].0).then(plan.ops[a].1.cmp(&plan.ops[b].1)));
+        // Section 14: an author's newest `MAX_UNDOMINATED_RETIRES` retires stay, the rest
+        // drop; those that stay rank first in the author's group.
+        let retire = |i: &usize| matches!(plan.ops[*i].0.payload, CrdtPayload::DeviceRetired { .. });
+        let mut retires: HashMap<&str, usize> = HashMap::new();
+        let mut gone: HashSet<usize> = HashSet::new();
+        for &i in undecided.iter().rev().filter(|i| retire(i)) {
+            let n = retires.entry(plan.ops[i].0.author.as_str()).or_default();
+            *n += 1;
+            if *n > MAX_UNDOMINATED_RETIRES {
+                gone.insert(i);
+            }
+        }
+        undecided.retain(|i| !gone.contains(i));
+        undecided.sort_by_key(|i| !retire(i));
+        for i in gone {
+            plan.ops[i].2 = Class::Drop;
+        }
         let sizes: HashMap<usize, usize> = undecided.iter().map(|&i| (i, op_size(&plan.ops[i].0))).collect();
         for &i in &undecided {
             q.restaff(&plan.ops[i].0);
@@ -1230,9 +2049,10 @@ impl ServerState {
     /// base does not decide, in HLC order, each judged against the state just before it.
     /// A row it now refuses is parked, never deleted; a refused op never stored waits in
     /// `held`.
-    fn fold_all(&mut self, fresh: Vec<CrdtOp>, mut out: Ingested) -> Ingested {
+    pub(super) fn fold_all(&mut self, fresh: Vec<CrdtOp>, mut out: Ingested) -> Ingested {
+        self.retire_rebuilds.due = false;
         let now_ms = super::hlc::wall_clock_ms();
-        let before: HashMap<OpKey, ([u8; 32], Option<u64>)> = self
+        let before: HashMap<OpKey, RowMark> = self
             .op_log
             .iter()
             .map(|o| (o, None))
@@ -1240,34 +2060,95 @@ impl ServerState {
             .map(|(o, parked)| {
                 let key = (o.author.clone(), o.hlc.clone());
                 let h = self.op_log_dedup.get(&key).copied().unwrap_or_else(|| o.content_hash());
-                (key, (h, parked))
+                (key, (h, parked, proof_device(o)))
             })
             .collect();
         let was_folded: HashSet<OpKey> = self.op_log.iter().map(|o| (o.author.clone(), o.hlc.clone())).collect();
-        let plan = self.plan(fresh, now_ms);
-        self.install(plan, now_ms);
+        self.refresh_endorsed(&fresh);
+        let mut plan = self.plan(fresh.clone(), now_ms);
+        if self.took_cp_rosters(&plan) {
+            self.refresh_view();
+            plan = self.plan(fresh.clone(), now_ms);
+        }
+        // A counted settle mark decides: the round under the previous view has no more
+        // to do, and nothing the settling drops may fold meanwhile.
+        if plan.settled && self.close_round() {
+            plan = self.plan(fresh.clone(), now_ms);
+        }
+        // Section 8.8: a member that hears of a recovery dropping the only checkpoint
+        // writer marks the base it held, before the step back drops what it folded.
+        let owner = self.fold_owner(&plan.ops);
+        let new_base = plan.base.as_ref().map(Base::hash_hex);
+        let mut trigger = self.recovery_trigger(new_base.as_deref(), plan.old_eligible, plan.settled, owner.as_deref());
+        if let Some(r) = trigger.as_mut().filter(|_| self.can_author()) {
+            // The round keeps judging under the previous view (H4) and marks once it ends.
+            let unpinned = self.authority.clone();
+            if let Some(round) = self.open_round(owner.as_deref()) {
+                r.round = Some(round);
+                self.recovery = Some(Arc::new(r.clone()));
+                self.pin_round_view();
+                let held = self.plan(fresh.clone(), now_ms);
+                if held.old_eligible {
+                    plan = held;
+                } else {
+                    r.round = None;
+                    self.recovery = None;
+                    self.authority = unpinned;
+                }
+            }
+            if r.round.is_none()
+                && let Some(cp) = r.base.clone()
+            {
+                r.floor_b = r.base_op.clone();
+                let mark = self.create_op(CrdtPayload::FloorMark { cp });
+                let mut fresh = fresh;
+                fresh.push(mark);
+                plan = self.plan(fresh, now_ms);
+            }
+        }
+        // The view never changes inside a rebuild, so an op it refuses now stays refused
+        // (dropped or parked) until a roster arrives.
+        for (op, _, class, _) in &plan.ops {
+            if matches!(class, Class::Fold | Class::Row(RowKind::Parked(_)) | Class::Held) && self.wants_roster(op, plan.cut) {
+                out.wanted.insert(op.author.clone());
+            }
+        }
+        if let Some(owner) = self.owner_missing(&plan) {
+            out.wanted.insert(owner);
+        }
+        let settled = plan.settled && plan.base.is_some();
+        out.own_since = self.install(plan, now_ms);
+        if let Some(r) = trigger {
+            out.recovery = r.to_json().map(Some);
+            self.recovery = Some(Arc::new(r));
+        } else if self.recovery_ends(settled) {
+            self.recovery = None;
+            out.recovery = Some(None);
+        }
 
         // What changed in the store, against what it held when this rebuild began.
-        let mut after: HashMap<OpKey, ([u8; 32], Option<u64>)> = HashMap::new();
+        let mut after: HashMap<OpKey, RowMark> = HashMap::new();
         for op in &self.op_log {
             let key = (op.author.clone(), op.hlc.clone());
             let h = self.op_log_dedup[&key];
-            after.insert(key.clone(), (h, None));
+            let now = (h, None, proof_device(op));
             if !was_folded.contains(&key) && !out.admitted.iter().any(|o| o.author == key.0 && o.hlc == key.1) {
                 out.admitted.push(op.clone());
             }
-            if before.get(&key) != Some(&(h, None)) {
+            if before.get(&key) != Some(&now) {
                 out.rows.push((op.clone(), None));
             }
+            after.insert(key, now);
         }
         for (op, kind) in &self.stored {
             let key = (op.author.clone(), op.hlc.clone());
             let h = self.op_log_dedup[&key];
             let parked = kind.parked_until();
-            after.insert(key.clone(), (h, parked));
-            if before.get(&key) != Some(&(h, parked)) {
+            let now = (h, parked, proof_device(op));
+            if before.get(&key) != Some(&now) {
                 out.rows.push((op.clone(), parked));
             }
+            after.insert(key, now);
         }
         for key in before.keys() {
             if !after.contains_key(key) {
@@ -1277,19 +2158,42 @@ impl ServerState {
         out.rows.retain(|(o, _)| after.contains_key(&(o.author.clone(), o.hlc.clone())));
         out.admitted.retain(|o| self.op_log_dedup.contains_key(&(o.author.clone(), o.hlc.clone())));
         out.rebuilt = true;
+        out.base = self.base.as_ref().map(|b| b.hash_hex());
+        out.seen_keep = Some(self.first_folds.keys().cloned().collect());
         out
     }
 
     /// Fold a plan into this state: what `fold_all` and a restart that cannot trust its
     /// saved state run.
-    fn install(&mut self, plan: Plan, now_ms: u64) {
-        let Plan { mut ops, base, parent, quota } = plan;
+    fn install(&mut self, plan: Plan, now_ms: u64) -> Vec<(OwnKey, Option<u64>)> {
+        let Plan { mut ops, base, parent, quota, cut, rivals, own_new, floor_base, .. } = plan;
+        self.floor_base = floor_base;
+        let own_changes = self.keep_own_since(&ops, own_new);
+        if *self.rival_settles != rivals {
+            self.rival_settles = Arc::new(rivals);
+        }
         ops.sort_by(|a, b| fold_order(&a.0, &b.0).then(a.1.cmp(&b.1)));
         *self.quota = quota;
+        self.cut = cut;
         let held_since: HashMap<OpKey, Instant> =
             std::mem::take(&mut self.held).into_iter().map(|(o, at)| ((o.author, o.hlc), at)).collect();
         self.base = base.map(Box::new);
         self.parent = parent.map(Box::new);
+        if let Some(b) = &self.base {
+            let id = b.hash_hex();
+            if !self.first_folds.contains_key(&id) {
+                Arc::make_mut(&mut self.first_folds).insert(id, now_ms);
+            }
+        }
+        let mut keep: HashSet<String> = ops.iter().filter(|e| e.2 == Class::Row(RowKind::Restore)).map(|e| hex::encode(e.1)).collect();
+        for b in [&self.base, &self.parent].into_iter().flatten() {
+            keep.insert(b.hash_hex());
+            keep.extend(b.state.cp_lineage.iter().cloned());
+        }
+        if self.first_folds.keys().any(|k| !keep.contains(k)) {
+            Arc::make_mut(&mut self.first_folds).retain(|k, _| keep.contains(k));
+        }
+        self.endorse_from_base();
         // A removal voids only what it ends if it folds at its own point, which a pass
         // learns only on reaching it: a pass whose voiding removal was refused runs again
         // without it (fewer voids can seat whom a later removal needs, so a few passes).
@@ -1312,6 +2216,7 @@ impl ServerState {
         }
         self.cap_parked();
         self.trim_held();
+        own_changes
     }
 
     /// One fold of the sorted plan from the anchor, removals ahead judged by `ahead`.
@@ -1329,6 +2234,10 @@ impl ServerState {
         self.op_log_dedup.clear();
         self.held.clear();
         let now = Instant::now();
+        // H3's carve-out: whether an op a roster could still seat, and that could admit
+        // others, was skipped so far; whether our own admission holds a parked row.
+        let mut skipped = false;
+        let mut own_row = ops.iter().any(|e| matches!(e.2, Class::Row(RowKind::Parked(_))) && self.names_our_admission(&e.0));
         for (op, hash, class, was_row) in ops {
             let (op, hash) = (op.clone(), *hash);
             let key = (op.author.clone(), op.hlc.clone());
@@ -1346,6 +2255,18 @@ impl ServerState {
                         self.apply_payload(&op);
                         self.op_log_dedup.insert(key, hash);
                         self.op_log.push(op);
+                    } else if let Some(parkable) = self.device_refusal(&op) {
+                        let ends = !parkable && self.refusal_may_end(&op, skipped);
+                        skipped |= self.skipped_for_a_roster(&op);
+                        let own = self.names_our_admission(&op);
+                        if parkable || (ends && *was_row && !(own && own_row)) {
+                            own_row |= own;
+                            self.op_log_dedup.insert(key, hash);
+                            self.stored.push((op, RowKind::Parked(now_ms.saturating_add(PARK_MS))));
+                        } else if ends {
+                            let at = held_since.get(&key).copied().unwrap_or(now);
+                            self.held.push((op, at));
+                        }
                     } else if *was_row {
                         self.op_log_dedup.insert(key, hash);
                         self.stored.push((op, RowKind::Parked(now_ms.saturating_add(PARK_MS))));
@@ -1360,6 +2281,7 @@ impl ServerState {
                         self.op_log_dedup.insert(key, hash);
                         self.op_log.push(op);
                     } else {
+                        skipped |= self.skipped_for_a_roster(&op);
                         self.op_log_dedup.insert(key, hash);
                         self.stored.push((op, RowKind::Parked(until)));
                     }
@@ -1384,7 +2306,6 @@ impl ServerState {
     /// Keep each charge group's parked rows within `PARK_GROUP_BYTES`, the oldest first:
     /// what a quota or a refusal parks stays bounded whatever a group sends.
     fn cap_parked(&mut self) {
-        let us = self.hlc.as_ref().map(|h| h.actor().to_string());
         let mut parked: Vec<usize> =
             (0..self.stored.len()).filter(|&i| matches!(self.stored[i].1, RowKind::Parked(_))).collect();
         parked.sort_by(|&a, &b| fold_order(&self.stored[a].0, &self.stored[b].0));
@@ -1392,16 +2313,7 @@ impl ServerState {
         let mut gone: HashSet<usize> = HashSet::new();
         for i in parked {
             let op = &self.stored[i].0;
-            // Our own admission is what the silent re-ask reads.
-            if matches!(&op.payload, CrdtPayload::MemberAdded { peer_id, .. } if Some(peer_id) == us.as_ref()) {
-                continue;
-            }
-            // Staff acts park against the staff budget, so a flood never deletes them.
-            let (group, cap) = if self.quota.first(op) {
-                (POOL.to_string() + "staff", QUOTA_LEADER_BYTES)
-            } else {
-                (self.quota.top(&op.author), PARK_GROUP_BYTES)
-            };
+            let Some((group, cap)) = self.park_group(op) else { continue };
             let used = per.entry(group).or_default();
             let size = op_size(op);
             if *used + size > cap {
@@ -1423,6 +2335,39 @@ impl ServerState {
         }
     }
 
+    /// The charge group an op parks against and that group's budget; `None` = never
+    /// evicted (our own admission, which the silent re-ask reads).
+    fn park_group(&self, op: &CrdtOp) -> Option<(String, usize)> {
+        if self.names_our_admission(op) {
+            return None;
+        }
+        // Staff acts park against the staff budget, so a flood never deletes them.
+        Some(if self.quota.first(op) {
+            (POOL.to_string() + "staff", QUOTA_LEADER_BYTES)
+        } else {
+            (self.quota.top(&op.author), PARK_GROUP_BYTES)
+        })
+    }
+
+    /// `op` admits this replica's own identity.
+    pub(super) fn names_our_admission(&self, op: &CrdtOp) -> bool {
+        let us = self.hlc.as_ref().map(|h| h.actor());
+        matches!(&op.payload, CrdtPayload::MemberAdded { peer_id, .. } if Some(peer_id.as_str()) == us)
+    }
+
+    /// Whether `op` still fits its group's parked budget, as `cap_parked` would keep it
+    /// (it is newer than every parked row: the tail).
+    fn park_fits(&self, op: &CrdtOp) -> bool {
+        let Some((group, cap)) = self.park_group(op) else { return true };
+        let used: usize = self
+            .stored
+            .iter()
+            .filter(|(o, k)| matches!(k, RowKind::Parked(_)) && self.park_group(o).is_some_and(|(g, _)| g == group))
+            .map(|(o, _)| op_size(o))
+            .sum();
+        used + op_size(op) <= cap
+    }
+
     /// See [`ServerState::restore_op_log`].
     pub(super) fn restore_rows(&mut self, rows: Vec<(CrdtOp, Option<u64>)>) -> Restored {
         let now_ms = super::hlc::wall_clock_ms();
@@ -1433,6 +2378,7 @@ impl ServerState {
     }
 
     fn restore_classified(&mut self, rows: Vec<(CrdtOp, Option<u64>)>, now_ms: u64) -> bool {
+        self.fill_view(rows.iter().map(|(o, _)| o));
         self.op_log.clear();
         self.stored.clear();
         self.op_log_dedup.clear();
@@ -1456,18 +2402,27 @@ impl ServerState {
         if checkpointed && self.owner_pin.is_none() {
             self.owner_pin = self.op_log.iter().find(|o| matches!(o.payload, CrdtPayload::ServerCheckpoint { .. })).map(|o| o.author.clone());
         }
-        let plan = self.plan(Vec::new(), now_ms);
+        self.refresh_endorsed(&[]);
+        let mut plan = self.plan(Vec::new(), now_ms);
+        if self.took_cp_rosters(&plan) {
+            self.refresh_view();
+            plan = self.plan(Vec::new(), now_ms);
+        }
         let folds = |c: &Class| matches!(c, Class::Founding | Class::Base | Class::Fold);
-        let print = print_of(plan.ops.iter().filter(|e| folds(&e.2)).map(|e| &e.1));
+        let print = print_of(plan.ops.iter().filter(|e| folds(&e.2)).map(|e| &e.1))
+            + &self.view_print(plan.ops.iter().filter(|e| folds(&e.2)).map(|e| e.0.author.as_str()));
         if self.retained_print.as_deref() == Some(print.as_str()) && plan.base.is_some() == self.checkpoint_hlc.is_some() {
-            let Plan { mut ops, base, parent, quota } = plan;
+            let Plan { mut ops, base, parent, quota, cut, rivals, .. } = plan;
+            self.rival_settles = Arc::new(rivals);
             *self.quota = quota;
+            self.cut = cut;
             ops.sort_by(|a, b| fold_order(&a.0, &b.0).then(a.1.cmp(&b.1)));
             self.op_log.clear();
             self.stored.clear();
             self.op_log_dedup.clear();
             self.base = base.map(Box::new);
             self.parent = parent.map(Box::new);
+            self.endorse_from_base();
             for (op, hash, class, _) in ops {
                 let key = (op.author.clone(), op.hlc.clone());
                 match class {
@@ -1489,7 +2444,7 @@ impl ServerState {
             self.cap_parked();
             return false;
         }
-        self.install(plan, now_ms);
+        let _ = self.install(plan, now_ms);
         true
     }
 
@@ -1499,7 +2454,7 @@ impl ServerState {
         let mut all: Vec<&CrdtOp> = self
             .op_log
             .iter()
-            .chain(self.stored.iter().filter(|(_, k)| !matches!(k, RowKind::Parked(_))).map(|(o, _)| o))
+            .chain(self.stored.iter().filter(|(_, k)| k.served()).map(|(o, _)| o))
             .collect();
         all.sort_by(|a, b| fold_order(a, b));
         all
@@ -1564,7 +2519,48 @@ impl ServerState {
     /// The fingerprint of the folded log, saved with the state (`lean_snapshot`).
     pub(crate) fn current_print(&self) -> String {
         let hashes: Vec<[u8; 32]> = self.op_log.iter().map(|o| self.content_of(o)).collect();
-        print_of(hashes.iter())
+        print_of(hashes.iter()) + &self.view_print(self.op_log.iter().map(|o| o.author.as_str()))
+    }
+
+    /// What the view said about the authors of the folded set (section 10): a restart
+    /// under another view of them folds again; entries cached for anyone else do not.
+    fn view_print<'a>(&self, authors: impl Iterator<Item = &'a str>) -> String {
+        if !self.authority.is_set() {
+            return String::new();
+        }
+        format!(":{}", self.authority.digest_for(authors))
+    }
+
+    /// B of a floor round (8.8 item 1): the previous view's pick by the base order over
+    /// what this replica held at the trigger and the answered `floor_base`s. A
+    /// checkpoint first held after the trigger by a writer the new view does not count
+    /// is no candidate unless an answer carried it (RC32-2).
+    pub(super) fn floor_pick(&self, round: &super::hold::Round, answered: &[CrdtOp], now_ms: u64) -> Option<CrdtOp> {
+        let carried: HashSet<[u8; 32]> = answered.iter().map(CrdtOp::content_hash).collect();
+        let late = |o: &CrdtOp| {
+            let h = self.content_of(o);
+            matches!(o.payload, CrdtPayload::ServerCheckpoint { .. })
+                && !round.held_at_trigger.contains(&h)
+                && !carried.contains(&h)
+                && o.proven_device().is_none_or(|d| round.recount.iter().any(|x| x == d))
+        };
+        let mut scratch = self.clone();
+        scratch.op_log.retain(|o| !late(o));
+        scratch.stored.retain(|(o, _)| !late(o));
+        let b = scratch.plan(answered.to_vec(), now_ms).base?;
+        self.op_log
+            .iter()
+            .chain(self.stored.iter().map(|(o, _)| o))
+            .filter(|o| !late(o))
+            .chain(answered.iter())
+            .find(|o| matches!(o.payload, CrdtPayload::ServerCheckpoint { .. }) && self.content_of(o) == b.hash)
+            .cloned()
+    }
+
+    /// After a floor round: the base is eligible again, or a counted settle mark decides.
+    pub(super) fn base_holds_again(&self, now_ms: u64) -> bool {
+        let plan = self.plan(Vec::new(), now_ms);
+        plan.old_eligible || plan.settled
     }
 
     /// An op's content hash, from the dedup map when we hold it.
@@ -1582,6 +2578,11 @@ impl ServerState {
             let h = self.content_of(op);
             (hex::encode(h) == hex_hash).then(|| self.base_of(op, h, owner.as_deref())).flatten()
         })
+    }
+
+    /// A checkpoint op checked as a base of this server, held or not (`base_content`).
+    pub(crate) fn base_of_content(&self, op: &CrdtOp) -> Option<Base> {
+        self.base_of(op, op.content_hash(), self.anchor_owner().as_deref())
     }
 
     /// Rebase on `base`: replace everything materialized with its state.
@@ -1641,6 +2642,65 @@ impl ServerState {
 }
 
 /// A set's fingerprint: its count and the wrapping sum of its hashes, order-free.
+/// Ancestors a stamped checkpoint carries (section 7).
+pub(crate) const LINEAGE: usize = 64;
+
+/// The `cp_lineage` of a child of `parent`: the parent, then its own lineage.
+pub(super) fn lineage_after(parent: &Base) -> Vec<String> {
+    std::iter::once(parent.hash_hex()).chain(parent.state.cp_lineage.iter().take(LINEAGE - 1).cloned()).collect()
+}
+
+/// The content ids a base's `cp_refolded` pins (section 8.3, "Pins"): R and the DR of
+/// every unanswered entry, and the DR of an answered one for 30 days after its `at`.
+fn refold_pins(base: &ServerState, now_ms: u64) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for e in &base.cp_refolded {
+        if e.answered.is_none() {
+            out.insert(e.r.clone());
+        }
+        if e.answered.is_none() || now_ms.saturating_sub(e.at.physical_ms) < super::refold::R_REACH_MS {
+            out.insert(e.dr.clone());
+        }
+    }
+    out
+}
+
+/// The `cp_cut` of a child of `parent`: the parent's lineage clock, or none (its own
+/// clock) when the parent is not stamped.
+pub(super) fn cut_after(parent: &Base) -> Option<HlcTimestamp> {
+    parent.state.cp_stamped.then(|| parent.state.cp_cut.clone().unwrap_or_else(|| parent.hlc.clone()))
+}
+
+/// Whether stamped `child` agrees with its held `parent` on what it copies (section 7):
+/// else it is no base.
+fn agrees_with_parent(child: &Base, parent: &Base) -> bool {
+    // A settling names itself; any other checkpoint copies its parent's.
+    let settles_here = child.state.cp_settles.as_ref().is_some_and(|s| {
+        child.state.cp_settled.as_deref() == Some(s.id().as_str()) && s.parent == parent.hash_hex() && s.generation == child.generation
+    });
+    !child.state.cp_stamped
+        || (child.state.cp_lineage == lineage_after(parent)
+            && child.state.cp_cut == cut_after(parent)
+            && (child.state.cp_settled == parent.state.cp_settled || settles_here))
+}
+
+/// A founding op whose nonce commits to the founder's recovery key: the cut is in force
+/// from it (section 7).
+fn commits_to_a_key(op: &CrdtOp, server_id: &str) -> bool {
+    match &op.payload {
+        CrdtPayload::ServerCreated { owner_peer_id, nonce, .. } => {
+            op.author == *owner_peer_id
+                && super::authority::nonce_commitment(nonce).is_some()
+                && super::anchor::derive_server_id(owner_peer_id, nonce) == server_id
+        }
+        _ => false,
+    }
+}
+
+fn proof_device(op: &CrdtOp) -> Option<String> {
+    op.dev.as_deref().map(|d| d.device.clone())
+}
+
 fn print_of<'a>(hashes: impl Iterator<Item = &'a [u8; 32]>) -> String {
     let (n, sum) = hashes.fold((0u64, 0u128), |(n, sum), h| {
         (n + 1, sum.wrapping_add(u128::from_be_bytes(h[..16].try_into().expect("16 bytes"))))
@@ -1649,7 +2709,7 @@ fn print_of<'a>(hashes: impl Iterator<Item = &'a [u8; 32]>) -> String {
 }
 
 /// Ops that can make a held op valid: an admission, a grant, or the anchor itself.
-fn enables_others(payload: &CrdtPayload) -> bool {
+pub(super) fn enables_others(payload: &CrdtPayload) -> bool {
     matches!(
         payload,
         CrdtPayload::MemberAdded { .. }
@@ -1697,6 +2757,7 @@ mod tests {
             author: id,
             payload,
             auth: None,
+            dev: None,
         };
         op.sign(&kp, &pk);
         op
@@ -2915,7 +3976,19 @@ mod tests {
             32 => P::LabelUnassigned { label_id: label, peer_id: id(target) },
             33 => P::EmojiAdded { name: format!("e{}", next(3)), hash: format!("{:064x}", next(3)), animated: false },
             34 => P::EmojiRemoved { name: format!("e{}", next(3)) },
-            _ => match next(4) {
+            _ => match next(7) {
+                6 => P::FloorMark { cp: format!("{:064x}", next(3)) },
+                5 => P::SettleSign {
+                    stamp: crate::crdt::operations::SettleStamp {
+                        server: sid.to_string(),
+                        parent: format!("{:064x}", next(3)),
+                        generation: next(3),
+                        devices: vec![id(target)],
+                        t_ms: 0,
+                        sigs: Vec::new(),
+                    },
+                },
+                4 => P::DeviceRetired { device: id(target), ops: Vec::new(), posts_until_ms: None, restore: None },
                 3 => P::JoinKeySet { secret: crate::crdt::operations::JoinSecret(format!("{:064x}", next(3) + 1)) },
                 0 => P::StickerAdded { hash: format!("{:064x}", next(3)), name: "s".into(), pack: "p".into(), animated: false, w: 1, h: 1 },
                 1 => P::StickerRemoved { hash: format!("{:064x}", next(3)) },
@@ -3488,6 +4561,9 @@ mod tests {
             let mut st: ServerState = serde_json::from_str(&owner.checkpoint_json(&id(1), &[], 0).unwrap()).unwrap();
             st.cp_generation = generation;
             st.cp_parent = Some(hex::encode(parent.content_hash()));
+            let P::ServerCheckpoint { state, .. } = &parent.payload else { unreachable!() };
+            let up: ServerState = serde_json::from_str(state).unwrap();
+            st.cp_lineage = std::iter::once(hex::encode(parent.content_hash())).chain(up.cp_lineage).collect();
             op_at(1, &sid, ms, P::ServerCheckpoint { state: serde_json::to_string(&st).unwrap(), covers: covers.clone() })
         };
         let c2a = forge(&owner, 1, &c1, t + 2000);
@@ -4615,5 +5691,218 @@ mod tests {
         owner.name = name;
         assert!(owner.author_due_checkpoint(&id(1), &[], later).is_some(), "control: a state within the bound checkpoints");
         assert!(!owner.checkpoint_due(&id(1), later), "control: nothing more is due");
+    }
+
+    fn retire_at(tag: u8, sid: &str, ms: u64) -> CrdtOp {
+        op_at(tag, sid, ms, P::DeviceRetired { device: format!("dev-{tag}"), ops: Vec::new(), posts_until_ms: None, restore: None })
+    }
+
+    /// Section 14: a member's retire ranks first in its quota group, so its own flood
+    /// never pushes it over its share.
+    #[test]
+    fn a_retire_ranks_first_in_its_authors_quota_group() {
+        let (mut owner, history, t) = staffed();
+        let sid = owner.server_id.clone();
+        let cp = checkpoint(&mut owner);
+        let flood: Vec<CrdtOp> = (0..600u64)
+            .map(|k| op_at(4, &sid, t + 1_000 + k, P::NicknameChanged { peer_id: id(4), nickname: "x".repeat(400) + &k.to_string() }))
+            .collect();
+        let dr = retire_at(4, &sid, t + 5_000);
+        let mut r = joiner(&sid, 9);
+        r.ingest_remote(&history);
+        r.ingest_remote(std::slice::from_ref(&cp));
+        r.ingest_remote(&flood);
+        assert!(!r.op_log.iter().any(|o| o.hlc == flood[599].hlc), "precondition: the flood is over its share");
+        r.ingest_remote(std::slice::from_ref(&dr));
+        assert!(r.op_log.iter().any(|o| o.hlc == dr.hlc && o.author == dr.author), "the retire folds within the share");
+    }
+
+    #[test]
+    fn an_author_keeps_at_most_its_newest_undominated_retires() {
+        let (mut owner, history, t) = staffed();
+        let sid = owner.server_id.clone();
+        let cp = checkpoint(&mut owner);
+        let retires: Vec<CrdtOp> = (0..MAX_UNDOMINATED_RETIRES as u64 + 6).map(|k| retire_at(4, &sid, t + 1_000 + k)).collect();
+        let mut r = joiner(&sid, 9);
+        r.ingest_remote(&history);
+        r.ingest_remote(std::slice::from_ref(&cp));
+        r.ingest_remote(&retires);
+        let held = |o: &CrdtOp| r.op_log.iter().chain(r.stored.iter().map(|(x, _)| x)).chain(r.held.iter().map(|(x, _)| x)).any(|x| x.hlc == o.hlc && x.author == o.author);
+        assert_eq!(retires.iter().filter(|o| held(o)).count(), MAX_UNDOMINATED_RETIRES, "bounded per author");
+        assert!(retires[6..].iter().all(&held) && !retires[..6].iter().any(&held), "the oldest go");
+    }
+
+    /// Section 14: retires one author floods in, one ingest each, rebuild at most
+    /// `RETIRE_REBUILDS_PER_AUTHOR` times a window; the rest wait for the coalesced
+    /// rebuild, which places them, and another author keeps its own budget.
+    #[test]
+    fn a_flood_of_retires_from_one_author_rebuilds_a_bounded_number_of_times() {
+        let (mut owner, history, t) = staffed();
+        let sid = owner.server_id.clone();
+        let cp = checkpoint(&mut owner);
+        let mut r = joiner(&sid, 9);
+        r.ingest_remote(&history);
+        r.ingest_remote(std::slice::from_ref(&cp));
+        let flood: Vec<CrdtOp> = (0..40u64).map(|k| retire_at(4, &sid, t + 1_000 + k)).collect();
+        let rebuilt = flood.iter().filter(|o| r.ingest_remote(std::slice::from_ref(*o)).rebuilt).count();
+        assert_eq!(rebuilt, RETIRE_REBUILDS_PER_AUTHOR as usize, "one author's flood rebuilds a bounded number of times");
+        assert!(r.retire_rebuild_due(), "the rest wait for the coalesced rebuild");
+        let folded = |r: &ServerState, o: &CrdtOp| r.op_log.iter().any(|x| x.hlc == o.hlc && x.author == o.author);
+        assert!(!folded(&r, &flood[39]), "precondition: a held retire is not folded yet");
+        assert!(r.rebuild_now().rebuilt);
+        assert!(!r.retire_rebuild_due(), "the rebuild clears the wait");
+        assert!(flood.iter().all(|o| folded(&r, o)), "the coalesced rebuild places every held retire");
+        let other = retire_at(3, &sid, t + 2_000);
+        assert!(r.ingest_remote(std::slice::from_ref(&other)).rebuilt, "another author's retire rebuilds on its own budget");
+        assert!(folded(&r, &other));
+    }
+
+    #[test]
+    fn restore_points_are_the_newest_and_oldest_first_fold_of_each_window() {
+        let now = 100 * DAY_MS;
+        let ago = |d: f64| now - (d * DAY_MS as f64) as u64;
+        let held = [(0, ago(0.1)), (1, ago(0.5)), (2, ago(0.9)), (3, ago(2.0)), (4, ago(8.0)), (5, ago(20.0)), (6, ago(29.0)), (7, ago(40.0)), (8, 0), (9, ago(60.0))];
+        assert_eq!(restore_picks(&held, now), vec![0, 2, 3, 4, 6, 7, 8], "per window its newest and oldest, at most 8");
+        assert!(restore_picks(&[], now).is_empty());
+    }
+
+    /// Section 7: a checkpoint this replica once folded as its base stays as a restore
+    /// point after the base moves past it, is never served or compared, and comes back
+    /// on a restart from the first-fold records; one never folded here is dropped.
+    #[test]
+    fn a_base_the_replica_moved_past_stays_as_a_restore_point_it_never_serves() {
+        let (mut owner, history, t) = staffed();
+        let sid = owner.server_id.clone();
+        let mut cps = Vec::new();
+        for k in 0..4u64 {
+            owner.ingest_remote(&[op_at(2, &sid, t + 100 + k, P::ServerRenamed { new_name: format!("n{k}") })]);
+            cps.push(checkpoint(&mut owner));
+        }
+        let kind = |s: &ServerState, cp: &CrdtOp| s.stored.iter().find(|(o, _)| o.hlc == cp.hlc).map(|(_, k)| *k);
+        assert_eq!(kind(&owner, &cps[2]), Some(RowKind::Parent));
+        assert_eq!(kind(&owner, &cps[0]), Some(RowKind::CutMark), "the lowest stays as the cut's mark");
+        assert_eq!(kind(&owner, &cps[1]), Some(RowKind::Restore), "an earlier base is a restore point");
+        assert!(!owner.served_log().iter().any(|o| o.hlc == cps[1].hlc), "never on a page");
+        let kept: Vec<crate::crdt::digest::KeptRef<'_>> = Vec::new();
+        assert!(
+            !crate::crdt::digest::entries(&owner, &kept, None).iter().any(|e| matches!(e.item, crate::crdt::digest::Item::Op(o) if o.hlc == cps[1].hlc)),
+            "never in the digest",
+        );
+
+        let rows: Vec<(CrdtOp, Option<u64>)> =
+            owner.op_log.iter().map(|o| (o.clone(), None)).chain(owner.stored.iter().map(|(o, k)| (o.clone(), k.parked_until()))).collect();
+        let mut restarted = joiner(&sid, 1);
+        restarted.first_folds = owner.first_folds.clone();
+        restarted.restore_op_log(rows.clone());
+        assert_eq!(kind(&restarted, &cps[1]), Some(RowKind::Restore), "a restart keeps it from the first-fold records");
+        let mut forgot = joiner(&sid, 1);
+        forgot.restore_op_log(rows);
+        assert_eq!(kind(&forgot, &cps[1]), None, "a checkpoint never folded here as the base is dropped");
+        let _ = history;
+    }
+
+    /// Section 14: first-fold records rotate with what they date, the base's lineage and
+    /// the restore points; a rebuild's delta names what stays.
+    #[test]
+    fn a_rebuild_keeps_first_folds_only_for_the_lineage_and_the_restore_points() {
+        let (mut owner, _history, t) = staffed();
+        let sid = owner.server_id.clone();
+        let mut cps = Vec::new();
+        for k in 0..4u64 {
+            owner.ingest_remote(&[op_at(2, &sid, t + 100 + k, P::ServerRenamed { new_name: format!("n{k}") })]);
+            cps.push(checkpoint(&mut owner));
+        }
+        let stray = "f".repeat(64);
+        Arc::make_mut(&mut owner.first_folds).insert(stray.clone(), 1);
+        let out = owner.rebuild_now();
+        assert!(!owner.first_folds.contains_key(&stray), "a checkpoint off the lineage and no restore point loses its record");
+        for cp in &cps {
+            assert!(owner.first_folds.contains_key(&hex::encode(cp.content_hash())), "the lineage keeps its records");
+        }
+        let mut kept = out.delta(&sid).and_then(|d| d.seen_keep).expect("the rebuild names what stays");
+        kept.sort();
+        let mut held: Vec<String> = owner.first_folds.keys().cloned().collect();
+        held.sort();
+        assert_eq!(kept, held);
+    }
+
+    /// Section 7 (N6, decision 2): an author keeps its own dominated ops as `Own` rows,
+    /// never folded or served, while the checkpoint that first dominated them was first
+    /// folded here under 30 days ago; another author's go.
+    #[test]
+    fn an_author_keeps_its_own_dominated_ops_for_thirty_days() {
+        let run = |first_fold_ago: u64| {
+            let (mut owner, history, t) = staffed();
+            let sid = owner.server_id.clone();
+            let theirs = op_at(2, &sid, t + 50, P::NicknameChanged { peer_id: id(2), nickname: "two".into() });
+            owner.ingest_remote(std::slice::from_ref(&theirs));
+            let first = checkpoint(&mut owner);
+            Arc::make_mut(&mut owner.first_folds).insert(hex::encode(first.content_hash()), crate::crdt::hlc::wall_clock_ms() - first_fold_ago);
+            let covers = owner.checkpoint_covers();
+            let json = owner.checkpoint_json(&id(1), &[], crate::crdt::hlc::wall_clock_ms()).unwrap();
+            let (_, ingested) = owner.author_checkpoint(P::ServerCheckpoint { state: json, covers }).expect("the second checkpoint");
+            (owner, history[1].clone(), theirs, ingested)
+        };
+        let kind = |s: &ServerState, o: &CrdtOp| s.stored.iter().find(|(r, _)| r.hlc == o.hlc && r.author == o.author).map(|(_, k)| *k);
+        let key = |o: &CrdtOp| (o.author.clone(), o.hlc.physical_ms, o.hlc.counter);
+
+        let (mut owner, mine, theirs, ingested) = run(10 * DAY_MS);
+        let sid = owner.server_id.clone();
+        assert_eq!(kind(&owner, &mine), Some(RowKind::Own), "our own op stays once two checkpoints decide it");
+        assert_eq!(kind(&owner, &theirs), None, "a member's goes");
+        assert!(!owner.served_log().iter().any(|o| o.hlc == mine.hlc), "never served");
+        let dated = ingested.delta(&sid).map(|d| d.own_since).unwrap_or_default();
+        let since = dated.iter().find(|(k, _)| *k == key(&mine)).and_then(|(_, v)| *v).expect("the store learns its first domination");
+        assert!(crate::crdt::hlc::wall_clock_ms() - since >= 10 * DAY_MS - 1_000, "dated by the checkpoint that first decided it");
+        let old = crate::crdt::hlc::wall_clock_ms() - 31 * DAY_MS;
+        for v in Arc::make_mut(&mut owner.own_since).values_mut() {
+            *v = old;
+        }
+        let out = owner.rebuild_now();
+        assert_eq!(kind(&owner, &mine), None, "thirty days after, it goes");
+        assert!(out.dropped.iter().any(|(a, h)| *a == mine.author && *h == mine.hlc), "and its row is deleted");
+        assert!(out.own_since.iter().any(|(k, v)| *k == key(&mine) && v.is_none()), "with its date");
+
+        let (owner, mine, ..) = run(31 * DAY_MS);
+        assert_eq!(kind(&owner, &mine), None, "decided by a checkpoint first folded over 30 days ago: gone at once");
+    }
+
+    /// Section 14: past 16,384 own rows or 64 MiB, those first dominated longest ago go.
+    #[test]
+    fn own_rows_over_the_bound_go_oldest_domination_first() {
+        let rows = [(30u64, 10usize), (10, 10), (20, 10), (40, 10)];
+        assert_eq!(own_over_bound(&rows, 3, 1_000), vec![1], "over the count, the oldest");
+        assert_eq!(own_over_bound(&rows, 10, 25), vec![1, 2], "over the bytes, oldest first until it fits");
+        assert!(own_over_bound(&rows, 4, 40).is_empty());
+    }
+
+    /// Section 14: a restore point off the base's lineage (a base folded more than
+    /// `LINEAGE` generations back) keeps its first-fold record, so it stays one.
+    #[test]
+    fn a_restore_point_off_the_lineage_keeps_its_first_fold() {
+        let (mut owner, _history, _) = staffed();
+        checkpoint(&mut owner);
+        let oldest = checkpoint(&mut owner);
+        for _ in 0..LINEAGE + 4 {
+            checkpoint(&mut owner);
+        }
+        let id = hex::encode(oldest.content_hash());
+        assert!(!owner.base.as_ref().unwrap().state.cp_lineage.contains(&id), "precondition: off the lineage");
+        owner.rebuild_now();
+        let kind = owner.stored.iter().find(|(o, _)| o.hlc == oldest.hlc).map(|(_, k)| *k);
+        assert_eq!(kind, Some(RowKind::Restore), "the oldest base of its window past the cut's mark stays a restore point");
+        assert!(owner.first_folds.contains_key(&id), "with its first fold");
+    }
+
+    /// Section 7: the store dates a base's first fold from the rebuild that chose it.
+    #[test]
+    fn a_rebuild_names_its_base_for_the_first_fold_record() {
+        let (mut owner, history, _) = staffed();
+        let cp = checkpoint(&mut owner);
+        let mut r = joiner(&owner.server_id, 9);
+        r.ingest_remote(&history);
+        let out = r.ingest_remote(std::slice::from_ref(&cp));
+        assert!(out.rebuilt);
+        assert_eq!(out.delta(&owner.server_id).and_then(|d| d.base), Some(hex::encode(cp.content_hash())), "the delta names the base");
     }
 }

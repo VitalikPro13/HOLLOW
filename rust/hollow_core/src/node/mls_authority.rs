@@ -3,6 +3,7 @@
 //! own commits with the same rules, so an honest coordinator never builds a commit
 //! that honest members refuse.
 
+use crate::crdt::hold::Hold;
 use crate::crdt::server_state::ServerState;
 use crate::crypto::{CommitFacts, LeafIdentity, LeafView, MlsManager, Verdict, WelcomeFacts};
 
@@ -18,17 +19,32 @@ pub(crate) enum GroupRules<'a> {
 impl GroupRules<'_> {
     /// Hold unless `master` is a current, unbanned member who can see a subgroup's
     /// channel: our view may simply not have caught up with a join or a role change.
+    /// During a recovery (8.8) a new seat also takes the hold's SEAT.
     pub(crate) fn membership(&self, master: &str, what: &str) -> Verdict {
+        self.judged(master, what, Hold::Seat)
+    }
+
+    /// [`Self::membership`] for an existing seat, a committer or a Welcome's sender:
+    /// during a recovery the hold's KEEP also counts (8.8 class 1).
+    pub(crate) fn keeps(&self, master: &str, what: &str) -> Verdict {
+        self.judged(master, what, Hold::Keep)
+    }
+
+    fn judged(&self, master: &str, what: &str, need: Hold) -> Verdict {
         match self {
             GroupRules::Meeting { .. } => Verdict::Accept,
             GroupRules::Server { state, channel } => {
-                if !state.members.contains_key(master) || state.is_banned(master) {
+                let fold = if !state.members.contains_key(master) || state.is_banned(master) {
                     Verdict::Hold(format!("{what} {master} is not a member here"))
                 } else if channel.is_some_and(|c| !state.can_see_channel(master, c)) {
                     Verdict::Hold(format!("{what} {master} cannot see this channel"))
                 } else {
                     Verdict::Accept
+                };
+                if fold != Verdict::Accept && state.recovery_hold(*channel, master) >= need {
+                    return Verdict::Accept;
                 }
+                fold
             }
         }
     }
@@ -54,7 +70,7 @@ fn removable(leaf: &LeafView, committer: &LeafIdentity, facts: &CommitFacts, rul
     let Some(target) = leaf.bound() else { return true };
     target.master == committer.master
         || refused(target)
-        || rules.membership(&target.master, "") != Verdict::Accept
+        || rules.keeps(&target.master, "") != Verdict::Accept
         || repairs(&target.device, facts)
 }
 
@@ -137,7 +153,7 @@ pub(crate) fn commit_verdict(facts: &CommitFacts, rules: &GroupRules) -> Verdict
             Verdict::Refuse("committer is not the meeting's host".into())
         };
     }
-    if let hold @ Verdict::Hold(_) = rules.membership(&committer.master, "committer") {
+    if let hold @ Verdict::Hold(_) = rules.keeps(&committer.master, "committer") {
         return hold;
     }
     for add in facts.adds.iter().filter_map(LeafView::bound) {
@@ -183,7 +199,7 @@ pub(crate) fn welcome_verdict(facts: &WelcomeFacts, rules: &GroupRules, asked: b
         GroupRules::Meeting { host: Some(host) } if sender.master == *host => Verdict::Accept,
         GroupRules::Meeting { .. } => Verdict::Refuse("not sent by the meeting's host".into()),
         GroupRules::Server { .. } => {
-            if let hold @ Verdict::Hold(_) = rules.membership(&sender.master, "sender") {
+            if let hold @ Verdict::Hold(_) = rules.keeps(&sender.master, "sender") {
                 return hold;
             }
             // Every leaf, not only the sender's: whoever it seats reads what we post there.
@@ -411,7 +427,7 @@ pub(crate) fn stale_leaves(leaves: &[LeafView], ourselves: &str, rules: &GroupRu
 /// A bound leaf our view no longer seats: a revoked or disowned device, or a master
 /// who is not a current, unbanned member able to see a subgroup's channel.
 pub(crate) fn unseated(leaf: &LeafIdentity, rules: &GroupRules) -> bool {
-    refused(leaf) || rules.membership(&leaf.master, "") != Verdict::Accept
+    refused(leaf) || rules.keeps(&leaf.master, "") != Verdict::Accept
 }
 
 /// How long a sibling's ask for a leaf counts as its saying it holds no copy of the

@@ -163,6 +163,13 @@ pub(crate) struct DoorRooms {
     leaving: HashMap<String, (u64, Zeroizing<[u8; 32]>)>,
 }
 
+/// A `DoorGrant` frame handing door `n` of `room` (its `secret`) to device `to`, sealed
+/// from `our_device`.
+pub(crate) fn grant_frame(room: &str, n: u64, secret: &[u8], to: &str, our_device: &str) -> Option<Vec<u8>> {
+    let sealed = super::join_lock::peer_x25519(to).and_then(|key| sealed_box::seal(&key, GRANT_DOMAIN, &grant_aad(room, n, to, our_device), secret))?;
+    serde_json::to_vec(&HavenMessage::DoorGrant { server_id: room.to_string(), n, eph: sealed.eph, ct: sealed.ct }).ok()
+}
+
 fn grant_aad(server_id: &str, n: u64, asker: &str, granter: &str) -> Vec<u8> {
     [server_id.as_bytes(), b"\0", &n.to_le_bytes(), b"\0", asker.as_bytes(), b"\0", granter.as_bytes()].concat()
 }
@@ -178,9 +185,12 @@ impl DoorRooms {
     pub(crate) fn sync(&mut self, server_states: &ServerStates, local_master: &str, ws_cmd_tx: &WsCmdTx) {
         let mut kept: HashSet<&str> = HashSet::new();
         for (sid, state) in server_states {
-            if !crate::crdt::anchor::is_genesis_id(sid) || state.is_deleted() || !state.is_member(local_master) {
+            // During a recovery (8.8 class 3) the hold and a shell keep proving the door
+            // the pre-trigger state's lock names.
+            if !crate::crdt::anchor::is_genesis_id(sid) || state.is_deleted() || !state.held_as_member(local_master) {
                 continue;
             }
+            let state = state.liveness_state(local_master);
             let ours = state.join_lock.newest_door_id();
             if self.granted.get(sid).is_some_and(|(g, _, _)| ours.is_some_and(|(n, _)| n >= *g)) {
                 self.granted.remove(sid);
@@ -260,7 +270,7 @@ impl DoorRooms {
             return false;
         }
         self.hidden.insert(room.to_string());
-        if !server_states.get(room).is_some_and(|s| !s.is_deleted() && s.is_member(local_master)) {
+        if !server_states.get(room).is_some_and(|s| !s.is_deleted() && s.held_as_member(local_master)) {
             return false;
         }
         // Hand the socket our newest door again in case it never got it; one it
@@ -300,17 +310,21 @@ impl DoorRooms {
     ) -> bool {
         let Some(state) = server_states.get(room).filter(|_| server_id == room) else { return false };
         let master = speaks_for(asker)
-            .filter(|_| asker != our_device && !state.is_deleted() && state.is_member(local_master));
+            .filter(|_| asker != our_device && !state.is_deleted() && state.keeps_peer(local_master));
         let Some(master) = master else {
             hollow_log!("[HOLLOW-SECURITY] Not answering a door ask in {room} from {asker}: no device of a member");
             return false;
         };
-        if !state.is_member(&master) {
+        // During a recovery only SEAT is answered beside the fold (8.8 class 3).
+        if !state.seats_peer(&master) {
+            if state.in_recovery() {
+                return false;
+            }
             return olm.has_session(asker)
                 && reached(room, asker, sealed_at, ws_room_peers, our_device)
                 && self.tell_removal(room, asker, &master, state, ws_cmd_tx);
         }
-        let Some((n, _, secret)) = state.join_lock.newest_door() else { return false };
+        let Some((n, _, secret)) = state.liveness_state(local_master).join_lock.newest_door() else { return false };
         if !reached(room, asker, sealed_at, ws_room_peers, our_device) {
             return false;
         }
@@ -318,15 +332,9 @@ impl DoorRooms {
         if self.answered.get(&key).is_some_and(|(sent, t)| *sent == n && t.elapsed() < ASK_GAP) {
             return false;
         }
-        let Some(sealed) = super::join_lock::peer_x25519(asker)
-            .and_then(|to| sealed_box::seal(&to, GRANT_DOMAIN, &grant_aad(room, n, asker, our_device), secret.as_slice()))
-        else {
-            return false;
-        };
+        let Some(data) = grant_frame(room, n, secret.as_slice(), asker, our_device) else { return false };
         self.answered.retain(|_, (_, t)| t.elapsed() < ASK_GAP);
         self.answered.insert(key, (n, Instant::now()));
-        let grant = HavenMessage::DoorGrant { server_id: room.to_string(), n, eph: sealed.eph, ct: sealed.ct };
-        let Ok(data) = serde_json::to_vec(&grant) else { return false };
         hollow_log!("[HOLLOW-WS] Handing door {n} of {room} to {asker}, a member's device the relay hides");
         let _ = ws_cmd_tx.send(WsCommand::SendDirect { room_code: room.to_string(), target_peer: asker.to_string(), data });
         true
@@ -367,7 +375,7 @@ impl DoorRooms {
             ws_cmd_tx,
             asker,
             Some(room),
-            &HavenMessage::SyncResponse { server_id: room.to_string(), ops_json, nonce: None, page: None, digest: None, dg: Some(super::op_sync::DG) },
+            &HavenMessage::SyncResponse { server_id: room.to_string(), ops_json, nonce: None, page: None, digest: None, dg: Some(super::op_sync::DG), x: None },
             super::olm_lane::NoSession::Drop,
         );
         true
@@ -438,6 +446,7 @@ mod tests {
             author: id,
             payload,
             auth: None,
+            dev: None,
         };
         op.sign(&kp, &pk);
         op

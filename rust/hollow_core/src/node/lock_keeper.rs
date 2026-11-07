@@ -10,7 +10,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::time::{Duration, Instant};
 
-use crate::crdt::operations::{CrdtOp, CrdtPayload, JoinSecret};
+use crate::crdt::operations::{CrdtPayload, JoinSecret};
 use crate::crdt::server_state::ServerState;
 use crate::identity::native_identity::NativeKeypair;
 use super::join_lock::{self, LockLink, NewLock};
@@ -211,8 +211,6 @@ pub(crate) struct LockKeeper {
     /// Servers where our move ahead of removing a device of ours waits on the relay.
     pre_removal: BTreeSet<String>,
     resigned_at: HashMap<String, Instant>,
-    /// Whether this build's fold takes grants filed by device; only a yes is kept.
-    fold_takes_devices: bool,
     /// Offers in a row the relay did not end up holding, the relay's newest lock number
     /// at the first of them, and when the last one's wait ends.
     misses: HashMap<String, (u32, u64, Instant)>,
@@ -461,8 +459,7 @@ impl LockKeeper {
                 self.misses.remove(server_id);
                 self.due_since.remove(server_id);
                 self.stuck_since.remove(server_id);
-                let by_device = self.fold_takes_device_grants(server_id, state, &new.link);
-                Some(lock_op(server_id, &new, state, by_device, &mut self.authorities))
+                Some(lock_op(server_id, &new, state, &mut self.authorities))
             }
             Offer::Compact(base) if accepted && tip.as_ref() == Some(&base) => {
                 self.misses.remove(server_id);
@@ -552,7 +549,7 @@ impl LockKeeper {
                         .all(|d| state.join_lock.grants_for(&tip.change, &join_lock::grant_key(m, d)).is_empty())
             })
         });
-        if moved && (clean || !self.fold_takes_devices) {
+        if moved && clean {
             let now = Instant::now();
             if let Some(due) = self.removal_due.remove(server_id) {
                 for master in due.masters {
@@ -605,7 +602,13 @@ impl LockKeeper {
         // the owner as its own device's signature on our newest lock.
         let ours = lock.chain();
         if ours.last().is_some_and(|t| t.n > join_lock::FROZEN_FROM) {
-            // Only the fold can let a chain go below it (REQUESTS R2).
+            // A frozen chain is no lock: the owner starts over below the line (the fold
+            // takes the later base as the chain's start).
+            if is_owner {
+                let first = join_lock::mint_owner_base(server_id, 1, keys.master, nonce.as_deref(), keys.device)?;
+                hollow_log!("[HOLLOW-CRDT] Starting the join lock of {server_id} over: the chain we hold is frozen");
+                self.put(ws_cmd_tx, server_id, &owner, vec![first.link.clone()], Offer::Lock(first));
+            }
             return None;
         }
         let behind = match (view.last(), ours.last()) {
@@ -629,11 +632,10 @@ impl LockKeeper {
         let tip_held = lock.find(&tip).is_some();
         let tip_change = tip_held.then(|| open_change(server_id, state, &tip, keys)).flatten();
 
-        if let Some(change) = tip_change.as_ref() {
-            let by_device = self.fold_takes_device_grants(server_id, state, &tip);
-            if let Some(grants) = self.missing_grants(server_id, state, &tip, change, by_device) {
-                return Some(CrdtPayload::JoinLock { link: lock.find(&tip)?.clone(), door: None, grants });
-            }
+        if let Some(change) = tip_change.as_ref()
+            && let Some(grants) = self.missing_grants(server_id, state, &tip, change)
+        {
+            return Some(CrdtPayload::JoinLock { link: lock.find(&tip)?.clone(), door: None, grants });
         }
 
         if (lock.rotation_due() || removal_due) && state.holds_moderation(local) {
@@ -708,11 +710,11 @@ impl LockKeeper {
 
     /// Grants of the newest lock's change key for every counted device of every owner,
     /// admin and mod that has none, at most once a minute per server.
-    fn missing_grants(&mut self, server_id: &str, state: &ServerState, tip: &LockLink, change: &[u8; 32], by_device: bool) -> Option<BTreeMap<String, String>> {
+    fn missing_grants(&mut self, server_id: &str, state: &ServerState, tip: &LockLink, change: &[u8; 32]) -> Option<BTreeMap<String, String>> {
         if self.granted_at.get(server_id).is_some_and(|t| t.elapsed() < GRANT_GAP) {
             return None;
         }
-        let grants = lock_grants(server_id, state, &tip.change, change, by_device, &mut self.authorities, |key| {
+        let grants = lock_grants(server_id, state, &tip.change, change, &mut self.authorities, |key| {
             !state.join_lock.grants_for(&tip.change, key).is_empty()
         });
         if grants.is_empty() {
@@ -722,32 +724,6 @@ impl LockKeeper {
         hollow_log!("[HOLLOW-CRDT] Granting the join lock's change key of {server_id} to {} more", grants.len());
         Some(grants)
     }
-
-    /// Whether the fold takes grants filed by device (`join_lock::grant_key`). Until it
-    /// does (REQUESTS R1), a grant filed that way would refuse the whole op, so grants go
-    /// to masters the 0.13 way.
-    fn fold_takes_device_grants(&mut self, server_id: &str, state: &ServerState, link: &LockLink) -> bool {
-        if !self.fold_takes_devices {
-            self.fold_takes_devices = device_grant_probe(server_id, state, link);
-        }
-        self.fold_takes_devices
-    }
-}
-
-/// The fold's verdict on a grant filed by device for a held link, authored by a holder
-/// of moderation: the seam until the fold's own rule names device grants.
-fn device_grant_probe(server_id: &str, state: &ServerState, link: &LockLink) -> bool {
-    let Some(author) = state.moderation_masters().into_iter().next() else { return false };
-    let device = join_lock::grant_key(&author, &author);
-    let grant = format!("{}.{}", "A".repeat(44), "A".repeat(64));
-    let payload = CrdtPayload::JoinLock { link: link.clone(), door: None, grants: BTreeMap::from([(device, grant)]) };
-    let op = serde_json::json!({
-        "server_id": server_id,
-        "hlc": crate::crdt::hlc::HlcTimestamp { physical_ms: 0, counter: 0, actor: author.clone() },
-        "author": author,
-        "payload": payload,
-    });
-    serde_json::from_value::<CrdtOp>(op).is_ok_and(|op| state.op_allowed(&op))
 }
 
 /// The devices of `master` our resolver places, for an identity whose roster we do not
@@ -774,7 +750,6 @@ fn lock_grants(
     state: &ServerState,
     change: &str,
     secret: &[u8; 32],
-    by_device: bool,
     authorities: &mut Authorities,
     held: impl Fn(&str) -> bool,
 ) -> BTreeMap<String, String> {
@@ -783,23 +758,15 @@ fn lock_grants(
     masters.sort_by_key(|m| Some(m) != owner.as_ref());
     let mut grants = BTreeMap::new();
     for master in masters {
-        let wanted: Vec<(String, Option<String>)> = if by_device {
-            authorities.grant_devices(&master).into_iter().map(|d| (join_lock::grant_key(&master, &d), Some(d))).collect()
-        } else {
-            vec![(master.clone(), None)]
-        };
-        for (key, device) in wanted {
+        for device in authorities.grant_devices(&master) {
+            let key = join_lock::grant_key(&master, &device);
             if grants.len() >= GRANTS_PER_OP {
                 return grants;
             }
             if held(&key) {
                 continue;
             }
-            let grant = match device {
-                Some(d) => join_lock::seal_grant(server_id, change, &master, &d, secret).map(|(_, g)| g),
-                None => join_lock::seal_master_grant(server_id, change, &master, secret),
-            };
-            if let Some(grant) = grant {
+            if let Some((_, grant)) = join_lock::seal_grant(server_id, change, &master, &device, secret) {
                 grants.insert(key, grant);
             }
         }
@@ -835,10 +802,7 @@ pub(crate) fn sign_ring_control(
 fn open_change(server_id: &str, state: &ServerState, link: &LockLink, keys: LockKeys) -> Option<zeroize::Zeroizing<[u8; 32]>> {
     let master = keys.master.peer_id();
     let ours = join_lock::grant_key(&master, &keys.device.peer_id());
-    let by_device = state.join_lock.grants_for(&link.change, &ours).iter().find_map(|g| join_lock::open_grant(server_id, &link.change, &ours, keys.device, g));
-    by_device.or_else(|| {
-        state.join_lock.grants_for(&link.change, &master).iter().find_map(|g| join_lock::open_grant(server_id, &link.change, &master, keys.master, g))
-    })
+    state.join_lock.grants_for(&link.change, &ours).iter().find_map(|g| join_lock::open_grant(server_id, &link.change, &ours, keys.device, g))
 }
 
 /// The next lock after the newest link of the relay's chain, short of its tip, whose
@@ -892,11 +856,11 @@ pub(crate) fn door_sends(server_id: &str, door: &str) -> Vec<Vec<String>> {
 
 /// The op for a lock the relay took: its door for every member, its change key for
 /// every counted device of every owner, admin and mod.
-fn lock_op(server_id: &str, new: &NewLock, state: &ServerState, by_device: bool, authorities: &mut Authorities) -> CrdtPayload {
+fn lock_op(server_id: &str, new: &NewLock, state: &ServerState, authorities: &mut Authorities) -> CrdtPayload {
     CrdtPayload::JoinLock {
         link: new.link.clone(),
         door: Some(JoinSecret(hex::encode(new.door.as_slice()))),
-        grants: lock_grants(server_id, state, &new.link.change, &new.change, by_device, authorities, |_| false),
+        grants: lock_grants(server_id, state, &new.link.change, &new.change, authorities, |_| false),
     }
 }
 

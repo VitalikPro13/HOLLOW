@@ -150,6 +150,8 @@ pub(crate) struct Judge<'a> {
     /// What an unstamped ancestor decided (`ServerState::cp_floor`): every op at or
     /// below it, as `covers` above.
     pub floor: Option<&'a HlcTimestamp>,
+    /// The base's parent's `cp_retired`: a retire either lists is decided (section 8.2).
+    pub parent_retired: &'a [String],
 }
 
 /// Whether a floor decides `payload` once it is dated at or below it: anything but the
@@ -257,6 +259,12 @@ impl Judge<'_> {
             P::EmojiAdded { name, .. } | P::EmojiRemoved { name } => reg_at(s.stamps.emotes.get(name)),
             P::StickerAdded { hash, .. } | P::StickerRemoved { hash } => reg_at(s.stamps.stickers.get(hash)),
             P::JoinLock { link, door, grants } => s.join_lock.decides(link, door.as_ref(), grants, at),
+            P::SettleSign { .. } => false,
+            P::FloorMark { .. } => false,
+            P::DeviceRetired { .. } => {
+                let id = hex::encode(op.content_hash());
+                s.cp_retired.contains(&id) || self.parent_retired.contains(&id)
+            }
         }
     }
 

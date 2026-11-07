@@ -123,13 +123,27 @@ pub fn roster_status() -> Result<RosterStatus, String> {
 /// Devices `f` stopped counting (`roster_book::lost_by_own_change`): the node drops
 /// their sessions and moves the join locks they could extend.
 fn changed(c: &Ctx, f: impl FnOnce(&Ctx) -> Result<(), String>) -> Result<(), String> {
-    let before = crate::node::roster_book::own(&c.master.peer_id(), &c.db_path, &c.db_passphrase);
-    f(c)?;
-    let after = crate::node::roster_book::own(&c.master.peer_id(), &c.db_path, &c.db_passphrase);
-    let newly_revoked = crate::node::roster_book::lost_by_own_change(before.as_ref(), after.as_ref(), &c.device.peer_id());
+    let master = c.master.peer_id();
+    let store = MessageStore::open(&c.db_path, &c.db_passphrase)?;
+    let held = crate::node::authority_view::hold_own(&store, &master);
+    // Settled by the node, or at its next start when it is not running or stops first.
+    let change = crate::node::settle_owed::TypedChange::begin(&store, &master, &c.db_path, &c.db_passphrase);
+    if let Err(e) = f(c) {
+        change.abort(&store);
+        if held {
+            crate::node::authority_view::release_own(&store, &master);
+        }
+        return Err(e);
+    }
+    let newly_revoked = change.landed(&store, &master, &c.device.peer_id(), &c.db_path, &c.db_passphrase);
     erase_stored_phrase(&c.db_path, &c.db_passphrase);
+    let dropped = !newly_revoked.is_empty();
     // A node not started yet reads the roster at its start; nothing is lost.
-    let _ = super::network::send_node_command(NodeCommand::RosterChanged { newly_revoked });
+    let sent = super::network::send_node_command(NodeCommand::RosterChanged { newly_revoked }).is_ok();
+    // With devices dropped, the node lets the hold go once it has read what it held.
+    if held && !(dropped && sent) {
+        crate::node::authority_view::release_own(&store, &master);
+    }
     Ok(())
 }
 

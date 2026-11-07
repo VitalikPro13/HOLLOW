@@ -71,6 +71,18 @@ pub struct CrdtOp {
     /// indistinguishable from the unknown payload variants the tolerant parse skips.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<Box<CrdtAuth>>,
+    /// Which device of the author wrote it (DEVICE_PROOF_DESIGN section 6). Outside the
+    /// master-signed bytes, so the content id ignores it; a proof that fails reads as none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dev: Option<Box<DevProof>>,
+}
+
+/// A device's proof over an op: its key over `hollow-crdt-dev1:` + the op's master-signed
+/// payload. It proves which device wrote the op, never that the device may.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DevProof {
+    pub device: String,
+    pub sig: String,
 }
 
 impl CrdtOp {
@@ -102,6 +114,29 @@ impl CrdtOp {
         }));
     }
 
+    /// Add the device proof of `device`, the keypair of the device whose lane minted the clock.
+    pub fn sign_device(&mut self, device: &NativeKeypair) {
+        let sig = device.sign(dev_payload(&self.signing_payload()).as_bytes());
+        self.dev = Some(Box::new(DevProof {
+            device: device.peer_id(),
+            sig: base64::engine::general_purpose::STANDARD.encode(sig),
+        }));
+    }
+
+    /// The device this op's proof names, when the proof verifies: the signature checks
+    /// under the key the id derives, and the clock sits in that device's lane.
+    pub fn proven_device(&self) -> Option<&str> {
+        let dev = self.dev.as_deref()?;
+        (dev_proof_verifies(dev, &self.hlc, &self.signing_payload())).then_some(dev.device.as_str())
+    }
+
+    /// Drop a proof that does not verify, so a stored copy only ever carries a good one.
+    pub fn strip_bad_proof(&mut self) {
+        if self.dev.is_some() && self.proven_device().is_none() {
+            self.dev = None;
+        }
+    }
+
     /// Bind this op to its claimed `author`: the key must derive that peer_id, the clock
     /// must name it, and the signature must verify over the signing payload. REJECTS,
     /// never logs and continues.
@@ -117,6 +152,22 @@ pub(crate) fn signing_payload(server_id: &str, hlc: &HlcTimestamp, author: &str,
         "hollow-crdt1:{}:{}:{}:{}:{}:{}",
         server_id, hlc.physical_ms, hlc.counter, hlc.actor, author, payload_json,
     )
+}
+
+fn dev_payload(signing_payload: &str) -> String {
+    format!("hollow-crdt-dev1:{signing_payload}")
+}
+
+pub(crate) fn dev_proof_verifies(dev: &DevProof, hlc: &HlcTimestamp, signing_payload: &str) -> bool {
+    use base64::Engine as _;
+    if hlc.counter % super::hlc::LANES != super::hlc::lane_of(&dev.device) {
+        return false;
+    }
+    let Some(key) = crate::crypto::safety_number::pubkey_from_peer_id(&dev.device) else { return false };
+    let Ok(sig) = base64::engine::general_purpose::STANDARD.decode(&dev.sig) else { return false };
+    let Ok(sig) = <[u8; 64]>::try_from(sig.as_slice()) else { return false };
+    let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&key) else { return false };
+    vk.verify_strict(dev_payload(signing_payload).as_bytes(), &ed25519_dalek::Signature::from_bytes(&sig)).is_ok()
 }
 
 fn verify_signed(author: &str, hlc: &HlcTimestamp, auth: Option<&CrdtAuth>, signed: &str) -> Result<(), OpReject> {
@@ -174,6 +225,8 @@ pub fn read_op(item: &str) -> ReadOp {
         payload: &'a serde_json::value::RawValue,
         #[serde(default)]
         auth: Option<Box<CrdtAuth>>,
+        #[serde(default)]
+        dev: Option<Box<DevProof>>,
     }
     let Ok(shape) = serde_json::from_str::<Shape>(item) else { return ReadOp::Junk };
     let raw = shape.payload.get();
@@ -186,7 +239,9 @@ pub fn read_op(item: &str) -> ReadOp {
         }
     }
     match parsed {
-        Some(payload) => ReadOp::Op(CrdtOp { server_id: shape.server_id, hlc: shape.hlc, author: shape.author, payload, auth: shape.auth }),
+        Some(payload) => {
+            ReadOp::Op(CrdtOp { server_id: shape.server_id, hlc: shape.hlc, author: shape.author, payload, auth: shape.auth, dev: shape.dev })
+        }
         None => ReadOp::Junk,
     }
 }
@@ -532,6 +587,172 @@ pub enum CrdtPayload {
     StickerRemoved {
         hash: String,
     },
+
+    // Device proof (DEVICE_PROOF_DESIGN section 8.2)
+    /// `device` stops counting: the author's ops it names (by clock and content id) stay
+    /// counted as that device wrote them. Folds nothing; it is read by the verdict.
+    DeviceRetired {
+        device: String,
+        /// At most `MAX_RETIRED_REFS`, strictly sorted by (ms, c, h).
+        ops: Vec<OpRef>,
+        /// The newest post window of `device` (section 13).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        posts_until_ms: Option<i64>,
+        /// A member's lost-or-stolen retire only: its restore checkpoint (section 8.3). It
+        /// endorses nothing.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        restore: Option<String>,
+    },
+    /// One device's signature of a settling (section 7, RC32-4): owner-authored, its
+    /// stamp carries exactly that device's signature. Never folded; stored with the
+    /// stamp's parent checkpoint as the settling's mark.
+    SettleSign {
+        stamp: SettleStamp,
+    },
+    /// A member's record of the server as it held it when it heard of a recovery that
+    /// dropped the only checkpoint writer (section 8.8): names checkpoint `cp` (content id
+    /// hex), which rides along as a pin. Never folded; the oldest of the counted marks on
+    /// one line is the floor.
+    FloorMark {
+        cp: String,
+    },
+}
+
+/// A settling's stamp (section 7): the settling id covers every field before `sigs`, and
+/// each signature is a device key over that id, so a stamp verifies without the
+/// checkpoint's state and another device can co-sign the same settling.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettleStamp {
+    pub server: String,
+    /// The settling's parent checkpoint, content id hex.
+    pub parent: String,
+    pub generation: u64,
+    /// The dropped devices, sorted.
+    pub devices: Vec<String>,
+    pub t_ms: i64,
+    #[serde(default)]
+    pub sigs: Vec<SettleSig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettleSig {
+    pub device: String,
+    pub sig: String,
+}
+
+/// Devices one settling may drop: the device and the vouchees removed with it (8.6).
+pub const MAX_SETTLE_DEVICES: usize = 64;
+
+impl SettleStamp {
+    /// The settling id: SHA-256 of `hollow-settle-id1\n` and the fields before `sigs`, as
+    /// one JSON array (no field can shift into another).
+    pub fn id(&self) -> String {
+        use sha2::Digest;
+        let fields = serde_json::to_string(&(&self.server, &self.parent, self.generation, &self.devices, self.t_ms)).unwrap_or_default();
+        hex::encode(sha2::Sha256::digest(format!("hollow-settle-id1\n{fields}").as_bytes()))
+    }
+
+    fn signed(id: &str) -> String {
+        format!("hollow-settle1\n{id}")
+    }
+
+    /// Add `device`'s signature over the settling id.
+    pub fn sign(&mut self, device: &NativeKeypair) {
+        let sig = device.sign(Self::signed(&self.id()).as_bytes());
+        self.sigs.push(SettleSig { device: device.peer_id(), sig: base64::engine::general_purpose::STANDARD.encode(sig) });
+    }
+
+    /// The stamp with only `device`'s signature, as one `SettleSign` carries it.
+    pub fn signed_by(&self, device: &NativeKeypair) -> Self {
+        let mut one = Self { sigs: Vec::new(), ..self.clone() };
+        one.sign(device);
+        one
+    }
+
+    /// Whether `sig` verifies under the key its device id derives.
+    pub fn sig_verifies(&self, sig: &SettleSig) -> bool {
+        let Some(key) = crate::crypto::safety_number::pubkey_from_peer_id(&sig.device) else { return false };
+        let Ok(raw) = base64::engine::general_purpose::STANDARD.decode(&sig.sig) else { return false };
+        let Ok(raw) = <[u8; 64]>::try_from(raw.as_slice()) else { return false };
+        let Ok(vk) = ed25519_dalek::VerifyingKey::from_bytes(&key) else { return false };
+        vk.verify_strict(Self::signed(&self.id()).as_bytes(), &ed25519_dalek::Signature::from_bytes(&raw)).is_ok()
+    }
+
+    /// The shape every replica requires: a 64-hex parent, 1 to `MAX_SETTLE_DEVICES`
+    /// strictly sorted devices, a time not before 0.
+    pub fn well_formed(&self) -> bool {
+        self.parent.len() == 64
+            && self.parent.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+            && !self.devices.is_empty()
+            && self.devices.len() <= MAX_SETTLE_DEVICES
+            && self.devices.windows(2).all(|w| w[0] < w[1])
+            && self.t_ms >= 0
+    }
+}
+
+/// One op a `DeviceRetired` names: its clock and content id (hex).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct OpRef {
+    pub ms: u64,
+    pub c: u32,
+    pub h: String,
+}
+
+impl OpRef {
+    #[cfg(test)]
+    pub fn of(op: &CrdtOp) -> Self {
+        Self { ms: op.hlc.physical_ms, c: op.hlc.counter, h: hex::encode(op.content_hash()) }
+    }
+
+    /// Whether `op` (content id `hash`) is the op this names.
+    pub fn names(&self, op: &CrdtOp, hash: &[u8; 32]) -> bool {
+        self.ms == op.hlc.physical_ms && self.c == op.hlc.counter && self.h == hex::encode(hash)
+    }
+}
+
+/// Refs one `DeviceRetired` carries (section 8.2).
+pub const MAX_RETIRED_REFS: usize = 256;
+
+/// Refs a checkpoint's `cp_endorsed` carries in all (section 14).
+pub const MAX_ENDORSED_REFS: usize = 4_096;
+
+/// One retire's endorsement a checkpoint carries (section 8.2): the retire's content id,
+/// its author identity (whose ops it names), the device that signed it, the retired
+/// device, and the named ops the carrying checkpoint does not decide.
+/// A device's post window (DEVICE_PROOF_DESIGN 8.2, section 13): its posts dated at or
+/// before `until_ms` keep counting after the removal. Set by the retire (or settling)
+/// `dr` that device `by` of `author` signed; `author` is a build note, as on
+/// [`Endorsement`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PostsUntil {
+    #[serde(default)]
+    pub author: String,
+    #[serde(default)]
+    pub device: String,
+    #[serde(default)]
+    pub until_ms: i64,
+    #[serde(default)]
+    pub dr: String,
+    #[serde(default)]
+    pub by: String,
+}
+
+/// Post windows a checkpoint carries per author identity and in all (section 14).
+pub const MAX_POSTS_UNTIL_PER_AUTHOR: usize = 16;
+pub const MAX_POSTS_UNTIL: usize = 4_096;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Endorsement {
+    #[serde(default)]
+    pub dr: String,
+    #[serde(default)]
+    pub author: String,
+    #[serde(default)]
+    pub by: String,
+    #[serde(default)]
+    pub device: String,
+    #[serde(default)]
+    pub refs: Vec<OpRef>,
 }
 
 /// What a tolerant parse kept and what it skipped.
@@ -766,6 +987,7 @@ mod tests {
                 access: true,
             },
             auth: None,
+            dev: None,
         };
         let json = serde_json::to_string(&op).unwrap();
         let deserialized: CrdtOp = serde_json::from_str(&json).unwrap();
@@ -790,6 +1012,7 @@ mod tests {
             author: id,
             payload,
             auth: None,
+            dev: None,
         };
         op.sign(&kp, &pk);
         op
@@ -858,6 +1081,7 @@ mod tests {
             author: "a".into(),
             payload: CrdtPayload::ServerRenamed { new_name: "x".into() },
             auth: None,
+            dev: None,
         };
         assert_eq!(op.verify_author(), Err(OpReject::MissingSignature));
         // …and an op serialized before signatures existed parses into exactly

@@ -141,8 +141,10 @@ fn ask_owner(server_id: &str, nonce: u64) -> HavenMessage {
             from: None,
             ranges: Vec::new(),
             round: 0,
+            rs: None,
         }),
         dg: Some(super::op_sync::DG),
+        x: None,
     }
 }
 
@@ -557,6 +559,7 @@ mod tests {
             author: id,
             payload,
             auth: None,
+            dev: None,
         };
         op.sign(&kp, &pk);
         op

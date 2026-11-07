@@ -194,6 +194,16 @@ pub(crate) struct ChannelRowOwner {
     pub public_key: Option<String>,
 }
 
+/// The device proofs of the changes riding some posts ([`MessageStore::change_proofs`]).
+#[derive(Default)]
+pub(crate) struct ChangeProofs {
+    pub deletions: HashMap<String, crate::crdt::operations::DevProof>,
+    pub cards: HashMap<String, crate::node::types::CardProof>,
+    /// (message, emoji, reactor).
+    pub reactions: HashMap<(String, String, String), crate::crdt::operations::DevProof>,
+    pub files: HashMap<String, crate::crdt::operations::DevProof>,
+}
+
 /// A stored file metadata entry.
 pub(crate) struct StoredFile {
     pub file_id: String,
@@ -357,8 +367,29 @@ pub struct OverlayPersonRow {
 /// Run one idempotent migration statement in its own batch, ignoring the "already
 /// exists" error a re-run produces. Never batch several: the first already-applied
 /// statement would abort the rest.
+/// The local clock a first store or fold is dated by.
+fn seen_now() -> i64 {
+    crate::crdt::hlc::wall_clock_ms().min(i64::MAX as u64) as i64
+}
+
 pub(crate) fn migrate(conn: &Connection, sql: &str) {
     conn.execute_batch(sql).unwrap_or(());
+}
+
+/// The upgrade seed of `cp_seen` (R3-4): every checkpoint held before 0.14, the base and
+/// its parent among them, first folded at 0.
+fn seed_cp_seen(conn: &Connection) {
+    let Ok(mut stmt) = conn.prepare("SELECT server_id, op_json FROM crdt_ops WHERE op_json LIKE '%\"ServerCheckpoint\"%'") else { return };
+    let Ok(rows) = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))) else { return };
+    let held: Vec<(String, String)> = rows
+        .filter_map(Result::ok)
+        .filter_map(|(sid, json)| serde_json::from_str::<CrdtOp>(&json).ok().map(|op| (sid, op)))
+        .filter(|(_, op)| matches!(op.payload, crate::crdt::operations::CrdtPayload::ServerCheckpoint { .. }))
+        .map(|(sid, op)| (sid, hex::encode(op.content_hash())))
+        .collect();
+    for (sid, id) in held {
+        let _ = conn.execute("INSERT OR IGNORE INTO cp_seen (server_id, content_id, first_fold_ms) VALUES (?1, ?2, 0)", params![sid, id]);
+    }
 }
 
 /// One stored row per message id; rows from before ids carry none and are not keyed.
@@ -939,6 +970,13 @@ thread_local! {
 }
 
 impl MessageStore {
+    /// The database file this store reads, as SQLite names it.
+    pub(crate) fn db_path(&self) -> Option<String> {
+        self.conn.path().map(str::to_string)
+    }
+}
+
+impl MessageStore {
     /// Open (or create) an encrypted database at `path` using `passphrase`.
     pub fn open(path: &str, passphrase: &str) -> Result<Self, String> {
         #[cfg(test)]
@@ -1131,6 +1169,38 @@ impl MessageStore {
             "CREATE INDEX IF NOT EXISTS idx_crdt_ops_server ON crdt_ops (server_id, hlc_ms)")?;
         // 0.14: a row the fold refuses now is parked (kept, not folded) until this epoch ms.
         migrate(conn, "ALTER TABLE crdt_ops ADD COLUMN parked_until INTEGER");
+        // 0.14 (DEVICE_PROOF_DESIGN section 7): when this replica first stored a row, and
+        // first folded a checkpoint as its base. Rows and checkpoints from before the
+        // upgrade read 0, "before any T" (R3-4).
+        migrate(conn, "ALTER TABLE crdt_ops ADD COLUMN seen_ms INTEGER NOT NULL DEFAULT 0");
+        // The content id `seen_ms` dates: other content at the key is first stored anew.
+        migrate(conn, "ALTER TABLE crdt_ops ADD COLUMN content_h TEXT NOT NULL DEFAULT ''");
+        // 0.14 (section 7, N6): when each of our own kept rows was first dominated.
+        ddl(conn, "own_kept table",
+            "CREATE TABLE IF NOT EXISTS own_kept (
+                server_id   TEXT NOT NULL,
+                author      TEXT NOT NULL,
+                hlc_ms      INTEGER NOT NULL,
+                hlc_counter INTEGER NOT NULL,
+                since_ms    INTEGER NOT NULL,
+                PRIMARY KEY (server_id, author, hlc_ms, hlc_counter)
+            )")?;
+        ddl(conn, "floor_pending table",
+            "CREATE TABLE IF NOT EXISTS floor_pending (
+                server_id TEXT PRIMARY KEY,
+                row_json  TEXT NOT NULL
+            )")?;
+        let upgrade = !table_exists(conn, "cp_seen");
+        ddl(conn, "cp_seen table",
+            "CREATE TABLE IF NOT EXISTS cp_seen (
+                server_id     TEXT NOT NULL,
+                content_id    TEXT NOT NULL,
+                first_fold_ms INTEGER NOT NULL,
+                PRIMARY KEY (server_id, content_id)
+            )")?;
+        if upgrade {
+            seed_cp_seen(conn);
+        }
 
         ddl(conn, "hlc_state table",
             "CREATE TABLE IF NOT EXISTS hlc_state (
@@ -1395,6 +1465,14 @@ impl MessageStore {
         // bound by the v3 message signature.
         migrate(conn, "ALTER TABLE messages ADD COLUMN album_id TEXT;");
         migrate(conn, "ALTER TABLE channel_messages ADD COLUMN album_id TEXT;");
+        // The device proof of a post (DEVICE_PROOF_DESIGN section 13), served back with it.
+        migrate(conn, "ALTER TABLE channel_messages ADD COLUMN dev_device TEXT;");
+        migrate(conn, "ALTER TABLE channel_messages ADD COLUMN dev_sig TEXT;");
+        // Device proofs of the changes riding a post (section 13), JSON, served back.
+        migrate(conn, "ALTER TABLE channel_messages ADD COLUMN lp_dev TEXT;");
+        migrate(conn, "ALTER TABLE message_deletions ADD COLUMN dev TEXT;");
+        migrate(conn, "ALTER TABLE message_reactions ADD COLUMN dev TEXT;");
+        migrate(conn, "ALTER TABLE files ADD COLUMN meta_dev TEXT;");
 
         // updated_at tracks the last edit or delete, so sync queries catch changes to old
         // messages they would otherwise miss.
@@ -1852,6 +1930,18 @@ impl MessageStore {
                 master_peer_id TEXT NOT NULL,
                 device_peer_id TEXT NOT NULL,
                 PRIMARY KEY (master_peer_id, device_peer_id)
+            )")?;
+        // Co-members' rosters a member delivered in a sync answer or a checkpoint
+        // (DEVICE_PROOF_DESIGN section 9, H3): never the book, never the resolver, read
+        // only by server authority; one row per (master, recovery key).
+        ddl(conn, "server_rosters table",
+            "CREATE TABLE IF NOT EXISTS server_rosters (
+                master_peer_id TEXT NOT NULL,
+                r_pub          TEXT NOT NULL,
+                json           TEXT NOT NULL,
+                bytes          INTEGER NOT NULL,
+                last_needed_ms INTEGER NOT NULL,
+                PRIMARY KEY (master_peer_id, r_pub)
             )")?;
 
         // Local-only, unsigned human labels for devices (Step 8 Devices panel). NOT
@@ -3216,6 +3306,15 @@ impl MessageStore {
         self.conn
             .execute("DELETE FROM crdt_ops WHERE server_id = ?1", params![server_id])
             .map_err(|e| format!("Failed to delete server ops: {e}"))?;
+        self.conn
+            .execute("DELETE FROM cp_seen WHERE server_id = ?1", params![server_id])
+            .map_err(|e| format!("Failed to delete first folds: {e}"))?;
+        self.conn
+            .execute("DELETE FROM own_kept WHERE server_id = ?1", params![server_id])
+            .map_err(|e| format!("Failed to delete own rows' dates: {e}"))?;
+        self.conn
+            .execute("DELETE FROM floor_pending WHERE server_id = ?1", params![server_id])
+            .map_err(|e| format!("Failed to delete the recovery row: {e}"))?;
         // A hole would ask the server's members for history after we left it; what a clear
         // counted goes with it (a floor without it asks as a device whose history begins later).
         for table in ["channel_sync_holes", "channel_cleared_senders", "channel_cleared_tail", "channel_cleared_days"] {
@@ -3232,14 +3331,16 @@ impl MessageStore {
             serde_json::to_string(op).map_err(|e| format!("Failed to serialize CrdtOp: {e}"))?;
         self.conn
             .execute(
-                "INSERT OR IGNORE INTO crdt_ops (server_id, hlc_ms, hlc_counter, author, op_json)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT OR IGNORE INTO crdt_ops (server_id, hlc_ms, hlc_counter, author, op_json, seen_ms, content_h)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
                     op.server_id,
                     op.hlc.physical_ms as i64,
                     op.hlc.counter as i64,
                     op.author,
                     op_json,
+                    seen_now(),
+                    hex::encode(op.content_hash()),
                 ],
             )
             .map_err(|e| format!("Failed to insert crdt_op: {e}"))?;
@@ -3265,10 +3366,14 @@ impl MessageStore {
             let op_json = serde_json::to_string(op).map_err(|e| format!("Failed to serialize CrdtOp: {e}"))?;
             self.conn
                 .execute(
-                    "INSERT INTO crdt_ops (server_id, hlc_ms, hlc_counter, author, op_json, parked_until)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                    "INSERT INTO crdt_ops (server_id, hlc_ms, hlc_counter, author, op_json, parked_until, seen_ms, content_h)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
                      ON CONFLICT(server_id, hlc_ms, hlc_counter, author)
-                     DO UPDATE SET op_json = excluded.op_json, parked_until = excluded.parked_until",
+                     DO UPDATE SET op_json = excluded.op_json, parked_until = excluded.parked_until,
+                         seen_ms = CASE WHEN crdt_ops.content_h = excluded.content_h
+                                          OR (crdt_ops.content_h = '' AND crdt_ops.op_json = excluded.op_json)
+                                        THEN crdt_ops.seen_ms ELSE excluded.seen_ms END,
+                         content_h = excluded.content_h",
                     params![
                         delta.server_id,
                         op.hlc.physical_ms as i64,
@@ -3276,9 +3381,48 @@ impl MessageStore {
                         op.author,
                         op_json,
                         parked.map(|p| p.min(i64::MAX as u64) as i64),
+                        seen_now(),
+                        hex::encode(op.content_hash()),
                     ],
                 )
                 .map_err(|e| format!("Failed to write crdt_op: {e}"))?;
+        }
+        if let Some(base) = &delta.base {
+            self.conn
+                .execute(
+                    "INSERT OR IGNORE INTO cp_seen (server_id, content_id, first_fold_ms) VALUES (?1, ?2, ?3)",
+                    params![delta.server_id, base, seen_now()],
+                )
+                .map_err(|e| format!("Failed to note a first fold: {e}"))?;
+        }
+        for ((author, ms, counter), since) in &delta.own_since {
+            let key = params![delta.server_id, author, *ms as i64, *counter as i64];
+            match since {
+                Some(at) => self.conn.execute(
+                    "INSERT OR REPLACE INTO own_kept (server_id, author, hlc_ms, hlc_counter, since_ms) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![delta.server_id, author, *ms as i64, *counter as i64, (*at).min(i64::MAX as u64) as i64],
+                ),
+                None => self.conn.execute("DELETE FROM own_kept WHERE server_id = ?1 AND author = ?2 AND hlc_ms = ?3 AND hlc_counter = ?4", key),
+            }
+            .map_err(|e| format!("Failed to date an own row: {e}"))?;
+        }
+        match &delta.recovery {
+            Some(Some(row)) => self.conn.execute(
+                "INSERT OR REPLACE INTO floor_pending (server_id, row_json) VALUES (?1, ?2)",
+                params![delta.server_id, row],
+            ),
+            Some(None) => self.conn.execute("DELETE FROM floor_pending WHERE server_id = ?1", params![delta.server_id]),
+            None => Ok(0),
+        }
+        .map_err(|e| format!("Failed to write the recovery row: {e}"))?;
+        if let Some(keep) = &delta.seen_keep {
+            let keep = serde_json::to_string(keep).map_err(|e| format!("Failed to list kept first folds: {e}"))?;
+            self.conn
+                .execute(
+                    "DELETE FROM cp_seen WHERE server_id = ?1 AND content_id NOT IN (SELECT value FROM json_each(?2))",
+                    params![delta.server_id, keep],
+                )
+                .map_err(|e| format!("Failed to rotate first folds: {e}"))?;
         }
         for (author, hlc) in &delta.dropped {
             self.conn
@@ -3289,6 +3433,72 @@ impl MessageStore {
                 .map_err(|e| format!("Failed to delete crdt_op: {e}"))?;
         }
         Ok(())
+    }
+
+    /// When this replica first folded checkpoint `content_id` as its base (0: before
+    /// the 0.14 upgrade).
+    pub fn cp_first_fold_ms(&self, server_id: &str, content_id: &str) -> Option<u64> {
+        self.conn
+            .query_row(
+                "SELECT first_fold_ms FROM cp_seen WHERE server_id = ?1 AND content_id = ?2",
+                params![server_id, content_id],
+                |r| r.get::<_, i64>(0),
+            )
+            .ok()
+            .map(|ms| ms.max(0) as u64)
+    }
+
+    /// The server's `floor_pending` row (section 8.8), local and never served.
+    pub fn floor_pending(&self, server_id: &str) -> Option<String> {
+        self.conn.query_row("SELECT row_json FROM floor_pending WHERE server_id = ?1", params![server_id], |r| r.get(0)).ok()
+    }
+
+    /// Every first-fold record of a server (content id hex -> ms; 0 before the upgrade).
+    pub fn cp_first_folds(&self, server_id: &str) -> HashMap<String, u64> {
+        let Ok(mut stmt) = self.conn.prepare("SELECT content_id, first_fold_ms FROM cp_seen WHERE server_id = ?1") else {
+            return HashMap::new();
+        };
+        stmt.query_map(params![server_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?.max(0) as u64)))
+            .map(|rows| rows.filter_map(Result::ok).collect())
+            .unwrap_or_default()
+    }
+
+    /// When this replica first stored each row of a server, by (author, clock ms,
+    /// counter); 0 for rows from before the 0.14 upgrade.
+    /// When each of our own kept rows of a server was first dominated (`ServerState.own_since`).
+    pub fn own_kept_since(&self, server_id: &str) -> HashMap<(String, u64, u32), u64> {
+        let Ok(mut stmt) = self.conn.prepare("SELECT author, hlc_ms, hlc_counter, since_ms FROM own_kept WHERE server_id = ?1") else {
+            return HashMap::new();
+        };
+        let rows = stmt.query_map(params![server_id], |r| {
+            Ok((
+                (r.get::<_, String>(0)?, r.get::<_, i64>(1)?.max(0) as u64, r.get::<_, i64>(2)?.clamp(0, i64::from(u32::MAX)) as u32),
+                r.get::<_, i64>(3)?.max(0) as u64,
+            ))
+        });
+        rows.map(|r| r.filter_map(Result::ok).collect()).unwrap_or_default()
+    }
+
+    /// When this replica first stored any op of a server (0: before the 0.14 upgrade).
+    pub fn op_first_seen_ms(&self, server_id: &str) -> Option<u64> {
+        self.conn
+            .query_row("SELECT MIN(seen_ms) FROM crdt_ops WHERE server_id = ?1", params![server_id], |r| r.get::<_, Option<i64>>(0))
+            .ok()
+            .flatten()
+            .map(|ms| ms.max(0) as u64)
+    }
+
+    pub fn op_seen_ms(&self, server_id: &str) -> Result<HashMap<(String, u64, u32), u64>, String> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT author, hlc_ms, hlc_counter, seen_ms FROM crdt_ops WHERE server_id = ?1")
+            .map_err(|e| format!("Failed to prepare seen_ms query: {e}"))?;
+        let rows = stmt
+            .query_map(params![server_id], |r| {
+                Ok(((r.get::<_, String>(0)?, r.get::<_, i64>(1)?.max(0) as u64, r.get::<_, i64>(2)?.clamp(0, i64::from(u32::MAX)) as u32), r.get::<_, i64>(3)?.max(0) as u64))
+            })
+            .map_err(|e| format!("Failed to query seen_ms: {e}"))?;
+        rows.collect::<Result<_, _>>().map_err(|e| format!("Failed to read seen_ms: {e}"))
     }
 
     /// Every stored row of a server with its parked mark, in clock order: what
@@ -3506,6 +3716,163 @@ impl MessageStore {
         } else {
             ChannelInsert::Duplicate
         })
+    }
+
+    /// Keep a post's device proof on its row; a row keeps the first proof it got, and the
+    /// caller writes one only for a row it just stored.
+    pub(crate) fn set_channel_post_proof(&self, message_id: &str, dev: &crate::crdt::operations::DevProof) -> Result<(), String> {
+        self.conn
+            .execute(
+                "UPDATE channel_messages SET dev_device = ?2, dev_sig = ?3 WHERE message_id = ?1 AND dev_device IS NULL",
+                params![message_id, dev.device, dev.sig],
+            )
+            .map(|_| ())
+            .map_err(|e| format!("Failed to keep a post proof: {e}"))
+    }
+
+    /// The device proofs of `message_ids`, for a sync answer.
+    pub(crate) fn channel_post_proofs(&self, message_ids: &[&str]) -> HashMap<String, crate::crdt::operations::DevProof> {
+        let mut out = HashMap::new();
+        let Ok(mut stmt) = self.conn.prepare_cached(
+            "SELECT dev_device, dev_sig FROM channel_messages WHERE message_id = ?1 AND dev_device IS NOT NULL AND dev_sig IS NOT NULL",
+        ) else {
+            return out;
+        };
+        for mid in message_ids {
+            if let Ok((device, sig)) = stmt.query_row(params![mid], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))) {
+                out.insert((*mid).to_string(), crate::crdt::operations::DevProof { device, sig });
+            }
+        }
+        out
+    }
+
+    /// Keep the device proof of the deletion `message_id`'s newest signed record holds.
+    pub(crate) fn set_deletion_dev(&self, message_id: &str, dev: &crate::crdt::operations::DevProof) -> Result<(), String> {
+        let json = serde_json::to_string(dev).map_err(|e| e.to_string())?;
+        self.conn
+            .execute(
+                "UPDATE message_deletions SET dev = ?2 WHERE id = (SELECT id FROM message_deletions
+                  WHERE message_id = ?1 AND signature IS NOT NULL ORDER BY id DESC LIMIT 1) AND dev IS NULL",
+                params![message_id, json],
+            )
+            .map(|_| ())
+            .map_err(|e| format!("Failed to keep a deletion proof: {e}"))
+    }
+
+    /// The card proof a channel row keeps with its card; `None` clears it.
+    pub(crate) fn set_channel_card_proof(&self, message_id: &str, dev: Option<&crate::node::types::CardProof>) -> Result<(), String> {
+        let json = dev.and_then(|d| serde_json::to_string(d).ok());
+        self.conn
+            .execute("UPDATE channel_messages SET lp_dev = ?2 WHERE message_id = ?1", params![message_id, json])
+            .map(|_| ())
+            .map_err(|e| format!("Failed to keep a card proof: {e}"))
+    }
+
+    /// Keep the device proof of the reaction `peer_id` added on `message_id` at `added_at`.
+    pub(crate) fn set_reaction_dev(&self, message_id: &str, emoji: &str, peer_id: &str, added_at: i64, dev: &crate::crdt::operations::DevProof) -> Result<(), String> {
+        let json = serde_json::to_string(dev).map_err(|e| e.to_string())?;
+        self.conn
+            .execute(
+                "UPDATE message_reactions SET dev = ?4 WHERE message_id = ?1 AND emoji = ?2 AND peer_id = ?3 AND added_at = ?5",
+                params![message_id, emoji, peer_id, json, added_at],
+            )
+            .map(|_| ())
+            .map_err(|e| format!("Failed to keep a reaction proof: {e}"))
+    }
+
+    /// The device proof a file card keeps with its metadata; `None` clears it.
+    pub(crate) fn set_file_meta_dev(&self, file_id: &str, dev: Option<&crate::crdt::operations::DevProof>) -> Result<(), String> {
+        let json = dev.and_then(|d| serde_json::to_string(d).ok());
+        self.conn
+            .execute("UPDATE files SET meta_dev = ?2 WHERE file_id = ?1", params![file_id, json])
+            .map(|_| ())
+            .map_err(|e| format!("Failed to keep a file card proof: {e}"))
+    }
+
+    /// The change proofs riding `message_ids` (and their files), for a sync answer.
+    pub(crate) fn change_proofs(&self, message_ids: &[&str], file_ids: &[&str]) -> ChangeProofs {
+        fn parse<T: serde::de::DeserializeOwned>(json: Option<String>) -> Option<T> {
+            json.and_then(|j| serde_json::from_str(&j).ok())
+        }
+        let mut out = ChangeProofs::default();
+        let one = |sql: &str, key: &str| -> Option<String> {
+            self.conn.prepare_cached(sql).ok()?.query_row(params![key], |r| r.get::<_, Option<String>>(0)).ok().flatten()
+        };
+        for mid in message_ids {
+            let deletion = "SELECT dev FROM message_deletions WHERE message_id = ?1 AND signature IS NOT NULL ORDER BY id DESC LIMIT 1";
+            if let Some(d) = parse(one(deletion, mid)) {
+                out.deletions.insert((*mid).to_string(), d);
+            }
+            if let Some(c) = parse(one("SELECT lp_dev FROM channel_messages WHERE message_id = ?1", mid)) {
+                out.cards.insert((*mid).to_string(), c);
+            }
+            if let Ok(mut stmt) = self.conn.prepare_cached("SELECT emoji, peer_id, dev FROM message_reactions WHERE message_id = ?1 AND dev IS NOT NULL") {
+                let rows = stmt.query_map(params![mid], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?)));
+                for (emoji, peer, dev) in rows.into_iter().flatten().flatten() {
+                    if let Some(d) = parse(dev) {
+                        out.reactions.insert(((*mid).to_string(), emoji, peer), d);
+                    }
+                }
+            }
+        }
+        for fid in file_ids {
+            if let Some(d) = parse(one("SELECT meta_dev FROM files WHERE file_id = ?1", fid)) {
+                out.files.insert((*fid).to_string(), d);
+            }
+        }
+        out
+    }
+
+    /// The newest date the gate judged of what `device` proved for `master` in a server
+    /// (posts, edits, deletions, cards, reactions, file cards): what a retire of that
+    /// device keeps counting (section 13).
+    pub(crate) fn newest_post_of_device(&self, server_id: &str, master: &str, device: &str) -> Option<i64> {
+        let posts = self
+            .conn
+            .query_row(
+                "SELECT MAX(MAX(timestamp, COALESCE(edited_at, timestamp))) FROM channel_messages WHERE server_id = ?1 AND sender_id = ?2 AND dev_device = ?3",
+                params![server_id, master, device],
+                |r| r.get::<_, Option<i64>>(0),
+            )
+            .ok()
+            .flatten();
+        posts.into_iter().chain(self.newest_change_of_device(server_id, master, device)).max()
+    }
+
+    /// [`Self::newest_post_of_device`] over the change proofs, each judged at the later of
+    /// its post's date and its own. Only a proof naming exactly `device` counts.
+    fn newest_change_of_device(&self, server_id: &str, master: &str, device: &str) -> Option<i64> {
+        #[derive(serde::Deserialize)]
+        struct Named {
+            device: String,
+            /// A card's own date; the other kinds date by their row.
+            #[serde(default)]
+            at: Option<i64>,
+        }
+        // (the row's date, the proof); `instr` only narrows, the parse decides.
+        const SQL: [&str; 4] = [
+            "SELECT MAX(cm.timestamp, md.deleted_at), md.dev FROM message_deletions md JOIN channel_messages cm ON cm.message_id = md.message_id
+              WHERE cm.server_id = ?1 AND cm.sender_id = ?2 AND md.dev IS NOT NULL AND instr(md.dev, ?3) > 0",
+            "SELECT timestamp, lp_dev FROM channel_messages
+              WHERE server_id = ?1 AND sender_id = ?2 AND lp_dev IS NOT NULL AND instr(lp_dev, ?3) > 0",
+            "SELECT MAX(cm.timestamp, mr.added_at), mr.dev FROM message_reactions mr JOIN channel_messages cm ON cm.message_id = mr.message_id
+              WHERE cm.server_id = ?1 AND mr.peer_id IN (?2, ?3) AND mr.dev IS NOT NULL AND instr(mr.dev, ?3) > 0",
+            "SELECT cm.timestamp, f.meta_dev FROM files f JOIN channel_messages cm ON cm.message_id = f.message_id
+              WHERE cm.server_id = ?1 AND cm.sender_id = ?2 AND f.meta_dev IS NOT NULL AND instr(f.meta_dev, ?3) > 0",
+        ];
+        let mut newest: Option<i64> = None;
+        for sql in SQL {
+            let Ok(mut stmt) = self.conn.prepare_cached(sql) else { continue };
+            let rows = stmt.query_map(params![server_id, master, device], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)));
+            for (date, json) in rows.into_iter().flatten().flatten() {
+                if let Ok(n) = serde_json::from_str::<Named>(&json)
+                    && n.device == device
+                {
+                    newest = newest.max(Some(n.at.map_or(date, |at| at.max(date))));
+                }
+            }
+        }
+        newest
     }
 
     /// Whether a channel row, or a header, reaction or card riding one, is history
@@ -4765,6 +5132,8 @@ impl MessageStore {
                  DELETE FROM mls_identity;
                  DELETE FROM mls_storage;
                  DELETE FROM app_settings WHERE key = 'recovery_mnemonic';
+                 DELETE FROM app_settings WHERE key >= 'retire_held:' AND key < 'retire_held;';
+                 DELETE FROM app_settings WHERE key >= 'settle_owed:' AND key < 'settle_owed;';
                  DELETE FROM image_verdicts;
                  DELETE FROM channel_floors;
                  DELETE FROM channel_cleared_ids;
@@ -4885,6 +5254,60 @@ impl MessageStore {
         self.conn
             .query_row("SELECT updated_at FROM device_lists WHERE master_peer_id = ?1", [master_peer_id], |row| row.get(0))
             .unwrap_or(0)
+    }
+
+    /// Every `server_rosters` row of `master`, oldest first: (recovery key, roster).
+    pub fn load_server_rosters(&self, master: &str) -> Result<Vec<(String, crate::identity::roster::Roster)>, String> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT r_pub, json FROM server_rosters WHERE master_peer_id = ?1 ORDER BY rowid")
+            .map_err(|e| format!("Failed to read server rosters: {e}"))?;
+        let rows = stmt
+            .query_map([master], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+            .map_err(|e| format!("Failed to read server rosters: {e}"))?;
+        Ok(rows
+            .filter_map(Result::ok)
+            .filter_map(|(key, json)| serde_json::from_str(&json).ok().map(|r| (key, r)))
+            .collect())
+    }
+
+    /// Write `master`'s row under `r_pub`, needed now.
+    pub fn save_server_roster(&self, master: &str, r_pub: &str, json: &str, now_ms: i64) -> Result<(), String> {
+        self.conn
+            .execute(
+                "INSERT INTO server_rosters (master_peer_id, r_pub, json, bytes, last_needed_ms) VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT (master_peer_id, r_pub) DO UPDATE SET json = ?3, bytes = ?4, last_needed_ms = ?5",
+                rusqlite::params![master, r_pub, json, json.len() as i64, now_ms],
+            )
+            .map(|_| ())
+            .map_err(|e| format!("Failed to save a server roster: {e}"))
+    }
+
+    /// The masters of every `server_rosters` row with its total bytes and last need.
+    pub fn server_roster_rows(&self) -> Result<Vec<(String, String, i64, i64)>, String> {
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT master_peer_id, r_pub, bytes, last_needed_ms FROM server_rosters")
+            .map_err(|e| format!("Failed to list server rosters: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))
+            .map_err(|e| format!("Failed to list server rosters: {e}"))?;
+        Ok(rows.filter_map(Result::ok).collect())
+    }
+
+    /// `master`'s rows are needed at `now_ms`.
+    pub fn note_server_roster_needed(&self, master: &str, now_ms: i64) -> Result<(), String> {
+        self.conn
+            .execute("UPDATE server_rosters SET last_needed_ms = ?2 WHERE master_peer_id = ?1", rusqlite::params![master, now_ms])
+            .map(|_| ())
+            .map_err(|e| format!("Failed to stamp a server roster: {e}"))
+    }
+
+    pub fn delete_server_roster(&self, master: &str, r_pub: &str) -> Result<(), String> {
+        self.conn
+            .execute("DELETE FROM server_rosters WHERE master_peer_id = ?1 AND r_pub = ?2", rusqlite::params![master, r_pub])
+            .map(|_| ())
+            .map_err(|e| format!("Failed to delete a server roster: {e}"))
     }
 
     /// The roster stored for a master, unverified. `None` for no row or a 0.11 row; a
@@ -5949,6 +6372,8 @@ impl MessageStore {
         Ok(())
     }
 
+    /// `dev` = the edit's verified device proof: the row keeps the proof of the version
+    /// it holds, or none (a post's proof never vouches for an edit's words).
     pub fn edit_channel_message(
         &self,
         message_id: &str,
@@ -5956,13 +6381,15 @@ impl MessageStore {
         edited_at: i64,
         signature: Option<&str>,
         public_key: Option<&str>,
+        dev: Option<&crate::crdt::operations::DevProof>,
     ) -> Result<bool, String> {
-        self.edit_message_in("channel_messages", message_id, new_text, edited_at, signature, public_key)
+        self.edit_message_in("channel_messages", message_id, new_text, edited_at, signature, public_key, Some(dev))
     }
 
     /// Shared implementation of the edit methods. `table` is a fixed table name, never
     /// user input. Preserves the previous text and signature provenance in
     /// message_edits before overwriting, in one transaction.
+    #[allow(clippy::too_many_arguments)]
     fn edit_message_in(
         &self,
         table: &str,
@@ -5971,6 +6398,7 @@ impl MessageStore {
         edited_at: i64,
         signature: Option<&str>,
         public_key: Option<&str>,
+        proof: Option<Option<&crate::crdt::operations::DevProof>>,
     ) -> Result<bool, String> {
         // text, signature, public key, previous timestamp, last edit
         type EditRow = (String, Option<String>, Option<String>, i64, Option<i64>);
@@ -6010,10 +6438,16 @@ impl MessageStore {
             return Err(format!("Failed to insert edit history: {e}"));
         }
 
-        let result = self.conn.execute(
-            &format!("UPDATE {table} SET text = ?1, edited_at = ?2, signature = ?3, public_key = ?4, updated_at = ?2 WHERE message_id = ?5"),
-            params![new_text, edited_at, signature, public_key, message_id],
-        );
+        let result = match proof {
+            None => self.conn.execute(
+                &format!("UPDATE {table} SET text = ?1, edited_at = ?2, signature = ?3, public_key = ?4, updated_at = ?2 WHERE message_id = ?5"),
+                params![new_text, edited_at, signature, public_key, message_id],
+            ),
+            Some(dev) => self.conn.execute(
+                &format!("UPDATE {table} SET text = ?1, edited_at = ?2, signature = ?3, public_key = ?4, updated_at = ?2, dev_device = ?6, dev_sig = ?7 WHERE message_id = ?5"),
+                params![new_text, edited_at, signature, public_key, message_id, dev.map(|d| &d.device), dev.map(|d| &d.sig)],
+            ),
+        };
 
         match result {
             Ok(rows) => {
@@ -6069,7 +6503,7 @@ impl MessageStore {
         signature: Option<&str>,
         public_key: Option<&str>,
     ) -> Result<bool, String> {
-        self.edit_message_in("messages", message_id, new_text, edited_at, signature, public_key)
+        self.edit_message_in("messages", message_id, new_text, edited_at, signature, public_key, None)
     }
 
     // ── Message Deletion / Hiding (Phase 3.5) ──
@@ -9741,6 +10175,20 @@ mod tests {
         assert_eq!(store.image_verdict("h", 1), None);
     }
 
+    /// A removal this device held for its retire round is this device's own work: a
+    /// device landing a copy never finishes it (lead decision 11-05).
+    #[test]
+    fn a_staged_database_loses_its_held_removals() {
+        let store = mem_store();
+        store.save_setting("retire_held:dev", "one").unwrap();
+        store.save_setting("retire_heldx", "kept").unwrap();
+        store.save_setting("settle_owed:lost:dev", "{}").unwrap();
+        store.scrub_device_secrets().unwrap();
+        assert_eq!(store.load_setting("retire_held:dev").unwrap(), None);
+        assert_eq!(store.load_setting("settle_owed:lost:dev").unwrap(), None, "an owed settling is this device's own work too");
+        assert_eq!(store.load_setting("retire_heldx").unwrap().as_deref(), Some("kept"));
+    }
+
     /// Read marks and replay-guard nonces describe this device's own Olm sessions and
     /// frames: a device landing a copy holds neither, so a copied mark would turn the
     /// re-key it needs into a quiet drop (AR-35 review LOW 5).
@@ -10014,7 +10462,7 @@ mod tests {
         store.insert_channel_message("s", "c", "peer", "c1", false, 1_000, None, None, Some("m2"), None, None, None, None).unwrap();
         store.begin_transaction().unwrap();
         assert!(store.edit_dm_message("m1", "v2", 2_000, None, None).unwrap(), "a DM edit inside a batch");
-        assert!(store.edit_channel_message("m2", "c2", 2_000, None, None).unwrap(), "a channel edit inside a batch");
+        assert!(store.edit_channel_message("m2", "c2", 2_000, None, None, None).unwrap(), "a channel edit inside a batch");
         store.commit_transaction().unwrap();
         assert_eq!(store.get_dm_message_sig_row("m1").unwrap().text, "v2");
         assert_eq!(store.get_channel_message_sig_row("m2").unwrap().text, "c2");
@@ -11326,7 +11774,7 @@ mod g13w3_sync_cost {
         let store = MessageStore::open(":memory:", &"ab".repeat(32)).expect("open in-memory store");
         let op = |tag: u8, ms: u64, payload: P| {
             let (kp, id, pk) = crate::crdt::testkeys::keys(tag);
-            let mut op = CrdtOp { server_id: "S".into(), hlc: HlcTimestamp { physical_ms: ms, counter: 0, actor: id.clone() }, author: id, payload, auth: None };
+            let mut op = CrdtOp { server_id: "S".into(), hlc: HlcTimestamp { physical_ms: ms, counter: 0, actor: id.clone() }, author: id, payload, auth: None, dev: None };
             op.sign(&kp, &pk);
             op
         };
@@ -11334,7 +11782,7 @@ mod g13w3_sync_cost {
         let founding = op(1, 50, P::ServerCreated { name: "s".into(), owner_peer_id: crate::crdt::testkeys::keys(1).1, nonce: "n".into() });
         let named = op(1, 100, P::ChannelAdded { channel_id: "c".into(), name: "ServerCreated".into(), category: None, channel_type: "text".into() });
         let rename = op(1, 150, P::ServerRenamed { new_name: "a".into() });
-        let delta = |rows: Vec<(CrdtOp, Option<u64>)>, dropped: Vec<_>| OpDelta { server_id: "S".into(), rows, dropped };
+        let delta = |rows: Vec<(CrdtOp, Option<u64>)>, dropped: Vec<_>| OpDelta { server_id: "S".into(), rows, dropped, base: None, seen_keep: None, own_since: Vec::new(), recovery: None };
         store.persist_op_delta(&delta(vec![(founding.clone(), None), (named.clone(), None), (rename.clone(), Some(77))], vec![])).unwrap();
         let rows = store.load_op_rows("S").unwrap();
         assert_eq!(rows.iter().find(|(o, _)| o.hlc == rename.hlc).map(|r| r.1), Some(Some(77)), "the parked mark round-trips");
@@ -11360,6 +11808,120 @@ mod g13w3_sync_cost {
         migrate(&old, "ALTER TABLE crdt_ops ADD COLUMN parked_until INTEGER");
         let n: i64 = old.query_row("SELECT COUNT(*) FROM crdt_ops WHERE parked_until IS NULL", [], |r| r.get(0)).unwrap();
         assert_eq!(n, 1, "the 0.13 row survives the migration unparked");
+    }
+
+    /// DEVICE_PROOF_DESIGN section 7 (R3-4): `seen_ms` is set once when a row is first
+    /// stored, a base's first fold once; a 0.13 database reads 0 for both after the upgrade.
+    #[test]
+    fn first_store_and_first_fold_are_dated_once_and_the_upgrade_reads_zero() {
+        use crate::crdt::fold::OpDelta;
+        use crate::crdt::hlc::HlcTimestamp;
+        use crate::crdt::operations::CrdtPayload as P;
+        let op = |ms: u64, payload: P| {
+            let (kp, id, pk) = crate::crdt::testkeys::keys(1);
+            let mut op = CrdtOp { server_id: "S".into(), hlc: HlcTimestamp { physical_ms: ms, counter: 0, actor: id.clone() }, author: id, payload, auth: None, dev: None };
+            op.sign(&kp, &pk);
+            op
+        };
+        let rename = op(150, P::ServerRenamed { new_name: "a".into() });
+        let cp = op(200, P::ServerCheckpoint { state: "{}".into(), covers: HlcTimestamp::zero("") });
+        let cp_id = hex::encode(cp.content_hash());
+
+        let old = Connection::open_in_memory().unwrap();
+        old.execute_batch("CREATE TABLE crdt_ops (id INTEGER PRIMARY KEY AUTOINCREMENT, server_id TEXT NOT NULL, hlc_ms INTEGER NOT NULL, hlc_counter INTEGER NOT NULL, author TEXT NOT NULL, op_json TEXT NOT NULL, UNIQUE(server_id, hlc_ms, hlc_counter, author));").unwrap();
+        for o in [&rename, &cp] {
+            old.execute(
+                "INSERT INTO crdt_ops (server_id, hlc_ms, hlc_counter, author, op_json) VALUES ('S', ?1, 0, ?2, ?3)",
+                params![o.hlc.physical_ms as i64, o.author, serde_json::to_string(o).unwrap()],
+            )
+            .unwrap();
+        }
+        MessageStore::init_schema(&old).expect("the 0.14 schema over a 0.13 database");
+        let zero: i64 = old.query_row("SELECT COUNT(*) FROM crdt_ops WHERE seen_ms = 0", [], |r| r.get(0)).unwrap();
+        assert_eq!(zero, 2, "rows from before the upgrade were stored before any T");
+        let seeded: i64 = old.query_row("SELECT first_fold_ms FROM cp_seen WHERE server_id = 'S' AND content_id = ?1", [&cp_id], |r| r.get(0)).unwrap();
+        assert_eq!(seeded, 0, "a checkpoint held before the upgrade was first folded before any T");
+        MessageStore::init_schema(&old).expect("a second run");
+        let n: i64 = old.query_row("SELECT COUNT(*) FROM cp_seen", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 1, "the seed runs once");
+
+        let store = MessageStore::open(":memory:", &"ab".repeat(32)).expect("open in-memory store");
+        let delta = |rows: Vec<(CrdtOp, Option<u64>)>, base: Option<String>| OpDelta { server_id: "S".into(), rows, dropped: Vec::new(), base, seen_keep: None, own_since: Vec::new(), recovery: None };
+        let before = crate::crdt::hlc::wall_clock_ms();
+        store.persist_op_delta(&delta(vec![(rename.clone(), None), (cp.clone(), None)], Some(cp_id.clone()))).unwrap();
+        let seen = store.op_seen_ms("S").unwrap();
+        let first = seen[&(rename.author.clone(), 150, 0)];
+        assert!(first >= before, "a new row is dated when first stored");
+        let folded = store.cp_first_fold_ms("S", &cp_id).expect("the base's first fold");
+        assert!(folded >= before);
+        store.conn.execute("UPDATE crdt_ops SET seen_ms = 5 WHERE hlc_ms = 150", []).unwrap();
+        store.conn.execute("UPDATE cp_seen SET first_fold_ms = 5", []).unwrap();
+        store.persist_op_delta(&delta(vec![(rename.clone(), Some(9))], Some(cp_id.clone()))).unwrap();
+        assert_eq!(store.op_seen_ms("S").unwrap()[&(rename.author.clone(), 150, 0)], 5, "rewriting a row never moves its date");
+        assert_eq!(store.cp_first_fold_ms("S", &cp_id), Some(5), "folding a base again never moves its first fold");
+        store.delete_server_state("S").unwrap();
+        assert_eq!(store.cp_first_fold_ms("S", &cp_id), None, "a deleted server's first folds go with it");
+    }
+
+    /// Lead decision 11-05 (section 8.3): `seen_ms` dates the CONTENT a row holds, so an
+    /// equivocation that replaces it at its key after T reads as first stored then, while
+    /// a proof added to the same content keeps the row's date.
+    #[test]
+    fn a_row_replaced_by_other_content_is_dated_again() {
+        use crate::crdt::fold::OpDelta;
+        use crate::crdt::hlc::HlcTimestamp;
+        use crate::crdt::operations::CrdtPayload as P;
+        let (kp, id, pk) = crate::crdt::testkeys::keys(1);
+        let op = |name: &str| {
+            let mut op = CrdtOp { server_id: "S".into(), hlc: HlcTimestamp { physical_ms: 150, counter: 0, actor: id.clone() }, author: id.clone(), payload: P::ServerRenamed { new_name: name.into() }, auth: None, dev: None };
+            op.sign(&kp, &pk);
+            op
+        };
+        let store = MessageStore::open(":memory:", &"ab".repeat(32)).expect("open in-memory store");
+        let delta = |o: &CrdtOp| OpDelta { server_id: "S".into(), rows: vec![(o.clone(), None)], dropped: Vec::new(), base: None, seen_keep: None, own_since: Vec::new(), recovery: None };
+        let key = (id.clone(), 150, 0);
+        store.persist_op_delta(&delta(&op("a"))).unwrap();
+        store.conn.execute("UPDATE crdt_ops SET seen_ms = 5", []).unwrap();
+        let mut proven = op("a");
+        proven.sign_device(&crate::crdt::testkeys::keys(2).0);
+        store.persist_op_delta(&delta(&proven)).unwrap();
+        assert_eq!(store.op_seen_ms("S").unwrap()[&key], 5, "the same content with a proof keeps its date");
+        let before = crate::crdt::hlc::wall_clock_ms();
+        store.persist_op_delta(&delta(&op("b"))).unwrap();
+        assert!(store.op_seen_ms("S").unwrap()[&key] >= before, "other content at the key is first stored now");
+
+        // A row from before the upgrade holds no content id: its own JSON keeps the date,
+        // other content does not.
+        let old = op("a");
+        store.conn.execute("DELETE FROM crdt_ops", []).unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO crdt_ops (server_id, hlc_ms, hlc_counter, author, op_json, seen_ms) VALUES ('S', 150, 0, ?1, ?2, 0)",
+                params![id, serde_json::to_string(&old).unwrap()],
+            )
+            .unwrap();
+        store.persist_op_delta(&delta(&old)).unwrap();
+        assert_eq!(store.op_seen_ms("S").unwrap()[&key], 0, "an upgraded row rewritten as it was keeps its date");
+        store.conn.execute("UPDATE crdt_ops SET content_h = ''", []).unwrap();
+        store.persist_op_delta(&delta(&op("b"))).unwrap();
+        assert!(store.op_seen_ms("S").unwrap()[&key] >= before, "and other content is first stored now");
+    }
+
+    /// Section 14: a rebuild's delta names the first folds that stay; the rest go.
+    #[test]
+    fn first_folds_rotate_to_what_a_rebuild_keeps() {
+        use crate::crdt::fold::OpDelta;
+        let store = MessageStore::open(":memory:", &"ab".repeat(32)).expect("open in-memory store");
+        let delta = |base: &str, keep: Option<Vec<String>>| OpDelta { server_id: "S".into(), rows: Vec::new(), dropped: Vec::new(), base: Some(base.into()), seen_keep: keep, own_since: Vec::new(), recovery: None };
+        store.persist_op_delta(&delta("a", None)).unwrap();
+        store.persist_op_delta(&delta("b", None)).unwrap();
+        store.persist_op_delta(&OpDelta { server_id: "T".into(), base: Some("a".into()), ..Default::default() }).unwrap();
+        store.persist_op_delta(&delta("c", Some(vec!["a".into(), "c".into()]))).unwrap();
+        let mut held: Vec<String> = store.cp_first_folds("S").into_keys().collect();
+        held.sort();
+        assert_eq!(held, vec!["a".to_string(), "c".to_string()]);
+        assert!(store.cp_first_fold_ms("T", "a").is_some(), "another server's records stay");
     }
 }
 

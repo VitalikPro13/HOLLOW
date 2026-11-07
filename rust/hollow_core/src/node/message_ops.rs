@@ -20,6 +20,8 @@ use super::types::*;
 /// degrades to mid-only extras, which fails unless the signer saw no row either.
 pub(crate) struct RowExtras {
     pub text: Option<String>,
+    /// The row's own date (never its edit's).
+    pub timestamp: Option<i64>,
     pub reply_to: Option<String>,
     pub file_id: Option<String>,
     pub order_us: Option<i64>,
@@ -38,11 +40,12 @@ impl RowExtras {
 
     fn from_row(row: Option<crate::storage::messages::MessageSigRow>) -> Self {
         let Some(r) = row else {
-            return Self { text: None, reply_to: None, file_id: None, order_us: None, lp_digest: None, album: None };
+            return Self { text: None, timestamp: None, reply_to: None, file_id: None, order_us: None, lp_digest: None, album: None };
         };
         Self {
             lp_digest: r.link_preview.as_ref().map(link_preview_digest),
             text: Some(r.text),
+            timestamp: Some(r.timestamp),
             reply_to: r.reply_to_mid,
             file_id: r.file_id,
             order_us: r.order_us,
@@ -820,6 +823,7 @@ pub(crate) async fn handle_send_channel_message(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, HashSet<String>>,
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
+    device_keypair: &crate::identity::native_identity::NativeKeypair,
     pub_key_b64: &str,
     local_peer_str: &str,
     server_id: String,
@@ -874,6 +878,9 @@ pub(crate) async fn handle_send_channel_message(
         bundle_keypair, pub_key_b64, "ch", &format!("{}:{}", server_id, channel_id),
         &local_peer, timestamp, &extras, &text,
     );
+    let dev = super::post_proof::sign(device_keypair, &super::post_proof::Version {
+        sid: &server_id, cid: &channel_id, sender: &local_peer, ts: timestamp, edited_at: None, text: &text, x: &extras,
+    });
 
     // Mention metadata — shared by the notification hint and the offline push
     // fan-out below.
@@ -899,6 +906,7 @@ pub(crate) async fn handle_send_channel_message(
             order_us: Some(order_us),
             album: None,
             file_meta: None,
+            dev: dev.clone(),
         };
         send_public_channel_msg(ws_cmd_tx, server, &channel_id, &msg).map(|data| (data, None))
     } else {
@@ -916,6 +924,7 @@ pub(crate) async fn handle_send_channel_message(
                 link_preview: link_preview.clone(),
                 order_us: Some(order_us),
                 album: None,
+                dev: dev.clone(),
             }),
         };
         broadcast_channel_envelope(
@@ -990,7 +999,7 @@ pub(crate) async fn handle_send_channel_message(
     persist_sent_channel_message(
         &server_id, &channel_id, &local_peer, &text, timestamp,
         sig.as_deref(), pk.as_deref(), &message_id,
-        reply_to_mid.as_deref(), order_us, &link_preview,
+        reply_to_mid.as_deref(), order_us, &link_preview, dev.as_deref(),
         db_path, db_passphrase,
     );
 
@@ -1369,17 +1378,21 @@ fn persist_sent_channel_message(
     reply_to_mid: Option<&str>,
     order_us: i64,
     link_preview: &Option<LinkPreviewRef>,
+    dev: Option<&crate::crdt::operations::DevProof>,
     db_path: &str,
     db_passphrase: &str,
 ) {
     let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) else {
         return;
     };
-    let _ = store.insert_channel_message(
+    let stored = store.insert_channel_message(
         server_id, channel_id, local_peer, text, true, timestamp,
         sig, pk, Some(message_id),
         reply_to_mid, None, Some(order_us), None,
     );
+    if let (Ok(1), Some(dev)) = (stored, dev) {
+        let _ = store.set_channel_post_proof(message_id, dev);
+    }
     if let Some(lp) = link_preview {
         if let Ok(lp_json) = serde_json::to_string(lp) {
             let _ = store.update_channel_link_preview(message_id, &lp_json);
@@ -1389,6 +1402,7 @@ fn persist_sent_channel_message(
 
 // ── 3. EditChannelMessage ────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_edit_channel_message(
     olm: &mut OlmManager,
     crypto_store: &CryptoStore,
@@ -1400,6 +1414,7 @@ pub(crate) async fn handle_edit_channel_message(
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     pub_key_b64: &str,
     local_peer_str: &str,
+    device_keypair: &crate::identity::native_identity::NativeKeypair,
     server_id: String,
     channel_id: String,
     message_id: String,
@@ -1438,17 +1453,22 @@ pub(crate) async fn handle_edit_channel_message(
     // carries. Updated in the same open, which preserves the old text.
     let mut sig = None;
     let mut pk = None;
+    let mut edev = None;
     {
         if let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) {
             let row = RowExtras::load_channel(&store, &message_id);
+            let extras = row.as_signed(&message_id);
             (sig, pk) = sign_message_versioned(
                 bundle_keypair, pub_key_b64, "ch",
                 &format!("{}:{}", server_id, channel_id),
-                &local_peer, edit_timestamp, &row.as_signed(&message_id), &new_text,
+                &local_peer, edit_timestamp, &extras, &new_text,
             );
+            edev = row.timestamp.and_then(|ts| super::post_proof::sign(device_keypair, &super::post_proof::Version {
+                sid: &server_id, cid: &channel_id, sender: &local_peer, ts, edited_at: Some(edit_timestamp), text: &new_text, x: &extras,
+            }));
             let _ = store.edit_channel_message(
                 &message_id, &new_text, edit_timestamp,
-                sig.as_deref(), pk.as_deref(),
+                sig.as_deref(), pk.as_deref(), edev.as_deref(),
             );
         }
     }
@@ -1458,6 +1478,7 @@ pub(crate) async fn handle_edit_channel_message(
             server_id: server_id.clone(), channel_id: channel_id.clone(),
             mid: message_id.clone(), text: new_text.clone(),
             ts: edit_timestamp, sig: sig.clone(), pk: pk.clone(),
+            dev: edev.clone(),
         };
         send_public_channel_msg(ws_cmd_tx, server, &channel_id, &msg);
     } else {
@@ -1469,6 +1490,7 @@ pub(crate) async fn handle_edit_channel_message(
             pk: pk.clone(),
             sid: Some(server_id.clone()),
             cid: Some(channel_id.clone()),
+            dev: edev.clone(),
         };
         broadcast_channel_envelope(
             olm, crypto_store, mls, event_tx, ws_cmd_tx, ws_room_peers,
@@ -1557,6 +1579,7 @@ pub(crate) async fn handle_edit_dm_message(
         pk: pk.clone(),
         sid: None,
         cid: None,
+        dev: None,
     };
     let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
 
@@ -1695,6 +1718,15 @@ fn sign_attached_preview(
 /// within one millisecond or over a sibling's card stamped ahead of our clock.
 fn local_card_stamp(floor: Option<i64>) -> i64 {
     super::frame_auth::now_ms().max(floor.unwrap_or(0).saturating_add(1))
+}
+
+/// Our device's proof of a reaction our master adds or removes on a channel post.
+#[allow(clippy::too_many_arguments)]
+fn reaction_proof(device: &crate::identity::native_identity::NativeKeypair, sid: &str, cid: &str, master: &str, mid: &str, emoji: &str, at: i64, add: bool) -> Option<Box<crate::crdt::operations::DevProof>> {
+    let master = super::resolver::resolve(master);
+    super::post_proof::sign_change(device, &super::post_proof::Change {
+        sid, cid, signer: &master, mid, at, kind: super::post_proof::ChangeKind::React { emoji, add },
+    })
 }
 
 /// Serialize a preview for the `link_preview_json` column. `None` clears it.
@@ -1883,6 +1915,7 @@ pub(crate) async fn handle_attach_channel_link_preview(
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     pub_key_b64: &str,
     local_peer_str: &str,
+    device_keypair: &crate::identity::native_identity::NativeKeypair,
     server_id: String,
     channel_id: String,
     message_id: String,
@@ -1910,7 +1943,7 @@ pub(crate) async fn handle_attach_channel_link_preview(
     let lp_json = preview_column(lp);
     let ctx = format!("{server_id}:{channel_id}");
 
-    let mut attached: Option<AttachSig> = None;
+    let mut attached: Option<(AttachSig, Option<Box<super::types::CardProof>>)> = None;
     if let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) {
         // Local-author op: we may only re-sign our OWN row. Remote ingest has its
         // own check; this stops a UI bug minting a signature over somebody else's.
@@ -1930,13 +1963,20 @@ pub(crate) async fn handle_attach_channel_link_preview(
             &row, lp, bundle_keypair, pub_key_b64, "ch", &ctx,
             &super::resolver::resolve(local_peer_str), &message_id,
         );
+        let at = local_card_stamp(store.channel_card_floor(&message_id));
+        let digest = lp.map(link_preview_digest).unwrap_or_default();
+        let author = super::resolver::resolve(local_peer_str);
+        let change = super::post_proof::Change {
+            sid: &server_id, cid: &channel_id, signer: &author, mid: &message_id, at, kind: super::post_proof::ChangeKind::Card { lp_digest: &digest },
+        };
+        let cdev = super::post_proof::sign_card(device_keypair, &change);
         let _ = store.update_channel_link_preview_and_sig(
-            &message_id, lp_json.as_deref(), signed.sig.as_deref(), signed.pk.as_deref(),
-            Some(local_card_stamp(store.channel_card_floor(&message_id))),
+            &message_id, lp_json.as_deref(), signed.sig.as_deref(), signed.pk.as_deref(), Some(at),
         );
-        attached = Some(signed);
+        let _ = store.set_channel_card_proof(&message_id, cdev.as_deref());
+        attached = Some((signed, cdev));
     }
-    let Some(signed) = attached else { return };
+    let Some((signed, cdev)) = attached else { return };
 
     if server.is_channel_public(&channel_id) {
         let msg = HavenMessage::PublicLinkPreviewSet {
@@ -1947,6 +1987,7 @@ pub(crate) async fn handle_attach_channel_link_preview(
             ts: signed.ts,
             sig: signed.sig.clone(),
             pk: signed.pk.clone(),
+            dev: cdev.clone(),
         };
         send_public_channel_msg(ws_cmd_tx, server, &channel_id, &msg);
     } else {
@@ -1958,6 +1999,7 @@ pub(crate) async fn handle_attach_channel_link_preview(
             pk: signed.pk.clone(),
             sid: Some(server_id.clone()),
             cid: Some(channel_id.clone()),
+            dev: cdev.clone(),
         };
         broadcast_channel_envelope(
             olm, crypto_store, mls, event_tx, ws_cmd_tx, ws_room_peers,
@@ -2040,6 +2082,7 @@ pub(crate) async fn handle_attach_dm_link_preview(
         pk: signed.pk.clone(),
         sid: None,
         cid: None,
+        dev: None,
     };
     let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
 
@@ -2108,6 +2151,7 @@ pub(crate) async fn handle_delete_channel_message(
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     pub_key_b64: &str,
     local_peer_str: &str,
+    device_keypair: &crate::identity::native_identity::NativeKeypair,
     server_id: String,
     channel_id: String,
     message_id: String,
@@ -2138,6 +2182,11 @@ pub(crate) async fn handle_delete_channel_message(
     // any same-text message in the channel. Text from DB, so the archive verifies.
     let mut sig = None;
     let mut pk = None;
+    let author = super::resolver::resolve(local_peer_str);
+    let change = super::post_proof::Change {
+        sid: &server_id, cid: &channel_id, signer: &author, mid: &message_id, at: delete_timestamp, kind: super::post_proof::ChangeKind::Delete,
+    };
+    let cdev = super::post_proof::sign_change(device_keypair, &change);
     {
         if let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) {
             let row = RowExtras::load_channel(&store, &message_id);
@@ -2152,6 +2201,9 @@ pub(crate) async fn handle_delete_channel_message(
                 &message_id, delete_timestamp,
                 sig.as_deref(), pk.as_deref(),
             );
+            if let Some(dev) = cdev.as_deref() {
+                let _ = store.set_deletion_dev(&message_id, dev);
+            }
         }
     }
 
@@ -2159,7 +2211,7 @@ pub(crate) async fn handle_delete_channel_message(
         let msg = HavenMessage::PublicChannelDelete {
             server_id: server_id.clone(), channel_id: channel_id.clone(),
             mid: message_id.clone(), ts: delete_timestamp,
-            sig: sig.clone(), pk: pk.clone(),
+            sig: sig.clone(), pk: pk.clone(), dev: cdev.clone(),
         };
         send_public_channel_msg(ws_cmd_tx, server, &channel_id, &msg);
     } else {
@@ -2170,6 +2222,7 @@ pub(crate) async fn handle_delete_channel_message(
             pk: pk.clone(),
             sid: Some(server_id.clone()),
             cid: Some(channel_id.clone()),
+            dev: cdev.clone(),
         };
         broadcast_channel_envelope(
             olm, crypto_store, mls, event_tx, ws_cmd_tx, ws_room_peers,
@@ -2243,6 +2296,7 @@ pub(crate) async fn handle_delete_dm_message(
         pk: pk.clone(),
         sid: None,
         cid: None,
+        dev: None,
     };
     let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
 
@@ -2278,6 +2332,7 @@ pub(crate) async fn handle_add_channel_reaction(
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     pub_key_b64: &str,
     local_peer_str: &str,
+    device_keypair: &crate::identity::native_identity::NativeKeypair,
     server_id: String,
     channel_id: String,
     message_id: String,
@@ -2318,12 +2373,16 @@ pub(crate) async fn handle_add_channel_reaction(
         }
         (reaction_ts, sig, pk)
     };
+    let cdev = reaction_proof(device_keypair, &server_id, &channel_id, &local_peer, &message_id, &emoji, reaction_ts, true);
+    if let (Some(dev), Ok(store)) = (cdev.as_deref(), crate::storage::MessageStore::lease(db_path, db_passphrase)) {
+        let _ = store.set_reaction_dev(&message_id, &emoji, &local_peer, reaction_ts, dev);
+    }
 
     if server.is_channel_public(&channel_id) {
         let msg = HavenMessage::PublicChannelAddReaction {
             server_id: server_id.clone(), channel_id: channel_id.clone(),
             mid: message_id.clone(), emoji: emoji.clone(),
-            ts: reaction_ts, sig: sig.clone(), pk: pk.clone(),
+            ts: reaction_ts, sig: sig.clone(), pk: pk.clone(), dev: cdev.clone(),
         };
         send_public_channel_msg(ws_cmd_tx, server, &channel_id, &msg);
     } else {
@@ -2335,6 +2394,7 @@ pub(crate) async fn handle_add_channel_reaction(
             pk: pk.clone(),
             sid: Some(server_id.clone()),
             cid: Some(channel_id.clone()),
+            dev: cdev.clone(),
         };
         broadcast_channel_envelope(
             olm, crypto_store, mls, event_tx, ws_cmd_tx, ws_room_peers,
@@ -2407,6 +2467,7 @@ pub(crate) async fn handle_add_dm_reaction(
         pk: pk.clone(),
         sid: None,
         cid: None,
+        dev: None,
     };
     let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
 
@@ -2448,6 +2509,7 @@ pub(crate) async fn handle_remove_channel_reaction(
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
     pub_key_b64: &str,
     local_peer_str: &str,
+    device_keypair: &crate::identity::native_identity::NativeKeypair,
     server_id: String,
     channel_id: String,
     message_id: String,
@@ -2481,12 +2543,13 @@ pub(crate) async fn handle_remove_channel_reaction(
         }
         (remove_ts, sig, pk)
     };
+    let cdev = reaction_proof(device_keypair, &server_id, &channel_id, &local_peer, &message_id, &emoji, remove_ts, false);
 
     if server.is_channel_public(&channel_id) {
         let msg = HavenMessage::PublicChannelRemoveReaction {
             server_id: server_id.clone(), channel_id: channel_id.clone(),
             mid: message_id.clone(), emoji: emoji.clone(),
-            ts: remove_ts, sig: sig.clone(), pk: pk.clone(),
+            ts: remove_ts, sig: sig.clone(), pk: pk.clone(), dev: cdev.clone(),
         };
         send_public_channel_msg(ws_cmd_tx, server, &channel_id, &msg);
     } else {
@@ -2498,6 +2561,7 @@ pub(crate) async fn handle_remove_channel_reaction(
             pk: pk.clone(),
             sid: Some(server_id.clone()),
             cid: Some(channel_id.clone()),
+            dev: cdev.clone(),
         };
         broadcast_channel_envelope(
             olm, crypto_store, mls, event_tx, ws_cmd_tx, ws_room_peers,
@@ -2569,6 +2633,7 @@ pub(crate) async fn handle_remove_dm_reaction(
         pk: pk.clone(),
         sid: None,
         cid: None,
+        dev: None,
     };
     let envelope_json = serde_json::to_string(&envelope).unwrap_or_default();
 
@@ -2612,6 +2677,7 @@ pub(crate) async fn handle_envelope_channel_message(
     link_preview: Option<LinkPreviewRef>,
     order_us: Option<i64>,
     album: Option<String>,
+    dev: Option<Box<crate::crdt::operations::DevProof>>,
     db_path: &str,
     db_passphrase: &str,
 ) {
@@ -2641,6 +2707,11 @@ pub(crate) async fn handle_envelope_channel_message(
     ) {
         return;
     }
+    let version = super::post_proof::Version { sid: &sid, cid: &cid, sender: &sender_peer_id, ts, edited_at: None, text: &text, x: &extras };
+    if super::post_proof::refused(server_state, &version, dev.as_deref(), "live") {
+        return;
+    }
+    let dev = super::post_proof::verified(dev, &version);
 
     // Multi-device: a message from ANY of our own devices is ours.
     let is_mine = super::resolver::same_identity(&sender_peer_id, local_peer);
@@ -2660,7 +2731,7 @@ pub(crate) async fn handle_envelope_channel_message(
         &sid, &cid, &sender_peer_id, &text, is_mine, ts,
         sig.as_deref(), pk.as_deref(), mid.as_deref(),
         reply_to.as_deref(), file_id.as_deref(), order_us, album.as_deref(),
-        &link_preview, db_path, db_passphrase,
+        &link_preview, dev.as_deref(), db_path, db_passphrase,
     ) else {
         // Store-open failure — the message is silently gone otherwise; log
         // channel + sender context (never content) so the drop is diagnosable.
@@ -2933,6 +3004,7 @@ fn persist_incoming_channel_message(
     order_us: Option<i64>,
     album: Option<&str>,
     link_preview: &Option<LinkPreviewRef>,
+    dev: Option<&crate::crdt::operations::DevProof>,
     db_path: &str,
     db_passphrase: &str,
 ) -> Option<(ChannelInsert, Option<String>)> {
@@ -2954,12 +3026,24 @@ fn persist_incoming_channel_message(
             sig, pk, mid, reply_to, file_id, order_us, album,
         ).unwrap_or(ChannelInsert::Duplicate)
     };
-    if stored == ChannelInsert::Stored {
-        if let (Some(lp), Some(message_id)) = (link_preview.as_ref(), mid) {
-            if let Ok(lp_json) = serde_json::to_string(lp) {
-                let _ = store.update_channel_link_preview(message_id, &lp_json);
-            }
-        }
+    // A duplicate still gives a proof-less row the proof of the version it holds.
+    let held_as_sent = |m: &str| {
+        store.get_channel_message_sig_row(m).is_some_and(|r| {
+            r.edited_at.is_none() && r.text == text && r.timestamp == ts && r.reply_to_mid.as_deref() == reply_to
+                && r.file_id.as_deref() == file_id && r.order_us == order_us && r.album_id.as_deref() == album
+        })
+    };
+    if let (Some(dev), Some(message_id)) = (dev, mid)
+        && (stored == ChannelInsert::Stored || stored == ChannelInsert::Duplicate && held_as_sent(message_id))
+    {
+        let _ = store.set_channel_post_proof(message_id, dev);
+    }
+    if stored == ChannelInsert::Stored
+        && let (Some(lp), Some(message_id)) = (link_preview.as_ref(), mid)
+        && super::link_preview::card_within_bounds(lp)
+        && let Ok(lp_json) = serde_json::to_string(lp)
+    {
+        let _ = store.update_channel_link_preview(message_id, &lp_json);
     }
     Some((stored, reply_author))
 }
@@ -2979,6 +3063,7 @@ pub(crate) async fn handle_envelope_edit_message(
     pk: Option<String>,
     sid: Option<String>,
     cid: Option<String>,
+    dev: Option<Box<crate::crdt::operations::DevProof>>,
     db_path: &str,
     db_passphrase: &str,
 ) {
@@ -3001,16 +3086,24 @@ pub(crate) async fn handle_envelope_edit_message(
             // come from OUR row, matching what the editor's signature bound.
             let ctx = format!("{s}:{c}");
             let row = RowExtras::load_channel(&store, &mid);
+            let extras = row.as_signed(&mid);
             if !verify_message_signature_v2(
                 peer_str, sig.as_deref(), pk.as_deref(), "ch", &ctx,
-                ts, &row.as_signed(&mid), &new_text, &mut PkCache::new(),
+                ts, &extras, &new_text, &mut PkCache::new(),
             ) {
                 hollow_log!("[HOLLOW-SECURITY] REJECTED channel edit of {mid} from {peer_str} — signature verification FAILED");
                 return;
             }
+            let version = super::post_proof::Version {
+                sid: s, cid: c, sender: peer_str, ts: row.timestamp.unwrap_or(ts), edited_at: Some(ts), text: &new_text, x: &extras,
+            };
+            if super::post_proof::refused(server_state, &version, dev.as_deref(), "live") {
+                return;
+            }
+            let dev = super::post_proof::verified(dev, &version);
             let _ = store.edit_channel_message(
                 &mid, &new_text, ts,
-                sig.as_deref(), pk.as_deref(),
+                sig.as_deref(), pk.as_deref(), dev.as_deref(),
             );
             edit_applied = true;
         }
@@ -3053,6 +3146,7 @@ pub(crate) async fn handle_envelope_link_preview_set(
     pk: Option<String>,
     sid: Option<String>,
     cid: Option<String>,
+    dev: Option<Box<super::types::CardProof>>,
     sealed_at: i64,
     db_path: &str,
     db_passphrase: &str,
@@ -3114,6 +3208,23 @@ pub(crate) async fn handle_envelope_link_preview_set(
         hollow_log!("[HOLLOW-SECURITY] REJECTED link preview for {mid} from {peer_str} (signer {signer}) — signature verification FAILED");
         return;
     }
+    if lp.as_deref().is_some_and(|c| !super::link_preview::card_within_bounds(c)) {
+        hollow_log!("[HOLLOW-SECURITY] REJECTED link preview for {mid} from {peer_str}: the card is over its bounds");
+        return;
+    }
+    // A channel card is the author's change, judged at the latest of its post's date,
+    // the date its device signed and when its frame was sealed.
+    let mut card_dev = None;
+    if let (Some(s), Some(c)) = (sid.as_deref(), cid.as_deref()) {
+        let digest = lp_digest.clone().unwrap_or_default();
+        let at = dev.as_deref().map_or(sealed_at, |d| d.at);
+        let change = super::post_proof::Change { sid: s, cid: c, signer: &signer, mid: &mid, at, kind: super::post_proof::ChangeKind::Card { lp_digest: &digest } };
+        let proof = dev.as_deref().map(super::types::CardProof::proof);
+        if super::post_proof::change_refused(server_state, &change, row.timestamp.max(sealed_at), proof.as_ref(), "live") {
+            return;
+        }
+        card_dev = dev.filter(|_| super::post_proof::change_proven(proof.as_ref(), &change).is_some());
+    }
 
     let lp_json = preview_column(lp.as_deref());
     let applied = if is_channel {
@@ -3127,6 +3238,9 @@ pub(crate) async fn handle_envelope_link_preview_set(
     };
     if !matches!(applied, Ok(true)) {
         return;
+    }
+    if is_channel {
+        let _ = store.set_channel_card_proof(&mid, card_dev.as_deref());
     }
 
     let preview = lp.map(|b| *b);
@@ -3147,6 +3261,7 @@ pub(crate) async fn handle_envelope_link_preview_set(
 pub(crate) async fn handle_envelope_delete_message(
     event_tx: &mpsc::Sender<NetworkEvent>,
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
+    server_state: Option<&ServerState>,
     sender_peer_id: &str,
     mid: String,
     ts: i64,
@@ -3154,6 +3269,7 @@ pub(crate) async fn handle_envelope_delete_message(
     pk: Option<String>,
     sid: Option<String>,
     cid: Option<String>,
+    dev: Option<Box<crate::crdt::operations::DevProof>>,
     db_path: &str,
     db_passphrase: &str,
 ) {
@@ -3178,8 +3294,15 @@ pub(crate) async fn handle_envelope_delete_message(
         hollow_log!("[HOLLOW-SECURITY] REJECTED channel delete of {mid} from {sender_peer_id} — signature verification FAILED");
         return;
     }
+    let change = super::post_proof::Change { sid: s, cid: c, signer: sender_peer_id, mid: &mid, at: ts, kind: super::post_proof::ChangeKind::Delete };
+    if super::post_proof::change_refused(server_state, &change, row.timestamp.unwrap_or(ts), dev.as_deref(), "live") {
+        return;
+    }
     if store.hide_channel_message(&mid, ts, sig.as_deref(), pk.as_deref()).is_err() {
         return;
+    }
+    if let Some(dev) = dev.as_deref().filter(|d| super::post_proof::change_proven(Some(d), &change).is_some()) {
+        let _ = store.set_deletion_dev(&mid, dev);
     }
     drop(store);
     if let (Some(s_id), Some(c_id)) = (sid, cid) {
@@ -3287,6 +3410,7 @@ pub(crate) async fn handle_envelope_add_reaction(
     pk: Option<String>,
     sid: Option<String>,
     cid: Option<String>,
+    dev: Option<Box<crate::crdt::operations::DevProof>>,
     db_path: &str,
     db_passphrase: &str,
 ) {
@@ -3311,10 +3435,21 @@ pub(crate) async fn handle_envelope_add_reaction(
     if !channel_reaction_target_ok(&store, &mid, &s_id, &c_id) {
         return;
     }
+    let change = super::post_proof::Change {
+        sid: &s_id, cid: &c_id, signer: peer_str, mid: &mid, at: ts, kind: super::post_proof::ChangeKind::React { emoji: &emoji, add: true },
+    };
+    let post_ts = store.get_channel_message_sig_row(&mid).map_or(ts, |r| r.timestamp);
+    if super::post_proof::change_refused(server_state, &change, post_ts, dev.as_deref(), "live") {
+        return;
+    }
+    let dev = dev.filter(|d| super::post_proof::change_proven(Some(d), &change).is_some());
     // A refused add (a replay older than its own removal, the per-reactor cap) shows
     // nothing either, as a removal that removed nothing.
     if store.add_reaction(&mid, &emoji, peer_str, ts, sig.as_deref(), pk.as_deref()) != Ok(true) {
         return;
+    }
+    if let Some(dev) = dev.as_deref() {
+        let _ = store.set_reaction_dev(&mid, &emoji, peer_str, ts, dev);
     }
     drop(store);
     let _ = event_tx.send(NetworkEvent::ChannelReactionAdded {
@@ -3392,6 +3527,7 @@ pub(crate) fn reaction_sig_rejected(
 pub(crate) async fn handle_envelope_remove_reaction(
     event_tx: &mpsc::Sender<NetworkEvent>,
     bundle_keypair: &crate::identity::native_identity::NativeKeypair,
+    server_state: Option<&ServerState>,
     peer_str: &str,
     mid: String,
     emoji: String,
@@ -3400,6 +3536,7 @@ pub(crate) async fn handle_envelope_remove_reaction(
     pk: Option<String>,
     sid: Option<String>,
     cid: Option<String>,
+    dev: Option<Box<crate::crdt::operations::DevProof>>,
     db_path: &str,
     db_passphrase: &str,
 ) {
@@ -3408,8 +3545,14 @@ pub(crate) async fn handle_envelope_remove_reaction(
     if reaction_sig_rejected(peer_str, "unreaction", &mid, &emoji, ts, sig.as_deref(), pk.as_deref()) {
         return;
     }
-    let removed = crate::storage::MessageStore::lease(db_path, db_passphrase)
-        .is_ok_and(|store| store.remove_reaction(&mid, &emoji, peer_str, ts, sig.as_deref(), pk.as_deref()) == Ok(true));
+    let change = super::post_proof::Change {
+        sid: &s_id, cid: &c_id, signer: peer_str, mid: &mid, at: ts, kind: super::post_proof::ChangeKind::React { emoji: &emoji, add: false },
+    };
+    let removed = crate::storage::MessageStore::lease(db_path, db_passphrase).is_ok_and(|store| {
+        let post_ts = store.get_channel_message_sig_row(&mid).map_or(ts, |r| r.timestamp);
+        !super::post_proof::change_refused(server_state, &change, post_ts, dev.as_deref(), "live")
+            && store.remove_reaction(&mid, &emoji, peer_str, ts, sig.as_deref(), pk.as_deref()) == Ok(true)
+    });
     if !removed {
         return;
     }
@@ -3637,7 +3780,7 @@ mod tests {
             &author, &author_pk, "ch-delete", &format!("{sid}:{cid}"),
             &author_id, 5_000, &extras, "guest text",
         );
-        let mut item = crate::node::types::SyncMessageItem {
+        let mut item = crate::node::types::SyncMessageItem { hidden_dev: None, lp_dev: None,
             s: author_id.clone(),
             t: "guest text".to_string(),
             ts: 4_000,
@@ -3655,6 +3798,7 @@ mod tests {
             lp_digest: None,
             lp: None,
             reactions: Vec::new(),
+            dev: None,
             album: None,
         };
         let mut cache = PkCache::new();
@@ -3693,7 +3837,7 @@ mod tests {
             signer, &pk_b64(signer), "ch", &format!("{sid}:{cid}"),
             claimed_sender, ts, &extras, text,
         );
-        crate::node::types::SyncMessageItem {
+        crate::node::types::SyncMessageItem { hidden_dev: None, lp_dev: None,
             s: claimed_sender.to_string(),
             t: text.to_string(),
             ts,
@@ -3711,6 +3855,7 @@ mod tests {
             lp_digest: None,
             lp: None,
             reactions: Vec::new(),
+            dev: None,
             album: None,
         }
     }
@@ -3726,7 +3871,7 @@ mod tests {
             Some(k) => sign_message(k, &pk_b64(k), &format!("reaction:{mid}:{emoji}:{ts}")),
             None => (None, None),
         };
-        crate::node::types::SyncReactionItem {
+        crate::node::types::SyncReactionItem { dev: None,
             e: emoji.to_string(), p: reactor.to_string(), ts, sig, pk,
         }
     }
@@ -3768,7 +3913,7 @@ mod tests {
         );
 
         // The responder ships card + digest together, as every packer does.
-        let item = crate::node::types::SyncMessageItem {
+        let item = crate::node::types::SyncMessageItem { hidden_dev: None, lp_dev: None,
             s: author_id.clone(),
             t: text.to_string(),
             ts,
@@ -3786,6 +3931,7 @@ mod tests {
             lp_digest: Some(digest.clone()),
             lp: Some(Box::new(card.clone())),
             reactions: Vec::new(),
+            dev: None,
             album: None,
         };
 
@@ -3968,18 +4114,18 @@ mod tests {
             k, &pk_b64(k), "ch", &format!("{sid}:{cid}"), &k.peer_id(),
             edited_at.unwrap_or(ts), &extras, text,
         );
-        crate::node::types::SyncMessageItem {
+        crate::node::types::SyncMessageItem { hidden_dev: None, lp_dev: None,
             s: k.peer_id(), t: text.to_string(), ts, sig, pk,
             mid: Some(mid.to_string()), edited_at, reply_to: None,
             file_id: file_id.map(str::to_string), file_meta: None,
             hidden_at: None, hidden_sig: None, hidden_pk: None,
             order_us: Some(ts * 1000), lp_digest: digest, lp: lp.map(|c| Box::new(c.clone())),
-            reactions: Vec::new(), album: None,
+            reactions: Vec::new(), album: None, dev: None,
         }
     }
 
     fn file_meta_for(fid: &str, sender: &str, name: &str) -> crate::node::types::SyncFileMetaItem {
-        crate::node::types::SyncFileMetaItem {
+        crate::node::types::SyncFileMetaItem { dev: None,
             fid: fid.to_string(), name: name.to_string(), ext: "pdf".to_string(),
             mime: "application/pdf".to_string(), size: 10, img: false, w: None, h: None,
             mid: None, ts: 1_000, sender: sender.to_string(), vthumb: None, thumb: None, sha256: None,
@@ -4041,8 +4187,8 @@ mod tests {
         );
         assert_eq!(store.get_channel_message_sig_row(mid).unwrap().text, text);
 
-        // The author's own edit still applies.
-        ingest(&own_channel_item(&bob, sid, cid, mid, "meet at one", 1_000, Some(5_000), None, None));
+        // The author's own edit of the post as held (its slots) still applies.
+        ingest(&own_channel_item(&bob, sid, cid, mid, "meet at one", 1_000, Some(5_000), Some("bob-file"), None));
         assert_eq!(store.get_channel_message_sig_row(mid).unwrap().text, "meet at one");
     }
 
@@ -4183,7 +4329,7 @@ mod tests {
         handle_envelope_link_preview_set(
             &tx, None, &k.peer_id(), local, mid.into(), Some(Box::new(evil_card())),
             att.ts, att.sig, att.pk,
-            place.map(|p| p.0.to_string()), place.map(|p| p.1.to_string()),
+            place.map(|p| p.0.to_string()), place.map(|p| p.1.to_string()), None,
             crate::node::frame_auth::now_ms(), path, pass,
         ).await;
     }
@@ -4322,13 +4468,13 @@ mod tests {
             let ctx = place.map(|(s, c)| format!("{s}:{c}")).unwrap_or_else(|| ":".to_string());
             let (sig, pk) = row_sig(&path, &pass, true, &bob, "ch", &ctx, "c1", 5_000, "moved");
             let (s, c) = named(place);
-            handle_envelope_edit_message(&tx, &bob, None, &b, "c1".into(), "moved".into(), 5_000, sig, pk, s, c, &path, &pass).await;
+            handle_envelope_edit_message(&tx, &bob, None, &b, "c1".into(), "moved".into(), 5_000, sig, pk, s, c, None, &path, &pass).await;
         }
         assert_eq!(text(), "hello");
 
         let (sig, pk) = row_sig(&path, &pass, true, &bob, "ch-delete", "srv-b:chan-b", "c1", 6_000, "hello");
         let (s, c) = named(Some(("srv-b", "chan-b")));
-        handle_envelope_delete_message(&tx, &bob, &b, "c1".into(), 6_000, sig, pk, s, c, &path, &pass).await;
+        handle_envelope_delete_message(&tx, &bob, None, &b, "c1".into(), 6_000, sig, pk, s, c, None, &path, &pass).await;
         assert_eq!(open(&path, &pass).get_channel_message_hidden_at("c1"), None);
 
         live_card(&path, &pass, &bob, &a, "srv-b:chan-b", "c1", Some(("srv-b", "chan-b"))).await;
@@ -4337,14 +4483,14 @@ mod tests {
         for (place, emoji) in [(Some(("srv-b", "chan-b")), "elsewhere"), (None, "as a DM"), (Some((sid, cid)), "here")] {
             let (sig, pk) = sign_message(&mallory, &pk_b64(&mallory), &format!("reaction:c1:{emoji}:7000"));
             let (s, c) = named(place);
-            handle_envelope_add_reaction(&tx, &mallory, None, &m, "c1".into(), emoji.into(), 7_000, sig, pk, s, c, &path, &pass).await;
+            handle_envelope_add_reaction(&tx, &mallory, None, &m, "c1".into(), emoji.into(), 7_000, sig, pk, s, c, None, &path, &pass).await;
         }
         let reactions = open(&path, &pass).load_reactions_for_messages(&["c1".to_string()]).unwrap();
         assert_eq!(reactions.get("c1"), Some(&vec![("here".to_string(), m.clone(), 7_000)]));
 
         let (sig, pk) = row_sig(&path, &pass, true, &bob, "ch", &format!("{sid}:{cid}"), "c1", 5_000, "hello again");
         let (s, c) = named(Some((sid, cid)));
-        handle_envelope_edit_message(&tx, &bob, None, &b, "c1".into(), "hello again".into(), 5_000, sig, pk, s, c, &path, &pass).await;
+        handle_envelope_edit_message(&tx, &bob, None, &b, "c1".into(), "hello again".into(), 5_000, sig, pk, s, c, None, &path, &pass).await;
         assert_eq!(text(), "hello again");
     }
 
@@ -4368,18 +4514,18 @@ mod tests {
         let (sig, pk) = row_sig(&path, &pass, true, &bob, "ch-delete", &format!("{sid}:{cid}"), "c1", 6_000, "hello");
         let (s, c) = place();
         let unopenable = format!("{path}-gone/no/such.db");
-        handle_envelope_delete_message(&tx, &bob, &b, "c1".into(), 6_000, sig, pk, s, c, &unopenable, &pass).await;
+        handle_envelope_delete_message(&tx, &bob, None, &b, "c1".into(), 6_000, sig, pk, s, c, None, &unopenable, &pass).await;
         assert!(rx.try_recv().is_err(), "a delete nobody could check reached Dart");
 
         let react = |kind: &str, ts: i64| sign_message(&mallory, &pk_b64(&mallory), &format!("{kind}:c1:here:{ts}"));
         let (sig, pk) = react("reaction", 7_000);
         let (s, c) = place();
-        handle_envelope_add_reaction(&tx, &mallory, None, &m, "c1".into(), "here".into(), 7_000, sig.clone(), pk.clone(), s, c, &path, &pass).await;
+        handle_envelope_add_reaction(&tx, &mallory, None, &m, "c1".into(), "here".into(), 7_000, sig.clone(), pk.clone(), s, c, None, &path, &pass).await;
         let (usig, upk) = react("unreaction", 8_000);
         let (s, c) = place();
-        handle_envelope_remove_reaction(&tx, &mallory, &m, "c1".into(), "here".into(), 8_000, usig, upk, s, c, &path, &pass).await;
+        handle_envelope_remove_reaction(&tx, &mallory, None, &m, "c1".into(), "here".into(), 8_000, usig, upk, s, c, None, &path, &pass).await;
         let (s, c) = place();
-        handle_envelope_add_reaction(&tx, &mallory, None, &m, "c1".into(), "here".into(), 7_000, sig, pk, s, c, &path, &pass).await;
+        handle_envelope_add_reaction(&tx, &mallory, None, &m, "c1".into(), "here".into(), 7_000, sig, pk, s, c, None, &path, &pass).await;
 
         let mut added = 0;
         while let Ok(ev) = rx.try_recv() {
@@ -4462,7 +4608,7 @@ mod tests {
             );
             handle_envelope_channel_message(
                 &tx, k, Some(&state), &mut SlowModeClock::default(), &local, k.peer_id(), "srv-c".into(), cid.into(),
-                "hello".into(), 1_000, sig, pk, Some(mid.into()), None, None, None, Some(1_000_000), None,
+                "hello".into(), 1_000, sig, pk, Some(mid.into()), None, None, None, Some(1_000_000), None, None,
                 &path, &pass,
             ).await;
         }
@@ -4518,21 +4664,21 @@ mod tests {
 
         let (sig, pk) = row_sig(&path, &pass, true, &bob, "ch", "srv-r:general", "r1", 5_000, "edited as a member");
         let (s, c) = place();
-        handle_envelope_edit_message(&tx, &us, Some(&state), &b, "r1".into(), "edited as a member".into(), 5_000, sig, pk, s, c, &path, &pass).await;
+        handle_envelope_edit_message(&tx, &us, Some(&state), &b, "r1".into(), "edited as a member".into(), 5_000, sig, pk, s, c, None, &path, &pass).await;
         assert_eq!(row().text, "edited as a member");
 
         let op = state.create_op(crate::crdt::operations::CrdtPayload::MemberRemoved { peer_id: b.clone(), seen: None });
         state.apply_op(&op).unwrap();
         let (sig, pk) = row_sig(&path, &pass, true, &bob, "ch", "srv-r:general", "r1", 6_000, "edited once removed");
         let (s, c) = place();
-        handle_envelope_edit_message(&tx, &us, Some(&state), &b, "r1".into(), "edited once removed".into(), 6_000, sig, pk, s, c, &path, &pass).await;
+        handle_envelope_edit_message(&tx, &us, Some(&state), &b, "r1".into(), "edited once removed".into(), 6_000, sig, pk, s, c, None, &path, &pass).await;
         assert_eq!(row().text, "edited as a member", "a removed author rewrote its post live");
 
         let att = card_sig(&path, &pass, true, &bob, "srv-r:general", "r1");
         let (s, c) = place();
         handle_envelope_link_preview_set(
             &tx, Some(&state), &b, &us.peer_id(), "r1".into(), Some(Box::new(evil_card())),
-            att.ts, att.sig, att.pk, s, c, crate::node::frame_auth::now_ms(), &path, &pass,
+            att.ts, att.sig, att.pk, s, c, None, crate::node::frame_auth::now_ms(), &path, &pass,
         ).await;
         assert_eq!(row().link_preview, None, "a removed author re-carded its post live");
     }
@@ -4552,7 +4698,7 @@ mod tests {
             let (sig, pk) = sign_message(&bob, &pk_b64(&bob), &format!("reaction:{mid}:\u{1F44D}:7000"));
             handle_envelope_add_reaction(
                 &tx, &us, Some(&state), &b, mid.into(), "\u{1F44D}".into(), 7_000, sig, pk,
-                Some("srv-r".into()), Some(cid.into()), &path, &pass,
+                Some("srv-r".into()), Some(cid.into()), None, &path, &pass,
             ).await;
         }
         let reactions = open(&path, &pass).load_reactions_for_messages(&["r1".to_string(), "r2".to_string()]).unwrap();
@@ -4616,7 +4762,7 @@ mod tests {
             let (sig, pk) = sign_message_versioned(&bob, &pk_b64(&bob), "ch", "srv-f:general", &b, ts, &extras, mid);
             handle_envelope_channel_message(
                 &tx, &us, Some(&state), &mut clock, &a, b.clone(), "srv-f".into(), "general".into(),
-                mid.into(), ts, sig, pk, Some(mid.into()), None, None, None, Some(ts * 1000), None,
+                mid.into(), ts, sig, pk, Some(mid.into()), None, None, None, Some(ts * 1000), None, None,
                 &path, &pass,
             ).await;
         }
@@ -4658,7 +4804,7 @@ mod tests {
             let (sig, pk) = sign_message_versioned(&bob, &pk_b64(&bob), "ch", "srv-d:general", &b, 1_000, &extras, text);
             handle_envelope_channel_message(
                 &tx, &us, Some(&state), &mut SlowModeClock::default(), &a, b.clone(), "srv-d".into(), "general".into(),
-                text.clone(), 1_000, sig, pk, Some(mid.into()), None, None, None, Some(1_000_000), None,
+                text.clone(), 1_000, sig, pk, Some(mid.into()), None, None, None, Some(1_000_000), None, None,
                 &path, &pass,
             ).await;
         }
@@ -4668,7 +4814,7 @@ mod tests {
         let (sig, pk) = row_sig(&path, &pass, true, &bob, "ch", "srv-d:general", "fits", 5_000, &over);
         handle_envelope_edit_message(
             &tx, &us, Some(&state), &b, "fits".into(), over.clone(), 5_000, sig, pk,
-            Some("srv-d".into()), Some("general".into()), &path, &pass,
+            Some("srv-d".into()), Some("general".into()), None, &path, &pass,
         ).await;
         assert_eq!(channel_text("fits").as_ref(), Some(&long), "an oversized edit leaves the row alone");
 
@@ -4745,7 +4891,7 @@ mod w2c_cleared {
         let (sig, pk) = sign_message_versioned(k, &pk, "ch", "srv:ch", &k.peer_id(), ts, &extras, "hello");
         handle_envelope_channel_message(
             tx, k, None, &mut SlowModeClock::default(), local, k.peer_id(), "srv".into(), "ch".into(),
-            "hello".into(), ts, sig, pk, Some(mid.into()), None, None, None, Some(ts * 1000), None, path, pass,
+            "hello".into(), ts, sig, pk, Some(mid.into()), None, None, None, Some(ts * 1000), None, None, path, pass,
         ).await;
     }
 

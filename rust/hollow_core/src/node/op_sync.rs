@@ -36,6 +36,10 @@ const ASK_TTL: Duration = Duration::from_secs(60);
 const JOIN_FOLLOW_UP: Duration = Duration::from_secs(if cfg!(test) { 6 } else { 5 });
 /// Member devices asked after a join.
 pub(crate) const JOIN_FOLLOW_UP_PEERS: usize = 2;
+/// Between two rounds an owner asks of one server for its due checkpoint (writer rule a).
+const WITNESS_ROUND_GAP: Duration = Duration::from_secs(600);
+/// Identities one such round asks, by standing.
+const WITNESS_ROUND_ASKED: usize = 8;
 
 /// What a device reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,6 +90,9 @@ pub(crate) enum Step {
     Done,
     /// The answer was not one an honest answerer sends: the ask is closed.
     Malformed,
+    /// The ask is complete and the answerer holds rosters ours differ from: this asks
+    /// for them (DEVICE_PROOF_DESIGN section 9).
+    Rosters(Box<HavenMessage>),
     /// Ask the same device again, with this.
     Again(Box<HavenMessage>),
 }
@@ -105,6 +112,15 @@ pub(crate) struct OpSync {
     /// Per server, the identities (masters) whose digest round with us ended since the
     /// socket came up: what the owner's checkpoint writer rule reads.
     witnesses: HashMap<String, std::collections::HashSet<String>>,
+    /// (server, identity) -> when its last digest round with us ended: what a retire's
+    /// round waits on (DEVICE_PROOF_DESIGN 8.2, M4).
+    ended_at: HashMap<(String, String), Instant>,
+    /// Server -> when we last asked a round for its due checkpoint.
+    witness_asked: HashMap<String, Instant>,
+    /// Our store, master and device, for the roster parts of an ask; `None` in units.
+    store: Option<(String, String, String)>,
+    /// Identity -> our roster's digest when we last sent it there with an ask.
+    roster_sent: HashMap<String, String>,
 }
 
 /// Ops kept per server for its first room listing.
@@ -153,7 +169,27 @@ pub(crate) fn vector_ask(state: &ServerState, nonce: Option<u64>, mls_epoch: Opt
         full: None,
         digest: None,
         dg: Some(DG),
+        x: None,
     }
+}
+
+/// An ask for rosters only: no digest and no vector, so an answerer reads no op from it.
+pub(crate) fn roster_ask(server_id: &str, nonce: Option<u64>, wanted: Vec<String>) -> HavenMessage {
+    HavenMessage::SyncRequest {
+        server_id: server_id.to_string(),
+        state_vector_json: String::new(),
+        mls_epoch: None,
+        nonce,
+        full: None,
+        digest: None,
+        dg: Some(DG),
+        x: super::sync_ext::AskExt { rosters_wanted: wanted, ..Default::default() }.boxed(),
+    }
+}
+
+/// Whether `msg` is a [`roster_ask`].
+pub(crate) fn is_roster_ask(digest: Option<&OpDigest>, full: bool, state_vector_json: &str, x: Option<&super::sync_ext::AskExt>) -> bool {
+    digest.is_none() && !full && state_vector_json.is_empty() && x.is_some_and(|x| !x.rosters_wanted.is_empty())
 }
 
 fn fresh_id() -> u64 {
@@ -166,6 +202,58 @@ impl OpSync {
     /// Called once with this node's device id.
     pub(crate) fn set_local(&mut self, device: &str) {
         self.old = acts_old(device);
+    }
+
+    /// Where our rosters live, so an ask carries the authority set's fingerprints and our
+    /// own roster when an answerer may not hold it.
+    pub(crate) fn set_store(&mut self, db_path: &str, db_passphrase: &str, local_master: &str) {
+        self.store = Some((db_path.to_string(), db_passphrase.to_string(), local_master.to_string()));
+    }
+
+    /// The answerer refused our ask (`roster_needed`): it is not sent again as it is.
+    pub(crate) fn close(&mut self, server: &str, device: &str) {
+        self.asks.remove(&(server.to_string(), device.to_string()));
+    }
+
+    /// The last message of our open ask to `device` for `server`.
+    pub(crate) fn last_ask(&self, server: &str, device: &str) -> Option<HavenMessage> {
+        self.asks.get(&(server.to_string(), device.to_string())).map(|a| (*a.last).clone())
+    }
+
+    /// The next ask to `device`'s identity carries our roster even if it went there before:
+    /// that answerer could not place us.
+    pub(crate) fn resend_roster_to(&mut self, device: &str) {
+        self.roster_sent.remove(&super::resolver::resolve(device));
+    }
+
+    /// The fingerprints of `state`'s authority set under `salt`, and our own roster when
+    /// `device`'s identity has not had this version of it.
+    fn roster_parts(&mut self, state: &ServerState, device: &str, salt: &str) -> (Option<Vec<String>>, Option<crate::identity::roster::Roster>) {
+        let Some((db, pass, master)) = self.store.clone() else { return (None, None) };
+        let Ok(store) = crate::storage::MessageStore::lease(&db, &pass) else { return (None, None) };
+        let prints = super::server_rosters::prints(&super::server_rosters::entries(&store, &db, state), salt);
+        let identity = super::resolver::resolve(device);
+        let own = (identity != master)
+            .then(|| super::roster_book::own_roster(&master, &db, &pass))
+            .flatten()
+            .filter(|r| self.roster_sent.get(&identity) != Some(&r.digest()));
+        if let Some(r) = &own {
+            if self.roster_sent.len() >= CAPS_MAX {
+                self.roster_sent.clear();
+            }
+            self.roster_sent.insert(identity, r.digest());
+        }
+        (Some(prints), own)
+    }
+
+    /// The masters whose rosters `rd` says the answerer holds otherwise than we do.
+    fn rosters_wanted(&self, state: &ServerState, rd: &[(String, String)]) -> Vec<String> {
+        if rd.is_empty() {
+            return Vec::new();
+        }
+        let Some((db, pass, _)) = self.store.as_ref() else { return Vec::new() };
+        let Ok(store) = crate::storage::MessageStore::lease(db, pass) else { return Vec::new() };
+        super::server_rosters::wanted(&super::server_rosters::entries(&store, db, state), rd)
     }
 
     /// This node speaks sync as a 0.12.2 build (tests only).
@@ -228,16 +316,24 @@ impl OpSync {
             let HavenMessage::SyncRequest { server_id, state_vector_json, .. } = vector_ask(state, nonce, mls_epoch) else {
                 unreachable!("a vector ask is a sync request")
             };
-            return HavenMessage::SyncRequest { server_id, state_vector_json, mls_epoch, nonce, full: None, digest: None, dg: None };
+            return HavenMessage::SyncRequest { server_id, state_vector_json, mls_epoch, nonce, full: None, digest: None, dg: None, x: None };
         }
         if state.anchor() == Anchor::Legacy || reads == Reads::Vector {
-            return vector_ask(state, nonce, mls_epoch);
+            let mut ask = vector_ask(state, nonce, mls_epoch);
+            let (_, asker_roster) = self.roster_parts(state, device, "");
+            if let HavenMessage::SyncRequest { x, .. } = &mut ask {
+                *x = super::sync_ext::AskExt { asker_roster, ..Default::default() }.boxed();
+            }
+            return ask;
         }
         let id = fresh_id();
         let salt = digest::new_salt();
         let base = state.checkpoint_hlc.clone();
         let bref = state.base.as_ref().map(|b| b.hash_hex());
-        let d = digest::first_ask(&digest::entries(state, kept, None), id, salt.clone(), base, bref);
+        let mut d = digest::first_ask(&digest::entries(state, kept, None), id, salt.clone(), base, bref);
+        let (rs, asker_roster) = self.roster_parts(state, device, &salt);
+        d.rs = rs;
+        let x = super::sync_ext::AskExt { asker_roster, ..Default::default() }.boxed();
         let key = (state.server_id.clone(), device.to_string());
         // A newer ask replaces the open one, keeping the nonce a held join waits on.
         let nonce = nonce.or_else(|| self.asks.get(&key).and_then(|a| a.nonce));
@@ -251,6 +347,7 @@ impl OpSync {
             full: None,
             digest: Some(d),
             dg: Some(DG),
+            x,
         };
         self.asks.insert(
             key,
@@ -259,6 +356,41 @@ impl OpSync {
                 unconfirmed: reads == Reads::Unknown, asked, last: Box::new(msg.clone()), resends: 0,
             },
         );
+        msg
+    }
+
+    /// [`Self::ask`] with `base` as the base reference instead of our own base: an answerer
+    /// leaves out what that checkpoint decides, and says `base_unknown` when it lacks it
+    /// (`named_base`). `extra` rides along (a witness ask); our roster is added as usual.
+    #[allow(dead_code)] // track C1's settling and witness rounds (INTERFACE R-C2-1)
+    pub(crate) fn ask_on_base(
+        &mut self,
+        state: &ServerState,
+        kept: &[KeptRef<'_>],
+        device: &str,
+        nonce: Option<u64>,
+        base: &crate::crdt::operations::CrdtOp,
+        extra: super::sync_ext::AskExt,
+    ) -> HavenMessage {
+        let mut msg = self.ask(state, kept, device, nonce, None);
+        let covers = match &base.payload {
+            crate::crdt::operations::CrdtPayload::ServerCheckpoint { covers, .. } => Some(covers.clone()),
+            _ => None,
+        };
+        let bref = hex::encode(state.content_of(base));
+        if let HavenMessage::SyncRequest { digest: Some(d), x, .. } = &mut msg {
+            d.bref = Some(bref);
+            d.base = covers;
+            let mut ext = x.take().map(|b| *b).unwrap_or_default();
+            ext.named_base = true;
+            ext.witness = extra.witness.or(ext.witness);
+            ext.floor |= extra.floor;
+            ext.asker_roster = extra.asker_roster.or(ext.asker_roster);
+            *x = ext.boxed();
+            if let Some(ask) = self.asks.get_mut(&(state.server_id.clone(), device.to_string())) {
+                *ask.last = msg.clone();
+            }
+        }
         msg
     }
 
@@ -306,9 +438,17 @@ impl OpSync {
             let ask = self.asks.remove(&key).expect("open");
             return Step::Again(Box::new(vector_ask(state, ask.nonce, epoch_now.filter(|_| ask.hinted))));
         }
+        let wanted = self.rosters_wanted(state, &reply.rd);
+        let ask = self.asks.get_mut(&key).expect("open");
         if reply.groups.is_empty() || reply.round >= digest::MAX_ROUNDS {
+            let nonce = ask.nonce;
             self.asks.remove(&key);
-            self.witnesses.entry(state.server_id.clone()).or_default().insert(super::resolver::resolve(device));
+            let identity = super::resolver::resolve(device);
+            self.ended_at.insert((state.server_id.clone(), identity.clone()), Instant::now());
+            self.witnesses.entry(state.server_id.clone()).or_default().insert(identity);
+            if !wanted.is_empty() {
+                return Step::Rosters(Box::new(roster_ask(&state.server_id, nonce, wanted)));
+            }
             return Step::Done;
         }
         let Some(ranges) = digest::follow_up(&digest::entries(state, kept, None), &ask.salt, &ask.asked, reply) else {
@@ -336,8 +476,10 @@ impl OpSync {
                 from: None,
                 ranges,
                 round: ask.round,
+                rs: None,
             }),
             dg: Some(DG),
+            x: super::sync_ext::AskExt { rosters_wanted: wanted, ..Default::default() }.boxed(),
         };
         Step::Again(ask.last.clone())
     }
@@ -418,11 +560,53 @@ impl OpSync {
     pub(crate) fn went_away(&mut self) {
         self.asks.clear();
         self.witnesses.clear();
+        self.ended_at.clear();
+        self.witness_asked.clear();
+    }
+
+    /// The member devices of `room` to ask a digest round of so that our due checkpoint
+    /// on `state` can be witnessed: an owner whose members stay online is otherwise never
+    /// the asker. One device per identity not heard since the socket came up and with no
+    /// ask of ours open, by standing; at most one round per server per gap.
+    pub(crate) fn witness_round(
+        &mut self,
+        state: &ServerState,
+        room: Option<&std::collections::HashSet<String>>,
+        us: &str,
+        now: Instant,
+    ) -> Vec<String> {
+        let sid = &state.server_id;
+        if self.witness_asked.get(sid).is_some_and(|at| now.saturating_duration_since(*at) < WITNESS_ROUND_GAP) {
+            return Vec::new();
+        }
+        let heard = self.witnesses(sid);
+        let mut devices: Vec<&String> = room
+            .into_iter()
+            .flatten()
+            .filter(|d| state.keeps_peer(d) && !super::resolver::same_identity(d, us) && self.reads(d) != Reads::Vector)
+            .filter(|d| !heard.contains(&super::resolver::resolve(d)) && !self.asks.contains_key(&(sid.clone(), (*d).clone())))
+            .collect();
+        devices.sort();
+        let masters = devices.iter().map(|d| super::resolver::resolve(d));
+        let picked: Vec<String> = super::standing::rank_masters(state, masters)
+            .into_iter()
+            .take(WITNESS_ROUND_ASKED)
+            .filter_map(|m| devices.iter().find(|d| super::resolver::resolve(d) == m).map(|d| (*d).clone()))
+            .collect();
+        if !picked.is_empty() {
+            self.witness_asked.insert(sid.clone(), now);
+        }
+        picked
     }
 
     /// The identities whose digest round on `server` ended since the socket came up.
     pub(crate) fn witnesses(&self, server: &str) -> std::collections::HashSet<String> {
         self.witnesses.get(server).cloned().unwrap_or_default()
+    }
+
+    /// The identities whose digest round on `server` ended at or after `since`.
+    pub(crate) fn ended_since(&self, server: &str, since: Instant) -> std::collections::HashSet<String> {
+        self.ended_at.iter().filter(|((s, _), at)| s == server && **at >= since).map(|((_, id), _)| id.clone()).collect()
     }
 
     #[cfg(test)]
@@ -480,6 +664,30 @@ mod tests {
         assert_eq!(again, vec![(s.server_id.clone(), Some(4), Some(2))]);
         assert_eq!(book.reads("old"), Reads::Vector);
         assert!(vector_of(&book.ask(&s, &[], "old", None, None)).is_some_and(|v| !v.is_empty()), "an older device got a digest");
+    }
+
+    /// Writer rule a: an owner whose checkpoint waits on witnesses asks one device per
+    /// member identity it has not heard, none of its own and none with an ask open, and
+    /// asks again only after the gap or a new socket.
+    #[test]
+    fn a_witness_round_asks_each_unheard_member_once_per_gap() {
+        let mut s = server();
+        let us = s.current_owner().expect("the founder owns it");
+        for m in ["m_a", "m_b", "m_c"] {
+            s.members.insert(m.into(), crate::crdt::server_state::MemberInfo { peer_id: m.into(), display_name: m.into() });
+        }
+        let room: std::collections::HashSet<String> = ["m_a", "m_b", "m_c", "stranger", us.as_str()].iter().map(|d| d.to_string()).collect();
+        let mut book = OpSync::default();
+        let _ = book.ask(&s, &[], "m_c", None, None);
+        book.witnesses.entry(s.server_id.clone()).or_default().insert("m_b".into());
+        let now = Instant::now();
+        assert_eq!(book.witness_round(&s, Some(&room), &us, now), vec!["m_a".to_string()]);
+        assert!(book.witness_round(&s, Some(&room), &us, now + Duration::from_secs(60)).is_empty(), "one round per gap");
+        book.went_away();
+        let mut again = book.witness_round(&s, Some(&room), &us, now + Duration::from_secs(61));
+        again.sort();
+        assert_eq!(again, vec!["m_a".to_string(), "m_b".to_string(), "m_c".to_string()], "a new socket hears no one yet");
+        assert!(book.witness_round(&s, None, &us, now + WITNESS_ROUND_GAP * 3).is_empty(), "no room, no round");
     }
 
     fn kinds(silent: &[Silent]) -> Vec<String> {
@@ -555,7 +763,7 @@ mod tests {
         let ask = book.ask(&s, &[], "dev", None, Some(3));
         let d = digest_of(&ask).unwrap();
         let Range(lo, hi, _, _) = d.ranges[0].clone();
-        let split = DigestReply { ask: d.ask, round: 0, groups: vec![vec![Range(lo, lo, 1, "x".into()), Range(lo + 1, hi, 1, "y".into())]], vector: false };
+        let split = DigestReply { ask: d.ask, round: 0, groups: vec![vec![Range(lo, lo, 1, "x".into()), Range(lo + 1, hi, 1, "y".into())]], vector: false, rd: Vec::new() };
         let t1 = Instant::now();
         let _ = book.tick(t1 + RESEND_AFTER * 2, &|_| false, &|_| Some(7));
         let _ = book.tick(t1 + RESEND_AFTER * 5, &|_| false, &|_| Some(7));
@@ -595,6 +803,7 @@ mod tests {
         assert!(hi > lo, "the first range spans several ms");
         let split = |ask: u64, round: u8| DigestReply {
             ask, round, groups: vec![vec![Range(lo, lo, 1, "x".into()), Range(lo + 1, hi, 1, "y".into())]], vector: false,
+            rd: Vec::new(),
         };
         assert!(matches!(book.answered(&s, &[], "other", &split(id, 0), None), Step::Unasked), "another device's split");
         assert!(matches!(book.answered(&s, &[], "dev", &split(id ^ 1, 0), None), Step::Unasked), "a split for another ask");
@@ -606,7 +815,7 @@ mod tests {
             }
             _ => panic!("the split was not followed"),
         }
-        let done = DigestReply { ask: id, round: 1, groups: Vec::new(), vector: false };
+        let done = DigestReply { ask: id, round: 1, groups: Vec::new(), vector: false, rd: Vec::new() };
         assert!(matches!(book.answered(&s, &[], "dev", &done, None), Step::Done));
         assert!(matches!(book.answered(&s, &[], "dev", &done, None), Step::Unasked), "a closed ask answered twice");
         let _ = book.ask(&s, &[], "dev", None, None);
@@ -624,13 +833,14 @@ mod tests {
         let last = d.ranges.last().unwrap().1;
         let outside = DigestReply {
             ask: d.ask, round: 0, groups: vec![vec![Range(last + 1, last + 1, 1, "x".into()), Range(last + 2, last + 3, 1, "y".into())]], vector: false,
+            rd: Vec::new(),
         };
         assert!(matches!(book.answered(&s, &[], "dev", &outside, None), Step::Malformed));
         assert_eq!(book.open_asks(), 0);
         let ask = book.ask(&s, &[], "dev", None, None);
         let d = digest_of(&ask).unwrap();
         let Range(lo, hi, _, _) = d.ranges[0].clone();
-        let overlapping = DigestReply { ask: d.ask, round: 0, groups: vec![vec![Range(lo, hi, 1, "x".into()), Range(lo, hi, 1, "y".into())]], vector: false };
+        let overlapping = DigestReply { ask: d.ask, round: 0, groups: vec![vec![Range(lo, hi, 1, "x".into()), Range(lo, hi, 1, "y".into())]], vector: false, rd: Vec::new() };
         assert!(matches!(book.answered(&s, &[], "dev", &overlapping, None), Step::Malformed));
     }
 
@@ -653,7 +863,7 @@ mod tests {
         let mut book = OpSync::default();
         let ask = book.ask(&s, &[], "dev", Some(8), Some(3));
         let id = digest_of(&ask).unwrap().ask;
-        match book.answered(&s, &[], "dev", &DigestReply { ask: id, round: 0, groups: Vec::new(), vector: true }, None) {
+        match book.answered(&s, &[], "dev", &DigestReply { ask: id, round: 0, groups: Vec::new(), vector: true, rd: Vec::new() }, None) {
             Step::Again(next) => assert!(vector_of(&next).is_some_and(|v| !v.is_empty())),
             _ => panic!("no vector ask"),
         }
@@ -685,7 +895,7 @@ mod tests {
         let ask = book.ask(&s, &[], "dev", Some(8), Some(1));
         let id = digest_of(&ask).unwrap().ask;
         let _ = book.tick(t0 + RESEND_AFTER + Duration::from_millis(50), &|_| false, &|_| Some(7));
-        match book.answered(&s, &[], "dev", &DigestReply { ask: id, round: 0, groups: Vec::new(), vector: true }, Some(7)) {
+        match book.answered(&s, &[], "dev", &DigestReply { ask: id, round: 0, groups: Vec::new(), vector: true, rd: Vec::new() }, Some(7)) {
             Step::Again(next) => assert!(
                 matches!(*next, HavenMessage::SyncRequest { mls_epoch: Some(7), .. }),
                 "the vector re-ask names the first ask's epoch, older than the copy it answers"
@@ -705,7 +915,7 @@ mod tests {
         let ask = book.ask(&s, &[], "dev", None, None);
         let d = digest_of(&ask).unwrap();
         let Range(lo, hi, _, _) = d.ranges[0].clone();
-        let split = DigestReply { ask: d.ask, round: 0, groups: vec![vec![Range(lo, lo, 1, "x".into()), Range(lo + 1, hi, 1, "y".into())]], vector: false };
+        let split = DigestReply { ask: d.ask, round: 0, groups: vec![vec![Range(lo, lo, 1, "x".into()), Range(lo + 1, hi, 1, "y".into())]], vector: false, rd: Vec::new() };
         let mut verdict = Vec::new();
         for i in 1..=8u32 {
             verdict.extend(kinds(&book.tick(t0 + RESEND_AFTER * (i * 2), &|_| false, &|_| None).0));
@@ -713,4 +923,19 @@ mod tests {
         assert_eq!(verdict, ["again dev", "again dev", "closed dev"]);
         assert!(matches!(book.answered(&s, &[], "dev", &split, None), Step::Again(_)), "a split 40 s after the ask was dropped as unasked");
     }
+
+    /// M4 (8.2 step 1): a retire's round counts only identities whose digest round
+    /// ended at or after it started, never one that ended before.
+    #[test]
+    fn a_round_hears_only_identities_that_ended_after_it_started() {
+        let mut sync = OpSync::default();
+        let t0 = Instant::now();
+        sync.ended_at.insert(("s".into(), "early".into()), t0);
+        let since = t0 + std::time::Duration::from_secs(1);
+        sync.ended_at.insert(("s".into(), "late".into()), since);
+        sync.ended_at.insert(("other".into(), "late".into()), since);
+        let heard = sync.ended_since("s", since);
+        assert_eq!(heard, ["late".to_string()].into_iter().collect(), "an earlier round and another server never count");
+    }
+
 }

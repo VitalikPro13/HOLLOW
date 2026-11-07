@@ -530,7 +530,7 @@ fn try_process_channel_msg(
                 MessageEnvelope::ChannelMessage { inner } => {
                     let ChannelMessagePayload {
                         sid, cid, text, ts, sig, pk, mid, reply_to, file_id,
-                        link_preview, order_us, album,
+                        link_preview, order_us, album, dev,
                     } = *inner;
                     // Conference chat is live-only — it must never be persisted
                     // by a push-fetch either (mirrors the live-ingest guard).
@@ -568,7 +568,7 @@ fn try_process_channel_msg(
                     if insert_channel_row(
                         db_path, db_passphrase, &sid, &cid, &sender_master, &text, ts,
                         sig.as_deref(), pk.as_deref(), mid.as_deref(), reply_to.as_deref(),
-                        file_id.as_deref(), order_us, album.as_deref(), link_preview.as_ref(),
+                        file_id.as_deref(), order_us, album.as_deref(), link_preview.as_ref(), dev.as_deref(),
                     ) == Some(ChannelInsert::Cleared) {
                         return None;
                     }
@@ -597,6 +597,7 @@ fn try_process_channel_msg(
             // Guest display metadata — irrelevant to the push-fetch path
             // (members store metadata from the MLS FileHeader instead).
             file_meta: _,
+            dev,
         } => {
             // Plaintext, so anyone in the room can send one: only a channel that is
             // public in our own state takes it (guests get no pushes). Meeting chat
@@ -637,7 +638,7 @@ fn try_process_channel_msg(
             if insert_channel_row(
                 db_path, db_passphrase, &server_id, &channel_id, &sender_master, &text, ts,
                 sig.as_deref(), pk.as_deref(), Some(&mid), reply_to.as_deref(),
-                file_id.as_deref(), order_us, album.as_deref().map(String::as_str), link_preview.as_ref(),
+                file_id.as_deref(), order_us, album.as_deref().map(String::as_str), link_preview.as_ref(), dev.as_deref(),
             ) == Some(ChannelInsert::Cleared) {
                 return None;
             }
@@ -834,7 +835,8 @@ fn fetch_channel_sig_rejected(
 }
 
 /// Insert a fetched channel message row, deduplicated by message_id: the same
-/// message may arrive again via channel sync when the full app opens.
+/// message may arrive again via channel sync when the full app opens. The row keeps
+/// `dev` only when it proves this post.
 /// `order_us` is the SENDER's Lamport stamp, persisted faithfully because the v2
 /// signature binds it; a local default would store a row that fails re-serving.
 #[allow(clippy::too_many_arguments)]
@@ -854,6 +856,7 @@ fn insert_channel_row(
     order_us: Option<i64>,
     album: Option<&str>,
     link_preview: Option<&LinkPreviewRef>,
+    dev: Option<&crate::crdt::operations::DevProof>,
 ) -> Option<ChannelInsert> {
     let store = crate::storage::MessageStore::open(db_path, db_passphrase).ok()?;
     // History this device cleared shows no banner either.
@@ -871,6 +874,13 @@ fn insert_channel_row(
                 server_id, channel_id, sender, text, false, ts, sig, pk, mid,
                 reply_to, file_id, order_us, album,
             );
+            let x = crate::node::crypto_handler::SignedExtras { mid, reply_to, file_id, order_us, lp_digest: None, album };
+            let version = crate::node::post_proof::Version { sid: server_id, cid: channel_id, sender, ts, edited_at: None, text, x: &x };
+            if let (Ok(1), Some(dev), Some(message_id)) = (&inserted, dev, mid)
+                && crate::node::post_proof::proven(Some(dev), &version).is_some()
+            {
+                let _ = store.set_channel_post_proof(message_id, dev);
+            }
             // Persist the preview too: dedup by mid means the full app never
             // re-ingests this row, so a dropped card is lost forever.
             if let (Ok(n), Some(lp), Some(message_id)) = (&inserted, link_preview, mid) {
@@ -2369,7 +2379,7 @@ mod tests {
             let frame = serde_json::to_string(&HavenMessage::PublicChannelMessage {
                 server_id: sid.into(), channel_id: cid, text: "hello".into(), ts, sig, pk, mid: mid.into(),
                 reply_to: None, file_id: None, link_preview: None, order_us: Some(ts * 1000), album: None,
-                file_meta: None,
+                file_meta: None, dev: None,
             })
             .unwrap();
             let mut mls = None;
@@ -2378,6 +2388,43 @@ mod tests {
         };
         assert!(posted("srv-a-t08", "a-t08-server"), "the same public post in a server is stored");
         assert!(!posted(&meeting, "a-t08-meeting"), "a meeting's public frame was stored");
+        crate::node::resolver::clear_all();
+    }
+
+    /// Section 13 in the push fetch: a fetched post keeps its device proof only when the
+    /// proof is for this post, its words included, so the rows it serves back later never
+    /// carry a proof that proves nothing.
+    #[test]
+    fn a_fetched_post_keeps_only_a_proof_that_proves_it() {
+        let _g = crate::node::resolver::test_lock();
+        crate::node::resolver::clear_all();
+        crate::node::blocklist::clear_for_test();
+        let (_tmp, path, pass) = temp_store();
+        let store = crate::storage::MessageStore::open(&path, &pass).unwrap();
+        let (author, me, device) = (kp(181), kp(182), kp(183));
+        let (a, m) = (author.peer_id(), me.peer_id());
+        let sid = "srv-b15-fetch";
+        let mut state = server_with(sid, &[(&a, "Ann"), (&m, "Me")]);
+        let cid = state.channels.keys().next().expect("the founder's channel").clone();
+        state.channels.get_mut(&cid).unwrap().is_public = true;
+        store.save_server_state(sid, &serde_json::to_string(&state).unwrap()).unwrap();
+        let fetched = |mid: &str, proof_text: &str| {
+            let ts = crate::node::frame_auth::now_ms();
+            let extras = SignedExtras { mid: Some(mid), order_us: Some(ts * 1000), ..SignedExtras::default() };
+            let (sig, pk) = sign_message_versioned(&author, &pk_b64(&author), "ch", &format!("{sid}:{cid}"), &a, ts, &extras, "hello");
+            let version = crate::node::post_proof::Version { sid, cid: &cid, sender: &a, ts, edited_at: None, text: proof_text, x: &extras };
+            let frame = serde_json::to_string(&HavenMessage::PublicChannelMessage {
+                server_id: sid.into(), channel_id: cid.clone(), text: "hello".into(), ts, sig, pk, mid: mid.into(),
+                reply_to: None, file_id: None, link_preview: None, order_us: Some(ts * 1000), album: None,
+                file_meta: None, dev: crate::node::post_proof::sign(&device, &version),
+            })
+            .unwrap();
+            let _ = try_process_channel_msg(&a, &frame, &mut None, &mut false, &path, &pass, &m);
+            assert!(store.channel_message_exists(mid), "the fetch stores the post");
+            store.channel_post_proofs(&[mid]).get(mid).map(|d| d.device.clone())
+        };
+        assert_eq!(fetched("b15-proven", "hello"), Some(device.peer_id()), "the post's own proof is kept");
+        assert_eq!(fetched("b15-other", "other words"), None, "a proof for other words is kept");
         crate::node::resolver::clear_all();
     }
 }
@@ -2400,7 +2447,7 @@ mod w2c_cleared {
             store.insert_channel_message("srv", "ch", "alice", "a", false, t, None, None, Some("m1"), None, None, None, None).unwrap();
             store.clear_channel_history(t + 5_000).unwrap();
         }
-        let row = |mid: &str, ts: i64| insert_channel_row(&path, &pass, "srv", "ch", "alice", "a", ts, None, None, Some(mid), None, None, None, None, None);
+        let row = |mid: &str, ts: i64| insert_channel_row(&path, &pass, "srv", "ch", "alice", "a", ts, None, None, Some(mid), None, None, None, None, None, None);
         assert_eq!(row("m1", t), Some(ChannelInsert::Cleared), "a cleared message came back by push");
         assert_eq!(row("m2", t + 10), Some(ChannelInsert::Stored));
         assert_eq!(row("m2", t + 10), Some(ChannelInsert::Duplicate));

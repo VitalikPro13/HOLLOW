@@ -1,14 +1,20 @@
 pub(crate) mod admin_lww;
 pub(crate) mod anchor;
+pub(crate) mod authority;
 pub(crate) mod digest;
 pub(crate) mod dominance;
 pub(crate) mod fold;
+pub(crate) mod hold;
 pub(crate) mod hlc;
 pub(crate) mod lock_state;
 pub(crate) mod members;
 pub(crate) mod operations;
+pub(crate) mod refold;
+pub(crate) mod refold_write;
 pub(crate) mod server_state;
+pub(crate) mod settle;
 pub(crate) mod sync;
+pub(crate) mod verdict;
 pub(crate) mod voids;
 
 use std::sync::OnceLock;

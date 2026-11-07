@@ -283,6 +283,47 @@ pub(crate) fn synced_file_meta<'a>(
     file_meta_write_allowed(store, &fm.fid, author).then_some(fm)
 }
 
+/// Whether a write of `fid`'s card must keep the card held: one a device proof holds
+/// is replaced only by another proven card (section 13), never a proof-less one.
+pub(crate) fn meta_swap_refused(store: &crate::storage::MessageStore, fid: &str, proven: bool) -> bool {
+    let held = !proven && store.change_proofs(&[], &[fid]).files.contains_key(fid);
+    if held {
+        hollow_log!("[HOLLOW-SECURITY] REJECTED a proof-less file card for {fid}: the card held is proven");
+    }
+    held
+}
+
+/// A channel file card is its author's change (section 13): judged at its post's date
+/// (`place` = ((server, channel), post); `None` judges nothing). `Err` = refused, else
+/// the proof to keep when it verifies.
+pub(crate) fn header_meta_judged(
+    store: &crate::storage::MessageStore,
+    server_states: &HashMap<String, ServerState>,
+    place: Option<((&str, &str), &str)>,
+    card_owner: &str,
+    ts: i64,
+    digest: &str,
+    dev: Option<Box<crate::crdt::operations::DevProof>>,
+) -> Result<Option<Box<crate::crdt::operations::DevProof>>, ()> {
+    let Some(((sid, cid), mid)) = place else { return Ok(None) };
+    let author = super::resolver::resolve(card_owner);
+    let change = super::post_proof::Change { sid, cid, signer: &author, mid, at: ts, kind: super::post_proof::ChangeKind::FileMeta { digest } };
+    let post_ts = store.get_channel_message_sig_row(mid).map_or(ts, |r| r.timestamp);
+    if super::post_proof::change_refused(server_states.get(sid), &change, post_ts, dev.as_deref(), "live") {
+        return Err(());
+    }
+    Ok(dev.filter(|d| super::post_proof::change_proven(Some(d), &change).is_some()))
+}
+
+/// Keep `dev` with `fid`'s card only when the stored card is the one it proves
+/// (`digest`); else the row keeps no proof it could not serve back.
+pub(crate) fn keep_meta_proof(store: &crate::storage::MessageStore, fid: &str, digest: &str, dev: Option<&crate::crdt::operations::DevProof>) {
+    let stored = store.get_file_metadata(fid).ok().flatten().map(|f| {
+        super::post_proof::file_meta_digest(&f.file_id, &f.mime_type, f.is_image, f.width, f.height, f.thumb_b64.as_deref())
+    });
+    let _ = store.set_file_meta_dev(fid, dev.filter(|_| stored.as_deref() == Some(digest)));
+}
+
 /// Why a card riding a signed item (sync, a public post) may not describe its file.
 pub(crate) fn synced_card_claim_refused(
     fm: &super::types::SyncFileMetaItem,
@@ -1032,9 +1073,25 @@ pub(crate) async fn finish_send_file(
             webrtc_peers, pending_webrtc_sends, peer_auto_dl, db_path, db_passphrase,
         ).await;
     } else if let (Some(sid), Some(cid)) = (server_id, channel_id) {
+        let extras = crate::node::crypto_handler::SignedExtras {
+            mid: Some(&message_id),
+            reply_to: None,
+            file_id: Some(&file_id),
+            order_us: Some(order_us),
+            lp_digest: None,
+            album: album.as_deref(),
+        };
+        let dev = super::post_proof::sign(device_keypair, &super::post_proof::Version {
+            sid: &sid, cid: &cid, sender: &local_peer, ts: timestamp, edited_at: None, text: &signing_payload_text, x: &extras,
+        });
+        let meta_digest = super::post_proof::file_meta_digest(&file_id, &final_mime, is_image, width, height, thumb.as_deref());
+        let meta_dev = super::post_proof::sign_change(device_keypair, &super::post_proof::Change {
+            sid: &sid, cid: &cid, signer: &local_peer, mid: &message_id, at: timestamp,
+            kind: super::post_proof::ChangeKind::FileMeta { digest: &meta_digest },
+        });
         // Channel path — broadcast via MLS.
         send_channel_file(
-            &sid, &cid, &signing_payload_text, timestamp, &sig, &pk,
+            &sid, &cid, &signing_payload_text, timestamp, &sig, &pk, &dev, &meta_dev,
             &message_id, &file_id, order_us, album.as_deref(), &final_data,
             &original_name, &final_ext, &final_mime, file_size, &sha256,
             is_image, width, height, &vthumb, &thumb, voice, &share_ref, &local_peer, device_peer_id,
@@ -1333,7 +1390,7 @@ fn build_dm_file_header(
     inline_bytes: Option<String>,
 ) -> MessageEnvelope {
     MessageEnvelope::FileHeader {
-        inner: Box::new(FileHeaderPayload {
+        inner: Box::new(FileHeaderPayload { meta_dev: None,
             fid: msg.file_id.to_string(),
             name: msg.original_name.to_string(),
             ext: msg.final_ext.to_string(),
@@ -1801,13 +1858,17 @@ fn persist_sent_channel_row(
     file_id: &str,
     order_us: i64,
     album: Option<&str>,
+    dev: Option<&crate::crdt::operations::DevProof>,
 ) {
     if let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) {
-        let _ = store.insert_channel_message(
+        let stored = store.insert_channel_message(
             sid, cid, local_peer, text, true, timestamp,
             sig, pk, Some(message_id),
             None, Some(file_id), Some(order_us), album,
         );
+        if let (Ok(1), Some(dev)) = (stored, dev) {
+            let _ = store.set_channel_post_proof(message_id, dev);
+        }
     }
 }
 
@@ -1822,6 +1883,8 @@ async fn send_channel_file(
     timestamp: i64,
     sig: &Option<String>,
     pk: &Option<String>,
+    dev: &Option<Box<crate::crdt::operations::DevProof>>,
+    meta_dev: &Option<Box<crate::crdt::operations::DevProof>>,
     message_id: &str,
     file_id: &str,
     order_us: i64,
@@ -1868,13 +1931,18 @@ async fn send_channel_file(
             link_preview: None,
             order_us: Some(order_us),
             album: album.map(str::to_owned),
+            dev: dev.clone(),
         }),
     };
 
     persist_sent_channel_row(
         db_path, db_passphrase, sid, cid, local_peer, signing_payload_text,
-        timestamp, sig.as_deref(), pk.as_deref(), message_id, file_id, order_us, album,
+        timestamp, sig.as_deref(), pk.as_deref(), message_id, file_id, order_us, album, dev.as_deref(),
     );
+    if let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) {
+        let digest = super::post_proof::file_meta_digest(file_id, final_mime, is_image, width, height, thumb.as_deref());
+        keep_meta_proof(&store, file_id, &digest, meta_dev.as_deref());
+    }
 
     // Send the TEXT MESSAGE via the MLS TOPIC broadcast, the SAME path normal
     // channel text takes. Targeted per-member direct sends silently skipped every
@@ -1917,7 +1985,9 @@ async fn send_channel_file(
                 vthumb: vthumb.clone(),
                 thumb: thumb.clone(),
                 sha256: Some(sha256.to_string()),
+                dev: meta_dev.clone(),
             }),
+            dev: dev.clone(),
         };
         if let Some(server) = server_states.get(sid) {
             super::message_ops::send_public_channel_msg(ws_cmd_tx, server, cid, &msg);
@@ -1974,6 +2044,7 @@ async fn send_channel_file(
             voice,
             author: Some(local_peer.to_string()),
             sha256: Some(sha256.to_string()),
+            meta_dev: meta_dev.clone(),
         }),
     };
     let header_json = serde_json::to_string(&header).unwrap_or_default();
@@ -3506,6 +3577,7 @@ pub(crate) async fn handle_envelope_file_header(
     voice: bool,
     author: Option<String>,
     sha256: Option<String>,
+    meta_dev: Option<Box<crate::crdt::operations::DevProof>>,
     // The answer to a guest pull, from the peer we asked (the caller checked the
     // receipt): we hold no membership to judge the channel by.
     from_guest_pull: bool,
@@ -3575,13 +3647,17 @@ pub(crate) async fn handle_envelope_file_header(
         _ => server_id.to_string(),
     };
 
+    let meta_digest = super::post_proof::file_meta_digest(&fid, &mime, img, w, h, thumb.as_deref());
+    let place = if from_guest_pull { None } else { sid.as_deref().zip(cid.as_deref()).zip(mid.as_deref()) };
+    let Ok(meta_proof) = header_meta_judged(&store, server_states, place, &card_owner, ts, &meta_digest, meta_dev) else { return };
+
     // Envelope-borne thumb: image blur placeholder or video poster,
     // size-capped — see accept_header_thumb.
     let thumb = accept_header_thumb(thumb, img, &mime);
 
     // Owner guard (0.8.5): MLS proves the sender is a group member, not
     // that this `file_id` is theirs to relabel. See `file_meta_write_allowed`.
-    let meta_written = file_meta_write_allowed(&store, &fid, &sender_peer_id);
+    let meta_written = file_meta_write_allowed(&store, &fid, &sender_peer_id) && !meta_swap_refused(&store, &fid, meta_proof.is_some());
     if meta_written {
         let _ = store.insert_file_metadata(
             &fid, &name, &ext, &mime,
@@ -3591,6 +3667,9 @@ pub(crate) async fn handle_envelope_file_header(
             &card_owner, false, ts,
             vthumb.as_ref(), thumb.as_deref(), sha256.as_deref(),
         );
+        if sid.is_some() {
+            keep_meta_proof(&store, &fid, &meta_digest, meta_proof.as_deref());
+        }
         // Persist the share back-reference (issue #41) so a manual
         // download can rejoin the share swarm after a restart.
         if let Some(sr) = share_ref.as_ref() {
@@ -3885,7 +3964,7 @@ mod tests {
             "srv", sender.to_string(),
             fid.to_string(), "a.png".into(), "png".into(), "image/png".into(), 10, 0, true, None, None,
             Some("m1".into()), Some("srv".into()), Some("srv-general".into()), 1,
-            Some("11".repeat(32)), Some("22".repeat(12)), None, None, None, false, None, None, false,
+            Some("11".repeat(32)), Some("22".repeat(12)), None, None, None, false, None, None, None, false,
             &mut receipts, &mut std::collections::HashSet::new(), &ws_tx, &HashMap::new(),
             "us", path, pass,
         ).await;
@@ -4310,7 +4389,7 @@ mod tests {
         let fid = super::super::file_commit::file_id_for(&super::super::file_commit::FileCommit {
             author: "bob", mid: "m1", size: 7, sha256: &sha, name: "invoice.pdf", ext: "pdf", vthumb: None,
         });
-        let card = super::super::types::SyncFileMetaItem {
+        let card = super::super::types::SyncFileMetaItem { dev: None,
             fid: fid.clone(), name: "invoice.pdf".into(), ext: "pdf".into(), mime: "application/pdf".into(),
             size: 7, img: false, w: None, h: None, mid: Some("m1".into()), ts: 1, sender: "bob".into(),
             vthumb: None, thumb: None, sha256: Some(sha.clone()),

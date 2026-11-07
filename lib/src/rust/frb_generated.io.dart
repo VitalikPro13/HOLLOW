@@ -8,6 +8,7 @@ import 'api/at_rest.dart';
 import 'api/catalog.dart';
 import 'api/conference.dart';
 import 'api/crdt.dart';
+import 'api/device_proof.dart';
 import 'api/emotes.dart';
 import 'api/gifs.dart';
 import 'api/identity.dart';
@@ -138,6 +139,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   PushProfile dco_decode_box_autoadd_push_profile(dynamic raw);
+
+  @protected
+  RefoldAnswered dco_decode_box_autoadd_refold_answered(dynamic raw);
+
+  @protected
+  RestorePoint dco_decode_box_autoadd_restore_point(dynamic raw);
 
   @protected
   ServerAvatarAnimData dco_decode_box_autoadd_server_avatar_anim_data(
@@ -353,6 +360,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<MutedMemberFfi> dco_decode_list_muted_member_ffi(dynamic raw);
 
   @protected
+  List<String?> dco_decode_list_opt_String(dynamic raw);
+
+  @protected
   List<OverlayPersonFfi> dco_decode_list_overlay_person_ffi(dynamic raw);
 
   @protected
@@ -400,7 +410,22 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<(String, String)> dco_decode_list_record_string_string(dynamic raw);
 
   @protected
+  List<RefoldItem> dco_decode_list_refold_item(dynamic raw);
+
+  @protected
+  List<RefoldItemOutcome> dco_decode_list_refold_item_outcome(dynamic raw);
+
+  @protected
+  List<RefoldReview> dco_decode_list_refold_review(dynamic raw);
+
+  @protected
   List<RemoteReadMarker> dco_decode_list_remote_read_marker(dynamic raw);
+
+  @protected
+  List<RestoreChoices> dco_decode_list_restore_choices(dynamic raw);
+
+  @protected
+  List<RestorePoint> dco_decode_list_restore_point(dynamic raw);
 
   @protected
   List<RosterDevice> dco_decode_list_roster_device(dynamic raw);
@@ -512,6 +537,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   PushProfile? dco_decode_opt_box_autoadd_push_profile(dynamic raw);
 
   @protected
+  RefoldAnswered? dco_decode_opt_box_autoadd_refold_answered(dynamic raw);
+
+  @protected
+  RestorePoint? dco_decode_opt_box_autoadd_restore_point(dynamic raw);
+
+  @protected
   ServerAvatarAnimData? dco_decode_opt_box_autoadd_server_avatar_anim_data(
     dynamic raw,
   );
@@ -612,10 +643,49 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   RedeemOutcome dco_decode_redeem_outcome(dynamic raw);
 
   @protected
+  RefoldAnswered dco_decode_refold_answered(dynamic raw);
+
+  @protected
+  RefoldApplied dco_decode_refold_applied(dynamic raw);
+
+  @protected
+  RefoldGroup dco_decode_refold_group(dynamic raw);
+
+  @protected
+  RefoldItem dco_decode_refold_item(dynamic raw);
+
+  @protected
+  RefoldItemKind dco_decode_refold_item_kind(dynamic raw);
+
+  @protected
+  RefoldItemOutcome dco_decode_refold_item_outcome(dynamic raw);
+
+  @protected
+  RefoldOutcome dco_decode_refold_outcome(dynamic raw);
+
+  @protected
+  RefoldReview dco_decode_refold_review(dynamic raw);
+
+  @protected
+  RefoldReviews dco_decode_refold_reviews(dynamic raw);
+
+  @protected
   RemoteReadMarker dco_decode_remote_read_marker(dynamic raw);
 
   @protected
   RepairOutcome dco_decode_repair_outcome(dynamic raw);
+
+  @protected
+  RestoreChoices dco_decode_restore_choices(dynamic raw);
+
+  @protected
+  RestorePoint dco_decode_restore_point(dynamic raw);
+
+  @protected
+  RestoreStage dco_decode_restore_stage(dynamic raw);
+
+  @protected
+  Restores dco_decode_restores(dynamic raw);
 
   @protected
   RosterDevice dco_decode_roster_device(dynamic raw);
@@ -640,6 +710,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ServerFfi dco_decode_server_ffi(dynamic raw);
+
+  @protected
+  ServerRecovery dco_decode_server_recovery(dynamic raw);
 
   @protected
   ServerSticker dco_decode_server_sticker(dynamic raw);
@@ -872,6 +945,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   PushProfile sse_decode_box_autoadd_push_profile(SseDeserializer deserializer);
+
+  @protected
+  RefoldAnswered sse_decode_box_autoadd_refold_answered(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  RestorePoint sse_decode_box_autoadd_restore_point(
+    SseDeserializer deserializer,
+  );
 
   @protected
   ServerAvatarAnimData sse_decode_box_autoadd_server_avatar_anim_data(
@@ -1135,6 +1218,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  List<String?> sse_decode_list_opt_String(SseDeserializer deserializer);
+
+  @protected
   List<OverlayPersonFfi> sse_decode_list_overlay_person_ffi(
     SseDeserializer deserializer,
   );
@@ -1198,7 +1284,30 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  List<RefoldItem> sse_decode_list_refold_item(SseDeserializer deserializer);
+
+  @protected
+  List<RefoldItemOutcome> sse_decode_list_refold_item_outcome(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<RefoldReview> sse_decode_list_refold_review(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   List<RemoteReadMarker> sse_decode_list_remote_read_marker(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<RestoreChoices> sse_decode_list_restore_choices(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<RestorePoint> sse_decode_list_restore_point(
     SseDeserializer deserializer,
   );
 
@@ -1350,6 +1459,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  RefoldAnswered? sse_decode_opt_box_autoadd_refold_answered(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  RestorePoint? sse_decode_opt_box_autoadd_restore_point(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   ServerAvatarAnimData? sse_decode_opt_box_autoadd_server_avatar_anim_data(
     SseDeserializer deserializer,
   );
@@ -1472,10 +1591,51 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   RedeemOutcome sse_decode_redeem_outcome(SseDeserializer deserializer);
 
   @protected
+  RefoldAnswered sse_decode_refold_answered(SseDeserializer deserializer);
+
+  @protected
+  RefoldApplied sse_decode_refold_applied(SseDeserializer deserializer);
+
+  @protected
+  RefoldGroup sse_decode_refold_group(SseDeserializer deserializer);
+
+  @protected
+  RefoldItem sse_decode_refold_item(SseDeserializer deserializer);
+
+  @protected
+  RefoldItemKind sse_decode_refold_item_kind(SseDeserializer deserializer);
+
+  @protected
+  RefoldItemOutcome sse_decode_refold_item_outcome(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  RefoldOutcome sse_decode_refold_outcome(SseDeserializer deserializer);
+
+  @protected
+  RefoldReview sse_decode_refold_review(SseDeserializer deserializer);
+
+  @protected
+  RefoldReviews sse_decode_refold_reviews(SseDeserializer deserializer);
+
+  @protected
   RemoteReadMarker sse_decode_remote_read_marker(SseDeserializer deserializer);
 
   @protected
   RepairOutcome sse_decode_repair_outcome(SseDeserializer deserializer);
+
+  @protected
+  RestoreChoices sse_decode_restore_choices(SseDeserializer deserializer);
+
+  @protected
+  RestorePoint sse_decode_restore_point(SseDeserializer deserializer);
+
+  @protected
+  RestoreStage sse_decode_restore_stage(SseDeserializer deserializer);
+
+  @protected
+  Restores sse_decode_restores(SseDeserializer deserializer);
 
   @protected
   RosterDevice sse_decode_roster_device(SseDeserializer deserializer);
@@ -1504,6 +1664,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ServerFfi sse_decode_server_ffi(SseDeserializer deserializer);
+
+  @protected
+  ServerRecovery sse_decode_server_recovery(SseDeserializer deserializer);
 
   @protected
   ServerSticker sse_decode_server_sticker(SseDeserializer deserializer);
@@ -1796,6 +1959,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_box_autoadd_push_profile(
     PushProfile self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_refold_answered(
+    RefoldAnswered self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_restore_point(
+    RestorePoint self,
     SseSerializer serializer,
   );
 
@@ -2151,6 +2326,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_opt_String(List<String?> self, SseSerializer serializer);
+
+  @protected
   void sse_encode_list_overlay_person_ffi(
     List<OverlayPersonFfi> self,
     SseSerializer serializer,
@@ -2235,8 +2413,38 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_refold_item(
+    List<RefoldItem> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_refold_item_outcome(
+    List<RefoldItemOutcome> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_refold_review(
+    List<RefoldReview> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_remote_read_marker(
     List<RemoteReadMarker> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_restore_choices(
+    List<RestoreChoices> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_restore_point(
+    List<RestorePoint> self,
     SseSerializer serializer,
   );
 
@@ -2433,6 +2641,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_opt_box_autoadd_refold_answered(
+    RefoldAnswered? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_restore_point(
+    RestorePoint? self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_opt_box_autoadd_server_avatar_anim_data(
     ServerAvatarAnimData? self,
     SseSerializer serializer,
@@ -2607,6 +2827,42 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_redeem_outcome(RedeemOutcome self, SseSerializer serializer);
 
   @protected
+  void sse_encode_refold_answered(
+    RefoldAnswered self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_refold_applied(RefoldApplied self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_refold_group(RefoldGroup self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_refold_item(RefoldItem self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_refold_item_kind(
+    RefoldItemKind self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_refold_item_outcome(
+    RefoldItemOutcome self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_refold_outcome(RefoldOutcome self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_refold_review(RefoldReview self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_refold_reviews(RefoldReviews self, SseSerializer serializer);
+
+  @protected
   void sse_encode_remote_read_marker(
     RemoteReadMarker self,
     SseSerializer serializer,
@@ -2614,6 +2870,21 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_repair_outcome(RepairOutcome self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_restore_choices(
+    RestoreChoices self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_restore_point(RestorePoint self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_restore_stage(RestoreStage self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_restores(Restores self, SseSerializer serializer);
 
   @protected
   void sse_encode_roster_device(RosterDevice self, SseSerializer serializer);
@@ -2650,6 +2921,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_server_ffi(ServerFfi self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_server_recovery(
+    ServerRecovery self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_server_sticker(ServerSticker self, SseSerializer serializer);
