@@ -50,32 +50,25 @@ int main() {
     c.clear = false;
     c.channels = {"3f2c9a8e-1b4d-4e6f-9a0b-1c2d3e4f5a6b", "~join"};
 
-    // 0.12.1 and older clients sign ring1, which names no relay.
-    check("the ring1 payload stays as 0.12.1 clients sign it",
-          ring_auth::payload_ring1(c) ==
-              "hollow-ring1\n0123456789abcdef0123456789abcdef01234567\n\n1790000000000\n86400\nkeep\n"
-              "3f2c9a8e-1b4d-4e6f-9a0b-1c2d3e4f5a6b\n~join");
-
     // Pinned in rust/hollow_core/src/node/ring_auth.rs
     // (ring_control_payload_matches_the_relays_pinned_vector).
-    c.version = 2;
     check("the ring2 payload matches the client's pinned vector",
-          ring_auth::payload_ring2(c, "relay.example.com") ==
+          ring_auth::payload(c, "relay.example.com") ==
               "hollow-ring2\nrelay.example.com\n0123456789abcdef0123456789abcdef01234567\n\n1790000000000\n"
               "86400\nkeep\n3f2c9a8e-1b4d-4e6f-9a0b-1c2d3e4f5a6b\n~join");
 
     std::vector<LockLink> chain = {link_with_change(1, "OLDCHANGE"), link_with_change(2, "CHANGE")};
     const int64_t now = c.ts_ms + 1000;
-    const ring_auth::Relay relay{"relay.example.com", false};
+    const std::string relay = "relay.example.com";
     const auto sign = [&relay](const ring_auth::Control& k) {
-        return "SIG:CHANGE:" + ring_auth::payload_ring2(k, relay.domain);
+        return "SIG:CHANGE:" + ring_auth::payload(k, relay);
     };
     c.sig = sign(c);
     check("a control signed by the newest lock's change key counts",
           ring_auth::authorized(c, &chain, now, stub_crypto(), relay));
 
     ring_auth::Control old_key = c;
-    old_key.sig = "SIG:OLDCHANGE:" + ring_auth::payload_ring2(c, relay.domain);
+    old_key.sig = "SIG:OLDCHANGE:" + ring_auth::payload(c, relay);
     check("a control signed by an older lock's change key does not",
           !ring_auth::authorized(old_key, &chain, now, stub_crypto(), relay));
 
@@ -113,30 +106,20 @@ int main() {
     printf("relay domain (hollow-ring2)\n");
     {
         check("a control signed for another relay is refused",
-              !ring_auth::authorized(c, &chain, now, stub_crypto(), ring_auth::Relay{"relay.other.net", true}));
+              !ring_auth::authorized(c, &chain, now, stub_crypto(), "relay.other.net"));
         ring_auth::Control blank = c;
-        blank.sig = "SIG:CHANGE:" + ring_auth::payload_ring2(c, "");
-        check("a relay with no domain takes no ring2 control, not even one naming none",
-              !ring_auth::authorized(blank, &chain, now, stub_crypto(), ring_auth::Relay{"", true}));
-        check("a ring2 control is judged as ring2 while ring1 is still taken",
-              ring_auth::authorized(c, &chain, now, stub_crypto(), ring_auth::Relay{relay.domain, true}));
+        blank.sig = "SIG:CHANGE:" + ring_auth::payload(c, "");
+        check("a relay with no domain takes no control, not even one naming none",
+              !ring_auth::authorized(blank, &chain, now, stub_crypto(), ""));
 
+        // What 0.12.1 and older clients signed: the same lines under `hollow-ring1`, no relay.
+        std::string ring1 = "hollow-ring1\n" + c.room + "\n" + c.owner + "\n" + std::to_string(c.ts_ms) +
+                            "\n86400\nkeep";
+        for (const auto& ch : c.channels) ring1 += "\n" + ch;
         ring_auth::Control old = c;
-        old.version = 1;
-        old.sig = "SIG:CHANGE:" + ring_auth::payload_ring1(old);
-        check("a ring1 control counts while the switch is on",
-              ring_auth::authorized(old, &chain, now, stub_crypto(), ring_auth::Relay{relay.domain, true}));
-        check("a ring1 control is refused once the switch is off",
+        old.sig = "SIG:CHANGE:" + ring1;
+        check("a ring1 signature is no control at this relay",
               !ring_auth::authorized(old, &chain, now, stub_crypto(), relay));
-
-        ring_auth::Control down = c;
-        down.version = 1;
-        check("a ring2 signature presented as ring1 is refused",
-              !ring_auth::authorized(down, &chain, now, stub_crypto(), ring_auth::Relay{relay.domain, true}));
-        ring_auth::Control up = old;
-        up.version = 2;
-        check("a ring1 signature presented as ring2 is refused",
-              !ring_auth::authorized(up, &chain, now, stub_crypto(), ring_auth::Relay{relay.domain, true}));
     }
 
     printf("parse\n");
@@ -146,22 +129,25 @@ int main() {
         auto j = nlohmann::json::parse(
             R"({"type":"set_topic_buffer","room":"r","owner":"o","channels":["a","b"],)"
             R"("retention_secs":3600,"clear":false,"ts":5,"sig":"s"})");
-        check("a signed control parses", ring_auth::parse(j, p, is_signed) && is_signed &&
-                                             p.room == "r" && p.owner == "o" && p.channels.size() == 2 &&
-                                             p.retention_secs == 3600 && p.ts_ms == 5 && p.sig == "s" &&
-                                             p.version == 1);
+        check("a signed control without its form (ring1) is no control at all", !ring_auth::parse(j, p, is_signed));
     }
     {
         ring_auth::Control p;
         bool is_signed = false;
-        auto j = nlohmann::json::parse(R"({"type":"set_topic_buffer","room":"r","v":2,"ts":5,"sig":"s"})");
-        check("a ring2 control parses as ring2", ring_auth::parse(j, p, is_signed) && is_signed && p.version == 2);
+        auto j = nlohmann::json::parse(
+            R"({"type":"set_topic_buffer","room":"r","owner":"o","channels":["a","b"],)"
+            R"("retention_secs":3600,"clear":false,"v":2,"ts":5,"sig":"s"})");
+        check("a signed ring2 control parses", ring_auth::parse(j, p, is_signed) && is_signed &&
+                                                  p.room == "r" && p.owner == "o" && p.channels.size() == 2 &&
+                                                  p.retention_secs == 3600 && p.ts_ms == 5 && p.sig == "s");
     }
     {
         ring_auth::Control p;
         bool is_signed = true;
         auto j = nlohmann::json::parse(R"({"type":"set_topic_buffer","room":"r","channels":["a"]})");
         check("an unsigned request parses as unsigned", ring_auth::parse(j, p, is_signed) && !is_signed);
+        auto v = nlohmann::json::parse(R"({"type":"set_topic_buffer","room":"r","v":2,"channels":["a"]})");
+        check("so does one naming its form", ring_auth::parse(v, p, is_signed) && !is_signed);
     }
     {
         ring_auth::Control p;

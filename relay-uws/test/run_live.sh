@@ -1,13 +1,11 @@
 #!/bin/bash
-# Live tests of the relay's dispatch gates (test_relay_live.cpp): builds the real relay
-# twice, with the compatibility switch (ACCEPT_RING1_CONTROL) on and off, runs each on
-# 127.0.0.1 with a throwaway certificate and drives it over TLS.
+# Live tests of the relay's dispatch gates (test_relay_live.cpp): builds the real relay,
+# runs it on 127.0.0.1 with a throwaway certificate and drives it over TLS.
 # run_tests.sh calls it with its scratch directory; SANITIZE=1 builds the relay and the
 # client with ASan and UBSan. Skips, saying why, when the vendored uWebSockets/uSockets
 # sources or the openssl tool are missing.
 #   bash run_live.sh [dir]
 #   RELAY_LIVE_BUILD=<dir>    keep the relay's objects there between runs
-#   RELAY_LIVE_VARIANTS=on    run one of the two builds
 #   RELAY_LIVE_PORTS=lo-hi    pick the relay's port in this range (a machine others share)
 #   RELAY_LIVE_JOBS=n         compile at most n objects at once
 cd "$(dirname "$0")" || exit 1
@@ -71,11 +69,6 @@ us_c="gcc -std=c11 $flags -DLIBUS_USE_OPENSSL -I../uSockets/src"
 # A session grace of seconds, so the tests watch one run out; three sockets fill an
 # address, so they fill one under its rate of ten new sockets a minute.
 relay_cxx="g++ -std=c++20 $flags -DLIBUS_USE_OPENSSL -DHOLLOW_RELAY_TEST_LOOPBACK=1 -DHOLLOW_RELAY_TEST_GRACE_SECS=5 -DHOLLOW_RELAY_TEST_CONNS_PER_IP=3 -I../uWebSockets/src -I../uSockets/src -I../src"
-# Both builds set the switch, so flipping its default on release day changes neither.
-switches() {
-    printf -- "-DHOLLOW_ACCEPT_RING1_CONTROL=%s " "$1"
-}
-variants=${RELAY_LIVE_VARIANTS:-on off}
 
 objects=()
 for f in bsd context loop socket eventing/epoll_kqueue eventing/gcd eventing/libuv; do
@@ -93,19 +86,15 @@ for f in main crypto license reports http_handlers snapshot; do
     compile "$f" "../src/$f.cpp" "$obj/$f.o" $relay_cxx
     objects+=("$obj/$f.o")
 done
-for v in $variants; do
-    if [ "$v" = on ]; then bit=1; else bit=0; fi
-    compile "ws_handler_$v" ../src/ws_handler.cpp "$obj/ws_handler_$v.o" $relay_cxx $(switches $bit)
-done
-# The circuit breaker enforced (breaker.h); every other build runs it in shadow mode.
-compile ws_handler_enforce ../src/ws_handler.cpp "$obj/ws_handler_enforce.o" $relay_cxx $(switches 1) \
-    -DHOLLOW_BREAKER_ENFORCE=1
+compile ws_handler_main ../src/ws_handler.cpp "$obj/ws_handler_main.o" $relay_cxx
+# The circuit breaker enforced (breaker.h); the main build runs it in shadow mode.
+compile ws_handler_enforce ../src/ws_handler.cpp "$obj/ws_handler_enforce.o" $relay_cxx -DHOLLOW_BREAKER_ENFORCE=1
 g++ -std=c++17 $flags -I../src test_relay_live.cpp ../src/crypto.cpp \
     -o "$dir/client" -lssl -lcrypto -lsodium > "$dir/client.build" 2>&1 &
 pids+=($!)
 names+=(client)
 wait_all
-for v in $variants enforce; do
+for v in main enforce; do
     g++ $flags "${objects[@]}" "$obj/ws_handler_$v.o" -o "$dir/relay_$v" -lssl -lcrypto -lsodium -lz -pthread \
         > "$dir/link_$v.build" 2>&1 || build_fail "link $v" "$dir/link_$v.build"
 done
@@ -147,8 +136,7 @@ done
 # relay's send-buffer memory budget in bytes, which runs only the OOM-budget case.
 run_variant() {
     local v=$1 name=${2:-$1} exempt=${3-} backpressure=${4-} breaker=${5-} budget=${6-} port tries=0 log=$dir/relay_${2:-$1}.log
-    local extra=() args=() only=${RELAY_LIVE_ONLY-} client_v=$1 stall=
-    [ "$v" = enforce ] && client_v=on
+    local extra=() args=() only=${RELAY_LIVE_ONLY-} stall=
     if [ -n "$breaker" ]; then
         # Budgets / 100 and times / 60: the numbers test_relay_live.cpp's BRK_W and BRK_T name.
         extra=(HOLLOW_RELAY_TEST_BREAKER_W=100 HOLLOW_RELAY_TEST_BREAKER_T=60)
@@ -200,7 +188,7 @@ run_variant() {
 
     # The client's last case sends the relay SIGTERM itself (the drain hint); its pid
     # also lets a probe read the relay's memory. Under ASan the run takes about 96 s.
-    RELAY_LIVE_ONLY=$only RELAY_LIVE_BACKPRESSURE=$backpressure RELAY_LIVE_SEND_BUDGET=$budget RELAY_LIVE_STALL_MS=$stall RELAY_LIVE_SANITIZED=${SANITIZE:-0} RELAY_LIVE_PID=$relay_pid timeout 240 "$dir/client" "$port" "$domain" "$client_v" \
+    RELAY_LIVE_ONLY=$only RELAY_LIVE_BACKPRESSURE=$backpressure RELAY_LIVE_SEND_BUDGET=$budget RELAY_LIVE_STALL_MS=$stall RELAY_LIVE_SANITIZED=${SANITIZE:-0} RELAY_LIVE_PID=$relay_pid timeout 240 "$dir/client" "$port" "$domain" \
         > "$dir/client_$name.log" 2>&1
     local rc=$?
     # A relay that does not exit on SIGTERM is down until systemd kills it.
@@ -249,16 +237,14 @@ run_variant() {
     fail=1
 }
 
-for v in $variants; do
-    run_variant "$v"
-done
+run_variant main
 # The exemption list: a v4 address written v4-mapped, beside three entries it ignores.
-run_variant "${variants%% *}" exempt "::ffff:127.0.241.3, not-an-address,127.0.241, 0.0.0.0"
+run_variant main exempt "::ffff:127.0.241.3, not-an-address,127.0.241, 0.0.0.0"
 # A 1 MiB send buffer: a test drains it and writes again inside one session tick.
-run_variant "${variants%% *}" backpressure "" 1048576
+run_variant main backpressure "" 1048576
 # The circuit breaker scaled down: shadow mode (every build's default), then enforced.
-run_variant "${variants%% *}" breaker_shadow "" "" shadow
+run_variant main breaker_shadow "" "" shadow
 run_variant enforce breaker_enforce "" "" enforce
 # A 32 MiB send-buffer memory budget and a 5 s stall window: honest traffic passes, effects stay bounded.
-run_variant "${variants%% *}" oom "" "" "" 33554432
+run_variant main oom "" "" "" 33554432
 exit $fail

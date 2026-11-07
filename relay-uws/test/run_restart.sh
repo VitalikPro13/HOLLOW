@@ -7,8 +7,7 @@
 #   RELAY_LIVE_PORTS=lo-hi    pick the relays' ports in this range
 cd "$(dirname "$0")" || exit 1
 live=${1:?usage: run_restart.sh <dir>}/live
-relay=$live/relay_off
-[ -x "$relay" ] || relay=$live/relay_on
+relay=$live/relay_main
 if [ ! -x "$relay" ] || [ ! -x "$live/client" ]; then
     echo "skip test_relay_restart (no relay or client from run_live.sh in $live)"
     exit 0

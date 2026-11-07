@@ -309,9 +309,6 @@ struct RelayInner {
     /// Opt-in: a join by a socket already in the room announces nothing to the others,
     /// as the relay does (`already_present` in `ws_handler.cpp`).
     quiet_rejoins: bool,
-    /// A relay answering `discover_peers` with the peer list (what an ask without the 0.13
-    /// digest flag gets): the tests of what discovery may name.
-    legacy_discovery: bool,
     /// Every (device, room) audit whose digest differed from what the device was told.
     drifts_told: Vec<(String, String)>,
     /// (sender, target) pairs whose direct frames the relay swallows: it keeps what
@@ -1385,10 +1382,6 @@ impl MockRelay {
         self.inner.lock().unwrap().quiet_rejoins = on;
     }
 
-    pub(crate) fn set_legacy_discovery(&self, on: bool) {
-        self.inner.lock().unwrap().legacy_discovery = on;
-    }
-
     /// Lose the next `n` `PeerJoined` frames to `dev` in `room`, as writes the relay drops.
     pub(crate) fn lose_peer_joined(&self, dev: &str, room: &str, n: u32) {
         if let Some(conn) = self.inner.lock().unwrap().conns.get(dev) {
@@ -1664,12 +1657,8 @@ impl RelayInner {
                             .collect()
                     })
                     .unwrap_or_default();
-                if inner.legacy_discovery {
-                    inner.write(from, WsEvent::DiscoveredPeers { room: room_code, peers });
-                    return;
-                }
-                // 0.13: the relay's digest of what it lists to `from`, judged by its
-                // ws_client against what it was told. A hidden device is told no
+                // The relay's digest of what it lists to `from`, judged by its ws_client
+                // against what it was told. A hidden device is told no
                 // presence and sends no audit.
                 if inner.hidden.contains(from) {
                     return;
@@ -4267,7 +4256,6 @@ fn sync_response(server_id: &str, ops: &[crate::crdt::operations::CrdtOp]) -> su
         nonce: None,
         page: None,
         digest: None,
-        dg: None,
         x: None,
     }
 }
@@ -21303,8 +21291,6 @@ async fn authz_a_stranger_in_a_forwarder_room_meets_only_the_forwarder() {
     let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
-    // Discovery as an ask without the digest flag gets it: the list this test judges.
-    relay.set_legacy_discovery(true);
 
     // F, a real node, hosts its own room as an embedded forwarder does.
     let f = spawn_node_with_friends(&relay, 191, 191, &[]).await;
@@ -21319,7 +21305,7 @@ async fn authz_a_stranger_in_a_forwarder_room_meets_only_the_forwarder() {
 
     let stranger = keys(193).peer_id();
     let (s_tx, mut s_rx) = relay.attach_raw(&stranger);
-    let barrier = |tx: &mpsc::UnboundedSender<WsCommand>| tx.send(WsCommand::DiscoverPeers { room_code: room.clone() }).unwrap();
+    let barrier = |tx: &mpsc::UnboundedSender<WsCommand>| tx.send(WsCommand::CheckPeers { peers: Vec::new(), rooms: Vec::new() }).unwrap();
     let to = |target: &str, data: &[u8]| WsCommand::SendDirect { room_code: room.clone(), target_peer: target.to_string(), data: data.to_vec() };
     s_tx.send(WsCommand::JoinRoom { room_code: room.clone() }).unwrap();
     s_tx.send(WsCommand::SendToRoom { room_code: room.clone(), data: b"to the room".to_vec() }).unwrap();
@@ -21327,7 +21313,7 @@ async fn authz_a_stranger_in_a_forwarder_room_meets_only_the_forwarder() {
     s_tx.send(to(&viewer, b"to the viewer")).unwrap();
     s_tx.send(WsCommand::SendBinaryDirect { room_code: room.clone(), target_peer: viewer.clone(), data: b"stream".to_vec(), credit: Default::default() }).unwrap();
     barrier(&s_tx);
-    let mut heard = raw_events_until(&mut s_rx, 10, |ev| matches!(ev, WsEvent::DiscoveredPeers { .. })).await;
+    let mut heard = raw_events_until(&mut s_rx, 10, |ev| matches!(ev, WsEvent::PeerStatus { .. })).await;
 
     // While the viewer is away, what the stranger leaves for it waits for nobody.
     v_tx.send(WsCommand::LeaveRoom { room_code: room.clone() }).unwrap();
@@ -21338,20 +21324,19 @@ async fn authz_a_stranger_in_a_forwarder_room_meets_only_the_forwarder() {
     })
     .unwrap();
     barrier(&s_tx);
-    heard.extend(raw_events_until(&mut s_rx, 10, |ev| matches!(ev, WsEvent::DiscoveredPeers { .. })).await);
+    heard.extend(raw_events_until(&mut s_rx, 10, |ev| matches!(ev, WsEvent::PeerStatus { .. })).await);
     v_tx.send(WsCommand::JoinRoom { room_code: room.clone() }).unwrap();
     assert!(wait_until(10, async || relay.room_devices(&room).contains(&viewer)).await, "the viewer is back");
     barrier(&v_tx);
-    let seen = raw_events_until(&mut v_rx, 10, |ev| matches!(ev, WsEvent::DiscoveredPeers { .. })).await;
+    let seen = raw_events_until(&mut v_rx, 10, |ev| matches!(ev, WsEvent::PeerStatus { .. })).await;
     barrier(&s_tx);
-    heard.extend(raw_events_until(&mut s_rx, 10, |ev| matches!(ev, WsEvent::DiscoveredPeers { .. })).await);
+    heard.extend(raw_events_until(&mut s_rx, 10, |ev| matches!(ev, WsEvent::PeerStatus { .. })).await);
 
     let only = |peers: &[String], me: &str| peers.iter().cloned().collect::<HashSet<_>>() == HashSet::from([fwd.clone(), me.to_string()]);
     for (me, other, events) in [(&stranger, &viewer, &heard), (&viewer, &stranger, &seen)] {
         for ev in events {
             match ev {
                 WsEvent::RoomMembers { room: r, peers } if *r == room => assert!(only(peers, me), "{me} is shown {peers:?}"),
-                WsEvent::DiscoveredPeers { peers, .. } => assert_eq!(peers, &vec![fwd.clone()], "{me} discovers only F"),
                 WsEvent::PeerJoined { peer_id, .. } | WsEvent::PeerLeft { peer_id, .. } => {
                     assert_ne!(peer_id, other, "{me} is told of {other}'s presence")
                 }
@@ -23013,8 +22998,6 @@ async fn declined_request_does_not_resurrect_on_mailbox_redelivery() {
 async fn authz_an_inbox_shows_its_devices_only_to_each_other() {
     let _g = test_guard();
     let relay = MockRelay::new();
-    // Discovery as an ask without the digest flag gets it: the list this test judges.
-    relay.set_legacy_discovery(true);
 
     let m_kp = NativeKeypair::from_secret_bytes(&seed_bytes(91));
     let m = m_kp.peer_id();
@@ -23067,18 +23050,6 @@ async fn authz_an_inbox_shows_its_devices_only_to_each_other() {
         rosters(&b_saw).iter().all(|r| !r.contains(&asker_a)) && !joined(&a_saw, &asker_b),
         "askers must not learn about each other",
     );
-    a.cmd_tx.send(WsCommand::DiscoverPeers { room_code: inbox.clone() }).unwrap();
-    let discovered: Vec<String> = a
-        .events(300)
-        .await
-        .into_iter()
-        .filter_map(|e| match e {
-            WsEvent::DiscoveredPeers { peers, .. } => Some(peers),
-            _ => None,
-        })
-        .flatten()
-        .collect();
-    assert!(discovered.is_empty(), "discovery shows an asker nobody, got {discovered:?}");
 
     // The owners never hear of the askers, yet a deposit for the master reaches
     // both of them now, and waits in the mailbox for the devices that are not here.
@@ -34685,18 +34656,7 @@ async fn authz_only_a_member_is_served_the_op_log() {
         f.from == s.device_id && f.to.as_deref() == Some(o.device_id.as_str()) && f.kind() == "encrypted"
     }).count();
     let before = to_o();
-    let empty = crate::crdt::sync::StateVector { server_id: server_id.clone(), entries: HashMap::new() };
-    carry_as(&s, &o, super::types::HavenMessage::SyncRequest {
-        server_id: server_id.clone(),
-        state_vector_json: serde_json::to_string(&empty).unwrap(),
-        mls_epoch: None,
-        nonce: None,
-        full: None,
-        digest: None,
-        dg: None,
-        x: None,
-    })
-    .await;
+    carry_as(&s, &o, t14a_digest_ask(&server_id, None, &[], None)).await;
     assert!(wait_until(10, async || to_o() > before).await, "the request reaches the relay");
     flush_frames(&relay, &mut o).await;
     let served_in_clear = relay.wiretap().frames.iter().any(|f| f.from == o.device_id && f.to.as_deref() == Some(s.device_id.as_str()) && f.kind() == "sync_response");
@@ -34704,17 +34664,7 @@ async fn authz_only_a_member_is_served_the_op_log() {
     assert!(!served_in_clear && !served_carried, "a non-member must not be served the op log");
 
     // A member asking the same is served, inside its Olm session and never in the clear.
-    carry_as(&m, &o, super::types::HavenMessage::SyncRequest {
-        server_id: server_id.clone(),
-        state_vector_json: serde_json::to_string(&empty).unwrap(),
-        mls_epoch: None,
-        nonce: None,
-        full: None,
-        digest: None,
-        dg: None,
-        x: None,
-    })
-    .await;
+    carry_as(&m, &o, t14a_digest_ask(&server_id, None, &[], None)).await;
     assert!(
         wait_until(10, async || o.carried_to(&m.device_id).await.iter().any(|msg| matches!(msg, super::types::HavenMessage::SyncResponse { .. }))).await,
         "a member is served its delta over Olm"
@@ -35531,18 +35481,7 @@ async fn authz_a_member_banned_while_away_learns_it_from_its_sync() {
 
     // Only a sync reaches the owner: it hears no room broadcast, so B's door ask is lost.
     relay.set_broadcast_deaf(&o.device_id, true);
-    let nothing_held = crate::crdt::sync::StateVector { server_id: server_id.clone(), entries: Default::default() };
-    carry_as(&j, &o, super::types::HavenMessage::SyncRequest {
-        server_id: server_id.clone(),
-        state_vector_json: serde_json::to_string(&nothing_held).unwrap(),
-        mls_epoch: None,
-        nonce: None,
-        full: None,
-        digest: None,
-        dg: None,
-        x: None,
-    })
-    .await;
+    carry_as(&j, &o, t14a_digest_ask(&server_id, None, &[], None)).await;
     carried_barrier(&j, &mut o).await;
     let ask = serde_json::to_vec(&super::types::HavenMessage::DoorAsk { server_id: server_id.clone(), nonce: String::new() }).unwrap();
     relay.inject(&server_id, &j.device_id, &o.device_id, ask);
@@ -36291,24 +36230,10 @@ async fn sync_answers_a_member_that_misses_nothing() {
             .collect()
     };
     let before = answers().await.len();
-    let all_of_it = crate::crdt::sync::StateVector {
-        server_id: server_id.clone(),
-        entries: [&o.master_id, &y.master_id]
-            .into_iter()
-            .map(|a| (a.clone(), crate::crdt::hlc::HlcTimestamp { physical_ms: u64::MAX, counter: 0, actor: a.clone() }))
-            .collect(),
-    };
-    carry_as(&y, &o, super::types::HavenMessage::SyncRequest {
-        server_id: server_id.clone(),
-        state_vector_json: serde_json::to_string(&all_of_it).unwrap(),
-        mls_epoch: None,
-        nonce: Some(7),
-        full: None,
-        digest: None,
-        dg: None,
-        x: None,
-    })
-    .await;
+    // A digest of exactly what the owner holds.
+    let all_of_it = o.live_server_state(&server_id).await.expect("the owner holds it");
+    let entries = crate::crdt::digest::entries(&all_of_it, &[], None);
+    carry_as(&y, &o, t14a_digest_ask(&server_id, Some(7), &entries, Some(&all_of_it))).await;
     assert!(
         wait_until(10, async || answers().await.iter().skip(before).any(|(ops, nonce)| ops == "[]" && *nonce == Some(7))).await,
         "a member that misses nothing heard nothing back, or not to the ask it made",
@@ -41159,8 +41084,6 @@ async fn authz_an_outsider_holding_a_server_id_sees_nobody_in_its_room() {
     let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
-    // Discovery as an ask without the digest flag gets it: the list this test judges.
-    relay.set_legacy_discovery(true);
     let (o, mut m, j, server_id) = owner_member_and_joiner(&relay, 201, 202, 203).await;
     assert!(expect_sees_room(&relay, &server_id, &o.device_id).await, "the owner proves the newest door");
     assert!(expect_sees_room(&relay, &server_id, &m.device_id).await, "and so does the member");
@@ -41194,8 +41117,8 @@ async fn authz_an_outsider_holding_a_server_id_sees_nobody_in_its_room() {
         .await,
         "the member still gets the post",
     );
-    x_tx.send(WsCommand::DiscoverPeers { room_code: server_id.clone() }).unwrap();
-    let events = raw_events_until(&mut x_rx, 10, |ev| matches!(ev, WsEvent::DiscoveredPeers { .. })).await;
+    x_tx.send(WsCommand::CheckPeers { peers: Vec::new(), rooms: Vec::new() }).unwrap();
+    let events = raw_events_until(&mut x_rx, 10, |ev| matches!(ev, WsEvent::PeerStatus { .. })).await;
 
     let mut leaked = Vec::new();
     let mut told_hidden = false;
@@ -41211,7 +41134,6 @@ async fn authz_an_outsider_holding_a_server_id_sees_nobody_in_its_room() {
             WsEvent::Message { room, from, .. } | WsEvent::DirectMessage { room, from, .. } if *room == server_id => {
                 leaked.push(from.clone());
             }
-            WsEvent::DiscoveredPeers { peers, .. } => assert!(peers.is_empty(), "discovery names nobody: {peers:?}"),
             _ => {}
         }
     }
@@ -41231,8 +41153,6 @@ async fn authz_a_socket_the_room_hides_leaves_no_channel_copy() {
     let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
-    // Discovery as an ask without the digest flag gets it: the list this test judges.
-    relay.set_legacy_discovery(true);
     let mut o = spawn_node_with_friends(&relay, 216, 216, &[]).await;
     let server_id = create_server_and_wait(&mut o, "Door Server").await;
     assert!(expect_sees_room(&relay, &server_id, &o.device_id).await, "the owner proves the newest door");
@@ -41260,8 +41180,8 @@ async fn authz_a_socket_the_room_hides_leaves_no_channel_copy() {
             })
             .unwrap();
         }
-        tx.send(WsCommand::DiscoverPeers { room_code: server_id.clone() }).unwrap();
-        raw_events_until(rx, 10, |ev| matches!(ev, WsEvent::DiscoveredPeers { .. })).await;
+        tx.send(WsCommand::CheckPeers { peers: Vec::new(), rooms: Vec::new() }).unwrap();
+        raw_events_until(rx, 10, |ev| matches!(ev, WsEvent::PeerStatus { .. })).await;
     }
     assert_eq!(relay.channel_copies_for(&absent), vec![prover.clone()], "only the prover's copy is kept");
     assert!(relay.channel_copies_for(&o.device_id).is_empty(), "a member who heard the room needs no copy");
@@ -49654,7 +49574,6 @@ async fn b1_a_legacy_server_is_never_fetched_whole() {
     let answer = |op: crate::crdt::operations::CrdtOp, page: Option<super::crdt_resync::FullPage>| super::types::HavenMessage::SyncResponse {
         server_id: server_id.clone(), ops_json: serde_json::to_string(&[op]).unwrap(), nonce: None, page,
         digest: None,
-        dg: None,
         x: None,
     };
     carry_as(&x, &m, answer(paged, Some(page))).await;
@@ -49678,10 +49597,6 @@ async fn b1_an_unasked_answer_never_clears_the_mark() {
     const O: u8 = 247;
     const M: u8 = 248;
     const X: u8 = 249;
-    // X plays a 0.12.2 build: its state-vector answer cannot bring back an op older than
-    // its author's newest, where a 0.13 member's digest answer would, so only the asked
-    // pages can.
-    let _old = super::op_sync::act_old_for_test(&NativeKeypair::from_secret_bytes(&seed_bytes(X)).peer_id());
     let (o, mut m, x, server_id) = three_member_server(&relay, O, M, X).await;
     let voice = b1_close_a_voice_room_then_write(&o, &[&m, &x], &server_id, 4).await;
     // X hands every op it takes on to M; one still on its way would wait in the relay's
@@ -49707,7 +49622,6 @@ async fn b1_an_unasked_answer_never_clears_the_mark() {
     carry_as(&x, &m, super::types::HavenMessage::SyncResponse {
         server_id: server_id.clone(), ops_json: "[]".into(), nonce: Some(nonce), page: Some(last),
         digest: None,
-        dg: None,
         x: None,
     })
     .await;
@@ -49715,7 +49629,6 @@ async fn b1_an_unasked_answer_never_clears_the_mark() {
     let (marks, asks) = b1_resync(&m).await;
     assert!(marks.get(&server_id).is_some_and(|mk| mk.due), "an unasked device's last page cleared the mark");
     assert_eq!(asks.get(&server_id), Some(&o.device_id), "an unasked device's answer moved the ask");
-    assert!(m.live_server_state(&server_id).await.is_some_and(|s| s.channel_chat_open(&voice)), "control: the op is still missing");
 
     relay.release_held(&o.device_id, &m.device_id);
     assert!(
@@ -49818,7 +49731,6 @@ async fn b1_a_signed_op_this_build_cannot_read_marks_the_server() {
     let sync = |op: String| super::types::HavenMessage::SyncResponse {
         server_id: server_id.clone(), ops_json: format!("[{op}]"), nonce: None, page: None,
         digest: None,
-        dg: None,
         x: None,
     };
     let broadcast = |op: String| super::types::HavenMessage::CrdtOpBroadcast { server_id: server_id.clone(), op_json: op };
@@ -49887,7 +49799,6 @@ async fn b1_a_former_member_gets_no_page() {
         server_id: server_id.clone(), state_vector_json: "{}".into(), mls_epoch: None, nonce: Some(7),
         full: Some(super::crdt_resync::FullAsk::default()),
         digest: None,
-        dg: None,
         x: None,
     };
     let pages_to = async |o: &TestNode, device: &str| {
@@ -50377,7 +50288,6 @@ pub(crate) mod g1_probe {
             WsEvent::PeerJoined { room, peer_id } => ("presence:peer_joined".into(), 40 + room.len() + peer_id.len()),
             WsEvent::PeerLeft { room, peer_id } => ("presence:peer_left".into(), 40 + room.len() + peer_id.len()),
             WsEvent::RoomMembers { room, peers } => ("presence:room_members".into(), 40 + room.len() + list_bytes(peers)),
-            WsEvent::DiscoveredPeers { room, peers } => ("presence:discovered_peers".into(), 40 + room.len() + list_bytes(peers)),
             WsEvent::PeerStatus { online, active_rooms } => {
                 ("presence:peer_status".into(), 40 + list_bytes(online) + list_bytes(active_rooms))
             }
@@ -51865,7 +51775,6 @@ async fn a_kick_learned_by_sync_stays_a_kick_after_restart() {
         nonce: None,
         page: None,
         digest: None,
-        dg: None,
         x: None,
     };
     send_as(&relay, &server_id, &o, &y, answer).await;
@@ -53792,81 +53701,6 @@ async fn g13_reconnect_converges_with_an_out_of_order_op() {
     );
 }
 
-/// A 0.12.2 build asks with the state vector and is answered from it.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
-async fn g13_old_requester_is_served_by_vector() {
-    let _g = test_guard();
-    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
-    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
-    let relay = MockRelay::new();
-    let _old = super::op_sync::act_old_for_test(&NativeKeypair::from_secret_bytes(&seed_bytes(162)).peer_id());
-    let (o, m, x, sid) = three_member_server(&relay, 161, 162, 163).await;
-    // The old build misses the op live: every frame towards it is held, then lost.
-    relay.set_broadcast_deaf(&m.device_id, true);
-    for from in [&o.device_id, &x.device_id] {
-        relay.hold_direct(from, &m.device_id);
-    }
-    o.cmd_tx
-        .send(NodeCommand::CreateChannel {
-            server_id: sid.clone(), channel_id: "while-away".into(), name: "w".into(), category: None, channel_type: "text".into(),
-        })
-        .await
-        .unwrap();
-    assert!(
-        wait_until(10, async || x.live_server_state(&sid).await.is_some_and(|s| s.channels.contains_key("while-away"))).await,
-        "X took the channel",
-    );
-    for from in [&o.device_id, &x.device_id] {
-        for kind in relay.held_kinds(from, &m.device_id) {
-            relay.discard_held_kind(from, &m.device_id, &kind);
-        }
-        relay.release_held(from, &m.device_id);
-    }
-    relay.set_broadcast_deaf(&m.device_id, false);
-    assert!(!m.live_server_state(&sid).await.is_some_and(|s| s.channels.contains_key("while-away")), "control: the old build missed it");
-    // Back from a reconnect, it asks with the state vector only.
-    go_offline(&relay, &m, &sid).await;
-    relay.expire_mailbox(&m.device_id);
-    relay.set_online(&m.device_id, true);
-    assert!(
-        wait_until(30, async || m.live_server_state(&sid).await.is_some_and(|s| s.channels.contains_key("while-away"))).await,
-        "the old build never caught up from 0.13 members",
-    );
-}
-
-/// A 0.13 member whose only peer is a 0.12.2 build still catches up: the digest goes
-/// unanswered and the ask is made again with the vector.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
-async fn g13_new_requester_falls_back_for_an_old_peer() {
-    let _g = test_guard();
-    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
-    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
-    let relay = MockRelay::new();
-    let _old = super::op_sync::act_old_for_test(&NativeKeypair::from_secret_bytes(&seed_bytes(165)).peer_id());
-    let (o, m, x, sid) = three_member_server(&relay, 164, 165, 166).await;
-    go_offline(&relay, &x, &sid).await;
-    o.cmd_tx
-        .send(NodeCommand::CreateChannel {
-            server_id: sid.clone(), channel_id: "from-owner".into(), name: "f".into(), category: None, channel_type: "text".into(),
-        })
-        .await
-        .unwrap();
-    assert!(
-        wait_until(15, async || m.live_server_state(&sid).await.is_some_and(|s| s.channels.contains_key("from-owner"))).await,
-        "the old build took the op live",
-    );
-    go_offline(&relay, &o, &sid).await;
-    // Only catch-up sync may deliver: nothing the relay kept for the absent device.
-    relay.expire_mailbox(&x.device_id);
-    relay.set_online(&x.device_id, true);
-    assert!(
-        wait_until(30, async || x.live_server_state(&sid).await.is_some_and(|s| s.channels.contains_key("from-owner"))).await,
-        "the 0.13 member never caught up from the old build",
-    );
-}
-
 /// An op a member authors before it knows a joiner is a member still reaches the joiner:
 /// nobody forwards it, so the joiner asks more members after its join completes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -53976,8 +53810,8 @@ async fn g13_joiner_sibling_gets_server_without_forward() {
     );
 }
 
-/// An op that arrived over the WebRTC mesh, or over the relay, from an author known to
-/// read digests is handed on to nobody: a 0.13 author carries its own ops.
+/// An op that arrived over the WebRTC mesh, or over the relay, is handed on to nobody:
+/// every author carries its own ops.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
 async fn g13_mesh_op_of_a_013_author_is_handed_on_to_nobody() {
@@ -53993,14 +53827,6 @@ async fn g13_mesh_op_of_a_013_author_is_handed_on_to_nobody() {
         })
         .await,
         "every member holds a leaf",
-    );
-    // M knows the author reads digests only once one of O's sync frames reached it.
-    assert!(
-        wait_until(30, async || {
-            m.debug_snapshot().await.is_some_and(|s| s.digest_caps.get(&o.device_id) == Some(&true))
-        })
-        .await,
-        "M never learned that O reads digests",
     );
     // Distinct clocks: two ops of one author at one clock are one op.
     let op = |cid: &str, ahead: u64| forge_crdt_op(
@@ -54077,7 +53903,6 @@ async fn g13_non_member_digest_gets_only_the_removal_notice() {
             ask: 9, salt: crate::crdt::digest::new_salt(), base: None, bref: None, from: Some(0), ranges: Vec::new(), round: 0,
             rs: None,
         }),
-        dg: Some(super::op_sync::DG),
         x: None,
     };
     carry_as(&s, &o, ask()).await;
@@ -54103,50 +53928,6 @@ async fn g13_non_member_digest_gets_only_the_removal_notice() {
         assert!(kinds.contains(&"MemberRemoved"), "no removal in {kinds:?}");
         assert!(!kinds.contains(&"ChannelAdded"), "a former member was handed the log: {kinds:?}");
     }
-}
-
-/// A 0.12.2 author with a live mesh sends an op with no MLS copy (a nickname,
-/// `OpBroadcast::WithFan`) over the mesh only: a member off the mesh, leaf or not, still
-/// gets it live from the first receiver, as the old receiver re-forward gave it.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
-async fn review_old_author_mesh_with_fan_op_reaches_off_mesh_member() {
-    let _g = test_guard();
-    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
-    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
-    let relay = MockRelay::new();
-    let _old = super::op_sync::act_old_for_test(&NativeKeypair::from_secret_bytes(&seed_bytes(182)).peer_id());
-    let (o, m, x, sid) = three_member_server(&relay, 182, 183, 184).await;
-    assert!(
-        wait_until(30, async || {
-            let leaves = o.mls_members(&sid).await;
-            leaves.contains(&m.device_id) && leaves.contains(&x.device_id)
-        })
-        .await,
-        "every member holds a leaf",
-    );
-    // The joiners' post-join asks would carry the op too, and have no signal of their own.
-    sleep_ms(7_000).await;
-    let op = forge_crdt_op(
-        &sid, &o.master_id,
-        crate::crdt::operations::CrdtPayload::NicknameChanged { peer_id: o.master_id.clone(), nickname: "meshnick".into() },
-        0, Some(&o.master_kp),
-    );
-    let mesh = super::gossip::GossipCrdtOp {
-        broadcast_id: "review-mesh".into(), server_id: sid.clone(), ttl: 3, op_json: serde_json::to_string(&op).unwrap(),
-    };
-    m.cmd_tx
-        .send(NodeCommand::WebRtcGossipOpReceived { sender_peer_id: o.device_id.clone(), payload: serde_json::to_vec(&mesh).unwrap() })
-        .await
-        .unwrap();
-    assert!(
-        wait_until(15, async || m.live_server_state(&sid).await.is_some_and(|s| s.get_nickname(&o.master_id) == "meshnick")).await,
-        "M took the mesh op",
-    );
-    assert!(
-        wait_until(20, async || x.live_server_state(&sid).await.is_some_and(|s| s.get_nickname(&o.master_id) == "meshnick")).await,
-        "X (leaf, off the mesh) never got the old author's mesh-only op",
-    );
 }
 
 /// An op of `node`'s identity at an exact clock, signed as its author.
@@ -54198,7 +53979,7 @@ async fn g13_join_hold_waits_for_the_final_round() {
         .collect();
     for batch in ops.chunks(40) {
         let answer = || super::types::HavenMessage::SyncResponse {
-            server_id: sid.clone(), ops_json: serde_json::to_string(batch).unwrap(), nonce: None, page: None, digest: None, dg: None, x: None,
+            server_id: sid.clone(), ops_json: serde_json::to_string(batch).unwrap(), nonce: None, page: None, digest: None, x: None,
         };
         carry_as(&o, &m, answer()).await;
         carry_as(&o, &x, answer()).await;
@@ -54267,42 +54048,6 @@ async fn g13_join_hold_waits_for_the_final_round() {
     expect_relay_drained(&relay, &x, "back").await;
     assert_eq!(verdicts(), [false], "X judged a banned joiner before its sync ended");
     assert!(admitted_by(&x, &sid, &j).await.is_empty(), "X admitted a banned joiner");
-}
-
-/// Only a member of a server we hold teaches us what its device reads: a stranger's
-/// digest marks on a sync ask and a sync answer leave its entry unknown.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
-async fn g13_a_non_members_digest_mark_teaches_nothing() {
-    let _g = test_guard();
-    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
-    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
-    let relay = MockRelay::new();
-    let (mut o, m, _x, sid) = three_member_server(&relay, 189, 190, 191).await;
-    let o_master = o.master_id.clone();
-    let s = spawn_node_with_friends(&relay, 192, 192, &[&o_master]).await;
-    o.store().save_friend(&s.master_id, "accepted", "outgoing", 0).unwrap();
-    expect_dm_pair_ready(&relay, &o, &s, 20).await;
-    let caps = async |o: &TestNode| o.debug_snapshot().await.expect("the loop answers").digest_caps;
-    assert!(wait_until(15, async || caps(&o).await.get(&m.device_id) == Some(&true)).await, "a member's mark is learned");
-    relay.start_wiretap();
-    let sent = frames_addressed(&relay, &s.device_id, &o.device_id).len();
-    carry_as(&s, &o, super::types::HavenMessage::SyncRequest {
-        server_id: sid.clone(), state_vector_json: "{}".into(), mls_epoch: None, nonce: None, full: None, digest: None,
-        dg: Some(super::op_sync::DG),
-        x: None,
-    })
-    .await;
-    carry_as(&s, &o, super::types::HavenMessage::SyncResponse {
-        server_id: sid.clone(), ops_json: "[]".into(), nonce: None, page: None, digest: None, dg: Some(super::op_sync::DG), x: None,
-    })
-    .await;
-    assert!(
-        wait_until(10, async || frames_addressed(&relay, &s.device_id, &o.device_id).len() >= sent + 2).await,
-        "the stranger's frames reached the relay",
-    );
-    flush_frames(&relay, &mut o).await;
-    assert_eq!(caps(&o).await.get(&s.device_id), None, "a stranger taught us what it reads");
 }
 
 /// A joiner whose join completes while its room shows no member keeps its pledge for the
@@ -55562,45 +55307,6 @@ async fn g13w2_a_late_digest_answer_brings_no_vector() {
     }
 }
 
-/// A 0.12.2 device that never shows its form and leaves every copy of the digest ask
-/// unanswered is still asked with the state vector, and the asker catches up from it.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
-async fn g13w2_a_silent_old_peer_still_gets_the_vector() {
-    let _g = test_guard();
-    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
-    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
-    let relay = MockRelay::new();
-    let _old = super::op_sync::act_old_for_test(&NativeKeypair::from_secret_bytes(&seed_bytes(251)).peer_id());
-    let (o, m, x, sid) = three_member_server(&relay, 250, 251, 252).await;
-    go_offline(&relay, &x, &sid).await;
-    o.cmd_tx
-        .send(NodeCommand::CreateChannel {
-            server_id: sid.clone(), channel_id: "from-owner".into(), name: "f".into(), category: None, channel_type: "text".into(),
-        })
-        .await
-        .unwrap();
-    assert!(
-        wait_until(15, async || m.live_server_state(&sid).await.is_some_and(|s| s.channels.contains_key("from-owner"))).await,
-        "the old build took the op live",
-    );
-    go_offline(&relay, &o, &sid).await;
-    relay.expire_mailbox(&x.device_id);
-    // X forgets what M reads, and hears nothing from M (whose own requests would show it)
-    // until it asks with the vector.
-    relay.hold_direct(&m.device_id, &x.device_id);
-    let x = restart_node(&relay, x, 252, 252).await;
-    assert!(wait_until(20, async || g13w2_sync_asks(&x, &m.device_id).await.0 >= 1).await, "X never asked M");
-    assert!(wait_until(45, async || g13w2_sync_asks(&x, &m.device_id).await.1 >= 1).await, "the silent old build never got the vector");
-    let (digest, _) = g13w2_sync_asks(&x, &m.device_id).await;
-    assert!(digest >= 3, "the vector went before every copy of the digest ask waited ({digest})");
-    relay.release_held(&m.device_id, &x.device_id);
-    assert!(
-        wait_until(20, async || x.live_server_state(&sid).await.is_some_and(|s| s.channels.contains_key("from-owner"))).await,
-        "the 0.13 member never caught up from the silent old build",
-    );
-}
-
 /// A digest answer that is lost is not the end: the silent ask goes again, and the
 /// asker catches up without the state vector.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -55611,8 +55317,6 @@ async fn g13w2_a_lost_digest_answer_is_asked_again() {
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let (o, m, x, sid) = three_member_server(&relay, 253, 254, 255).await;
-    let caps = async |n: &TestNode| n.debug_snapshot().await.expect("the loop answers").digest_caps;
-    assert!(wait_until(15, async || caps(&x).await.get(&m.device_id) == Some(&true)).await, "X knows M reads digests");
     go_offline(&relay, &x, &sid).await;
     o.cmd_tx
         .send(NodeCommand::CreateChannel {
@@ -55639,7 +55343,7 @@ async fn g13w2_a_lost_digest_answer_is_asked_again() {
         wait_until(25, async || x.live_server_state(&sid).await.is_some_and(|s| s.channels.contains_key("lost-answer"))).await,
         "X never caught up after its digest answer was lost",
     );
-    assert_eq!(g13w2_sync_asks(&x, &m.device_id).await.1, 0, "X asked a device that reads digests with the state vector");
+    assert_eq!(g13w2_sync_asks(&x, &m.device_id).await.1, 0, "X asked with the state vector");
 }
 
 /// A silent ask is never sent again to a device that left the server meanwhile: the copy
@@ -55652,8 +55356,6 @@ async fn g13w2_no_copy_goes_to_a_device_kicked_meanwhile() {
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
     let (o, m, x, sid) = three_member_server(&relay, 244, 245, 246).await;
-    let caps = async |n: &TestNode| n.debug_snapshot().await.expect("the loop answers").digest_caps;
-    assert!(wait_until(15, async || caps(&x).await.get(&m.device_id) == Some(&true)).await, "X knows M reads digests");
     go_offline(&relay, &x, &sid).await;
     relay.expire_mailbox(&x.device_id);
     relay.hold_direct(&m.device_id, &x.device_id);
@@ -62947,17 +62649,8 @@ async fn w3c2_answers(from: &TestNode, to: &TestNode, server_id: &str) -> Vec<(b
         .collect()
 }
 
-fn w3c2_vector_ask(server_id: &str) -> super::types::HavenMessage {
-    super::types::HavenMessage::SyncRequest {
-        server_id: server_id.to_string(),
-        state_vector_json: format!(r#"{{"server_id":"{server_id}","entries":{{}}}}"#),
-        mls_epoch: None,
-        nonce: None,
-        full: None,
-        digest: None,
-        dg: None,
-        x: None,
-    }
+fn w3c2_bare_ask(server_id: &str) -> super::types::HavenMessage {
+    t14a_digest_ask(server_id, None, &[], None)
 }
 
 /// C25 (H4): a responder whose view does not count the asking device serves it nothing
@@ -62971,7 +62664,7 @@ async fn w3c2_a_responder_serves_no_uncounted_asker_device() {
     let relay = MockRelay::new();
     let (o, j, sid) = w3c2_pair(&relay, 201, 202).await;
 
-    carry_as(&j, &o, w3c2_vector_ask(&sid)).await;
+    carry_as(&j, &o, w3c2_bare_ask(&sid)).await;
     assert!(
         wait_until(10, async || w3c2_answers(&o, &j, &sid).await.iter().any(|a| !a.0 && a.1 > 0)).await,
         "control: O serves J's sync",
@@ -62980,7 +62673,7 @@ async fn w3c2_a_responder_serves_no_uncounted_asker_device() {
     super::server_rosters::touched();
     let served = |answers: &[(bool, usize, bool)]| answers.iter().filter(|a| !a.0 && (a.1 > 0 || a.2)).count();
     let before = w3c2_answers(&o, &j, &sid).await;
-    carry_as(&j, &o, w3c2_vector_ask(&sid)).await;
+    carry_as(&j, &o, w3c2_bare_ask(&sid)).await;
     assert!(
         wait_until(10, async || w3c2_answers(&o, &j, &sid).await.iter().filter(|a| a.0).count() > before.iter().filter(|a| a.0).count()).await,
         "O did not say it needs J's roster",
@@ -63011,7 +62704,7 @@ async fn w3c2_an_ask_carrying_its_roster_is_served_to_a_device_the_responder_can
     super::server_rosters::touched();
     assert!(super::roster_book::load(&o.store(), &j.master_id).is_none(), "precondition: O holds no roster of J");
     let before = w3c2_answers(&o, &j, &sid).await.len();
-    carry_as(&j, &o, w3c2_vector_ask(&sid)).await;
+    carry_as(&j, &o, w3c2_bare_ask(&sid)).await;
     assert!(
         wait_until(15, async || {
             let answers = w3c2_answers(&o, &j, &sid).await;
@@ -63417,7 +63110,7 @@ async fn w3c2_an_asker_roster_is_kept_only_for_its_sender_and_the_owners_reaches
     let relay = MockRelay::new();
     let (o, j, sid) = w3c2_pair(&relay, 254, 255).await;
     let with_roster = |roster: crate::identity::roster::Roster| {
-        let mut ask = w3c2_vector_ask(&sid);
+        let mut ask = w3c2_bare_ask(&sid);
         if let super::types::HavenMessage::SyncRequest { x, .. } = &mut ask {
             *x = Some(Box::new(super::sync_ext::AskExt { asker_roster: Some(roster), ..Default::default() }));
         }
@@ -63446,7 +63139,7 @@ async fn w3c2_an_asker_roster_is_kept_only_for_its_sender_and_the_owners_reaches
 /// as "caught up" (`join_hold`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
-async fn w3c2_a_roster_refusal_echoes_no_nonce_to_an_older_build() {
+async fn w3c2_a_roster_refusal_echoes_its_nonce() {
     let _g = test_guard();
     let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
@@ -63454,11 +63147,10 @@ async fn w3c2_a_roster_refusal_echoes_no_nonce_to_an_older_build() {
     let (o, j, sid) = w3c2_pair(&relay, 196, 197).await;
     super::authority_view::ignore_for_test(&o.db_path, &j.master_id);
     super::server_rosters::touched();
-    let ask = |nonce: u64, dg: Option<u8>| {
-        let mut msg = w3c2_vector_ask(&sid);
-        if let super::types::HavenMessage::SyncRequest { nonce: n, dg: d, .. } = &mut msg {
+    let ask = |nonce: u64| {
+        let mut msg = w3c2_bare_ask(&sid);
+        if let super::types::HavenMessage::SyncRequest { nonce: n, .. } = &mut msg {
             *n = Some(nonce);
-            *d = dg;
         }
         msg
     };
@@ -63472,11 +63164,8 @@ async fn w3c2_a_roster_refusal_echoes_no_nonce_to_an_older_build() {
             })
             .collect::<Vec<_>>()
     };
-    carry_as(&j, &o, ask(7001, Some(super::op_sync::DG))).await;
-    assert!(wait_until(10, async || refusals().await.contains(&Some(7001))).await, "a current build's refusal lost its nonce");
-    carry_as(&j, &o, ask(7002, None)).await;
-    assert!(wait_until(10, async || refusals().await.len() >= 2).await, "precondition: the older build's ask was refused");
-    assert!(!refusals().await.contains(&Some(7002)), "a refusal echoed its nonce to a build that reads no roster_needed");
+    carry_as(&j, &o, ask(7001)).await;
+    assert!(wait_until(10, async || refusals().await.contains(&Some(7001))).await, "a refusal lost its nonce");
 }
 
 // w3-c1b
@@ -64741,4 +64430,261 @@ async fn lead_c_a_quiet_members_post_lands_after_the_roster_trade() {
     assert!(x.store().load_roster(&m).ok().flatten().is_none(), "precondition held: X's book never took M's roster");
     super::authority_view::unrefuse_book_for_test(&tag_kp(xd_tag).peer_id());
     drop(d1);
+}
+
+// t14-a
+/// A digest ask for `server_id` over `entries` (empty: nothing held), on `state`'s base when
+/// given, as a peer's modified client could send it.
+fn t14a_digest_ask(
+    server_id: &str,
+    nonce: Option<u64>,
+    entries: &[crate::crdt::digest::Entry<'_>],
+    state: Option<&ServerState>,
+) -> super::types::HavenMessage {
+    let base = state.and_then(|s| s.checkpoint_hlc.clone());
+    let bref = state.and_then(|s| s.base.as_ref().map(|b| b.hash_hex()));
+    super::types::HavenMessage::SyncRequest {
+        server_id: server_id.to_string(),
+        state_vector_json: String::new(),
+        mls_epoch: None,
+        nonce,
+        full: None,
+        digest: Some(crate::crdt::digest::first_ask(entries, 1, crate::crdt::digest::new_salt(), base, bref)),
+        x: None,
+    }
+}
+
+/// The nonces of `from`'s sync answers to `to` about `server_id`.
+async fn t14a_answered(from: &TestNode, to: &TestNode, server_id: &str) -> Vec<Option<u64>> {
+    from.carried_to(&to.device_id)
+        .await
+        .into_iter()
+        .filter_map(|msg| match msg {
+            super::types::HavenMessage::SyncResponse { server_id: sid, nonce, .. } if sid == server_id => Some(nonce),
+            _ => None,
+        })
+        .collect()
+}
+
+/// 0.14 clean break: the state vector, which loses ops (HOL-SEC-175), is never read for a
+/// self-certifying server. A member's vector ask is answered with nothing; its digest ask
+/// right after it is answered.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn t14a_a_vector_ask_for_a_self_certifying_server_is_answered_with_nothing() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o, m, x, sid) = three_member_server(&relay, 81, 82, 83).await;
+    assert!(crate::crdt::anchor::is_genesis_id(&sid), "precondition: a self-certifying id");
+    let empty = crate::crdt::sync::StateVector { server_id: sid.clone(), entries: HashMap::new() };
+    carry_as(&m, &o, super::types::HavenMessage::SyncRequest {
+        server_id: sid.clone(),
+        state_vector_json: serde_json::to_string(&empty).unwrap(),
+        mls_epoch: None,
+        nonce: Some(9001),
+        full: None,
+        digest: None,
+        x: None,
+    })
+    .await;
+    carry_as(&m, &o, t14a_digest_ask(&sid, Some(9002), &[], None)).await;
+    assert!(
+        wait_until(15, async || t14a_answered(&o, &m, &sid).await.contains(&Some(9002))).await,
+        "control: the member's digest ask, sent after its vector ask, is answered",
+    );
+    assert!(!t14a_answered(&o, &m, &sid).await.contains(&Some(9001)), "a vector ask was answered for a self-certifying server");
+    drop(x);
+}
+
+/// Catch-up between 0.14 devices of a self-certifying server rides the digest alone: a
+/// member back from away and a late joiner each converge, and no device asks or is asked
+/// with the state vector.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn t14a_catch_up_converges_by_digest_alone() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut o, m, x, sid) = three_member_server(&relay, 84, 85, 86).await;
+    go_offline(&relay, &x, &sid).await;
+    o.cmd_tx
+        .send(NodeCommand::CreateChannel {
+            server_id: sid.clone(), channel_id: "while-away".into(), name: "w".into(), category: None, channel_type: "text".into(),
+        })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(15, async || m.live_server_state(&sid).await.is_some_and(|s| s.channels.contains_key("while-away"))).await,
+        "M took the op live",
+    );
+    // Only catch-up sync may deliver: nothing the relay kept for the absent device.
+    relay.expire_mailbox(&x.device_id);
+    relay.set_online(&x.device_id, true);
+    assert!(
+        wait_until(30, async || x.live_server_state(&sid).await.is_some_and(|s| s.channels.contains_key("while-away"))).await,
+        "the member back from away never caught up",
+    );
+
+    let mut j = spawn_node_with_friends(&relay, 87, 87, &[]).await;
+    j.cmd_tx.send(join_cmd(&sid)).await.unwrap();
+    assert!(expect_joined(&mut j, &sid, 30).await, "the late joiner joins");
+    assert!(
+        wait_until(30, async || j.live_server_state(&sid).await.is_some_and(|s| s.channels.contains_key("while-away"))).await,
+        "the late joiner never caught up",
+    );
+    let nodes = [&o, &m, &x, &j];
+    let mut digests = 0;
+    for a in nodes {
+        for b in nodes {
+            if a.device_id == b.device_id {
+                continue;
+            }
+            let (d, v) = g13w2_sync_asks(a, &b.device_id).await;
+            assert_eq!(v, 0, "{} asked {} with the state vector", a.device_id, b.device_id);
+            digests += d;
+        }
+    }
+    assert!(digests > 0, "control: the catch-up asked with digests");
+    drain_events(&mut o);
+}
+
+/// A legacy-id server none of whose replicas holds an owner checkpoint yet still catches
+/// up by the state vector between two 0.14 members, the one form its arrival-order replicas
+/// may be handed ops in.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn t14a_a_legacy_id_server_still_catches_up_by_the_vector() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    const O: u8 = 88;
+    const M: u8 = 89;
+    const X: u8 = 90;
+    let ids: Vec<String> = [O, M, X].iter().map(|t| keys(*t).peer_id()).collect();
+    let m = spawn_node_with_friends(&relay, M, M, &[&ids[2]]).await;
+    let x = spawn_node_with_friends(&relay, X, X, &[&ids[1]]).await;
+    expect_dm_pair_ready(&relay, &m, &x, 15).await;
+
+    // A pre-0.12 server whose owner is away; X holds an owner op M missed.
+    let server_id = "a14a".repeat(8);
+    let mut legacy = ServerState::new(server_id.clone(), "Old Server".into(), ids[0].clone());
+    super::swarm::install_master_signer_for_test(&mut legacy, &keys(O));
+    let mut ops = Vec::new();
+    for (tag, id) in [(M, &ids[1]), (X, &ids[2])] {
+        ops.push(legacy.author_checked(crate::crdt::operations::CrdtPayload::MemberAdded {
+            peer_id: id.clone(), display_name: "m".into(), follow: None, ask: join_ask(&server_id, 1, &keys(tag)),
+        }).unwrap());
+    }
+    legacy.owner_pin = None;
+    let m_json = serde_json::to_string(&legacy).unwrap();
+    let rename = legacy.author_checked(crate::crdt::operations::CrdtPayload::ServerRenamed { new_name: "Renamed".into() }).unwrap();
+    let x_json = serde_json::to_string(&legacy).unwrap();
+    let stage = |json: &str, extra: Option<&crate::crdt::operations::CrdtOp>| {
+        let (json, ops, extra) = (json.to_string(), ops.clone(), extra.cloned());
+        let server_id = server_id.clone();
+        move |db: &str, pass: &str| {
+            let store = crate::storage::MessageStore::open(db, pass).unwrap();
+            store.save_server_state(&server_id, &json).unwrap();
+            for op in ops.iter().chain(extra.iter()) {
+                store.insert_crdt_op(op).unwrap();
+            }
+            store.delete_setting(super::crdt_resync::SWEEP_KEY).unwrap();
+        }
+    };
+    let x = restart_node_with(&relay, x, X, X, stage(&x_json, Some(&rename))).await;
+    let m = restart_node_with(&relay, m, M, M, stage(&m_json, None)).await;
+    assert!(
+        wait_until(30, async || m.live_server_name(&server_id).await == "Renamed").await,
+        "M never caught up from X",
+    );
+    assert!(
+        m.live_server_state(&server_id).await.is_some_and(|s| s.anchor() == crate::crdt::server_state::Anchor::Legacy),
+        "the server stays legacy",
+    );
+    let (digests, vectors) = g13w2_sync_asks(&m, &x.device_id).await;
+    assert!(vectors > 0 && digests == 0, "a legacy replica asked by digest ({digests}) or not by vector ({vectors})");
+}
+
+// The vector path kept for legacy ids still serves the op log only
+// to a member. A stranger's empty-vector ask for a legacy-id server is answered with no
+// op; a member's identical ask, sent after it, gets the delta.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn t14a_a_strangers_vector_ask_on_a_legacy_server_gets_no_op_log() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    const O: u8 = 91;
+    const M: u8 = 92;
+    const X: u8 = 93;
+    const S: u8 = 94;
+    let ids: Vec<String> = [O, M, X, S].iter().map(|t| keys(*t).peer_id()).collect();
+    let m = spawn_node_with_friends(&relay, M, M, &[&ids[2], &ids[3]]).await;
+    let x = spawn_node_with_friends(&relay, X, X, &[&ids[1]]).await;
+    let s = spawn_node_with_friends(&relay, S, S, &[&ids[1]]).await;
+    expect_dm_pair_ready(&relay, &m, &x, 15).await;
+    expect_dm_pair_ready(&relay, &m, &s, 15).await;
+
+    let server_id = "b14b".repeat(8);
+    let mut legacy = ServerState::new(server_id.clone(), "Old Server".into(), ids[0].clone());
+    super::swarm::install_master_signer_for_test(&mut legacy, &keys(O));
+    let mut ops = Vec::new();
+    for (tag, id) in [(M, &ids[1]), (X, &ids[2])] {
+        ops.push(legacy.author_checked(crate::crdt::operations::CrdtPayload::MemberAdded {
+            peer_id: id.clone(), display_name: "m".into(), follow: None, ask: join_ask(&server_id, 1, &keys(tag)),
+        }).unwrap());
+    }
+    ops.push(legacy.author_checked(crate::crdt::operations::CrdtPayload::ServerRenamed { new_name: "Secret name".into() }).unwrap());
+    legacy.owner_pin = None;
+    let json = serde_json::to_string(&legacy).unwrap();
+    let sid = server_id.clone();
+    let m = restart_node_with(&relay, m, M, M, move |db: &str, pass: &str| {
+        let store = crate::storage::MessageStore::open(db, pass).unwrap();
+        store.save_server_state(&sid, &json).unwrap();
+        for op in &ops {
+            store.insert_crdt_op(op).unwrap();
+        }
+        store.delete_setting(super::crdt_resync::SWEEP_KEY).unwrap();
+    })
+    .await;
+    assert!(m.live_server_state(&server_id).await.is_some_and(|st| st.anchor() == crate::crdt::server_state::Anchor::Legacy));
+    expect_dm_pair_ready(&relay, &m, &s, 15).await;
+    expect_dm_pair_ready(&relay, &m, &x, 15).await;
+
+    let empty = crate::crdt::sync::StateVector { server_id: server_id.clone(), entries: HashMap::new() };
+    let vector_ask = |nonce: u64| super::types::HavenMessage::SyncRequest {
+        server_id: server_id.clone(),
+        state_vector_json: serde_json::to_string(&empty).unwrap(),
+        mls_epoch: None,
+        nonce: Some(nonce),
+        full: None,
+        digest: None,
+        x: None,
+    };
+    let answers = async |to: &TestNode| -> Vec<(Option<u64>, String)> {
+        m.carried_to(&to.device_id)
+            .await
+            .into_iter()
+            .filter_map(|msg| match msg {
+                super::types::HavenMessage::SyncResponse { server_id: sid, nonce, ops_json, .. } if sid == server_id => Some((nonce, ops_json)),
+                _ => None,
+            })
+            .collect()
+    };
+    carry_as(&s, &m, vector_ask(4401)).await;
+    carry_as(&x, &m, vector_ask(4402)).await;
+    assert!(
+        wait_until(20, async || answers(&x).await.iter().any(|(n, ops)| *n == Some(4402) && ops.contains("Secret name"))).await,
+        "control: a member's vector ask on a legacy-id server is served the delta",
+    );
+    let to_s = answers(&s).await;
+    assert!(
+        !to_s.iter().any(|(_, ops)| ops.contains("Secret name") || ops.contains("member_added")),
+        "a stranger was served the op log of a legacy-id server by the vector: {to_s:?}",
+    );
 }

@@ -55,14 +55,6 @@ struct Control {
     bool clear = false;
     std::vector<std::string> channels;
     std::string sig;
-    // 1 = `hollow-ring1` (0.12.1 and older clients, no relay named), 2 = `hollow-ring2`.
-    int version = 1;
-};
-
-// The relay judging a control: its `auth_domain`, and whether it still takes ring1.
-struct Relay {
-    std::string domain;
-    bool accept_ring1 = false;
 };
 
 // What every ring topic of `room` starts with under `owner`: nothing for a
@@ -91,14 +83,7 @@ inline std::string ring_namespace(const std::string& key) {
     return dot == std::string::npos ? room : room + "|" + key.substr(nul + 1, dot - nul - 1);
 }
 
-inline std::string payload_ring1(const Control& c) {
-    std::string p = "hollow-ring1\n" + c.room + "\n" + c.owner + "\n" + std::to_string(c.ts_ms) + "\n" +
-                    std::to_string(c.retention_secs) + "\n" + (c.clear ? "clear" : "keep");
-    for (const auto& ch : c.channels) p += "\n" + ch;
-    return p;
-}
-
-inline std::string payload_ring2(const Control& c, const std::string& domain) {
+inline std::string payload(const Control& c, const std::string& domain) {
     std::string p = "hollow-ring2\n" + domain + "\n" + c.room + "\n" + c.owner + "\n" + std::to_string(c.ts_ms) +
                     "\n" + std::to_string(c.retention_secs) + "\n" + (c.clear ? "clear" : "keep");
     for (const auto& ch : c.channels) p += "\n" + ch;
@@ -126,9 +111,11 @@ inline bool parse(const nlohmann::json& j, Control& out, bool& signed_out) {
         if (!it->is_number_integer()) return false;
         out.retention_secs = it->get<int64_t>();
     }
+    // A signed control must name its form (`v`:2); one that does not names no relay.
     if (auto it = j.find("v"); it != j.end()) {
         if (!it->is_number_integer() || it->get<int64_t>() != 2) return false;
-        out.version = 2;
+    } else if (signed_out) {
+        return false;
     }
     if (auto it = j.find("ts"); it != j.end()) {
         if (!it->is_number_integer()) return false;
@@ -146,12 +133,10 @@ inline bool parse(const nlohmann::json& j, Control& out, bool& signed_out) {
 
 // Whether a signed control counts: fresh, well formed, inside its owner's topics,
 // signed by the change key of the newest link of `chain` (the relay's chain for
-// this server, null if none), and as ring2 naming `relay`, as ring1 only while it
-// still takes those.
+// this server, null if none), naming this relay's `domain`.
 inline bool authorized(const Control& c, const std::vector<LockLink>* chain, int64_t now_ms,
-                       const LockCrypto& crypto, const Relay& relay) {
-    if (!chain || chain->empty() || c.sig.empty()) return false;
-    if (c.version == 2 ? relay.domain.empty() : !relay.accept_ring1) return false;
+                       const LockCrypto& crypto, const std::string& domain) {
+    if (!chain || chain->empty() || c.sig.empty() || domain.empty()) return false;
     if (c.ts_ms <= 0) return false;
     int64_t skew = now_ms > c.ts_ms ? now_ms - c.ts_ms : c.ts_ms - now_ms;
     if (skew > MAX_SKEW_MS) return false;
@@ -159,8 +144,7 @@ inline bool authorized(const Control& c, const std::vector<LockLink>* chain, int
         if (!is_channel_shape(ch)) return false;
     }
     if (!in_own_topics(c)) return false;
-    return crypto.verify(chain->back().change, c.sig,
-                         c.version == 2 ? payload_ring2(c, relay.domain) : payload_ring1(c));
+    return crypto.verify(chain->back().change, c.sig, payload(c, domain));
 }
 
 }  // namespace ring_auth

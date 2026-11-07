@@ -126,10 +126,9 @@ fn ends_us_since(ops: &[CrdtOp], server_id: &str, local_master: &str, left: &Hlc
 /// A sync ask that only a former member's notice answers with ops: a member is sent an
 /// empty digest answer, a stranger nothing.
 fn ask_owner(server_id: &str, nonce: u64) -> HavenMessage {
-    let vector = crate::crdt::sync::StateVector { server_id: server_id.to_string(), entries: HashMap::new() };
     HavenMessage::SyncRequest {
         server_id: server_id.to_string(),
-        state_vector_json: serde_json::to_string(&vector).unwrap_or_default(),
+        state_vector_json: String::new(),
         mls_epoch: None,
         nonce: Some(nonce),
         full: None,
@@ -143,7 +142,6 @@ fn ask_owner(server_id: &str, nonce: u64) -> HavenMessage {
             round: 0,
             rs: None,
         }),
-        dg: Some(super::op_sync::DG),
         x: None,
     }
 }

@@ -292,8 +292,6 @@ pub enum WsEvent {
     RoomCapHit { room: String },
     /// Response to CheckPeers — which peers/rooms are actually alive.
     PeerStatus { online: Vec<String>, active_rooms: Vec<String> },
-    /// Response to DiscoverPeers from a relay older than 0.13: peers currently in the room.
-    DiscoveredPeers { room: String, peers: Vec<String> },
     /// What this socket was told of a room still differs from what the relay would list
     /// to it after a second look ([`super::presence_audit`]): the node re-joins it.
     PresenceDrift { room: String },
@@ -351,7 +349,6 @@ impl WsEvent {
             Self::ClockOffset { .. } => "ClockOffset",
             Self::RoomCapHit { .. } => "RoomCapHit",
             Self::PeerStatus { .. } => "PeerStatus",
-            Self::DiscoveredPeers { .. } => "DiscoveredPeers",
             Self::PresenceDrift { .. } => "PresenceDrift",
             Self::TurnCredentials { .. } => "TurnCredentials",
             Self::MediaForwarderInfo { .. } => "MediaForwarderInfo",
@@ -425,11 +422,9 @@ enum ServerMsg {
     // removed (it let anyone holding two peer_ids ask whether their deterministic
     // DM room was live). Defaulted so a relay dropping the field deserializes.
     PeerStatus { online: Vec<String>, #[serde(default)] active_rooms: Vec<String> },
-    /// A 0.13 relay answers an ask with `digest` with the digest and count of what this
-    /// socket was told of the room, or `joined: false`; an older one with the peers.
+    /// The digest and count of what this socket was told of the room, or `joined: false`.
     DiscoveredPeers {
         room: String,
-        #[serde(default)] peers: Vec<String>,
         #[serde(default)] digest: Option<u64>,
         #[serde(default)] count: Option<u64>,
         #[serde(default)] joined: Option<bool>,
@@ -2981,17 +2976,13 @@ fn handle_server_message(
             hollow_log!("[HOLLOW-WS] PeerStatus: {} online, {} active rooms", online.len(), active_rooms.len());
             WsEvent::PeerStatus { online, active_rooms }
         }
-        ServerMsg::DiscoveredPeers { room, peers, digest, count, joined } => {
+        ServerMsg::DiscoveredPeers { room, digest, count, joined } => {
             use super::presence_audit::{Answer, Verdict};
             let answer = match (joined, digest, count) {
                 (Some(false), _, _) => Answer::NotJoined,
                 (_, Some(sum), Some(count)) => Answer::Digest { sum, count },
-                // A relay older than 0.13: today's list, which only adds presence.
-                _ => {
-                    hollow_log!("[HOLLOW-WS] DiscoveredPeers: {} peers in room {room}", peers.len());
-                    let _ = event_tx.send(WsEvent::DiscoveredPeers { room, peers });
-                    return;
-                }
+                // A list of peers (a relay before 0.13) adds no presence.
+                _ => return,
             };
             if background {
                 return;
@@ -3178,10 +3169,10 @@ mod tests {
         assert!(rooms.audit.next_due().is_none() && drifts(&mut rx).is_empty(), "an answer older than a members is void");
     }
 
-    /// g13: an answer read while the relay withholds presence from us is ignored, and an
-    /// old relay's peer list is handed on as before.
+    /// g13: an answer read while the relay withholds presence from us is ignored; a list of
+    /// peers adds no presence (t14-a).
     #[tokio::test]
-    async fn background_answers_are_ignored_and_old_relays_pass_through() {
+    async fn background_answers_are_ignored_and_a_peer_list_adds_nothing() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut rooms = Rooms::default();
         rooms.joined.insert("r".into());
@@ -3191,8 +3182,7 @@ mod tests {
         assert!(rooms.audit.next_due().is_none() && drifts(&mut rx).is_empty());
 
         feed(&tx, &mut rooms, false, r#"{"type":"discovered_peers","room":"r","peers":["p"]}"#);
-        let Ok(WsEvent::DiscoveredPeers { room, peers }) = rx.try_recv() else { panic!("the old answer passes through") };
-        assert_eq!((room.as_str(), peers), ("r", vec!["p".to_string()]));
+        assert!(rx.try_recv().is_err(), "a list of peers (a relay before 0.13) added presence");
     }
 
     /// g13: `joined: false` for a room we hold is a difference; for one we left, not.

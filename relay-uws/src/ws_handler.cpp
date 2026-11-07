@@ -1953,13 +1953,6 @@ static void handle_report(SSLWebSocket* ws, PerSocketData* data, const json& j,
     // No logging — reporter/target peer ids are user-identifying.
 }
 
-// 0.12.1 and older clients sign `hollow-ring1`, which names no relay; newer ones sign
-// `hollow-ring2`. Off once those clients are gone.
-#ifndef HOLLOW_ACCEPT_RING1_CONTROL
-#define HOLLOW_ACCEPT_RING1_CONTROL 1
-#endif
-static constexpr bool ACCEPT_RING1_CONTROL = HOLLOW_ACCEPT_RING1_CONTROL;
-
 // A new ring for `key` charged to `share`, within its server's cap. Past the
 // relay-wide cap the share that created the most rings loses its least recently
 // used one: refusing would let whoever filled the table first keep every new
@@ -2045,7 +2038,7 @@ static void handle_set_topic_buffer(PerSocketData* data, const json& j, RelaySta
         const int64_t now_ms = static_cast<int64_t>(
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::system_clock::now().time_since_epoch()).count());
-        if (!ring_auth::authorized(c, chain, now_ms, lock_crypto(), {state.door_domain, ACCEPT_RING1_CONTROL})) return;
+        if (!ring_auth::authorized(c, chain, now_ms, lock_crypto(), state.door_domain)) return;
         apply_ring_control(state, c, prefix + ring_auth::topic_prefix(c.room, c.owner), socket_share(state, data));
         return;
     }
@@ -3094,52 +3087,36 @@ static void handle_text_message(SSLWebSocket* ws, PerSocketData* data,
                        {"online", online_peers},
                        {"active_rooms", json::array()}});
     } else if (type == "discover_peers") {
-        // Members only: a room code is no roster lookup. Guests, fetch sockets and hidden
-        // sessions are never named.
+        // Members only: a room code is no roster lookup. The answer names nobody: it is the
+        // digest of what this socket's rosters and presence frames name, which the client
+        // compares with what it was told, re-joining only on a difference. The `digest` flag
+        // clients send is not read.
         const std::string room = j.value("room", "");
-        const auto flag = j.find("digest");
-        const bool digest = flag != j.end() && flag->is_boolean() && flag->get<bool>();
         auto rit = room.empty() ? state.ws_rooms.end() : state.ws_rooms.find(room);
         json answer = {{"type", "discovered_peers"}, {"room", room}, {"peers", json::array()}};
-        if (digest) {
-            // The digest of what this socket's rosters and presence frames name (0.13): the
-            // client compares it with what it was told and re-joins only on a difference.
-            const SSLWebSocket* slot = nullptr;
-            if (rit != state.ws_rooms.end()) {
-                auto pit = rit->second.peers.find(data->peer_id);
-                if (pit != rit->second.peers.end()) slot = pit->second;
+        const SSLWebSocket* slot = nullptr;
+        if (rit != state.ws_rooms.end()) {
+            auto pit = rit->second.peers.find(data->peer_id);
+            if (pit != rit->second.peers.end()) slot = pit->second;
+        }
+        if (slot != ws) {
+            answer["joined"] = false;
+        } else {
+            WsRoom& r = rit->second;
+            const int64_t now_ms = steady_ms();
+            // A door grace that ran out is told first, so the digest never runs ahead
+            // of the presence frames it sums.
+            if (state.door_grace_rooms.count(room) && !expire_door_grace(state, room, r, now_ms)) {
+                state.door_grace_rooms.erase(room);
             }
-            if (slot != ws) {
-                answer["joined"] = false;
-            } else {
-                WsRoom& r = rit->second;
-                const int64_t now_ms = steady_ms();
-                // A door grace that ran out is told first, so the digest never runs ahead
-                // of the presence frames it sums.
-                if (state.door_grace_rooms.count(room) && !expire_door_grace(state, room, r, now_ms)) {
-                    state.door_grace_rooms.erase(room);
-                }
-                Audience aud = audience(state, r, room);
-                aud.now_ms = now_ms;
-                const bool sees = peer_sees_room(r, aud, data->peer_id, r.owners.count(data->peer_id) != 0);
-                const presence::Digest d = presence::digest_of(
-                    r.peers, data->peer_id, sees, [&](const std::string& pid) { return aud.shares(pid, data->peer_id); });
-                answer["digest"] = d.sum;
-                answer["count"] = d.count;
-                breaker::bump(static_cast<int64_t>((d.count + breaker::IDS_PER_W - 1) / breaker::IDS_PER_W));
-            }
-        } else if (rit != state.ws_rooms.end() && rit->second.peers.count(data->peer_id)) {
-            // A client before 0.13 asks every 30 s and only adds what it hears: a random
-            // window of the room keeps each answer bounded and still covers the room.
-            const WsRoom& r = rit->second;
-            const Audience aud = audience(state, r, room);
-            json& peers = answer["peers"];
-            presence::window_visible(
-                r.peers, data->peer_id, aud.sees(data->peer_id),
-                [&](const std::string& pid) { return aud.shares(pid, data->peer_id); },
-                r.peers.bucket_count() ? randombytes_uniform(static_cast<uint32_t>(r.peers.bucket_count())) : 0,
-                presence::LEGACY_CAP, [&](const std::string& pid) { peers.push_back(pid); });
-            breaker::bump(static_cast<int64_t>((peers.size() + breaker::IDS_PER_W - 1) / breaker::IDS_PER_W));
+            Audience aud = audience(state, r, room);
+            aud.now_ms = now_ms;
+            const bool sees = peer_sees_room(r, aud, data->peer_id, r.owners.count(data->peer_id) != 0);
+            const presence::Digest d = presence::digest_of(
+                r.peers, data->peer_id, sees, [&](const std::string& pid) { return aud.shares(pid, data->peer_id); });
+            answer["digest"] = d.sum;
+            answer["count"] = d.count;
+            breaker::bump(static_cast<int64_t>((d.count + breaker::IDS_PER_W - 1) / breaker::IDS_PER_W));
         }
         send_json(ws, answer);
     } else if (type == "subscribe") {
@@ -3186,8 +3163,8 @@ static void handle_text_message(SSLWebSocket* ws, PerSocketData* data,
         // replaces the open HTTP /turn-credentials endpoint for current
         // clients: no fresh TLS handshake per refresh, retries ride the
         // client's normal reconnect machinery, and the credentials sit
-        // behind relay auth instead of being farmable by anyone. The HTTP
-        // endpoint stays for older clients.
+        // behind relay auth instead of being farmable by anyone. The open
+        // HTTP endpoint is gone (http_handlers.cpp).
         if (data->is_guest) {
             send_json(ws, {{"type", "turn_credentials"}, {"error", "auth required"}});
         } else if (config.turn_secret.empty()) {

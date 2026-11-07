@@ -123,8 +123,7 @@ impl PageCursor {
     }
 }
 
-/// `SyncRequest.full`: an ask for the responder's whole log, one page at a time. An
-/// older client ignores it and answers the state vector, a page-less answer.
+/// `SyncRequest.full`: an ask for the responder's whole log, one page at a time.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct FullAsk {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -169,7 +168,7 @@ pub(crate) enum Claim {
     Unrelated,
     /// The asked page; the next one starts at the cursor.
     Page(Option<PageCursor>),
-    /// The asked device answered without a page (an older client) or declined.
+    /// The asked device answered without a page or declined.
     Released,
     /// The asked device is over its serving budget.
     Busy,
@@ -573,7 +572,7 @@ impl CrdtResync {
                 Some(at) if now >= at => {
                     ask.send_at = None;
                     ask.sent_at = now;
-                    out.push((ask.device.clone(), request(sid, "{}".to_string(), ask.nonce, ask.after.clone())));
+                    out.push((ask.device.clone(), request(sid, ask.nonce, ask.after.clone())));
                 }
                 Some(_) => {}
                 None if queued(&ask.device) => ask.sent_at = now,
@@ -607,10 +606,9 @@ impl CrdtResync {
             let Some(device) = room_peers.get(sid).and_then(|peers| self.pick(sid, state, peers, our_device, now)) else {
                 continue;
             };
-            let vector = serde_json::to_string(&crate::crdt::sync::StateVector::from_server_state(state)).unwrap_or_default();
             let nonce = fresh_nonce();
             hollow_log!("[HOLLOW-CRDT] Asking {device} for the whole op log of {sid}");
-            out.push((device.clone(), request(sid, vector, nonce, None)));
+            out.push((device.clone(), request(sid, nonce, None)));
             asks.push((
                 sid.clone(),
                 Ask { device, nonce, sent_at: now, send_at: None, pages: 0, after: None, partial: false, busy: 0 },
@@ -678,7 +676,7 @@ impl CrdtResync {
                 return Claim::Page(p.next.clone());
             }
             None => {
-                hollow_log!("[HOLLOW-CRDT] {from} cannot page {server_id}'s op log (an older client)");
+                hollow_log!("[HOLLOW-CRDT] {from} answered no page of {server_id}'s op log");
                 (TRIED_FOR, Claim::Released)
             }
         };
@@ -729,8 +727,7 @@ impl CrdtResync {
             return None;
         }
         ask.sent_at = now;
-        // A page ask only a client that pages reads: an older one finds no vector.
-        Some((ask.device.clone(), request(server_id, "{}".to_string(), ask.nonce, Some(cursor))))
+        Some((ask.device.clone(), request(server_id, ask.nonce, Some(cursor))))
     }
 
     /// The server left our hands (left, kicked, deleted): its mark and kept ops go too.
@@ -902,15 +899,14 @@ pub(crate) fn read_live_op(resync: &mut CrdtResync, state: Option<&ServerState>,
     }
 }
 
-fn request(server_id: &str, state_vector_json: String, nonce: u64, after: Option<PageCursor>) -> HavenMessage {
+fn request(server_id: &str, nonce: u64, after: Option<PageCursor>) -> HavenMessage {
     HavenMessage::SyncRequest {
         server_id: server_id.to_string(),
-        state_vector_json,
+        state_vector_json: String::new(),
         mls_epoch: None,
         nonce: Some(nonce),
         full: Some(FullAsk { after }),
         digest: None,
-        dg: Some(super::op_sync::DG),
         x: None,
     }
 }

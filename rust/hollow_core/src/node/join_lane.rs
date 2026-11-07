@@ -305,7 +305,7 @@ mod tests {
     }
 
     fn sync(server_id: &str) -> HavenMessage {
-        HavenMessage::SyncResponse { server_id: server_id.into(), ops_json: "[]".into(), nonce: None, page: None, digest: None, dg: None, x: None }
+        HavenMessage::SyncResponse { server_id: server_id.into(), ops_json: "[]".into(), nonce: None, page: None, digest: None, x: None }
     }
 
     fn resolved(server_id: &str) -> HavenMessage {

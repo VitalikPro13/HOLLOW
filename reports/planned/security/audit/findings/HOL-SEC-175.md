@@ -30,17 +30,22 @@ number of authors, about 535 bytes per author per request.
 `crdt/digest.rs` replaces the vector with salted range fingerprints over fold time (a count
 and a keyed sum of op ids per range). Mismatched ranges split within a budget of 256
 sub-ranges, so any missing op is found wherever it sits. Malformed asks go unanswered and
-malformed replies close the ask; non-members get only the removal notice. 0.12.2 peers are
-still served by the vector. At 50 members a sync ask drops from 14.5 KB to 1.7 KB.
+malformed replies close the ask; non-members get only the removal notice. 0.12.2 peers were
+still served by the vector until 0.14, which reads it only for a legacy (non-40-hex) server
+id whose replicas lack the owner's checkpoint (`op_sync::reads_vector`). At 50 members a sync ask drops from 14.5 KB to 1.7 KB.
 
 ## Residual risk
 
-A 0.12.2 peer keeps the old vector until 0.14 removes it.
+A legacy-id server whose replicas never receive an owner checkpoint (its owner never comes
+back) stays on the vector, which can lose ops; digest asks to other members and the whole-log
+fetch recover what one vector answer loses.
 
 ## Test
 
 `sibling_op_older_than_the_vector_tip_still_syncs` and
 `held_op_expired_after_a_later_op_still_syncs` (crdt/digest/tests.rs; both failed on the
 vector), `digest_random_sets_converge`, `digest_finds_an_old_hole_in_a_long_log`; harness
-`g13_reconnect_converges_with_an_out_of_order_op`, `g13_old_requester_is_served_by_vector`.
+`g13_reconnect_converges_with_an_out_of_order_op`, `t14a_catch_up_converges_by_digest_alone`,
+`t14a_a_legacy_id_server_still_catches_up_by_the_vector`,
+`t14a_a_strangers_vector_ask_on_a_legacy_server_gets_no_op_log`.
 Mutation pass 20/20.

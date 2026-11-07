@@ -431,15 +431,18 @@ AES-128 block per op id under a salt the asker picks per peer), and "everything 
 `from`" (its newest ms + 1). The answerer sends its ops in a differing range when it holds at
 most 32 there, else splits it (budget 256 sub-ranges per answer) and the asker compares
 again for the same ask id; round 6 always sends. Non-members are never fingerprinted (the
-removal notice only). Per-device form: a frame's `dg` mark says the sender reads digests; an
-unknown device gets the digest with an empty vector (a 0.12.2 build cannot parse it and stays
-silent), so silence for 5 s, or the device's own request without the mark, re-asks it with
-the vector. Legacy-anchored replicas keep the vector. The per-author vector LOSES ops (an
-author's op older than its newest one we hold is never sent: sibling clocks, expired held
-ops); tests `sibling_op_older_than_the_vector_tip_still_syncs`,
-`held_op_expired_after_a_later_op_still_syncs`. The vector path goes in 0.14.
+removal notice only). 0.14 (track A) deleted the per-device form (`dg` mark, vector re-asks,
+the old-build test mode): every device compares digests, and a silent ask closes after its
+copies. The per-author vector LOSES ops (an author's op older than its newest one we hold is
+never sent: sibling clocks, expired held ops; tests `sibling_op_older_than_the_vector_tip_still_syncs`,
+`held_op_expired_after_a_later_op_still_syncs`), so it is read ONLY for a legacy
+(non-self-certifying) id (`op_sync::reads_vector`): a replica still on the legacy anchor asks
+with it and an answerer on that anchor replies `vector: true`; for a 40-hex id a vector ask is
+answered with nothing and a `vector: true` reply is malformed.
 
 ## State Vector Sync Protocol (`sync.rs`)
+
+Since 0.14 only a legacy (non-self-certifying) id syncs this way (Range Digest Sync above).
 
 Efficient delta-based synchronization between peers. Instead of exchanging full state, peers exchange compact state vectors and then only send the operations the other side is missing.
 

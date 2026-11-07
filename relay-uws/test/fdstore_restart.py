@@ -85,7 +85,7 @@ def main():
         client_env = dict(os.environ)
         client_env["RELAY_LIVE_RESTART"] = work
         with open(os.path.join(work, "client.log"), "w") as log:
-            c = subprocess.Popen([client, str(port1), "relay.live.test", "off"], env=client_env,
+            c = subprocess.Popen([client, str(port1), "relay.live.test"], env=client_env,
                                  stdout=log, stderr=subprocess.STDOUT)
         deadline = time.time() + 60
         while not os.path.exists(os.path.join(work, "ready")):

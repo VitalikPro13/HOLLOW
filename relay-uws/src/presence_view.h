@@ -7,7 +7,7 @@
 #include <string_view>
 
 // What one socket may be told of a room's presence, and the digest of it a client
-// compares with what it was told (`discover_peers` with `digest`). Every roster the
+// compares with what it was told (`discover_peers`). Every roster the
 // relay sends and the digest read the same filter, or an honest client would see a
 // difference that is not there and re-join for nothing.
 //
@@ -15,10 +15,6 @@
 // own (test/test_presence_view.cpp). `node/presence_audit.rs` pins the same tag.
 
 namespace presence {
-
-// The largest answer a client that does not ask for the digest (0.12.2) gets: a window
-// of the room, so an ask costs the relay a bounded write.
-inline constexpr size_t LEGACY_CAP = 64;
 
 // A peer id's share of a digest: the first 8 bytes, little endian, of
 // SHA-256("hollow-presence1\n" || id). Never 0 in practice; 0 marks "not cached yet".
@@ -79,24 +75,6 @@ Digest digest_of(const Peers& peers, const std::string& me, bool me_sees, const 
         d.add(pd->presence_tag);
     });
     return d;
-}
-
-// Up to `cap` of the peers `for_each_visible` names, walking the buckets from `start`
-// and wrapping once: successive asks with random starts cover the room.
-template <typename Peers, typename Shares, typename Visit>
-void window_visible(const Peers& peers, const std::string& me, bool me_sees, const Shares& shares, size_t start,
-                    size_t cap, Visit&& visit) {
-    const size_t buckets = peers.bucket_count();
-    if (!me_sees || buckets == 0 || cap == 0) return;
-    size_t taken = 0;
-    for (size_t i = 0; i < buckets; i++) {
-        const size_t b = (start + i) % buckets;
-        for (auto it = peers.begin(b); it != peers.end(b); ++it) {
-            if (!listed(it->first, it->second, me, shares)) continue;
-            visit(it->first);
-            if (++taken == cap) return;
-        }
-    }
 }
 
 }  // namespace presence

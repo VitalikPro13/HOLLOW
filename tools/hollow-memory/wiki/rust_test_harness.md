@@ -323,10 +323,10 @@ Tests: `mailbox_requires_a_roster_that_counts_the_device`,
   `leave_racing_a_sibling_announce_join_stays_left` reproduces it and is `#[ignore]`d until
   the fix; run it with `--ignored`, it must fail today.
 - **Wait for the precondition the test names.** `g13_mesh_op_of_a_013_author_is_handed_on_to_nobody`
-  injected the mesh op before M had heard any sync frame from O, so M did not yet know O reads
-  digests and rightly handed the op on (PC full run). It now waits for
-  `DebugSnapshotReply.digest_caps[O]`, and checks M's carried log for the two injected ops
-  only: a per-sender probe also counted M's own late op from admitting X.
+  once injected the mesh op before M had heard any sync frame from O, so M did not yet know O
+  read digests and rightly handed the op on (PC full run). Since 0.14 nothing is handed on and
+  the wait is gone; it checks M's carried log for the two injected ops only: a per-sender probe
+  also counted M's own late op from admitting X.
 - **No wall-clock budget a loaded machine cannot keep.**
   `a_session_save_behind_a_nonce_flood_settles_fast` judges the save's wait against the same
   actor's time for one backlog of notes in that run (4x plus 50 ms), under a 1.5 s ceiling

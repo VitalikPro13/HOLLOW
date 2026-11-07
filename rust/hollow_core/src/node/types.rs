@@ -1735,8 +1735,6 @@ pub(crate) struct DebugSnapshotReply {
     pub resync_marks: std::collections::HashMap<String, super::crdt_resync::Mark>,
     /// server_id -> the device asked for its whole log now.
     pub resync_asks: std::collections::HashMap<String, String>,
-    /// Device -> whether its sync frames show it reads digests (`op_sync`).
-    pub digest_caps: std::collections::HashMap<String, bool>,
     /// Every (device, master) link in this node's own store, read over its pooled
     /// connection so a poll never opens a second one.
     pub device_links: Vec<(String, String)>,
@@ -1821,17 +1819,13 @@ pub(crate) enum HavenMessage {
         /// Echoed by the answer: tells it from an answer to an older ask the relay kept.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         nonce: Option<u64>,
-        /// An ask for one page of the WHOLE log (`crdt_resync`), not a delta. An older
-        /// client ignores it and answers the state vector without a `page`.
+        /// An ask for one page of the WHOLE log (`crdt_resync`), not a delta.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         full: Option<super::crdt_resync::FullAsk>,
         /// What the asker holds as a range digest; when present the vector is ignored
-        /// (`crdt::digest`). An older client ignores it and finds the vector empty.
+        /// (`crdt::digest`), which only a legacy-id server reads (`op_sync::reads_vector`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         digest: Option<crate::crdt::digest::OpDigest>,
-        /// Set by a sender that reads digests (`op_sync::DG`).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        dg: Option<u8>,
         /// Rosters, the floor round and the witness ask (`sync_ext`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         x: Option<Box<super::sync_ext::AskExt>>,
@@ -1850,9 +1844,6 @@ pub(crate) enum HavenMessage {
         /// Set on the answer to a digest ask.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         digest: Option<crate::crdt::digest::DigestReply>,
-        /// Set by a sender that reads digests (`op_sync::DG`).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        dg: Option<u8>,
         /// Rosters, a dropped base, the floor candidate and a witness (`sync_ext`).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         x: Option<Box<super::sync_ext::ReplyExt>>,
@@ -5625,7 +5616,7 @@ mod epoch_catchup_wire_tests {
     fn sync_request_without_epoch_parses_to_none() {
         let json = r#"{"type":"sync_request","server_id":"srv1","state_vector_json":"{}"}"#;
         match serde_json::from_str::<HavenMessage>(json) {
-            Ok(HavenMessage::SyncRequest { server_id, state_vector_json, mls_epoch, nonce: None, full: None, digest: None, dg: None, x: None }) => {
+            Ok(HavenMessage::SyncRequest { server_id, state_vector_json, mls_epoch, nonce: None, full: None, digest: None, x: None }) => {
                 assert_eq!(server_id, "srv1");
                 assert_eq!(state_vector_json, "{}");
                 assert!(mls_epoch.is_none());
@@ -5645,49 +5636,10 @@ mod epoch_catchup_wire_tests {
             nonce: None,
             full: None,
             digest: None,
-            dg: None,
             x: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert_eq!(json, r#"{"type":"sync_request","server_id":"s","state_vector_json":"{}"}"#);
-    }
-
-    /// A 0.12.2 build reads a digest ask as a vector ask whose vector it cannot parse, so it
-    /// stays silent, and reads a digest answer as a plain answer to its ask.
-    #[test]
-    fn digest_frames_parse_in_the_0_12_2_shape() {
-        #[derive(serde::Deserialize)]
-        #[serde(tag = "type")]
-        enum Old {
-            #[serde(rename = "sync_request")]
-            SyncRequest { state_vector_json: String },
-            #[serde(rename = "sync_response")]
-            SyncResponse { ops_json: String, #[serde(default)] nonce: Option<u64> },
-        }
-        let digest = crate::crdt::digest::OpDigest {
-            ask: 1, salt: crate::crdt::digest::new_salt(), base: None, bref: None, from: Some(0), ranges: Vec::new(), round: 0,
-            rs: None,
-        };
-        let ask = HavenMessage::SyncRequest {
-            server_id: "s".into(), state_vector_json: String::new(), mls_epoch: Some(3), nonce: Some(9), full: None,
-            digest: Some(digest), dg: Some(1), x: None,
-        };
-        match serde_json::from_str::<Old>(&serde_json::to_string(&ask).unwrap()).unwrap() {
-            Old::SyncRequest { state_vector_json } => {
-                assert!(serde_json::from_str::<crate::crdt::sync::StateVector>(&state_vector_json).is_err());
-            }
-            Old::SyncResponse { .. } => panic!("wrong variant"),
-        }
-        let reply = HavenMessage::SyncResponse {
-            server_id: "s".into(), ops_json: "[]".into(), nonce: Some(9), page: None,
-            digest: Some(crate::crdt::digest::DigestReply { ask: 1, round: 0, groups: Vec::new(), vector: false, rd: Vec::new() }),
-            dg: Some(1),
-            x: None,
-        };
-        match serde_json::from_str::<Old>(&serde_json::to_string(&reply).unwrap()).unwrap() {
-            Old::SyncResponse { ops_json, nonce } => assert_eq!((ops_json.as_str(), nonce), ("[]", Some(9))),
-            Old::SyncRequest { .. } => panic!("wrong variant"),
-        }
     }
 
     #[test]
@@ -5699,7 +5651,6 @@ mod epoch_catchup_wire_tests {
             nonce: None,
             full: None,
             digest: None,
-            dg: None,
             x: None,
         };
         let json = serde_json::to_string(&msg).unwrap();

@@ -2088,7 +2088,6 @@ mod tests {
             ("WsEvent::BinaryDirect { room, from, data } => {", "ws_stream_receive(", "resolver::is_bare_master(&from)"),
             ("WsEvent::PeerJoined { room, peer_id } => {", "ws_room_peers.entry(", "bare_presence.admits(&peer_id)"),
             ("WsEvent::RoomMembers { room, peers } => {", "ws_room_peers.insert(", "bare_presence.admits(p)"),
-            ("WsEvent::DiscoveredPeers { room, peers } => {", "ws_room_peers.entry(", "bare_presence.admits(p)"),
             ("loop_stall.check(arm, name, t0);", "tokio::select! {", "settle_bare_presence(&mut bare_presence"),
             ("async fn settle_bare_presence(", "\n}\n", "bare_presence.settle(ws_room_peers)"),
         ] {

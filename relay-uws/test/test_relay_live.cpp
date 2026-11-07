@@ -55,8 +55,6 @@ using json = nlohmann::json;
 static int failures = 0;
 static int g_port = 0;
 static std::string g_domain;
-// The build under test accepts `hollow-ring1` ring control (ACCEPT_RING1_CONTROL).
-static bool g_ring1 = true;
 static SSL_CTX* g_ctx = nullptr;
 static int g_next_source = 0;
 // Non-negative: every new socket comes from this one source address (Socket::open).
@@ -655,10 +653,38 @@ static std::optional<json> join(Peer& p, const std::string& room, const json& ex
     return next_json(p, typed("members", room));
 }
 
-static std::set<std::string> discover(Peer& p, const std::string& room) {
+// What discovery tells a socket of a room: the digest of the ids it may see
+// (presence_view.h), never the ids.
+struct Named {
+    uint64_t sum = 0;
+    uint64_t count = 0;
+    bool joined = false;
+    bool operator==(const Named& o) const { return sum == o.sum && count == o.count && joined == o.joined; }
+};
+
+// What discovery tells a joined socket that may see exactly `ids`.
+static Named names(const std::set<std::string>& ids) {
+    Named n{0, 0, true};
+    for (const auto& id : ids) {
+        n.sum += presence::tag(id);
+        n.count++;
+    }
+    return n;
+}
+
+// Asked without the `digest` flag, as clients before 0.13 did: the answer is the digest
+// all the same. An answer naming ids never equals any `names`.
+static Named discover(Peer& p, const std::string& room) {
     p.send({{"type", "discover_peers"}, {"room", room}});
     auto r = next_json(p, typed("discovered_peers", room));
-    return r ? peers_of(*r) : std::set<std::string>{"<no answer>"};
+    if (!r || !peers_of(*r).empty()) return {0, UINT64_MAX, false};
+    if (!r->value("joined", true)) return {0, 0, false};
+    return {r->value("digest", uint64_t{0}), r->value("count", uint64_t{0}), true};
+}
+
+static std::set<std::string> without(std::set<std::string> ids, const std::string& id) {
+    ids.erase(id);
+    return ids;
 }
 
 static std::set<std::string> online(Peer& p, const std::vector<std::string>& ids) {
@@ -746,7 +772,8 @@ static json base_link(const std::string& server, const Door& door, const Ident& 
     return join_lock::links_to_json({base_lock(server, door, change, owner, nonce, genesis)});
 }
 
-// A ring control signed as ring2 for `domain` (this relay's when empty), or as ring1.
+// A ring control signed as ring2 for `domain` (this relay's when empty), or in the
+// `hollow-ring1` form 0.12.1 and older clients signed, which names no relay.
 static json ring_control(const std::string& room, const std::string& owner, const std::vector<std::string>& channels,
                          const Ident& signer, int version = 2, const std::string& domain = "") {
     ring_auth::Control c;
@@ -755,8 +782,10 @@ static json ring_control(const std::string& room, const std::string& owner, cons
     c.ts_ms = wall_ms();
     c.retention_secs = 3600;
     c.channels = channels;
-    const std::string payload = version == 2 ? ring_auth::payload_ring2(c, domain.empty() ? auth_domain(g_domain) : domain)
-                                             : ring_auth::payload_ring1(c);
+    std::string ring1 = "hollow-ring1\n" + room + "\n" + owner + "\n" + std::to_string(c.ts_ms) + "\n3600\nkeep";
+    for (const auto& ch : channels) ring1 += "\n" + ch;
+    const std::string payload =
+        version == 2 ? ring_auth::payload(c, domain.empty() ? auth_domain(g_domain) : domain) : ring1;
     json j = {{"type", "set_topic_buffer"}, {"room", room},           {"owner", owner}, {"channels", channels},
               {"retention_secs", 3600},     {"clear", false},         {"ts", c.ts_ms},  {"sig", signer.sign(payload)}};
     if (version == 2) j["v"] = 2;
@@ -874,7 +903,7 @@ static void test_nicknames() {
 }
 
 static void test_rings() {
-    printf("rings (ACCEPT_RING1_CONTROL %s)\n", g_ring1 ? "on" : "off");
+    printf("rings\n");
     const std::string room = room_name("ring");
     auto a = login(Ident());
     auto b = login(Ident());
@@ -909,6 +938,12 @@ static void test_rings() {
     const std::string ring1 = owner.peer + ".c4";
     a->send(ring_control(server, owner.peer, {ring1}, change, 1));
     a->send_bin(frame(0x07, {server, ring1}, "ring-one"));
+    // The same ring1 control carrying `v`:2, as if it named this relay.
+    const std::string ring1_as_2 = owner.peer + ".c6";
+    json up = ring_control(server, owner.peer, {ring1_as_2}, change, 1);
+    up["v"] = 2;
+    a->send(up);
+    a->send_bin(frame(0x07, {server, ring1_as_2}, "ring-one-up"));
     const std::string elsewhere = owner.peer + ".c5";
     a->send(ring_control(server, owner.peer, {elsewhere}, change, 2, "another.relay"));
     a->send_bin(frame(0x07, {server, elsewhere}, "ring-elsewhere"));
@@ -917,6 +952,7 @@ static void test_rings() {
     late->send(catchup(server, topic));
     late->send(catchup(server, forged));
     late->send(catchup(server, ring1));
+    late->send(catchup(server, ring1_as_2));
     late->send(catchup(server, elsewhere));
     settle({late.get()});
     check("a ring2 control the change key signed opens a ring",
@@ -925,12 +961,10 @@ static void test_rings() {
           !got(*late, bin(frame(0x08, {server, forged, a->id.peer}, "ring-forged"))));
     check("a ring2 control signed for another relay opens none",
           !got(*late, bin(frame(0x08, {server, elsewhere, a->id.peer}, "ring-elsewhere"))));
-    const bool one = got(*late, bin(frame(0x08, {server, ring1, a->id.peer}, "ring-one")));
-    if (g_ring1) {
-        check("a ring1 control opens a ring while ACCEPT_RING1_CONTROL is on", one);
-    } else {
-        check("a ring1 control opens none once ACCEPT_RING1_CONTROL is off", !one);
-    }
+    check("a ring1 control (0.12.1 clients) opens none",
+          !got(*late, bin(frame(0x08, {server, ring1, a->id.peer}, "ring-one"))));
+    check("nor does a ring1 signature sent as ring2",
+          !got(*late, bin(frame(0x08, {server, ring1_as_2, a->id.peer}, "ring-one-up"))));
 }
 
 // Every frame up to and including the first that matches `pred`, in arrival order.
@@ -1101,8 +1135,8 @@ static void test_inbox_audience() {
     settle({s.get(), n.get()});
     check("and not the non-owner", !got(*n, bin(live)));
 
-    check("discovery names nobody to the non-owner", discover(*n, room).empty());
-    check("and only the other owner to an owner", discover(*o1, room) == std::set<std::string>{d2.peer});
+    check("discovery names nobody to the non-owner", discover(*n, room) == names({}));
+    check("and only the other owner to an owner", discover(*o1, room) == names({d2.peer}));
     check("check_peers tells the non-owner of no owner", online(*n, {d1.peer, d2.peer}).empty());
     check("nor an owner of the non-owner", online(*o1, {n->id.peer, d2.peer}) == std::set<std::string>{d2.peer});
 }
@@ -1127,8 +1161,8 @@ static void test_forwarder_rooms() {
     check("the forwarder is told of the stranger", next(*x, about("peer_joined", room, s->id.peer)).has_value());
     settle({s.get(), a.get()});
     check("the viewer is not", !got(*a, about("peer_joined", room, s->id.peer)));
-    check("discovery names only the forwarder to a member", discover(*s, room) == std::set<std::string>{fwd});
-    check("and every member to the forwarder", discover(*x, room) == std::set<std::string>{a->id.peer, s->id.peer});
+    check("discovery names only the forwarder to a member", discover(*s, room) == names({fwd}));
+    check("and every member to the forwarder", discover(*x, room) == names({a->id.peer, s->id.peer}));
     check("check_peers tells a member of no other member", online(*s, {a->id.peer, fwd}) == std::set<std::string>{fwd});
     check("and the forwarder of every member",
           online(*x, {a->id.peer, s->id.peer}) == std::set<std::string>{a->id.peer, s->id.peer});
@@ -1289,7 +1323,7 @@ static void test_guests() {
     auto late = login(Ident());
     auto ml = join(*late, room);
     check("and is in no later member list", ml && peers_of(*ml).count(g->id.peer) == 0);
-    check("nor in discovery", discover(*m, room).count(g->id.peer) == 0);
+    check("nor in discovery", discover(*m, room) == names({n->id.peer, late->id.peer}));
     settle({late.get(), m.get()});
     check("nor announced", !got(*m, about("peer_joined", room, g->id.peer)));
 
@@ -1483,7 +1517,7 @@ static void test_fetch() {
           next(*f, bin(frame(0x05, {room, m->id.peer}, "after-fetch-close"))).has_value());
     settle({m.get()});
     check("nobody was told the device left", !got(*m, about("peer_left", room, d.peer)));
-    check("discovery still names the device", discover(*m, room) == std::set<std::string>{d.peer});
+    check("discovery still names the device", discover(*m, room) == names({d.peer}));
 
     const std::string room2 = room_name("fetch2");
     Ident e;
@@ -1493,7 +1527,7 @@ static void test_fetch() {
     settle({y.get(), m.get()});
     check("a fetch socket with no full socket is told no roster", !got(*y, typed("members", room2)));
     check("and is announced to nobody", !got(*m, about("peer_joined", room2, e.peer)));
-    check("nor discovered", discover(*m, room2).empty());
+    check("nor discovered", discover(*m, room2) == names({}));
     auto n = login(Ident());
     auto mn = join(*n, room2);
     check("nor listed to a later member", mn && peers_of(*mn) == std::set<std::string>{m->id.peer, n->id.peer});
@@ -1516,7 +1550,7 @@ static void test_fetch() {
     check("the full socket closes", f2->ws.close_clean());
     check("and the room is told it left", next(*m, about("peer_left", room3, d2.peer)).has_value());
     m->send_bin(frame(0x03, {room3}, "after-full-close"));
-    check("its slot is gone", discover(*m, room3).empty());
+    check("its slot is gone", discover(*m, room3) == names({}));
 
     // A fetch socket that held a slot until the full socket took it closes without it.
     const std::string room4 = room_name("fetch4");
@@ -1632,8 +1666,8 @@ static void test_door_rooms() {
                                               !got(*w, bin(frame(0x05, {room, p->id.peer}, "door-bcast"))));
     check("no message", !got(*q, json_where([](const json& j) { return j.value("data", "") == "door-msg"; })));
     check("no topic frame", !got(*q, bin(frame(0x08, {room, "dc", p->id.peer}, "door-topic"))));
-    check("discovery names nobody to the hidden", discover(*q, room).empty());
-    check("and only the other prover to a prover", discover(*p, room) == std::set<std::string>{p2->id.peer});
+    check("discovery names nobody to the hidden", discover(*q, room) == names({}));
+    check("and only the other prover to a prover", discover(*p, room) == names({p2->id.peer}));
     check("check_peers tells the hidden of no prover", online(*q, {p->id.peer, p2->id.peer}).empty());
     check("nor a prover of the hidden", online(*p, {q->id.peer, p2->id.peer}) == std::set<std::string>{p2->id.peer});
     p2->send(catchup(room, "dc"));
@@ -1988,7 +2022,7 @@ static void test_session_resume() {
     b->send_bin(frame(0x04, {room, ida.peer}, "r-5"));
     check("and its directs reach the new socket", next(*a2, bin(frame(0x06, {room, b->id.peer}, "r-5"))).has_value());
     check("nothing was rejoined: the device is listed once",
-          discover(*b, room) == std::set<std::string>{ida.peer});
+          discover(*b, room) == names({ida.peer}));
     a2->ws.abort();
     check("the device left again", next(*b, about("peer_left", room, ida.peer)).has_value());
     check("the count a resume named acked the ring", resume_failed(*login3(ida, a->sid, read - 1)) == "bad_h");
@@ -2645,7 +2679,7 @@ static void test_hidden_presence() {
     auto c = login(Ident());
     auto mc = join(*c, r1);
     check("a newcomer's members leave it out", mc && peers_of(*mc) == std::set<std::string>{b->id.peer, c->id.peer});
-    check("so does discover_peers", discover(*b, r1) == std::set<std::string>{c->id.peer});
+    check("so does discover_peers", discover(*b, r1) == names({c->id.peer}));
     check("and check_peers counts it offline", online(*b, {ida.peer, c->id.peer}) == std::set<std::string>{c->id.peer});
     Ident ide;
     auto e = login3(ide, "new", 0);
@@ -2681,7 +2715,7 @@ static void test_hidden_presence() {
     auto md = join(*d, r1);
     check("and every list names it again", md && peers_of(*md).count(ida.peer) != 0 &&
                                                online(*b, {ida.peer}) == std::set<std::string>{ida.peer} &&
-                                               discover(*b, r1).count(ida.peer) != 0);
+                                               discover(*b, r1) == names(without(peers_of(*md), b->id.peer)));
 }
 
 // A sender a locked room hides reaches at most three provers per broadcast, the ones its
@@ -2889,7 +2923,7 @@ static void test_hidden_session() {
     check("its ring kept what came meanwhile", next(*a2, bin(frame(0x06, {room, b->id.peer}, "hide-grace"))).has_value());
     settle({a2.get(), b.get()});
     check("a resume while inactive announces nothing", !got(*b, about("peer_joined", room, ida.peer)));
-    check("and it stays hidden", discover(*b, room).empty() && online(*b, {ida.peer}).empty());
+    check("and it stays hidden", discover(*b, room) == names({}) && online(*b, {ida.peer}).empty());
 
     auto a3 = login3(ida, a->sid, a2->ws.counted);
     check("it moves to another socket", resumed(*a3) && closed_by_relay(*a2));
@@ -2909,7 +2943,7 @@ static void test_hidden_session() {
     settle({a4.get(), b.get()});
     check("a fresh session told inactive before its joins is never shown",
           !got(*b, about("peer_joined", room, ida.peer)) && !got(*b, about("peer_left", room, ida.peer)) &&
-              discover(*b, room).empty());
+              discover(*b, room) == names({}));
     a4->send({{"type", "active"}});
     check("until it says active", next(*b, about("peer_joined", room, ida.peer)).has_value());
 
@@ -3527,7 +3561,7 @@ static void hs_moved_socket() {
     check("nothing it sends reaches the room", !got(*b, bin(frame(0x05, {room, ida.peer}, "hs-from-moved"))) &&
                                                    !got(*b, json_where([](const json& j) { return j.value("data", "") == "hs-moved-msg"; })) &&
                                                    !got(*b, bin(frame(0x06, {room, ida.peer}, "hs-moved-direct"))));
-    check("its leave and end change nothing: the room still lists the device", discover(*b, room) == std::set<std::string>{ida.peer});
+    check("its leave and end change nothing: the room still lists the device", discover(*b, room) == names({ida.peer}));
     b->send_bin(frame(0x04, {room, ida.peer}, "hs-mv-1"));
     check("the room slot stays the new socket's", next(*a2, bin(frame(0x06, {room, b->id.peer}, "hs-mv-1"))).has_value());
     auto m = join(*b, room2);
@@ -4059,7 +4093,7 @@ static void hs_restart(const std::string& dir) {
     check("a session restored inactive resumes", resumed(*e2));
     settle({e2.get(), b2.get()});
     check("hidden: the room is told nothing", !got(*b2, about("peer_joined", plain, ide.peer)) &&
-                                                  discover(*b2, plain).count(ide.peer) == 0);
+                                                  discover(*b2, plain) == names({d1.peer}));
     e2->send({{"type", "active"}});
     check("until it says active", next(*b2, about("peer_joined", plain, ide.peer)).has_value());
 }
@@ -4189,23 +4223,17 @@ static void test_presence_digest() {
     told_join(*dfull, room);
     check("joined, it is", audit(*dfull, dtold, room) == Audit::Same);
 
-    // Old clients: a window of the same filter, never more than the cap.
+    // An ask without the flag (clients before 0.13) is told the digest too, never ids.
     std::vector<std::unique_ptr<Peer>> crowd;
     const std::string big = room_name("digest-big");
     told_join(*o, big);
+    std::set<std::string> others{o->id.peer};
     for (int i = 0; i < 70; i++) {
         crowd.push_back(login(Ident()));
         join(*crowd.back(), big);
+        if (i > 0) others.insert(crowd.back()->id.peer);
     }
-    std::set<std::string> union_seen;
-    bool capped = true;
-    for (int i = 0; i < 40; i++) {
-        auto ids = discover(*crowd[0], big);
-        capped = capped && ids.size() <= presence::LEGACY_CAP;
-        union_seen.insert(ids.begin(), ids.end());
-    }
-    check("an old client's answer is capped", capped && discover(*crowd[0], big).size() == presence::LEGACY_CAP);
-    check("its windows cover the room", union_seen.size() == 70 && !union_seen.count(crowd[0]->id.peer));
+    check("an ask without the digest flag names no ids, only the digest", discover(*crowd[0], big) == names(others));
     check("and the digest counts every member", audit(*o, told, big) == Audit::Same && told.rooms[big].size() == 70);
     crowd.clear();
     check("(they all left)", audit(*o, told, big) == Audit::Same && told.rooms[big].empty());
@@ -6236,14 +6264,13 @@ static void test_lock_after_a_mutual_removal() {
 }
 
 int main(int argc, char** argv) {
-    if (argc != 4 || (std::string(argv[3]) != "on" && std::string(argv[3]) != "off")) {
-        fprintf(stderr, "usage: test_relay_live <port> <auth domain> <on|off>\n");
+    if (argc != 3) {
+        fprintf(stderr, "usage: test_relay_live <port> <auth domain>\n");
         return 2;
     }
     if (sodium_init() < 0) return 2;
     g_port = atoi(argv[1]);
     g_domain = argv[2];
-    g_ring1 = std::string(argv[3]) == "on";
     g_tag = random_hex(4);
     g_ctx = SSL_CTX_new(TLS_client_method());
     SSL_CTX_set_verify(g_ctx, SSL_VERIFY_NONE, nullptr);

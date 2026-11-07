@@ -1,16 +1,14 @@
-//! CRDT catch-up asks: which form each peer device reads, and the digest asks still open.
+//! CRDT catch-up asks, and the digest asks still open.
 //!
-//! A 0.13 device asks with a range digest (`crdt::digest`), an older one only understands
-//! the per-author state vector. A device's own sync frames say which it is (`dg`); one not
-//! heard from yet gets the digest with an empty vector, which an older build cannot parse
-//! and leaves unanswered. A request showing the device is older is asked again with the
-//! vector at once. A silent ask is sent again unchanged, so a late first answer still
-//! counts and a lost one is replaced; only a device that never showed it reads digests
-//! and stays silent through every copy gets the vector, never a slow 0.13 device (each
-//! vector costs one entry per op author). A digest answer that splits a range is followed
-//! only for the ask it names, while that ask is open.
+//! Catch-up compares range digests (`crdt::digest`). The per-author state vector, which
+//! loses ops (HOL-SEC-175), is read only for a server whose id is not self-certifying,
+//! where a replica still on the legacy anchor (no owner checkpoint yet) applies in arrival
+//! order and only the vector says what may be handed to it. A silent ask is sent again
+//! unchanged, so a late first answer still counts and a lost one is replaced. A digest
+//! answer that splits a range is followed only for the ask it names, while that ask is
+//! open.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use crate::crdt::digest::{self, DigestReply, KeptRef, OpDigest};
@@ -19,9 +17,7 @@ use crate::crdt::sync::StateVector;
 
 use super::types::HavenMessage;
 
-/// Marks a sync frame from a build that reads digests.
-pub(crate) const DG: u8 = 1;
-/// Devices whose form we remember.
+/// Identities whose last roster from us we remember.
 const CAPS_MAX: usize = 4096;
 /// An ask nothing answered in this long is sent again; each later wait doubles, and the
 /// ask is judged once the last copy waited out its own (35 s, 21 s in tests).
@@ -41,14 +37,6 @@ const WITNESS_ROUND_GAP: Duration = Duration::from_secs(600);
 /// Identities one such round asks, by standing.
 const WITNESS_ROUND_ASKED: usize = 8;
 
-/// What a device reads.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Reads {
-    Digest,
-    Vector,
-    Unknown,
-}
-
 #[derive(Debug, Clone)]
 struct Ask {
     id: u64,
@@ -62,8 +50,6 @@ struct Ask {
     round_at: Instant,
     /// Every copy went unanswered; kept only for a late answer.
     judged: bool,
-    /// The device's form was unknown when asked, and nothing came back yet.
-    unconfirmed: bool,
     /// The ranges the last round asked: a split may only cover them.
     asked: Vec<(u64, u64)>,
     /// What the last round sent, and how often it was sent again unanswered.
@@ -75,10 +61,7 @@ struct Ask {
 pub(crate) enum Silent {
     /// Send (server, device) this copy of the ask again.
     Again(String, String, Box<HavenMessage>),
-    /// A device never seen to read digests left every copy unanswered: ask (server,
-    /// device) with the vector, carrying (nonce, mls_epoch). Goes with the vector in 0.14.
-    Vector(String, String, Option<u64>, Option<u64>),
-    /// A device that reads digests left every copy unanswered: no more copies go.
+    /// The device left every copy unanswered: no more copies go.
     Closed(String, String),
 }
 
@@ -99,16 +82,12 @@ pub(crate) enum Step {
 
 #[derive(Default)]
 pub(crate) struct OpSync {
-    caps: HashMap<String, bool>,
-    order: VecDeque<String>,
     /// (server, device) -> the open ask.
     asks: HashMap<(String, String), Ask>,
     follow_ups: Vec<(String, Instant)>,
     /// Our own ops on a server whose room we were not in yet when we authored them:
     /// carried to its members once the relay first lists the room for us.
     unseen: HashMap<String, Vec<HavenMessage>>,
-    /// This node plays a 0.12.2 build (tests of the mixed-version server only).
-    old: bool,
     /// Per server, the identities (masters) whose digest round with us ended since the
     /// socket came up: what the owner's checkpoint writer rule reads.
     witnesses: HashMap<String, std::collections::HashSet<String>>,
@@ -126,40 +105,8 @@ pub(crate) struct OpSync {
 /// Ops kept per server for its first room listing.
 const UNSEEN_MAX: usize = 16;
 
-#[cfg(test)]
-static OLD_BUILDS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
-
-/// Make the node of `device` speak sync as 0.12.2 did (vector asks, no digest, no mark)
-/// while the guard lives. Set before the node starts.
-#[cfg(test)]
-pub(crate) fn act_old_for_test(device: &str) -> OldBuildGuard {
-    OLD_BUILDS.lock().unwrap().push(device.to_string());
-    OldBuildGuard(device.to_string())
-}
-
-#[cfg(test)]
-pub(crate) struct OldBuildGuard(String);
-
-#[cfg(test)]
-impl Drop for OldBuildGuard {
-    fn drop(&mut self) {
-        OLD_BUILDS.lock().unwrap_or_else(|e| e.into_inner()).retain(|d| *d != self.0);
-    }
-}
-
-fn acts_old(device: &str) -> bool {
-    #[cfg(test)]
-    {
-        OLD_BUILDS.lock().unwrap().iter().any(|d| d == device)
-    }
-    #[cfg(not(test))]
-    {
-        let _ = device;
-        false
-    }
-}
-
-/// A request in the old form, for a device or a server that only reads it.
+/// A request in the state-vector form, for a server whose id is not self-certifying
+/// (`reads_vector`).
 pub(crate) fn vector_ask(state: &ServerState, nonce: Option<u64>, mls_epoch: Option<u64>) -> HavenMessage {
     HavenMessage::SyncRequest {
         server_id: state.server_id.clone(),
@@ -168,9 +115,14 @@ pub(crate) fn vector_ask(state: &ServerState, nonce: Option<u64>, mls_epoch: Opt
         nonce,
         full: None,
         digest: None,
-        dg: Some(DG),
         x: None,
     }
+}
+
+/// Whether a sync of `server_id` may take the state-vector form: never for a
+/// self-certifying id, whose replicas were all born anchored and always compare digests.
+pub(crate) fn reads_vector(server_id: &str) -> bool {
+    !crate::crdt::anchor::is_genesis_id(server_id)
 }
 
 /// An ask for rosters only: no digest and no vector, so an answerer reads no op from it.
@@ -182,7 +134,6 @@ pub(crate) fn roster_ask(server_id: &str, nonce: Option<u64>, wanted: Vec<String
         nonce,
         full: None,
         digest: None,
-        dg: Some(DG),
         x: super::sync_ext::AskExt { rosters_wanted: wanted, ..Default::default() }.boxed(),
     }
 }
@@ -199,11 +150,6 @@ fn fresh_id() -> u64 {
 }
 
 impl OpSync {
-    /// Called once with this node's device id.
-    pub(crate) fn set_local(&mut self, device: &str) {
-        self.old = acts_old(device);
-    }
-
     /// Where our rosters live, so an ask carries the authority set's fingerprints and our
     /// own roster when an answerer may not hold it.
     pub(crate) fn set_store(&mut self, db_path: &str, db_passphrase: &str, local_master: &str) {
@@ -256,53 +202,8 @@ impl OpSync {
         super::server_rosters::wanted(&super::server_rosters::entries(&store, db, state), rd)
     }
 
-    /// This node speaks sync as a 0.12.2 build (tests only).
-    pub(crate) fn is_old(&self) -> bool {
-        self.old
-    }
-
-    /// The `dg` mark our sync frames carry.
-    pub(crate) fn mark(&self) -> Option<u8> {
-        (!self.old).then_some(DG)
-    }
-
-    pub(crate) fn reads(&self, device: &str) -> Reads {
-        match self.caps.get(device) {
-            Some(true) => Reads::Digest,
-            Some(false) => Reads::Vector,
-            None => Reads::Unknown,
-        }
-    }
-
-    /// Whether any device of `identity` (a master) is known to read digests: a 0.13 author
-    /// always carries its own ops, so nobody hands them on.
-    pub(crate) fn identity_reads_digest(&self, identity: &str) -> bool {
-        std::iter::once(identity.to_string())
-            .chain(super::resolver::devices_for(identity))
-            .any(|d| self.reads(&d) == Reads::Digest)
-    }
-
-    /// Note what a device's sync frame shows it reads.
-    pub(crate) fn learn(&mut self, device: &str, digest: bool) {
-        if self.caps.insert(device.to_string(), digest).is_none() {
-            self.order.push_back(device.to_string());
-            while self.order.len() > CAPS_MAX {
-                if let Some(old) = self.order.pop_front() {
-                    self.caps.remove(&old);
-                }
-            }
-        }
-        if digest {
-            for ((_, d), ask) in self.asks.iter_mut() {
-                if d == device {
-                    ask.unconfirmed = false;
-                }
-            }
-        }
-    }
-
-    /// The sync ask for `state` to `device`: the digest unless the device or the server
-    /// only reads the vector.
+    /// The sync ask for `state` to `device`: the digest, or the vector while our replica
+    /// is on the legacy anchor.
     pub(crate) fn ask(
         &mut self,
         state: &ServerState,
@@ -311,14 +212,7 @@ impl OpSync {
         nonce: Option<u64>,
         mls_epoch: Option<u64>,
     ) -> HavenMessage {
-        let reads = self.reads(device);
-        if self.old {
-            let HavenMessage::SyncRequest { server_id, state_vector_json, .. } = vector_ask(state, nonce, mls_epoch) else {
-                unreachable!("a vector ask is a sync request")
-            };
-            return HavenMessage::SyncRequest { server_id, state_vector_json, mls_epoch, nonce, full: None, digest: None, dg: None, x: None };
-        }
-        if state.anchor() == Anchor::Legacy || reads == Reads::Vector {
+        if state.anchor() == Anchor::Legacy {
             let mut ask = vector_ask(state, nonce, mls_epoch);
             let (_, asker_roster) = self.roster_parts(state, device, "");
             if let HavenMessage::SyncRequest { x, .. } = &mut ask {
@@ -346,14 +240,13 @@ impl OpSync {
             nonce,
             full: None,
             digest: Some(d),
-            dg: Some(DG),
             x,
         };
         self.asks.insert(
             key,
             Ask {
                 id, salt, round: 0, nonce, hinted: mls_epoch.is_some(), sent_at: now, round_at: now, judged: false,
-                unconfirmed: reads == Reads::Unknown, asked, last: Box::new(msg.clone()), resends: 0,
+                asked, last: Box::new(msg.clone()), resends: 0,
             },
         );
         msg
@@ -394,31 +287,6 @@ impl OpSync {
         msg
     }
 
-    /// A request from `device` arrived; one without the mark shows it reads only the
-    /// vector, and the servers of our open digest asks to it are returned to ask again
-    /// with the vector now, as (server, nonce, mls_epoch). `epoch_of` is our MLS epoch of
-    /// a server now.
-    pub(crate) fn heard_request(
-        &mut self,
-        device: &str,
-        dg: Option<u8>,
-        epoch_of: &dyn Fn(&str) -> Option<u64>,
-    ) -> Vec<(String, Option<u64>, Option<u64>)> {
-        let digest = dg.is_some_and(|v| v >= DG);
-        self.learn(device, digest);
-        if digest {
-            return Vec::new();
-        }
-        let open: Vec<(String, String)> = self.asks.keys().filter(|(_, d)| d == device).cloned().collect();
-        open.into_iter()
-            .filter_map(|key| {
-                let a = self.asks.remove(&key)?;
-                let epoch = a.hinted.then(|| epoch_of(&key.0)).flatten();
-                Some((key.0, a.nonce, epoch))
-            })
-            .collect()
-    }
-
     /// The next step for a digest answer from `device` about `state`; `epoch_now` is our
     /// MLS epoch of it.
     pub(crate) fn answered(
@@ -430,12 +298,14 @@ impl OpSync {
         epoch_now: Option<u64>,
     ) -> Step {
         let key = (state.server_id.clone(), device.to_string());
-        let Some(ask) = self.asks.get_mut(&key).filter(|a| a.id == reply.ask && a.round == reply.round) else {
+        if !self.asks.get(&key).is_some_and(|a| a.id == reply.ask && a.round == reply.round) {
             return Step::Unasked;
-        };
-        ask.unconfirmed = false;
+        }
         if reply.vector {
             let ask = self.asks.remove(&key).expect("open");
+            if !reads_vector(&state.server_id) {
+                return Step::Malformed;
+            }
             return Step::Again(Box::new(vector_ask(state, ask.nonce, epoch_now.filter(|_| ask.hinted))));
         }
         let wanted = self.rosters_wanted(state, &reply.rd);
@@ -478,7 +348,6 @@ impl OpSync {
                 round: ask.round,
                 rs: None,
             }),
-            dg: Some(DG),
             x: super::sync_ext::AskExt { rosters_wanted: wanted, ..Default::default() }.boxed(),
         };
         Step::Again(ask.last.clone())
@@ -540,13 +409,6 @@ impl OpSync {
                 silent.push(Silent::Again(server.clone(), device.clone(), copy));
                 return true;
             }
-            // A held join judges after 10 s, before a silent unknown 0.12.2 device gets
-            // this; its own unmarked request gets it the vector at once.
-            if ask.unconfirmed {
-                let epoch = ask.hinted.then(|| epoch_of(server)).flatten();
-                silent.push(Silent::Vector(server.clone(), device.clone(), ask.nonce, epoch));
-                return false;
-            }
             silent.push(Silent::Closed(server.clone(), device.clone()));
             ask.judged = true;
             now.saturating_duration_since(ask.round_at) < ASK_TTL
@@ -583,7 +445,7 @@ impl OpSync {
         let mut devices: Vec<&String> = room
             .into_iter()
             .flatten()
-            .filter(|d| state.keeps_peer(d) && !super::resolver::same_identity(d, us) && self.reads(d) != Reads::Vector)
+            .filter(|d| state.keeps_peer(d) && !super::resolver::same_identity(d, us))
             .filter(|d| !heard.contains(&super::resolver::resolve(d)) && !self.asks.contains_key(&(sid.clone(), (*d).clone())))
             .collect();
         devices.sort();
@@ -612,11 +474,6 @@ impl OpSync {
     #[cfg(test)]
     pub(crate) fn open_asks(&self) -> usize {
         self.asks.len()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn debug_caps(&self) -> HashMap<String, bool> {
-        self.caps.clone()
     }
 }
 
@@ -649,23 +506,6 @@ mod tests {
         }
     }
 
-    /// An unknown device gets the digest with a vector no older build can parse; one whose
-    /// own request shows it is older has our open asks sent again with the vector, at once.
-    #[test]
-    fn an_older_device_is_asked_again_with_the_vector_at_once() {
-        let s = server();
-        let mut book = OpSync::default();
-        let ask = book.ask(&s, &[], "dev", Some(4), Some(2));
-        assert!(digest_of(&ask).is_some());
-        assert!(matches!(&ask, HavenMessage::SyncRequest { state_vector_json, .. } if state_vector_json.is_empty()));
-        assert_eq!(book.heard_request("dev", Some(DG), &|_| None), Vec::new(), "a 0.13 request resends nothing");
-        let _ = book.ask(&s, &[], "old", Some(4), Some(2));
-        let again = book.heard_request("old", None, &|_| Some(2));
-        assert_eq!(again, vec![(s.server_id.clone(), Some(4), Some(2))]);
-        assert_eq!(book.reads("old"), Reads::Vector);
-        assert!(vector_of(&book.ask(&s, &[], "old", None, None)).is_some_and(|v| !v.is_empty()), "an older device got a digest");
-    }
-
     /// Writer rule a: an owner whose checkpoint waits on witnesses asks one device per
     /// member identity it has not heard, none of its own and none with an ask open, and
     /// asks again only after the gap or a new socket.
@@ -695,22 +535,19 @@ mod tests {
             .iter()
             .map(|s| match s {
                 Silent::Again(_, d, _) => format!("again {d}"),
-                Silent::Vector(_, d, _, _) => format!("vector {d}"),
                 Silent::Closed(_, d) => format!("closed {d}"),
             })
             .collect()
     }
 
-    /// A silent ask goes again unchanged with a doubling wait; then a device never seen to
-    /// read digests gets the vector and one that reads them has its ask closed, never the
-    /// vector.
+    /// A silent ask goes again unchanged with a doubling wait, then closes: no device is
+    /// ever sent the vector instead (t14-a).
     #[test]
-    fn a_silent_ask_goes_again_before_the_vector_and_only_an_unknown_device_gets_it() {
+    fn a_silent_ask_goes_again_then_closes_and_never_turns_into_the_vector() {
         let s = server();
         let mut book = OpSync::default();
         let t0 = Instant::now();
         let first = book.ask(&s, &[], "quiet", Some(5), Some(1));
-        book.learn("known", true);
         let _ = book.ask(&s, &[], "known", None, None);
         let (silent, _) = book.tick(t0 + RESEND_AFTER / 2, &|_| false, &|_| Some(7));
         assert!(silent.is_empty(), "an ask went again before its wait");
@@ -736,25 +573,23 @@ mod tests {
         let (silent, _) = book.tick(t2 + RESEND_AFTER * 4 + Duration::from_millis(50), &|_| false, &|_| Some(7));
         let mut k = kinds(&silent);
         k.sort();
-        assert_eq!(k, ["closed known", "vector quiet"]);
-        assert!(silent.iter().any(|s| matches!(s, Silent::Vector(_, d, Some(5), Some(7)) if d == "quiet")), "the vector ask lost the nonce or kept an old epoch");
-        assert_eq!(book.open_asks(), 1, "the digest device's ask closed before a late answer could land");
+        assert_eq!(k, ["closed known", "closed quiet"]);
+        assert_eq!(book.open_asks(), 2, "a judged ask closed before a late answer could land");
         let (silent, _) = book.tick(t0 + ASK_TTL - Duration::from_millis(50), &|_| false, &|_| Some(7));
         assert!(silent.is_empty(), "a judged ask was sent again");
-        assert_eq!(book.open_asks(), 1);
+        assert_eq!(book.open_asks(), 2);
         let _ = book.tick(t0 + ASK_TTL + Duration::from_millis(50), &|_| false, &|_| Some(7));
         assert_eq!(book.open_asks(), 0, "a judged ask outlived the TTL");
     }
 
-    /// A device that shows it reads digests while its ask waits never gets the vector, and
-    /// an answer to the ask restarts its clock.
+    /// A silent device's ask closes after its copies, and an answer to an ask restarts its
+    /// clock.
     #[test]
-    fn a_device_heard_reading_digests_while_silent_never_gets_the_vector() {
+    fn a_silent_ask_closes_and_an_answer_restarts_the_clock() {
         let s = server();
         let mut book = OpSync::default();
         let t0 = Instant::now();
         let _ = book.ask(&s, &[], "slow", None, None);
-        assert_eq!(book.heard_request("slow", Some(DG), &|_| None), Vec::new());
         let mut silent = Vec::new();
         for i in 1..=8 {
             silent.extend(kinds(&book.tick(t0 + RESEND_AFTER * (i * 5), &|_| false, &|_| Some(7)).0));
@@ -856,40 +691,58 @@ mod tests {
         }
     }
 
-    /// An answerer that reads only the vector for this server sends us to it.
+    /// A legacy-id server checkpointed here while the answerer's replica is still on the
+    /// legacy anchor.
+    fn checkpointed_legacy_server() -> ServerState {
+        let (mut s, _) = crate::crdt::testkeys::owned_state("0123456789abcdef0123456789abcdef", "Old", 1);
+        let hlc = s.name.hlc().clone();
+        s.checkpoint_hlc = Some(hlc);
+        assert!(reads_vector(&s.server_id) && s.anchor() == Anchor::Checkpoint);
+        s
+    }
+
+    /// An answerer still on a legacy-id server's legacy anchor sends us to the vector;
+    /// for a self-certifying id that answer is malformed and nothing more is asked (t14-a).
     #[test]
-    fn a_vector_reply_asks_again_with_the_vector() {
-        let s = server();
+    fn a_vector_reply_asks_again_with_the_vector_only_for_a_legacy_id() {
+        let s = checkpointed_legacy_server();
         let mut book = OpSync::default();
         let ask = book.ask(&s, &[], "dev", Some(8), Some(3));
-        let id = digest_of(&ask).unwrap().ask;
+        let id = digest_of(&ask).expect("a checkpointed replica asks with the digest").ask;
         match book.answered(&s, &[], "dev", &DigestReply { ask: id, round: 0, groups: Vec::new(), vector: true, rd: Vec::new() }, None) {
             Step::Again(next) => assert!(vector_of(&next).is_some_and(|v| !v.is_empty())),
             _ => panic!("no vector ask"),
+        }
+
+        let g = server();
+        assert!(!reads_vector(&g.server_id));
+        let ask = book.ask(&g, &[], "dev", Some(8), Some(3));
+        let id = digest_of(&ask).unwrap().ask;
+        let reply = DigestReply { ask: id, round: 0, groups: Vec::new(), vector: true, rd: Vec::new() };
+        assert!(matches!(book.answered(&g, &[], "dev", &reply, None), Step::Malformed), "a self-certifying id was sent to the vector");
+        assert_eq!(book.open_asks(), 0, "the ask stayed open");
+    }
+
+    /// Only a replica on the legacy anchor asks with the vector (t14-a).
+    #[test]
+    fn only_a_legacy_anchored_replica_asks_with_the_vector() {
+        let (legacy, _) = crate::crdt::testkeys::owned_state("0123456789abcdef0123456789abcdef", "Old", 1);
+        assert_eq!(legacy.anchor(), Anchor::Legacy);
+        let mut book = OpSync::default();
+        assert!(vector_of(&book.ask(&legacy, &[], "dev", None, None)).is_some_and(|v| !v.is_empty()));
+        for s in [server(), checkpointed_legacy_server()] {
+            let ask = book.ask(&s, &[], "dev", None, None);
+            assert!(digest_of(&ask).is_some(), "an anchored replica asked without the digest");
+            assert!(matches!(&ask, HavenMessage::SyncRequest { state_vector_json, .. } if state_vector_json.is_empty()));
         }
     }
 
     // ---- review (g13w2-g-sync-fallback) ----
 
-    /// The vector re-ask a device's own unmarked request triggers carries our epoch now,
-    /// like the copies sent before it, never the one from when the ask first left.
-    #[test]
-    fn review_heard_request_vector_reask_carries_no_older_epoch_than_its_copies() {
-        let s = server();
-        let mut book = OpSync::default();
-        let t0 = Instant::now();
-        let _ = book.ask(&s, &[], "old", Some(5), Some(1));
-        let (silent, _) = book.tick(t0 + RESEND_AFTER + Duration::from_millis(50), &|_| false, &|_| Some(7));
-        assert!(silent.iter().any(|x| matches!(x, Silent::Again(_, _, m) if matches!(**m, HavenMessage::SyncRequest { mls_epoch: Some(7), .. }))));
-        let heard = book.heard_request("old", None, &|_| Some(7));
-        assert_eq!(heard.len(), 1);
-        assert_eq!(heard[0].2, Some(7), "the vector re-ask names the epoch from the first ask, older than the copy it follows");
-    }
-
     /// A vector reply to a copy re-asks with our epoch now, like the copy it answers.
     #[test]
     fn review_vector_reply_to_a_copy_carries_no_older_epoch_than_the_copy() {
-        let s = server();
+        let s = checkpointed_legacy_server();
         let mut book = OpSync::default();
         let t0 = Instant::now();
         let ask = book.ask(&s, &[], "dev", Some(8), Some(1));
@@ -910,7 +763,6 @@ mod tests {
     fn review_a_late_split_inside_the_old_ttl_is_still_followed() {
         let s = server();
         let mut book = OpSync::default();
-        book.learn("dev", true);
         let t0 = Instant::now();
         let ask = book.ask(&s, &[], "dev", None, None);
         let d = digest_of(&ask).unwrap();

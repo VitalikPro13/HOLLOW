@@ -263,7 +263,7 @@ mod tests {
     }
 
     fn answer(nonce: u64) -> HavenMessage {
-        HavenMessage::SyncResponse { server_id: "srv".into(), ops_json: "[]".into(), nonce: Some(nonce), page: None, digest: None, dg: None, x: None }
+        HavenMessage::SyncResponse { server_id: "srv".into(), ops_json: "[]".into(), nonce: Some(nonce), page: None, digest: None, x: None }
     }
 
     #[test]
@@ -374,9 +374,9 @@ mod tests {
         hold.went_away(&states);
         assert!(hold.ask() > before, "every connection asks with a new nonce");
         assert_eq!(hold.sync_mark(&answer(before), "x", &states), None, "an answer to an earlier ask");
-        let unasked = HavenMessage::SyncResponse { server_id: "srv".into(), ops_json: "[]".into(), nonce: None, page: None, digest: None, dg: None, x: None };
+        let unasked = HavenMessage::SyncResponse { server_id: "srv".into(), ops_json: "[]".into(), nonce: None, page: None, digest: None, x: None };
         assert_eq!(hold.sync_mark(&unasked, "x", &states), None, "an answer to no ask");
-        let ask = HavenMessage::SyncRequest { server_id: "srv".into(), state_vector_json: "{}".into(), mls_epoch: None, nonce: None, full: None, digest: None, dg: None, x: None };
+        let ask = HavenMessage::SyncRequest { server_id: "srv".into(), state_vector_json: "{}".into(), mls_epoch: None, nonce: None, full: None, digest: None, x: None };
         assert_eq!(hold.sync_mark(&ask, "x", &states), None, "an ask proves nothing");
     }
 
@@ -390,7 +390,7 @@ mod tests {
         hold.went_away(&states);
         let with = |groups: Vec<Vec<Range>>, vector: bool| HavenMessage::SyncResponse {
             server_id: "srv".into(), ops_json: "[]".into(), nonce: Some(hold.ask()), page: None,
-            digest: Some(DigestReply { ask: 1, round: 0, groups, vector, rd: Vec::new() }), dg: Some(1), x: None,
+            digest: Some(DigestReply { ask: 1, round: 0, groups, vector, rd: Vec::new() }), x: None,
         };
         let split = vec![vec![Range(1, 2, 1, "a".into()), Range(3, 4, 1, "b".into())]];
         assert_eq!(hold.sync_mark(&with(split, false), "x", &states), None, "a split answer counted");
@@ -405,7 +405,7 @@ mod tests {
         let mut hold = JoinHold::default();
         hold.went_away(&states);
         let refused = |x: super::super::sync_ext::ReplyExt| HavenMessage::SyncResponse {
-            server_id: "srv".into(), ops_json: "[]".into(), nonce: Some(hold.ask()), page: None, digest: None, dg: Some(1), x: x.boxed(),
+            server_id: "srv".into(), ops_json: "[]".into(), nonce: Some(hold.ask()), page: None, digest: None, x: x.boxed(),
         };
         let needed = super::super::sync_ext::ReplyExt { roster_needed: true, ..Default::default() };
         let unknown = super::super::sync_ext::ReplyExt { base_unknown: true, ..Default::default() };

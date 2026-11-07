@@ -112,45 +112,11 @@ static void test_digest() {
     check("random rooms: digest == tag sum of the named ids", same);
 }
 
-static void test_window() {
-    printf("window_visible\n");
-    std::vector<Sock> socks(200);
-    Peers peers;
-    for (size_t i = 0; i < socks.size(); i++) {
-        socks[i].d.hidden = i % 10 == 0;
-        peers["p" + std::to_string(i)] = &socks[i];
-    }
-    auto all = [](const std::string&) { return true; };
-    const std::set<std::string> truth = visible(peers, "p1", true);
-    std::set<std::string> seen;
-    bool capped = true, subset = true;
-    for (size_t start = 0; start < 400; start += 7) {
-        std::vector<std::string> got;
-        presence::window_visible(peers, "p1", true, all, start, presence::LEGACY_CAP, [&](const std::string& p) { got.push_back(p); });
-        capped = capped && got.size() == presence::LEGACY_CAP;
-        for (const auto& p : got) {
-            subset = subset && truth.count(p);
-            seen.insert(p);
-        }
-    }
-    check("each answer is exactly the cap", capped);
-    check("and names only what the filter names", subset);
-    check("starts spread over the buckets cover the room", seen == truth);
-    std::vector<std::string> small;
-    Peers few{{"p1", &socks[1]}, {"p2", &socks[2]}, {"p3", &socks[3]}};
-    presence::window_visible(few, "p1", true, all, 12345, presence::LEGACY_CAP, [&](const std::string& p) { small.push_back(p); });
-    check("a small room is named whole", std::set<std::string>(small.begin(), small.end()) == std::set<std::string>{"p2", "p3"});
-    std::vector<std::string> hiddenroom;
-    presence::window_visible(peers, "p1", false, all, 0, presence::LEGACY_CAP, [&](const std::string& p) { hiddenroom.push_back(p); });
-    check("nothing to a viewer who does not see the room", hiddenroom.empty());
-}
-
 int main() {
     if (sodium_init() < 0) return 2;
     test_tag_kat();
     test_filter();
     test_digest();
-    test_window();
     if (failures) printf("%d FAILED\n", failures);
     return failures ? 1 : 0;
 }
