@@ -7,6 +7,10 @@
 //! pre-0.13 whole-store blob keep their format. Every write is delegated to it and
 //! the row keys it touches are noted; tests check after each write that no other row
 //! changed, so a key shape that drifts fails every MLS test instead of a save.
+//!
+//! The rows that hold key material are written here instead, as the memory store
+//! would write them (tests compare every such write with its own), because it frees
+//! the buffer each write grows and the row it replaces as they are (HOL-SEC-201).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
@@ -16,6 +20,9 @@ use openmls_rust_crypto::RustCrypto;
 use openmls_traits::storage::{traits, StorageProvider, CURRENT_VERSION};
 use openmls_traits::OpenMlsProvider;
 use serde::Serialize;
+use zeroize::Zeroizing;
+
+use super::wiped::{json_wiped, wipe, SecretBytes};
 
 /// The scope of the live store's rows; a past epoch's rows carry [`past_scope`].
 pub(crate) const LIVE_SCOPE: &str = "";
@@ -32,8 +39,8 @@ pub(crate) fn parse_past_scope(scope: &str) -> Option<(String, u64)> {
     Some((group_key.to_string(), epoch.parse().ok()?))
 }
 
-/// Stored rows of one store, `(key, value)`.
-pub(crate) type Rows = Vec<(Vec<u8>, Vec<u8>)>;
+/// Stored rows of one store, `(key, value)`; a value may hold key material.
+pub(crate) type Rows = Vec<(Vec<u8>, SecretBytes)>;
 
 /// Each stored past epoch's rows, by `(group key, epoch)`.
 pub(crate) type PastRows = HashMap<(String, u64), Rows>;
@@ -43,12 +50,13 @@ pub(crate) type PastRows = HashMap<(String, u64), Rows>;
 pub(crate) struct MlsSave {
     /// [`super::MlsManager::taken`] for this save: it holds every change made before it.
     pub take: u64,
-    pub signer: Vec<u8>,
+    /// The device's MLS signing key pair.
+    pub signer: SecretBytes,
     pub credential: Vec<u8>,
     /// Scopes emptied before `rows` are written: a whole-store save, a dropped past epoch.
     pub cleared: Vec<String>,
     /// `(scope, key, value)`; `None` deletes the row.
-    pub rows: Vec<(String, Vec<u8>, Option<Vec<u8>>)>,
+    pub rows: Vec<(String, Vec<u8>, Option<SecretBytes>)>,
     /// The rows hold everything: the pre-0.13 whole-store blob goes.
     pub drop_blob: bool,
     /// A whole save: every stored scope not named here is erased (a past epoch dropped
@@ -60,7 +68,7 @@ impl MlsSave {
     /// Bytes of group state this save writes.
     #[cfg(test)]
     pub fn row_bytes(&self) -> usize {
-        self.rows.iter().map(|(_, k, v)| k.len() + v.as_ref().map_or(0, Vec::len)).sum()
+        self.rows.iter().map(|(_, k, v)| k.len() + v.as_ref().map_or(0, |v| v.len())).sum()
     }
 }
 
@@ -132,45 +140,85 @@ impl TrackedStorage {
         self.inner.values.write().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Rows as they are on disk: nothing to save.
-    pub fn load_rows(&self, rows: impl IntoIterator<Item = (Vec<u8>, Vec<u8>)>) {
-        self.values_mut().extend(rows);
+    /// Write a row that holds key material: in one pass into a buffer that wipes what
+    /// it outgrows, sized from the row it replaces, which is wiped. `theirs` is the
+    /// memory store's own write, which tests hold this one to.
+    fn put<V: Serialize + ?Sized>(&self, key: Vec<u8>, value: &V, theirs: impl FnOnce(&MemoryStorage) -> Res<()>) -> Res<()> {
+        let hint = self.values().get(&key).map_or(256, |old| old.len() + old.len() / 8 + 64);
+        let mut row = json_wiped(value, hint).map_err(|_| MemoryStorageError::SerializationError)?;
+        #[cfg(test)]
+        verify::same_write_as_theirs(&key, &row, theirs);
+        #[cfg(not(test))]
+        let _ = theirs;
+        if let Some(old) = self.values_mut().insert(key.clone(), std::mem::take(&mut *row)) {
+            wipe(old);
+        }
+        self.dirty.lock().unwrap_or_else(|e| e.into_inner()).insert(key);
+        Ok(())
+    }
+
+    /// Delete a row that holds key material, wiping it; `theirs` as in [`Self::put`].
+    fn remove(&self, key: Vec<u8>, theirs: impl FnOnce(&MemoryStorage) -> Res<()>) -> Res<()> {
+        #[cfg(test)]
+        verify::same_delete_as_theirs(&key, theirs);
+        #[cfg(not(test))]
+        let _ = theirs;
+        if let Some(old) = self.values_mut().remove(&key) {
+            wipe(old);
+        }
+        self.dirty.lock().unwrap_or_else(|e| e.into_inner()).insert(key);
+        Ok(())
+    }
+
+    /// Rows as they are on disk: nothing to save. Each value moves into the store.
+    pub fn load_rows(&self, rows: impl IntoIterator<Item = (Vec<u8>, SecretBytes)>) {
+        let mut values = self.values_mut();
+        for (k, mut v) in rows {
+            if let Some(old) = values.insert(k, std::mem::take(&mut *v)) {
+                wipe(old);
+            }
+        }
     }
 
     /// Rows as they are on disk laid over the store: an empty value deletes the row.
-    pub fn lay_over(&self, rows: impl IntoIterator<Item = (Vec<u8>, Vec<u8>)>) {
+    pub fn lay_over(&self, rows: impl IntoIterator<Item = (Vec<u8>, SecretBytes)>) {
         let mut values = self.values_mut();
-        for (k, v) in rows {
-            if v.is_empty() {
-                values.remove(&k);
-            } else {
-                values.insert(k, v);
+        for (k, mut v) in rows {
+            let old = if v.is_empty() { values.remove(&k) } else { values.insert(k, std::mem::take(&mut *v)) };
+            if let Some(old) = old {
+                wipe(old);
             }
         }
     }
 
     /// The rows changed since the last take, each with its value now (`None`: gone).
-    pub fn take_changes(&self) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
+    pub fn take_changes(&self) -> Vec<(Vec<u8>, Option<SecretBytes>)> {
         let dirty = std::mem::take(&mut *self.dirty.lock().unwrap_or_else(|e| e.into_inner()));
         let values = self.values();
-        dirty.into_iter().map(|k| { let v = values.get(&k).cloned(); (k, v) }).collect()
+        dirty.into_iter().map(|k| { let v = values.get(&k).map(|v| Zeroizing::new(v.clone())); (k, v) }).collect()
     }
 
     /// Every row, for a save that replaces what is stored.
     pub fn take_all(&self) -> Rows {
         self.dirty.lock().unwrap_or_else(|e| e.into_inner()).clear();
-        self.values().iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+        self.values().iter().map(|(k, v)| (k.clone(), Zeroizing::new(v.clone()))).collect()
     }
 
     /// The rows present among `keys`.
     pub fn rows(&self, keys: &[Vec<u8>]) -> Rows {
         let values = self.values();
-        keys.iter().filter_map(|k| values.get(k).map(|v| (k.clone(), v.clone()))).collect()
+        keys.iter().filter_map(|k| values.get(k).map(|v| (k.clone(), Zeroizing::new(v.clone())))).collect()
     }
 
     /// The keys that start with `prefix`.
     pub fn keys_with_prefix(&self, prefix: &[u8]) -> Vec<Vec<u8>> {
         self.values().keys().filter(|k| k.starts_with(prefix)).cloned().collect()
+    }
+
+    /// TEST-ONLY: where the store holds the row `key`, and the row's capacity and length.
+    #[cfg(test)]
+    pub fn row_buffer(&self, key: &[u8]) -> Option<(*const u8, usize, usize)> {
+        self.values().get(key).map(|v| (v.as_ptr(), v.capacity(), v.len()))
     }
 
     /// Bytes held.
@@ -195,6 +243,15 @@ impl TrackedStorage {
     }
 }
 
+/// A store let go (a past epoch idle for long, a fetch's manager) wipes every row.
+impl Drop for TrackedStorage {
+    fn drop(&mut self) {
+        for (_, row) in self.values_mut().drain() {
+            wipe(row);
+        }
+    }
+}
+
 /// The rows of a pre-0.13 whole-store blob.
 pub(crate) fn rows_from_blob(blob: &[u8]) -> Result<Rows, String> {
     fn take<'a>(rest: &mut &'a [u8], n: usize) -> Result<&'a [u8], String> {
@@ -215,7 +272,7 @@ pub(crate) fn rows_from_blob(blob: &[u8]) -> Result<Rows, String> {
     for _ in 0..count {
         let (k_len, v_len) = (len(&mut rest)?, len(&mut rest)?);
         let k = take(&mut rest, k_len)?.to_vec();
-        let v = take(&mut rest, v_len)?.to_vec();
+        let v = Zeroizing::new(take(&mut rest, v_len)?.to_vec());
         rows.push((k, v));
     }
     Ok(rows)
@@ -328,7 +385,7 @@ impl StorageProvider<CURRENT_VERSION> for TrackedStorage {
         group_id: &G,
         group_state: &S,
     ) -> Res<()> {
-        self.track(vec![row_key(label::GROUP_STATE, group_id)], |s| s.write_group_state(group_id, group_state))
+        self.put(row_key(label::GROUP_STATE, group_id), group_state, |s| s.write_group_state(group_id, group_state))
     }
 
     fn write_message_secrets<G: traits::GroupId<CURRENT_VERSION>, M: traits::MessageSecrets<CURRENT_VERSION>>(
@@ -336,9 +393,7 @@ impl StorageProvider<CURRENT_VERSION> for TrackedStorage {
         group_id: &G,
         message_secrets: &M,
     ) -> Res<()> {
-        self.track(vec![row_key(label::MESSAGE_SECRETS, group_id)], |s| {
-            s.write_message_secrets(group_id, message_secrets)
-        })
+        self.put(row_key(label::MESSAGE_SECRETS, group_id), message_secrets, |s| s.write_message_secrets(group_id, message_secrets))
     }
 
     fn write_resumption_psk_store<G: traits::GroupId<CURRENT_VERSION>, R: traits::ResumptionPskStore<CURRENT_VERSION>>(
@@ -346,7 +401,7 @@ impl StorageProvider<CURRENT_VERSION> for TrackedStorage {
         group_id: &G,
         store: &R,
     ) -> Res<()> {
-        self.track(vec![row_key(label::RESUMPTION_PSK, group_id)], |s| s.write_resumption_psk_store(group_id, store))
+        self.put(row_key(label::RESUMPTION_PSK, group_id), store, |s| s.write_resumption_psk_store(group_id, store))
     }
 
     fn write_own_leaf_index<G: traits::GroupId<CURRENT_VERSION>, L: traits::LeafNodeIndex<CURRENT_VERSION>>(
@@ -364,7 +419,7 @@ impl StorageProvider<CURRENT_VERSION> for TrackedStorage {
         group_id: &G,
         secrets: &E,
     ) -> Res<()> {
-        self.track(vec![row_key(label::EPOCH_SECRETS, group_id)], |s| s.write_group_epoch_secrets(group_id, secrets))
+        self.put(row_key(label::EPOCH_SECRETS, group_id), secrets, |s| s.write_group_epoch_secrets(group_id, secrets))
     }
 
     fn write_signature_key_pair<
@@ -375,9 +430,7 @@ impl StorageProvider<CURRENT_VERSION> for TrackedStorage {
         public_key: &P,
         signature_key_pair: &K,
     ) -> Res<()> {
-        self.track(vec![row_key(label::SIGNATURE_KEY_PAIR, public_key)], |s| {
-            s.write_signature_key_pair(public_key, signature_key_pair)
-        })
+        self.put(row_key(label::SIGNATURE_KEY_PAIR, public_key), signature_key_pair, |s| s.write_signature_key_pair(public_key, signature_key_pair))
     }
 
     fn write_encryption_key_pair<E: traits::EncryptionKey<CURRENT_VERSION>, K: traits::HpkeKeyPair<CURRENT_VERSION>>(
@@ -385,9 +438,7 @@ impl StorageProvider<CURRENT_VERSION> for TrackedStorage {
         public_key: &E,
         key_pair: &K,
     ) -> Res<()> {
-        self.track(vec![row_key(label::ENCRYPTION_KEY_PAIR, public_key)], |s| {
-            s.write_encryption_key_pair(public_key, key_pair)
-        })
+        self.put(row_key(label::ENCRYPTION_KEY_PAIR, public_key), key_pair, |s| s.write_encryption_key_pair(public_key, key_pair))
     }
 
     fn write_encryption_epoch_key_pairs<
@@ -401,9 +452,7 @@ impl StorageProvider<CURRENT_VERSION> for TrackedStorage {
         leaf_index: u32,
         key_pairs: &[K],
     ) -> Res<()> {
-        self.track(vec![epoch_key_pairs_key(group_id, epoch, leaf_index)], |s| {
-            s.write_encryption_epoch_key_pairs(group_id, epoch, leaf_index, key_pairs)
-        })
+        self.put(epoch_key_pairs_key(group_id, epoch, leaf_index), key_pairs, |s| s.write_encryption_epoch_key_pairs(group_id, epoch, leaf_index, key_pairs))
     }
 
     fn write_key_package<R: traits::HashReference<CURRENT_VERSION>, K: traits::KeyPackage<CURRENT_VERSION>>(
@@ -411,7 +460,7 @@ impl StorageProvider<CURRENT_VERSION> for TrackedStorage {
         hash_ref: &R,
         key_package: &K,
     ) -> Res<()> {
-        self.track(vec![row_key(label::KEY_PACKAGE, hash_ref)], |s| s.write_key_package(hash_ref, key_package))
+        self.put(row_key(label::KEY_PACKAGE, hash_ref), key_package, |s| s.write_key_package(hash_ref, key_package))
     }
 
     fn write_psk<P: traits::PskId<CURRENT_VERSION>, B: traits::PskBundle<CURRENT_VERSION>>(
@@ -419,7 +468,7 @@ impl StorageProvider<CURRENT_VERSION> for TrackedStorage {
         psk_id: &P,
         psk: &B,
     ) -> Res<()> {
-        self.track(vec![row_key(label::PSK, psk_id)], |s| s.write_psk(psk_id, psk))
+        self.put(row_key(label::PSK, psk_id), psk, |s| s.write_psk(psk_id, psk))
     }
 
     fn mls_group_join_config<G: traits::GroupId<CURRENT_VERSION>, C: traits::MlsGroupJoinConfig<CURRENT_VERSION>>(
@@ -590,7 +639,7 @@ impl StorageProvider<CURRENT_VERSION> for TrackedStorage {
     }
 
     fn delete_group_state<G: traits::GroupId<CURRENT_VERSION>>(&self, group_id: &G) -> Res<()> {
-        self.track(vec![row_key(label::GROUP_STATE, group_id)], |s| s.delete_group_state(group_id))
+        self.remove(row_key(label::GROUP_STATE, group_id), |s| s.delete_group_state(group_id))
     }
 
     fn delete_context<G: traits::GroupId<CURRENT_VERSION>>(&self, group_id: &G) -> Res<()> {
@@ -604,13 +653,11 @@ impl StorageProvider<CURRENT_VERSION> for TrackedStorage {
     }
 
     fn delete_message_secrets<G: traits::GroupId<CURRENT_VERSION>>(&self, group_id: &G) -> Res<()> {
-        self.track(vec![row_key(label::MESSAGE_SECRETS, group_id)], |s| s.delete_message_secrets(group_id))
+        self.remove(row_key(label::MESSAGE_SECRETS, group_id), |s| s.delete_message_secrets(group_id))
     }
 
     fn delete_all_resumption_psk_secrets<G: traits::GroupId<CURRENT_VERSION>>(&self, group_id: &G) -> Res<()> {
-        self.track(vec![row_key(label::RESUMPTION_PSK, group_id)], |s| {
-            s.delete_all_resumption_psk_secrets(group_id)
-        })
+        self.remove(row_key(label::RESUMPTION_PSK, group_id), |s| s.delete_all_resumption_psk_secrets(group_id))
     }
 
     fn delete_own_leaf_index<G: traits::GroupId<CURRENT_VERSION>>(&self, group_id: &G) -> Res<()> {
@@ -618,7 +665,7 @@ impl StorageProvider<CURRENT_VERSION> for TrackedStorage {
     }
 
     fn delete_group_epoch_secrets<G: traits::GroupId<CURRENT_VERSION>>(&self, group_id: &G) -> Res<()> {
-        self.track(vec![row_key(label::EPOCH_SECRETS, group_id)], |s| s.delete_group_epoch_secrets(group_id))
+        self.remove(row_key(label::EPOCH_SECRETS, group_id), |s| s.delete_group_epoch_secrets(group_id))
     }
 
     fn clear_proposal_queue<G: traits::GroupId<CURRENT_VERSION>, R: traits::ProposalRef<CURRENT_VERSION>>(
@@ -637,11 +684,11 @@ impl StorageProvider<CURRENT_VERSION> for TrackedStorage {
     }
 
     fn delete_signature_key_pair<P: traits::SignaturePublicKey<CURRENT_VERSION>>(&self, public_key: &P) -> Res<()> {
-        self.track(vec![row_key(label::SIGNATURE_KEY_PAIR, public_key)], |s| s.delete_signature_key_pair(public_key))
+        self.remove(row_key(label::SIGNATURE_KEY_PAIR, public_key), |s| s.delete_signature_key_pair(public_key))
     }
 
     fn delete_encryption_key_pair<E: traits::EncryptionKey<CURRENT_VERSION>>(&self, public_key: &E) -> Res<()> {
-        self.track(vec![row_key(label::ENCRYPTION_KEY_PAIR, public_key)], |s| s.delete_encryption_key_pair(public_key))
+        self.remove(row_key(label::ENCRYPTION_KEY_PAIR, public_key), |s| s.delete_encryption_key_pair(public_key))
     }
 
     fn delete_encryption_epoch_key_pairs<G: traits::GroupId<CURRENT_VERSION>, E: traits::EpochKey<CURRENT_VERSION>>(
@@ -650,17 +697,15 @@ impl StorageProvider<CURRENT_VERSION> for TrackedStorage {
         epoch: &E,
         leaf_index: u32,
     ) -> Res<()> {
-        self.track(vec![epoch_key_pairs_key(group_id, epoch, leaf_index)], |s| {
-            s.delete_encryption_epoch_key_pairs(group_id, epoch, leaf_index)
-        })
+        self.remove(epoch_key_pairs_key(group_id, epoch, leaf_index), |s| s.delete_encryption_epoch_key_pairs(group_id, epoch, leaf_index))
     }
 
     fn delete_key_package<R: traits::HashReference<CURRENT_VERSION>>(&self, hash_ref: &R) -> Res<()> {
-        self.track(vec![row_key(label::KEY_PACKAGE, hash_ref)], |s| s.delete_key_package(hash_ref))
+        self.remove(row_key(label::KEY_PACKAGE, hash_ref), |s| s.delete_key_package(hash_ref))
     }
 
     fn delete_psk<P: traits::PskId<CURRENT_VERSION>>(&self, psk_id: &P) -> Res<()> {
-        self.track(vec![row_key(label::PSK, psk_id)], |s| s.delete_psk(psk_id))
+        self.remove(row_key(label::PSK, psk_id), |s| s.delete_psk(psk_id))
     }
 }
 
@@ -691,6 +736,35 @@ pub(crate) mod verify {
         ON.with(|c| c.set(on));
     }
 
+    /// Our write of a key-material row is the memory store's own, key and bytes.
+    pub(super) fn same_write_as_theirs(
+        key: &[u8],
+        row: &[u8],
+        theirs: impl FnOnce(&super::MemoryStorage) -> super::Res<()>,
+    ) {
+        if !enabled() {
+            return;
+        }
+        let store = super::MemoryStorage::default();
+        theirs(&store).expect("the memory store's own write");
+        let values = store.values.read().unwrap();
+        assert_eq!(values.len(), 1, "the memory store's write touched another row");
+        let (k, v) = values.iter().next().unwrap();
+        assert_eq!(k.as_slice(), key, "an MLS row is keyed apart from the memory store's own");
+        assert_eq!(v.as_slice(), row, "an MLS row is written apart from the memory store's own");
+    }
+
+    /// Our delete of a key-material row removes the memory store's own row.
+    pub(super) fn same_delete_as_theirs(key: &[u8], theirs: impl FnOnce(&super::MemoryStorage) -> super::Res<()>) {
+        if !enabled() {
+            return;
+        }
+        let store = super::MemoryStorage::default();
+        store.values.write().unwrap().insert(key.to_vec(), b"row".to_vec());
+        theirs(&store).expect("the memory store's own delete");
+        assert!(store.values.read().unwrap().is_empty(), "an MLS delete names a row apart from the memory store's own");
+    }
+
     pub(super) fn only_these_changed(
         before: &HashMap<Vec<u8>, Vec<u8>>,
         after: &HashMap<Vec<u8>, Vec<u8>>,
@@ -708,5 +782,54 @@ pub(crate) mod verify {
                 String::from_utf8_lossy(key)
             );
         }
+    }
+}
+
+/// TEST-ONLY: what writing a key-material row here costs against the memory store's own
+/// write, interleaved in one process (HOL-SEC-201 measurement). Run by hand:
+/// `HOLLOW_ROW_BENCH_OUT=<file> cargo test --lib row_write_bench -- --ignored`
+#[cfg(test)]
+mod row_write_bench {
+    use super::*;
+
+    #[derive(serde::Serialize, serde::Deserialize)]
+    struct Secrets(Vec<Vec<u8>>);
+    impl openmls_traits::storage::Entity<CURRENT_VERSION> for Secrets {}
+    impl traits::MessageSecrets<CURRENT_VERSION> for Secrets {}
+    #[derive(serde::Serialize)]
+    struct Gid(&'static str);
+    impl openmls_traits::storage::Key<CURRENT_VERSION> for Gid {}
+    impl traits::GroupId<CURRENT_VERSION> for Gid {}
+
+    #[test]
+    #[ignore = "measurement, run by hand"]
+    fn row_write_bench() {
+        let Ok(out) = std::env::var("HOLLOW_ROW_BENCH_OUT") else { return };
+        verify::set(false);
+        let secrets = Secrets((0..400u32).map(|i| (0..32u32).map(|j| (i * 7 + j * 13) as u8).collect()).collect());
+        let ours = TrackedStorage::default();
+        let theirs = MemoryStorage::default();
+        let (mut ours_s, mut theirs_s) = (0f64, 0f64);
+        for _ in 0..20 {
+            let t = std::time::Instant::now();
+            for _ in 0..100 {
+                ours.write_message_secrets(&Gid("srv"), &secrets).unwrap();
+            }
+            ours_s += t.elapsed().as_secs_f64();
+            let t = std::time::Instant::now();
+            for _ in 0..100 {
+                theirs.write_message_secrets(&Gid("srv"), &secrets).unwrap();
+            }
+            theirs_s += t.elapsed().as_secs_f64();
+        }
+        let row = ours.values().values().next().unwrap().len();
+        let line = format!(
+            "{} message_secrets_row_bytes={row} ours_us={:.1} theirs_us={:.1}\n",
+            std::env::consts::OS,
+            ours_s * 1e6 / 2000.0,
+            theirs_s * 1e6 / 2000.0
+        );
+        use std::io::Write;
+        std::fs::OpenOptions::new().create(true).append(true).open(out).unwrap().write_all(line.as_bytes()).unwrap();
     }
 }

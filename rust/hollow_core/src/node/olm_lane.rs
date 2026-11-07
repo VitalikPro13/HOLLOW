@@ -721,7 +721,8 @@ mod g13_mls_save_retry {
 
         /// The MLS rows a restart would load.
         fn stored_state(&self) -> Vec<(String, Vec<u8>, Vec<u8>)> {
-            let mut rows = crate::storage::MessageStore::open(&self.path, &self.pass).unwrap().load_mls_rows().unwrap();
+            let rows = crate::storage::MessageStore::open(&self.path, &self.pass).unwrap().load_mls_rows().unwrap();
+            let mut rows: Vec<_> = rows.into_iter().map(|(s, k, v)| (s, k, v.to_vec())).collect();
             rows.sort();
             rows
         }
@@ -736,7 +737,7 @@ mod g13_mls_save_retry {
     /// Every row of the live group state, as a whole save would write it.
     fn live_state(mls: &Shared) -> Vec<(String, Vec<u8>, Vec<u8>)> {
         let save = mls.lock().unwrap().take_whole_save().unwrap();
-        let mut rows: Vec<_> = save.rows.into_iter().filter_map(|(scope, k, v)| Some((scope, k, v?))).collect();
+        let mut rows: Vec<_> = save.rows.into_iter().filter_map(|(scope, k, v)| Some((scope, k, v?.to_vec()))).collect();
         rows.sort();
         rows
     }

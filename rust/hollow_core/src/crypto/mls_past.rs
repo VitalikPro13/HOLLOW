@@ -10,13 +10,16 @@
 //! and after that only the rows a late frame changes, beside the packed one.
 
 use std::collections::{HashMap, VecDeque};
-use std::io::{Read, Write};
+use std::io::Write;
+use std::ops::Range;
 use std::sync::Mutex;
 
 use openmls::prelude::*;
 use openmls_traits::OpenMlsProvider;
+use zeroize::Zeroizing;
 
 use super::mls_storage::{label, past_scope, row_key, rows_from_blob, MlsProvider, MlsSave, PastRows, Rows};
+use super::wiped::{read_to_end_wiped, SecretBytes, WipingWriter};
 
 /// Past epochs kept per group: the window OpenMLS's `max_past_epochs(3)` gave before.
 pub(crate) const MAX_PAST_EPOCHS: usize = 3;
@@ -48,7 +51,7 @@ const PACKED: &[u8] = b"\0packed";
 /// A group's rows taken before a merge, packed, kept once the merge went through.
 pub(crate) struct Capture {
     epoch: u64,
-    packed: Vec<u8>,
+    packed: SecretBytes,
     /// The message secrets, kept apart from the packed rows: a late frame rewrites
     /// them, and the keys it consumed must not stay derivable in the packed copy.
     secrets: Rows,
@@ -63,12 +66,12 @@ impl Capture {
 
 struct PastEpoch {
     epoch: u64,
-    packed: Vec<u8>,
+    packed: SecretBytes,
     /// The packed row is not on disk yet.
     packed_unsaved: std::sync::atomic::AtomicBool,
     /// Rows changed since the packing, laid over it; an empty value is a deleted row.
     /// Small: the message secrets a late frame moves.
-    overrides: Mutex<HashMap<Vec<u8>, Vec<u8>>>,
+    overrides: Mutex<HashMap<Vec<u8>, SecretBytes>>,
     /// Unpacked on the first late frame, and let go once idle for [`OPEN_IDLE`].
     open: Mutex<Option<OpenPast>>,
 }
@@ -84,7 +87,7 @@ struct OpenPast {
 const OPEN_IDLE: std::time::Duration = std::time::Duration::from_secs(600);
 
 impl PastEpoch {
-    fn new(epoch: u64, packed: Vec<u8>, overrides: HashMap<Vec<u8>, Vec<u8>>, unsaved: bool) -> Self {
+    fn new(epoch: u64, packed: SecretBytes, overrides: HashMap<Vec<u8>, SecretBytes>, unsaved: bool) -> Self {
         PastEpoch {
             epoch,
             packed,
@@ -98,13 +101,15 @@ impl PastEpoch {
         self.open.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn overrides(&self) -> std::sync::MutexGuard<'_, HashMap<Vec<u8>, Vec<u8>>> {
+    fn overrides(&self) -> std::sync::MutexGuard<'_, HashMap<Vec<u8>, SecretBytes>> {
         self.overrides.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
 
-fn pack(rows: &Rows) -> Option<Vec<u8>> {
-    let mut blob = Vec::new();
+/// `rows` as a whole-store blob, in a buffer sized to it up front.
+fn blob(rows: &Rows) -> SecretBytes {
+    let size = 8 + rows.iter().map(|(k, v)| 16 + k.len() + v.len()).sum::<usize>();
+    let mut blob = Zeroizing::new(Vec::with_capacity(size));
     blob.extend_from_slice(&(rows.len() as u64).to_be_bytes());
     for (k, v) in rows {
         blob.extend_from_slice(&(k.len() as u64).to_be_bytes());
@@ -112,14 +117,19 @@ fn pack(rows: &Rows) -> Option<Vec<u8>> {
         blob.extend_from_slice(k);
         blob.extend_from_slice(v);
     }
-    let mut out = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::fast());
+    blob
+}
+
+fn pack(rows: &Rows) -> Option<SecretBytes> {
+    let blob = blob(rows);
+    let mut out = flate2::write::DeflateEncoder::new(WipingWriter::with_capacity(blob.len() / 3 + 64), flate2::Compression::fast());
     out.write_all(&blob).ok()?;
-    out.finish().ok()
+    Some(out.finish().ok()?.into_exact())
 }
 
 pub(crate) fn unpack(packed: &[u8]) -> Result<Rows, String> {
-    let mut blob = Vec::new();
-    flate2::read::DeflateDecoder::new(packed).read_to_end(&mut blob).map_err(|e| format!("unpack: {e}"))?;
+    let blob = read_to_end_wiped(flate2::read::DeflateDecoder::new(packed), packed.len().saturating_mul(4))
+        .map_err(|e| format!("unpack: {e}"))?;
     rows_from_blob(&blob)
 }
 
@@ -134,45 +144,75 @@ pub(crate) struct PastEpochs {
     cleared: Mutex<Vec<String>>,
 }
 
-/// Zero every byte string under `value`.
-fn zero_bytes(value: &mut serde_json::Value) {
-    match value {
-        serde_json::Value::Array(items) => {
-            for item in items {
-                if item.is_number() {
-                    *item = 0.into();
-                } else {
-                    zero_bytes(item);
+/// Zero every byte string under `json`, one JSON value, in place: each number an
+/// array holds becomes `0` padded with spaces, so no copy of a secret is made.
+fn zero_bytes(json: &mut [u8]) {
+    let mut in_array = Vec::new();
+    let mut i = 0;
+    while i < json.len() {
+        match json[i] {
+            b'"' => {
+                i += 1;
+                while i < json.len() && json[i] != b'"' {
+                    i += if json[i] == b'\\' { 2 } else { 1 };
                 }
             }
+            b'[' => in_array.push(true),
+            b'{' => in_array.push(false),
+            b']' | b'}' => {
+                in_array.pop();
+            }
+            b'-' | b'0'..=b'9' => {
+                let start = i;
+                while i + 1 < json.len() && matches!(json[i + 1], b'0'..=b'9' | b'-' | b'+' | b'.' | b'e' | b'E') {
+                    i += 1;
+                }
+                if in_array.last() == Some(&true) {
+                    json[start] = b'0';
+                    json[start + 1..=i].fill(b' ');
+                }
+            }
+            _ => {}
         }
-        serde_json::Value::Object(fields) => fields.values_mut().for_each(zero_bytes),
-        _ => {}
+        i += 1;
     }
 }
 
-/// `row` without the secrets a past store never uses; `None` when its shape is not
-/// the one this was written for, so nothing unscrubbed is kept.
-fn scrubbed(key: &[u8], row: Vec<u8>, gid: &GroupId) -> Option<Vec<u8>> {
+/// Where each of `names` sits in the JSON object `row`, read without copying a value.
+fn field_spans<const N: usize>(row: &[u8], names: [&str; N]) -> Option<[Range<usize>; N]> {
+    let fields: HashMap<&str, &serde_json::value::RawValue> = serde_json::from_slice(row).ok()?;
+    let base = row.as_ptr() as usize;
+    let mut spans = std::array::from_fn(|_| 0..0);
+    for (span, name) in spans.iter_mut().zip(names) {
+        let raw = fields.get(name)?.get();
+        let start = (raw.as_ptr() as usize).checked_sub(base)?;
+        *span = start..start + raw.len();
+    }
+    Some(spans)
+}
+
+/// `row` without the secrets a past store never uses, scrubbed in place; `None` when
+/// its shape is not the one this was written for, so nothing unscrubbed is kept.
+fn scrubbed(key: &[u8], mut row: SecretBytes, gid: &GroupId) -> Option<SecretBytes> {
     let is = |l: &[u8]| key == row_key(l, gid).as_slice();
     // Mid-merge the state is our staged commit, which holds the NEXT epoch's secrets
     // and path keys; a past store only ever opens frames.
     if is(label::GROUP_STATE) {
-        return serde_json::to_vec(&MlsGroupState::Operational).ok();
+        return serde_json::to_vec(&MlsGroupState::Operational).ok().map(Zeroizing::new);
     }
-    if !is(label::EPOCH_SECRETS) && !is(label::RESUMPTION_PSK) {
-        return Some(row);
-    }
-    let mut value: serde_json::Value = serde_json::from_slice(&row).ok()?;
-    let fields = value.as_object_mut()?;
     if is(label::EPOCH_SECRETS) {
-        for name in UNUSED_EPOCH_SECRETS {
-            zero_bytes(fields.get_mut(name)?);
+        for span in field_spans(&row, UNUSED_EPOCH_SECRETS)? {
+            zero_bytes(&mut row[span]);
         }
-    } else {
-        *fields.get_mut("resumption_psk")? = serde_json::Value::Array(Vec::new());
+    } else if is(label::RESUMPTION_PSK) {
+        let [span] = field_spans(&row, ["resumption_psk"])?;
+        if span.len() < 2 {
+            return None;
+        }
+        row[span.start..span.start + 2].copy_from_slice(b"[]");
+        row[span.start + 2..span.end].fill(b' ');
     }
-    serde_json::to_vec(&value).ok()
+    Some(row)
 }
 
 impl PastEpochs {
@@ -319,7 +359,7 @@ impl PastEpochs {
             epochs.sort_by_key(|(e, _)| std::cmp::Reverse(*e));
             let mut ring = VecDeque::new();
             for (epoch, rows) in epochs {
-                let mut overrides: HashMap<Vec<u8>, Vec<u8>> = rows.into_iter().collect();
+                let mut overrides: HashMap<Vec<u8>, SecretBytes> = rows.into_iter().collect();
                 let packed = overrides.remove(PACKED);
                 if let (true, true, Some(packed)) = (epoch < current, ring.len() < MAX_PAST_EPOCHS, packed) {
                     ring.push_front(PastEpoch::new(epoch, packed, overrides, false));
@@ -345,7 +385,7 @@ impl PastEpochs {
                 let mut overrides = past.overrides();
                 let mut slot = past.open_slot();
                 let changed = slot.as_ref().map(|o| o.provider.storage().take_changes()).unwrap_or_default();
-                let changed: Vec<(Vec<u8>, Vec<u8>)> = changed.into_iter().map(|(k, v)| (k, v.unwrap_or_default())).collect();
+                let changed: Rows = changed.into_iter().map(|(k, v)| (k, v.unwrap_or_default())).collect();
                 overrides.extend(changed.iter().cloned());
                 // Every change is in `overrides` now, so an idle copy goes without loss.
                 if slot.as_ref().is_some_and(|o| o.used.elapsed() >= OPEN_IDLE) {
@@ -358,7 +398,7 @@ impl PastEpochs {
                 if whole || unsaved {
                     save.rows.push((scope.clone(), PACKED.to_vec(), Some(past.packed.clone())));
                 }
-                let rows: Vec<(Vec<u8>, Vec<u8>)> = if whole || unsaved {
+                let rows: Rows = if whole || unsaved {
                     overrides.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
                 } else {
                     changed
@@ -366,5 +406,152 @@ impl PastEpochs {
                 save.rows.extend(rows.into_iter().map(|(k, v)| (scope.clone(), k, Some(v))));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crypto::mls_manager_test_keys::bound;
+
+    /// The scrub as a JSON value tree did it before HOL-SEC-201: the reference.
+    fn scrubbed_by_value(key: &[u8], row: &[u8], gid: &GroupId) -> Option<Vec<u8>> {
+        fn zero(value: &mut serde_json::Value) {
+            match value {
+                serde_json::Value::Array(items) => {
+                    for item in items {
+                        if item.is_number() {
+                            *item = 0.into();
+                        } else {
+                            zero(item);
+                        }
+                    }
+                }
+                serde_json::Value::Object(fields) => fields.values_mut().for_each(zero),
+                _ => {}
+            }
+        }
+        let is = |l: &[u8]| key == row_key(l, gid).as_slice();
+        if is(label::GROUP_STATE) {
+            return serde_json::to_vec(&MlsGroupState::Operational).ok();
+        }
+        if !is(label::EPOCH_SECRETS) && !is(label::RESUMPTION_PSK) {
+            return Some(row.to_vec());
+        }
+        let mut value: serde_json::Value = serde_json::from_slice(row).ok()?;
+        let fields = value.as_object_mut()?;
+        if is(label::EPOCH_SECRETS) {
+            for name in UNUSED_EPOCH_SECRETS {
+                zero(fields.get_mut(name)?);
+            }
+        } else {
+            *fields.get_mut("resumption_psk")? = serde_json::Value::Array(Vec::new());
+        }
+        serde_json::to_vec(&value).ok()
+    }
+
+    fn same_json(a: &[u8], b: &[u8]) -> bool {
+        serde_json::from_slice::<serde_json::Value>(a).unwrap() == serde_json::from_slice::<serde_json::Value>(b).unwrap()
+    }
+
+    /// The live rows of a group two commits in, as a whole save takes them.
+    fn live_rows(group: &str) -> Rows {
+        let (mut owner, _) = bound(1, 2);
+        owner.create_group(group).unwrap();
+        for tag in [3u8, 5] {
+            let (member, dev) = bound(tag, tag + 1);
+            let kp = member.generate_key_package().unwrap();
+            owner.add_members_batch(group, &[(dev, kp)]).unwrap();
+            owner.merge_pending_commit(group).unwrap();
+        }
+        let save = owner.take_whole_save().unwrap();
+        save.rows.into_iter().filter(|(scope, _, _)| scope.is_empty()).map(|(_, k, v)| (k, v.unwrap())).collect()
+    }
+
+    /// HOL-SEC-201: a past copy's secrets are scrubbed in the row's own buffer, never
+    /// through a value tree that frees copies of the secrets it keeps, with the same
+    /// result the value tree gave.
+    #[test]
+    fn a_past_copy_is_scrubbed_in_place_as_the_value_tree_scrubbed_it() {
+        let group = "srv-scrub";
+        let gid = GroupId::from_slice(group.as_bytes());
+        let rows = live_rows(group);
+        let mut seen = 0;
+        for label in [label::EPOCH_SECRETS, label::RESUMPTION_PSK] {
+            let key = row_key(label, &gid);
+            let row = rows.iter().find(|(k, _)| *k == key).expect("the live row").1.clone();
+            let reference = scrubbed_by_value(&key, &row, &gid).unwrap();
+            assert!(!same_json(&reference, &row), "nothing to scrub in {}", String::from_utf8_lossy(label));
+            let at = row.as_ptr();
+            let ours = scrubbed(&key, row, &gid).expect("scrubbed");
+            assert_eq!(ours.as_ptr(), at, "the scrub copied the row");
+            assert!(same_json(&ours, &reference), "the scrub differs from the value tree's");
+            seen += 1;
+        }
+        assert_eq!(seen, 2);
+        let state = row_key(label::GROUP_STATE, &gid);
+        assert_eq!(&scrubbed(&state, Zeroizing::new(b"{}".to_vec()), &gid).unwrap()[..], &scrubbed_by_value(&state, b"{}", &gid).unwrap()[..]);
+    }
+
+    #[test]
+    fn zeroing_in_place_touches_only_numbers_arrays_hold() {
+        let json = br#"{"a":[1,-2,3.5e2,[40,{"n":7,"s":"x\"9[1]"}]],"n":12,"s":"[3]"}"#;
+        let mut ours = json.to_vec();
+        zero_bytes(&mut ours);
+        let mut value: serde_json::Value = serde_json::from_slice(json).unwrap();
+        let reference = {
+            fn zero(value: &mut serde_json::Value) {
+                match value {
+                    serde_json::Value::Array(items) => {
+                        for item in items {
+                            if item.is_number() {
+                                *item = 0.into();
+                            } else {
+                                zero(item);
+                            }
+                        }
+                    }
+                    serde_json::Value::Object(fields) => fields.values_mut().for_each(zero),
+                    _ => {}
+                }
+            }
+            zero(&mut value);
+            serde_json::to_vec(&value).unwrap()
+        };
+        assert!(same_json(&ours, &reference), "{}", String::from_utf8_lossy(&ours));
+        assert_eq!(ours.len(), json.len());
+    }
+
+    #[test]
+    fn a_row_of_another_shape_is_not_kept() {
+        let gid = GroupId::from_slice(b"g");
+        let secrets = row_key(label::EPOCH_SECRETS, &gid);
+        assert!(scrubbed(&secrets, Zeroizing::new(b"[1,2]".to_vec()), &gid).is_none());
+        assert!(scrubbed(&secrets, Zeroizing::new(br#"{"init_secret":[1]}"#.to_vec()), &gid).is_none());
+        let psk = row_key(label::RESUMPTION_PSK, &gid);
+        assert!(scrubbed(&psk, Zeroizing::new(br#"{"resumption_psk":7}"#.to_vec()), &gid).is_none());
+    }
+
+    /// HOL-SEC-201: the packed copy is built and kept in buffers sized to it, and reads
+    /// back whole.
+    #[test]
+    fn a_packed_copy_never_outgrew_its_buffers() {
+        let rows = live_rows("srv-pack");
+        let blob = blob(&rows);
+        assert_eq!(blob.capacity(), blob.len(), "the blob grew, leaving a copy behind");
+        let packed = pack(&rows).unwrap();
+        assert_eq!(packed.capacity(), packed.len(), "the packed copy is kept in a buffer larger than it");
+        let back = unpack(&packed).unwrap();
+        assert_eq!(back.len(), rows.len());
+        for ((k, v), (k2, v2)) in back.iter().zip(&rows) {
+            assert_eq!((k, &v[..]), (k2, &v2[..]));
+            assert_eq!(v.capacity(), v.len());
+        }
+        // A copy that packs far below its size outgrows the unpacking buffer's first guess.
+        let flat: Rows = vec![(b"k".to_vec(), Zeroizing::new(vec![0u8; 200_000]))];
+        let packed = pack(&flat).unwrap();
+        let before = crate::crypto::wiped::counted::wipes();
+        assert_eq!(&unpack(&packed).unwrap()[0].1[..], &flat[0].1[..]);
+        assert!(crate::crypto::wiped::counted::wipes() > before, "unpacking grew its buffer without a wipe");
     }
 }

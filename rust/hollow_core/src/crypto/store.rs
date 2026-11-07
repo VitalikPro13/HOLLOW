@@ -959,9 +959,9 @@ mod tests {
 
     fn mls_save(value: &[u8]) -> MlsSave {
         MlsSave {
-            signer: b"signer".to_vec(),
+            signer: b"signer".to_vec().into(),
             credential: b"credential".to_vec(),
-            rows: vec![(String::new(), b"row".to_vec(), Some(value.to_vec()))],
+            rows: vec![(String::new(), b"row".to_vec(), Some(value.to_vec().into()))],
             ..Default::default()
         }
     }
@@ -981,7 +981,7 @@ mod tests {
         assert_eq!(first.settled(SOON).await, Saved::Stored);
         assert_eq!(second.settled(SOON).await, Saved::Stored);
         let rows = MessageStore::open(&path, &pass).unwrap().load_mls_rows().unwrap();
-        assert_eq!(rows, vec![(String::new(), b"row".to_vec(), b"two".to_vec())]);
+        assert_eq!(rows, vec![(String::new(), b"row".to_vec(), b"two".to_vec().into())]);
         assert!(!store.take_mls_resync());
     }
 
@@ -1007,7 +1007,7 @@ mod tests {
         // Rows past the first fail: the identity and the first row must not land either.
         disk().conn_execute_for_test("CREATE TRIGGER no_bad BEFORE INSERT ON mls_storage WHEN NEW.k = X'626164' BEGIN SELECT RAISE(ABORT, 'refused'); END;");
         let mut half = mls_save(b"one");
-        half.rows.push((String::new(), b"bad".to_vec(), Some(b"x".to_vec())));
+        half.rows.push((String::new(), b"bad".to_vec(), Some(b"x".to_vec().into())));
         assert_eq!(store.save_mls(half).settled(SOON).await, Saved::Failed);
         assert!(disk().load_mls_rows().unwrap().is_empty(), "a failed save left rows behind");
         assert!(disk().load_mls_identity().unwrap().is_none(), "a failed save left its identity behind");
@@ -1017,7 +1017,7 @@ mod tests {
         whole.retain_only = Some(vec![String::new()]);
         assert_eq!(store.save_mls(whole).settled(SOON).await, Saved::Stored);
         assert_eq!(store.save_mls(mls_save(b"four")).settled(SOON).await, Saved::Stored, "the whole save did not clear the failure");
-        assert_eq!(disk().load_mls_rows().unwrap(), vec![(String::new(), b"row".to_vec(), b"four".to_vec())]);
+        assert_eq!(disk().load_mls_rows().unwrap(), vec![(String::new(), b"row".to_vec(), b"four".to_vec().into())]);
     }
 
     fn mls_cmd(take: u64, value: &[u8], whole: bool, bad: bool) -> CryptoStoreCmd {
@@ -1027,7 +1027,7 @@ mod tests {
             save.retain_only = Some(vec![String::new()]);
         }
         if bad {
-            save.rows.push((String::new(), b"bad".to_vec(), Some(b"x".to_vec())));
+            save.rows.push((String::new(), b"bad".to_vec(), Some(b"x".to_vec().into())));
         }
         CryptoStoreCmd::SaveMls { save, saved: None }
     }
@@ -1049,7 +1049,7 @@ mod tests {
         let batch = vec![mls_cmd(1, b"one", false, true), mls_cmd(2, b"two", false, false), mls_cmd(3, b"three", true, false)];
         write_batch(&store, batch, &shared, &mut MlsDisk::default(), &mut NonceBook::new(Arc::default()));
         assert!(!shared.resync.load(Ordering::Relaxed), "a whole save queued behind the lost ones was not trusted to cover them");
-        assert_eq!(store.load_mls_rows().unwrap(), vec![(String::new(), b"row".to_vec(), b"three".to_vec())]);
+        assert_eq!(store.load_mls_rows().unwrap(), vec![(String::new(), b"row".to_vec(), b"three".to_vec().into())]);
 
         let shared = queued(3);
         write_batch(&store, vec![mls_cmd(4, b"four", false, true)], &shared, &mut MlsDisk::default(), &mut NonceBook::new(Arc::default()));

@@ -820,6 +820,13 @@ pub(crate) type SignedEmojiRow = (String, String, i64, Option<String>, Option<St
 /// A stored Olm session: (peer_id, pickle_json, sends, reads), the pickle wiped on drop.
 pub(crate) type OlmSessionRow = (String, zeroize::Zeroizing<String>, i64, i64);
 
+/// A stored MLS row: (scope, key, value), the value wiped on drop.
+pub(crate) type MlsRow = (String, Vec<u8>, zeroize::Zeroizing<Vec<u8>>);
+
+/// The stored MLS identity: (signer, credential, a pre-0.13 whole-store blob), the
+/// signer and the blob wiped on drop.
+pub(crate) type MlsIdentityRow = (zeroize::Zeroizing<Vec<u8>>, Vec<u8>, Option<zeroize::Zeroizing<Vec<u8>>>);
+
 /// Column list every DM-message query selects, in [`dm_message_from_row`] order.
 const DM_MSG_COLS: &str = "id, peer_id, text, is_mine, timestamp, signature, public_key, message_id, edited_at, hidden_at, reply_to_mid, file_id, link_preview_json, order_us, album_id";
 
@@ -5091,7 +5098,7 @@ impl MessageStore {
                     signer_data = excluded.signer_data,
                     credential_data = excluded.credential_data,
                     storage_data = CASE WHEN ?3 THEN NULL ELSE mls_identity.storage_data END",
-                params![save.signer, save.credential, save.drop_blob],
+                params![save.signer.as_slice(), save.credential, save.drop_blob],
             )
             .map_err(fail)?;
         if let Some(keep) = &save.retain_only {
@@ -5114,7 +5121,7 @@ impl MessageStore {
         let mut del = self.conn.prepare_cached("DELETE FROM mls_storage WHERE scope = ?1 AND k = ?2").map_err(fail)?;
         for (scope, k, v) in &save.rows {
             match v {
-                Some(v) => put.execute(params![scope, k, v]).map_err(fail)?,
+                Some(v) => put.execute(params![scope, k, v.as_slice()]).map_err(fail)?,
                 None => del.execute(params![scope, k]).map_err(fail)?,
             };
         }
@@ -5122,7 +5129,7 @@ impl MessageStore {
     }
 
     /// Every stored MLS row, `(scope, key, value)`.
-    pub fn load_mls_rows(&self) -> Result<Vec<(String, Vec<u8>, Vec<u8>)>, String> {
+    pub fn load_mls_rows(&self) -> Result<Vec<MlsRow>, String> {
         Ok(self.load_mls_rows_in(|_| true)?.0)
     }
 
@@ -5131,7 +5138,7 @@ impl MessageStore {
     pub fn load_mls_rows_in(
         &self,
         wanted: impl Fn(&str) -> bool,
-    ) -> Result<(Vec<(String, Vec<u8>, Vec<u8>)>, Vec<String>), String> {
+    ) -> Result<(Vec<MlsRow>, Vec<String>), String> {
         let mut stmt = self
             .conn
             .prepare_cached("SELECT scope, k, v FROM mls_storage")
@@ -5142,7 +5149,7 @@ impl MessageStore {
         while let Some(row) = rows.next().map_err(fail)? {
             let scope: String = row.get(0).map_err(fail)?;
             if wanted(&scope) {
-                kept.push((scope, row.get(1).map_err(fail)?, row.get(2).map_err(fail)?));
+                kept.push((scope, row.get(1).map_err(fail)?, zeroize::Zeroizing::new(row.get(2).map_err(fail)?)));
             } else {
                 others.insert(scope);
             }
@@ -5251,7 +5258,7 @@ impl MessageStore {
     }
 
     /// Load MLS identity. Returns (signer_data, credential_data, storage_data) if exists.
-    pub fn load_mls_identity(&self) -> Result<Option<(Vec<u8>, Vec<u8>, Option<Vec<u8>>)>, String> {
+    pub fn load_mls_identity(&self) -> Result<Option<MlsIdentityRow>, String> {
         let mut stmt = self
             .conn
             .prepare_cached("SELECT signer_data, credential_data, storage_data FROM mls_identity WHERE id = 1")
@@ -5259,9 +5266,9 @@ impl MessageStore {
         let mut rows = stmt
             .query_map([], |row| {
                 Ok((
-                    row.get::<_, Vec<u8>>(0)?,
+                    zeroize::Zeroizing::new(row.get::<_, Vec<u8>>(0)?),
                     row.get::<_, Vec<u8>>(1)?,
-                    row.get::<_, Option<Vec<u8>>>(2)?,
+                    row.get::<_, Option<Vec<u8>>>(2)?.map(zeroize::Zeroizing::new),
                 ))
             })
             .map_err(|e| format!("Failed to query mls_identity: {e}"))?;

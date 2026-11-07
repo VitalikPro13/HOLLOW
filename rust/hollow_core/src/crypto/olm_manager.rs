@@ -115,34 +115,7 @@ struct AccountRowSlots {
 /// `value` as JSON in a buffer sized to it before the first byte is written, so no
 /// growth leaves a copy of a secret behind in freed memory.
 fn pickle_json<T: Serialize + ?Sized>(value: &T) -> Result<Pickle, String> {
-    struct Count(usize);
-    impl std::io::Write for Count {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0 += buf.len();
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    /// Refuses to grow past the capacity it was given.
-    struct Fixed<'a>(&'a mut Vec<u8>);
-    impl std::io::Write for Fixed<'_> {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            if self.0.capacity() - self.0.len() < buf.len() {
-                return Err(std::io::Error::other("pickle outgrew its buffer"));
-            }
-            self.0.extend_from_slice(buf);
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    let mut count = Count(0);
-    serde_json::to_writer(&mut count, value).map_err(|e| format!("Failed to serialize pickle: {e}"))?;
-    let mut bytes = Zeroizing::new(Vec::with_capacity(count.0));
-    serde_json::to_writer(Fixed(&mut bytes), value).map_err(|e| format!("Failed to serialize pickle: {e}"))?;
+    let mut bytes = super::wiped::sized_json(value).map_err(|e| format!("Failed to serialize pickle: {e}"))?;
     match String::from_utf8(std::mem::take(&mut *bytes)) {
         Ok(json) => Ok(Zeroizing::new(json)),
         Err(e) => {

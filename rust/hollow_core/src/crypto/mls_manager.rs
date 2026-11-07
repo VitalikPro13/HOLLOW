@@ -11,6 +11,7 @@ use sha2::{Digest, Sha256};
 
 use super::mls_past::PastEpochs;
 use super::mls_storage::{parse_past_scope, MlsProvider, MlsSave, LIVE_SCOPE};
+use super::wiped::SecretBytes;
 use crate::hollow_log;
 use crate::identity::native_identity::NativeKeypair;
 
@@ -592,6 +593,21 @@ fn device_identity(
     (signer, credential_with_key)
 }
 
+/// The stored signer as `SignatureKeyPair` serializes it, its private key read into a
+/// buffer that wipes what it outgrows (the crate's own reader frees those as they are).
+#[derive(serde::Deserialize)]
+struct SignerRow {
+    #[serde(deserialize_with = "super::wiped::secret_bytes")]
+    private: SecretBytes,
+    public: Vec<u8>,
+    signature_scheme: SignatureScheme,
+}
+
+fn signer_from_row(bytes: &[u8]) -> Result<SignatureKeyPair, String> {
+    let mut row: SignerRow = serde_json::from_slice(bytes).map_err(|e| format!("Failed to deserialize MLS signer: {e}"))?;
+    Ok(SignatureKeyPair::from_raw(row.signature_scheme, std::mem::take(&mut *row.private), row.public))
+}
+
 impl MlsManager {
     fn with_identity(
         provider: MlsProvider,
@@ -657,7 +673,7 @@ impl MlsManager {
         signer_bytes: &[u8],
         credential_bytes: &[u8],
         storage_blob: Option<&[u8]>,
-        rows: Vec<(String, Vec<u8>, Vec<u8>)>,
+        rows: Vec<(String, Vec<u8>, SecretBytes)>,
         unread: Vec<String>,
         server_ids: &[String],
     ) -> Result<Self, String> {
@@ -682,8 +698,7 @@ impl MlsManager {
         }
         provider.storage().load_rows(live_rows);
 
-        let signer: SignatureKeyPair = serde_json::from_slice(signer_bytes)
-            .map_err(|e| format!("Failed to deserialize MLS signer: {e}"))?;
+        let signer = signer_from_row(signer_bytes)?;
         let credential_with_key: CredentialWithKey = serde_json::from_slice(credential_bytes)
             .map_err(|e| format!("Failed to deserialize MLS credential: {e}"))?;
 
@@ -723,7 +738,7 @@ impl MlsManager {
     pub fn load_from(store: &crate::storage::MessageStore, server_ids: &[String]) -> Result<Option<Self>, String> {
         let Some((signer, credential, blob)) = store.load_mls_identity()? else { return Ok(None) };
         let (rows, unread) = store.load_mls_rows_in(|scope| scope_wanted(scope, server_ids))?;
-        Self::from_stored(&signer, &credential, blob.as_deref(), rows, unread, server_ids).map(Some)
+        Self::from_stored(&signer, &credential, blob.as_ref().map(|b| b.as_slice()), rows, unread, server_ids).map(Some)
     }
 
     /// Make this device's key our signer and our credential the bound one. A restored
@@ -753,10 +768,9 @@ impl MlsManager {
         Some(String::from_utf8_lossy(raw).into_owned())
     }
 
-    /// The signer to persist.
-    pub fn signer_bytes(&self) -> Result<Vec<u8>, String> {
-        serde_json::to_vec(&self.signer)
-            .map_err(|e| format!("Failed to serialize MLS signer: {e}"))
+    /// The signer to persist, in a buffer sized to it.
+    pub fn signer_bytes(&self) -> Result<SecretBytes, String> {
+        super::wiped::sized_json(&self.signer).map_err(|e| format!("Failed to serialize MLS signer: {e}"))
     }
 
     /// The credential persisted alongside [`Self::signer_bytes`].
@@ -3782,8 +3796,8 @@ mod g13_past_epochs_and_row_saves {
     /// The `mls_storage` table as the saves landed on it, in memory.
     #[derive(Default)]
     struct Disk {
-        table: std::collections::BTreeMap<(String, Vec<u8>), Vec<u8>>,
-        identity: (Vec<u8>, Vec<u8>),
+        table: std::collections::BTreeMap<(String, Vec<u8>), SecretBytes>,
+        identity: (SecretBytes, Vec<u8>),
     }
 
     impl Disk {
@@ -3959,7 +3973,7 @@ mod g13_past_epochs_and_row_saves {
         // A past epoch whose group is stored nowhere else goes too.
         let stray = super::super::mls_storage::past_scope("srv-stray", 4);
         let (signer, credential) = (owner.signer_bytes().unwrap(), owner.credential_bytes().unwrap());
-        let rows = vec![(stray.clone(), b"\0packed".to_vec(), Some(b"x".to_vec()))];
+        let rows = vec![(stray.clone(), b"\0packed".to_vec(), Some(b"x".to_vec().into()))];
         store.save_mls_state(&MlsSave { signer, credential, rows, ..Default::default() }).unwrap();
         let mut node = MlsManager::load_from(&store, &["srv-a".to_string()]).unwrap().unwrap();
         let forgotten = node.forget_unloaded_groups(&[]);
@@ -4113,7 +4127,7 @@ mod g13_past_copy_contents {
         }
         assert_eq!(plain.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>(), vec![row_key(label::MESSAGE_SECRETS, &gid)], "{who}: only the message secrets stay out of the packed copy");
         let state = packed.iter().find(|(k, _)| *k == row_key(label::GROUP_STATE, &gid)).unwrap();
-        assert_eq!(state.1, serde_json::to_vec(&MlsGroupState::Operational).unwrap(), "{who}: the copy keeps a staged commit");
+        assert_eq!(*state.1, serde_json::to_vec(&MlsGroupState::Operational).unwrap(), "{who}: the copy keeps a staged commit");
         for (k, row) in packed.iter().chain(plain.iter()) {
             let leaked: Vec<_> = byte_strings(row).intersection(forbidden).cloned().collect();
             assert!(leaked.is_empty(), "{who}: {} holds {} secret(s) of a later epoch or a private key", String::from_utf8_lossy(k), leaked.len());
@@ -4444,5 +4458,143 @@ mod standing_tests {
         let kp = guest.generate_key_package_for(&sid, false);
         set(Knob::OldLeaf, &guest_dev, false);
         assert!(host.add_member(&sid, &kp.unwrap()).is_ok(), "a meeting refused a guest's leaf without the tally");
+    }
+}
+
+#[cfg(test)]
+mod hol_sec_201_wiped_saves {
+    use super::super::mls_storage::{label, row_key, rows_from_blob};
+    use super::super::wiped::counted;
+    use super::test_keys::bound;
+    use super::*;
+    use openmls_traits::storage::StorageProvider;
+
+    fn wiped_on_drop<T: zeroize::ZeroizeOnDrop>(_: &T) {}
+
+    fn pair(group: &str) -> (MlsManager, MlsManager) {
+        let (mut owner, _) = bound(1, 2);
+        owner.create_group(group).unwrap();
+        let (mut member, member_dev) = bound(3, 4);
+        let kp = member.generate_key_package().unwrap();
+        let (_, welcome, _) = owner.add_members_batch(group, &[(member_dev, kp)]).unwrap();
+        owner.merge_pending_commit(group).unwrap();
+        member.join_from_welcome(group, &welcome).unwrap();
+        (owner, member)
+    }
+
+    fn temp_db() -> (crate::test_tmp::TestDir, crate::storage::MessageStore) {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let path = tmp.path().join("mls.db").to_string_lossy().into_owned();
+        let store = crate::storage::MessageStore::open(&path, &"5e".repeat(32)).unwrap();
+        (tmp, store)
+    }
+
+    /// HOL-SEC-201. Every MLS save carries the device's signing key and the groups'
+    /// secrets, so its rows are wiped when dropped, from the take through the store
+    /// channel to the bind and on every read back, and none outgrew its buffer.
+    #[test]
+    fn mls_save_rows_are_wiped_on_drop() {
+        let group = "srv-wipe";
+        let (mut owner, _member) = pair(group);
+        owner.encrypt(group, b"hello").unwrap();
+        for save in [owner.take_save().unwrap(), owner.take_whole_save().unwrap()] {
+            wiped_on_drop(&save.signer);
+            assert_eq!(save.signer.capacity(), save.signer.len(), "the signer grew its buffer, leaving a copy behind");
+            assert!(!save.rows.is_empty());
+            for value in save.rows.iter().filter_map(|(_, _, v)| v.as_ref()) {
+                wiped_on_drop(value);
+                assert_eq!(value.capacity(), value.len(), "a row taken for the save is larger than it");
+            }
+        }
+
+        let (_tmp, store) = temp_db();
+        store.save_mls_state(&owner.take_whole_save().unwrap()).unwrap();
+        let (signer, _credential, _blob) = store.load_mls_identity().unwrap().unwrap();
+        wiped_on_drop(&signer);
+        let rows = store.load_mls_rows().unwrap();
+        assert!(!rows.is_empty());
+        wiped_on_drop(&rows[0].2);
+        wiped_on_drop(&store.load_mls_rows_in(|_| true).unwrap().0[0].2);
+        store.save_mls_identity(&signer, b"credential", &owner.serialize_storage().unwrap()).unwrap();
+        let blob = store.load_mls_identity().unwrap().unwrap().2.expect("the blob");
+        wiped_on_drop(&blob);
+        wiped_on_drop(&rows_from_blob(&blob).unwrap()[0].1);
+    }
+
+    /// HOL-SEC-201: the signer reads back as `SignatureKeyPair`'s own reader reads it.
+    #[test]
+    fn the_signer_reads_back_as_the_crate_reads_it() {
+        let (owner, _) = bound(7, 8);
+        let bytes = owner.signer_bytes().unwrap();
+        let ours = signer_from_row(&bytes).unwrap();
+        let theirs: SignatureKeyPair = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(super::super::wiped::sized_json(&ours).unwrap(), super::super::wiped::sized_json(&theirs).unwrap());
+        use openmls_traits::signatures::Signer;
+        assert_eq!(ours.sign(b"payload").unwrap(), theirs.sign(b"payload").unwrap());
+        assert!(signer_from_row(b"{\"public\":[1]}").is_err());
+    }
+
+    /// HOL-SEC-201: a row holding key material that a step replaces (the message
+    /// secrets every send moves) or deletes (a past epoch's secrets) is wiped before its
+    /// buffer is freed; OpenMLS's own store frees it as it is.
+    #[test]
+    fn a_replaced_or_deleted_secret_row_is_wiped() {
+        let group = "srv-replace";
+        let gid = GroupId::from_slice(group.as_bytes());
+        let (mut owner, _member) = pair(group);
+        let storage = owner.provider.storage();
+        let secrets = row_key(label::MESSAGE_SECRETS, &gid);
+        let (at, _, _) = storage.row_buffer(&secrets).expect("the message secrets");
+        counted::clear();
+        owner.encrypt(group, b"one").unwrap();
+        let storage = owner.provider.storage();
+        assert_ne!(storage.row_buffer(&secrets).unwrap().0, at, "the send rewrote the row in place");
+        assert!(counted::was_wiped(at), "the message secrets a send replaced were freed unwiped");
+
+        let epoch = row_key(label::EPOCH_SECRETS, &gid);
+        let (at, _, _) = storage.row_buffer(&epoch).expect("the epoch secrets");
+        counted::clear();
+        storage.delete_group_epoch_secrets(&gid).unwrap();
+        assert!(storage.row_buffer(&epoch).is_none());
+        assert!(counted::was_wiped(at), "deleted epoch secrets were freed unwiped");
+    }
+
+    /// HOL-SEC-201: a stored row laid over the store replaces or deletes a held one
+    /// only after wiping it, and moves into the store without a copy.
+    #[test]
+    fn rows_laid_over_the_store_wipe_what_they_replace() {
+        let storage = MlsProvider::default();
+        let storage = storage.storage();
+        let row = |v: &[u8]| zeroize::Zeroizing::new(v.to_vec());
+        let first = row(b"first");
+        let first_at = first.as_ptr();
+        storage.load_rows([(b"k".to_vec(), first)]);
+        assert_eq!(storage.row_buffer(b"k").unwrap().0, first_at, "the row was copied into the store");
+        counted::clear();
+        storage.lay_over([(b"k".to_vec(), row(b"second"))]);
+        assert!(counted::was_wiped(first_at), "a replaced row was freed unwiped");
+        let (second_at, _, _) = storage.row_buffer(b"k").unwrap();
+        storage.lay_over([(b"k".to_vec(), row(b""))]);
+        assert!(storage.row_buffer(b"k").is_none());
+        assert!(counted::was_wiped(second_at), "a deleted row was freed unwiped");
+        let third = row(b"third");
+        let third_at = third.as_ptr();
+        storage.load_rows([(b"k".to_vec(), row(b"x"))]);
+        let (x_at, _, _) = storage.row_buffer(b"k").unwrap();
+        storage.load_rows([(b"k".to_vec(), third)]);
+        assert!(counted::was_wiped(x_at), "a row loaded over another left it unwiped");
+        assert_eq!(storage.row_buffer(b"k").unwrap().0, third_at);
+    }
+
+    /// HOL-SEC-201: a store let go (an idle past epoch, a push fetch's manager) wipes
+    /// every row it held.
+    #[test]
+    fn a_store_let_go_wipes_every_row() {
+        let provider = MlsProvider::default();
+        provider.storage().load_rows([(b"k".to_vec(), zeroize::Zeroizing::new(b"secret".to_vec()))]);
+        let (at, _, _) = provider.storage().row_buffer(b"k").unwrap();
+        counted::clear();
+        drop(provider);
+        assert!(counted::was_wiped(at), "a dropped store freed its rows unwiped");
     }
 }

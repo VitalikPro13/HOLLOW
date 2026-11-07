@@ -9,6 +9,7 @@ mod olm_manager;
 pub(crate) mod push_seal;
 pub(crate) mod safety_number;
 mod store;
+pub(crate) mod wiped;
 
 pub(crate) use mls_manager::{
     certified_device, classify_leaf, CommitError, CommitFacts, DecryptFail, Seat, Decrypted, LeafIdentity, LeafView, MlsManager,
