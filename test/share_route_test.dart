@@ -85,6 +85,9 @@ void main() {
       final heard = <MediaRoute?>[];
       leg.onRoute = (route) => heard.add(route?.mediaRoute);
 
+      // A failure before the first connect is held by the setup grace.
+      leg.debugConnectionState(
+          RTCPeerConnectionState.RTCPeerConnectionStateConnected);
       leg.debugStatsReading(_reading('host', 'srflx'));
       leg.debugConnectionState(
           RTCPeerConnectionState.RTCPeerConnectionStateDisconnected);

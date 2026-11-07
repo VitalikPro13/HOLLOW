@@ -54,6 +54,22 @@ whitelist) stay in CLAUDE.md.
   (`LinkWatchdog`, 45s); recovery REBUILDS the media session (an in-place restart kills
   SFrame), only after `failed`; ONLY `onGiveUp` ends a call. Cameras carry a rung cap.
   `project_call_hold_open_resilience`.
+- A `failed` BEFORE a link's first connect is not final either: every lane (DM call, VC leg,
+  share leg, data channel) holds it in `SetupFailureGrace` (8 s; only `connected` or the lane's
+  teardown cancels it) and tears down only if still failed at the deadline. Our coturn peer
+  lock (AR-32) lets a relay-only peer connect relay<->relay ONLY: the remote host/srflx pairs
+  get CreatePermission 403 in ~1 ms, ICE reports `failed` before the remote relay candidate is
+  added, then revives (failed, connecting, connected, same second). Never skip non-relay
+  remote candidates instead (a self-hosted coturn without the lock still uses them). A queued
+  candidate flush stops once the PC it started on is gone or replaced.
+  `test/setup_failure_grace_test.dart`, `project_always_relay_calls`.
+- A VC leg keeps the candidates its peer trickles WHILE the leg is built: signals dispatch
+  un-awaited, so they land during `closePeer`/`createPeerConnection`. `closePeer` drops the old
+  list BEFORE its first await, `_createPeerConnection` never resets it, and the flush (after the
+  remote description) keeps only candidates whose `ufrag` names that description's
+  `a=ice-ufrag` (`candidateFitsRemoteSdp`; no ufrag = kept), so an old session's late candidate
+  never reaches the new leg. Wiping there left a relay-only leg with no remote relay candidate.
+  `test/vc_pending_ice_test.dart`, `feedback_pending_ice_queue_call_keyed`.
 - Renegotiation glare: never drop an inbound `sdp_offer`; queue while busy + retry
   (`_queueRenegOffer`); camera auto-enable STAGGERED (polite 300ms / other 1500ms); a new
   reneg trigger must handle both sides at once. `feedback_renegotiation_glare`.

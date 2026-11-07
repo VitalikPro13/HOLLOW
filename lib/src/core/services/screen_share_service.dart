@@ -13,6 +13,7 @@ import 'screen_audio_capturer.dart';
 import 'mac_sck_screen_audio_capturer.dart';
 import 'mobile_screen_audio_capturer.dart';
 import 'macos_version.dart';
+import 'setup_failure_grace.dart';
 
 /// Method channel exposed by the forked `flutter_webrtc` for the macOS-only
 /// system audio Process Tap (see `MacScreenShareAudioTap.m`).
@@ -74,6 +75,20 @@ class ScreenShareService {
   String? _publishedRoute;
   void Function()? onRemoteTrackReady;
   void Function()? onScreenShareEnded; // Track ended (window closed)
+
+  /// How long a `failed` before this link's first connect is held, waiting
+  /// for a late candidate, before it counts as a setup failure.
+  @visibleForTesting
+  set setupFailureGrace(Duration grace) => _setupFailure.grace = grace;
+
+  late final SetupFailureGrace _setupFailure = SetupFailureGrace(onExpired: () {
+    _log('[HOLLOW-SCREEN] Still failed after the setup grace — dropping the leg');
+    _stopLivenessWatchdog();
+    onDisconnected?.call();
+  });
+
+  /// Whether the current peer connection has reached `connected` once.
+  bool _everConnected = false;
 
   RTCVideoRenderer? get remoteRenderer => _remoteRenderer;
   RTCVideoRenderer? get localRenderer => _localRenderer;
@@ -1053,6 +1068,7 @@ class ScreenShareService {
   /// already-failing native PC, dispose() must still run, or the libwebrtc
   /// threads leak.
   Future<void> _closeAndDisposePc() async {
+    _setupFailure.cancel();
     final pc = _pc;
     _pc = null;
     if (pc == null) return;
@@ -1076,6 +1092,8 @@ class ScreenShareService {
   }
 
   void _setupCallbacks() {
+    _everConnected = false;
+    _setupFailure.cancel();
     _pc!.onIceCandidate = (candidate) {
       if (candidate.candidate == null || candidate.candidate!.isEmpty) return;
       onIceCandidate?.call(candidate);
@@ -1087,9 +1105,24 @@ class ScreenShareService {
     };
   }
 
+  @visibleForTesting
+  void debugConnectionState(RTCPeerConnectionState state) =>
+      _onConnectionStateChanged(state);
+
   void _onConnectionStateChanged(RTCPeerConnectionState state) {
+    if (!_everConnected) {
+      final wasHolding = _setupFailure.isHolding;
+      if (_setupFailure.note(state)) {
+        if (!wasHolding) {
+          _log('[HOLLOW-SCREEN] Failed before connect — holding '
+              '${_setupFailure.grace.inSeconds}s for a late candidate');
+        }
+        return;
+      }
+    }
     switch (state) {
       case RTCPeerConnectionState.RTCPeerConnectionStateConnected:
+        _everConnected = true;
         onConnected?.call();
         _scheduleIceRouteLog();
         _scheduleResolutionCapEnforcement();
@@ -1421,10 +1454,6 @@ class ScreenShareService {
   }
 
   @visibleForTesting
-  void debugConnectionState(RTCPeerConnectionState state) =>
-      _onConnectionStateChanged(state);
-
-  @visibleForTesting
   void debugStatsReading(List<StatsReport> stats) => _noteRouteIn(stats);
 
   Future<void> _handleRemoteVideoTrack(RTCTrackEvent event) async {
@@ -1515,13 +1544,15 @@ class ScreenShareService {
   }
 
   Future<void> _flushPendingCandidates() async {
-    if (_pendingCandidates.isNotEmpty) {
-      _log('[HOLLOW-SCREEN] Flushing ${_pendingCandidates.length} '
-          'pending ICE candidates');
-      for (final c in _pendingCandidates) {
-        await _pc!.addCandidate(c);
-      }
-      _pendingCandidates.clear();
+    final pc = _pc;
+    if (pc == null || _pendingCandidates.isEmpty) return;
+    final ready = List.of(_pendingCandidates);
+    _pendingCandidates.clear();
+    _log('[HOLLOW-SCREEN] Flushing ${ready.length} pending ICE candidates');
+    for (final c in ready) {
+      // A teardown or a replacement mid-flush owns its own candidates.
+      if (!identical(_pc, pc)) return;
+      await pc.addCandidate(c);
     }
   }
 

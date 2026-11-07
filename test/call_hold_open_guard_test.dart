@@ -44,9 +44,13 @@ void main() {
     // The watchdog is the only thing allowed to decide a link is gone, and it
     // does that by calling onGiveUp. Anything else reaching for a teardown on
     // a transport state is the old bug.
-    final handler = _between(src, '_voiceService!.onTransportState =', '};');
-    expect(handler, isNotNull,
+    expect(src.contains('_voiceService!.onTransportState = _onTransportState'),
+        isTrue,
         reason: 'onTransportState is no longer wired in _wireCallbacks.');
+    final handler =
+        _between(src, 'void _onTransportState(', '\n  late final SetupFailureGrace');
+    expect(handler, isNotNull,
+        reason: '_onTransportState moved; re-point this guard.');
     expect(
       handler!.contains('RTCPeerConnectionStateDisconnected'),
       isFalse,
@@ -59,7 +63,7 @@ void main() {
   test('the voice mesh recovers a peer leg before closing it', () {
     final src = _read('lib/src/core/services/voice_channel_service.dart');
     final handler = _between(
-        src, 'void _onPeerConnectionState(', '\n  /// Begin holding');
+        src, 'void _onPeerConnectionState(', '\n  /// Feeds a never-connected');
     expect(handler, isNotNull,
         reason: '_onPeerConnectionState moved; re-point this guard.');
 

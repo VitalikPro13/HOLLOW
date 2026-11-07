@@ -40,6 +40,7 @@ import 'package:hollow/src/core/services/link_watchdog.dart';
 import 'package:hollow/src/core/services/macos_version.dart';
 import 'package:hollow/src/core/services/overlay_mic.dart';
 import 'package:hollow/src/core/services/realtime_session_flag.dart';
+import 'package:hollow/src/core/services/setup_failure_grace.dart';
 import 'package:hollow/src/core/services/screen_audio_receiver.dart';
 import 'package:hollow/src/core/services/share_audio_level.dart';
 import 'package:hollow/src/core/services/screen_share_service.dart';
@@ -228,6 +229,12 @@ class CallNotifier extends Notifier<CallState> {
   /// governs the outbound camera so the picture degrades before the call does.
   /// This is the ONLY thing allowed to end a call because of network state.
   LinkWatchdog? _linkWatch;
+
+  /// How long a `failed` before this link's first connect is held, waiting
+  /// for a late candidate, before it counts as a setup failure.
+  @visibleForTesting
+  set setupFailureGrace(Duration grace) => _setupFailure.grace = grace;
+  Duration get setupFailureGrace => _setupFailure.grace;
 
   /// A hangup the peer never heard, held for the next time the relay is up.
   ///
@@ -528,22 +535,7 @@ class CallNotifier extends Notifier<CallState> {
     // Transport states go to the hold-open ladder, never straight to a hangup.
     // `disconnected` means ICE consent went unanswered for a couple of seconds,
     // which is a Wi-Fi stutter; answering it with `end` hung up BOTH machines.
-    _voiceService!.onTransportState = (transportState) {
-      final watch = _linkWatch;
-      if (watch != null) {
-        watch.noteTransportState(transportState);
-        return;
-      }
-      // No watchdog yet: the call never connected, so fail fast as a setup failure.
-      if (transportState ==
-              RTCPeerConnectionState.RTCPeerConnectionStateFailed ||
-          transportState ==
-              RTCPeerConnectionState.RTCPeerConnectionStateClosed) {
-        _callLog('[HOLLOW-CALL] Transport $transportState before connect — '
-            'treating as a setup failure');
-        unawaited(_endCallForLinkLoss('setup-$transportState'));
-      }
-    };
+    _voiceService!.onTransportState = _onTransportState;
 
     _voiceService!.onRemoteVideoTrack = (peerId) {
       _callLog('[HOLLOW-CALL] Remote video track/renderer ready for $peerId '
@@ -724,12 +716,50 @@ class CallNotifier extends Notifier<CallState> {
     }
   }
 
+  void _onTransportState(RTCPeerConnectionState transportState) {
+    final watch = _linkWatch;
+    if (watch != null) {
+      watch.noteTransportState(transportState);
+      return;
+    }
+    // No watchdog yet: the call never connected, so this is call setup.
+    if (transportState ==
+        RTCPeerConnectionState.RTCPeerConnectionStateClosed) {
+      _setupFailure.cancel();
+      _callLog('[HOLLOW-CALL] Transport $transportState before connect — '
+          'treating as a setup failure');
+      unawaited(_endCallForLinkLoss('setup-$transportState'));
+      return;
+    }
+    final wasHolding = _setupFailure.isHolding;
+    if (_setupFailure.note(transportState) && !wasHolding) {
+      _callLog('[HOLLOW-CALL] Transport failed before connect — holding '
+          '${_setupFailure.grace.inSeconds}s for a late candidate');
+    }
+  }
+
+  late final SetupFailureGrace _setupFailure = SetupFailureGrace(
+    onExpired: () {
+      _callLog('[HOLLOW-CALL] Transport still failed after the setup grace — '
+          'treating as a setup failure');
+      unawaited(_endCallForLinkLoss('setup-failed'));
+    },
+  );
+
+  @visibleForTesting
+  void debugTransportState(RTCPeerConnectionState state) =>
+      _onTransportState(state);
+
+  @visibleForTesting
+  VoiceService get debugVoiceService => _service;
+
   /// Start holding this call open across network trouble.
   ///
   /// Called once the call goes active; everything before that is call setup and
   /// belongs to the ring timeout. From here the watchdog owns every
   /// network-driven decision, including the one case that ends the call.
   void _startLinkWatch(String peerId) {
+    _setupFailure.cancel();
     _linkWatch?.stop();
     _linkWatch = LinkWatchdog(
       label: 'CALL-LINK',
@@ -1829,6 +1859,7 @@ class CallNotifier extends Notifier<CallState> {
     RealtimeSessionFlag.release('dm-call');
     _ringTimer?.cancel();
     _statsTimer?.cancel();
+    _setupFailure.cancel();
     _linkWatch?.stop();
     _linkWatch = null;
     await _voiceService?.dispose();
@@ -2492,6 +2523,7 @@ class CallNotifier extends Notifier<CallState> {
     }
     _statsTimer?.cancel();
     _statsTimer = null;
+    _setupFailure.cancel();
     _linkWatch?.stop();
     _linkWatch = null;
     _mediaRestartAt = null;

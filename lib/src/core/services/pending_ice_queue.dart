@@ -81,3 +81,19 @@ class _Entry {
   final String callId;
   final RTCIceCandidate candidate;
 }
+
+/// Whether [candidate] belongs to the ICE session [remoteSdp] describes.
+///
+/// A candidate held while a leg is rebuilt can still be from the session
+/// before it; its `ufrag` names the session it came from. A candidate or a
+/// description without one cannot be judged and fits.
+bool candidateFitsRemoteSdp(String candidate, String remoteSdp) {
+  final named = RegExp(r'\sufrag\s+(\S+)').firstMatch(candidate)?.group(1);
+  if (named == null) return true;
+  final described = {
+    for (final m in RegExp(r'^a=ice-ufrag:(\S+)', multiLine: true)
+        .allMatches(remoteSdp))
+      m.group(1),
+  };
+  return described.isEmpty || described.contains(named);
+}

@@ -20,6 +20,8 @@ import 'package:hollow/src/core/services/overlay_mic.dart';
 import 'package:hollow/src/core/services/voice_redirect_arm.dart';
 import 'package:hollow/src/core/providers/voice_level_provider.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
+import 'package:hollow/src/core/services/pending_ice_queue.dart';
+import 'package:hollow/src/core/services/setup_failure_grace.dart';
 
 void _vcLog(String msg) {
   network_api.logFromDart(message: msg);
@@ -310,6 +312,15 @@ class VoiceChannelService {
   /// injected so the service never reaches into Riverpod.
   bool Function()? canSignal;
 
+  /// How long a `failed` before this link's first connect is held, waiting
+  /// for a late candidate, before it counts as a setup failure.
+  @visibleForTesting
+  Duration setupFailureGrace = kSetupFailureGrace;
+
+  /// Legs that failed before their first connect, held for the grace.
+  final Map<String, ({RTCPeerConnection pc, SetupFailureGrace grace})>
+      _setupFailure = {};
+
   /// Peers that need camera renegotiation once their PC reaches stable state.
   final Set<String> _pendingCameraReneg = {};
 
@@ -335,6 +346,14 @@ class VoiceChannelService {
   /// probes it for the viewer's route hint, and must never store or close
   /// through this.
   RTCPeerConnection? pcFor(String peerId) => _peerConnections[peerId];
+
+  /// Seat [pc] as the leg to [peerId], its transport states routed as a dialed
+  /// leg's are.
+  @visibleForTesting
+  void debugAdoptPeer(String peerId, RTCPeerConnection pc) {
+    _peerConnections[peerId] = pc;
+    pc.onConnectionState = (state) => _onPeerConnectionState(peerId, pc, state);
+  }
 
   // Lifecycle
 
@@ -551,7 +570,7 @@ class VoiceChannelService {
       _fwdIn[peerId] = _forwardsIn(peerId, sdp);
       await pc.setRemoteDescription(RTCSessionDescription(sdp, 'offer'));
       _remoteDescSet[peerId] = true;
-      await _flushPendingCandidates(peerId);
+      await _flushPendingCandidates(peerId, pc, sdp);
 
       final answer = await pc.createAnswer();
       final mungedSdp = _mungeOpusParams(answer.sdp!);
@@ -605,7 +624,7 @@ class VoiceChannelService {
     _fwdIn[peerId] = _forwardsIn(peerId, sdp);
     await pc.setRemoteDescription(RTCSessionDescription(sdp, 'answer'));
     _remoteDescSet[peerId] = true;
-    await _flushPendingCandidates(peerId);
+    await _flushPendingCandidates(peerId, pc, sdp);
 
       // With the camera on, renegotiate to add the video track now that the
       // initial audio connection is established.
@@ -690,6 +709,10 @@ class VoiceChannelService {
 
   Future<void> closePeer(String peerId) async {
     _closingPeers.add(peerId);
+    // Before the first await: what arrives from here on is for the next leg.
+    _pendingCandidates.remove(peerId);
+    _remoteDescSet.remove(peerId);
+    _setupFailure.remove(peerId)?.grace.cancel();
     _linkWatch.remove(peerId)?.stop();
     // Whatever was last said about this leg is moot now, and a leg torn down
     // AFTER its watchdog was already gone has nothing left to retract it.
@@ -704,8 +727,6 @@ class VoiceChannelService {
       await pc.dispose();
     }
     _closingPeers.remove(peerId);
-    _pendingCandidates.remove(peerId);
-    _remoteDescSet.remove(peerId);
     _pendingCameraReneg.remove(peerId);
 
     final renderer = _remoteVideoRenderers.remove(peerId);
@@ -2169,8 +2190,10 @@ class VoiceChannelService {
 
     final pc = await createPeerConnection(iceServers);
     _peerConnections[peerId] = pc;
+    // Never resets the held candidates: what the peer trickled since closePeer
+    // began is this leg's (signals are not awaited one by one), and the flush
+    // judges each against the session it lands in.
     _remoteDescSet[peerId] = false;
-    _pendingCandidates[peerId] = [];
 
     pc.onIceCandidate = (candidate) => _onLocalIceCandidate(peerId, candidate);
     pc.onConnectionState = (state) =>
@@ -2241,16 +2264,50 @@ class VoiceChannelService {
       return;
     }
     // Never connected: a setup failure for this leg, which the mesh's own
-    // join machinery retries.
-    if (state == RTCPeerConnectionState.RTCPeerConnectionStateFailed ||
-        state == RTCPeerConnectionState.RTCPeerConnectionStateClosed) {
+    // join machinery retries. A `failed` waits out the setup grace first.
+    if (state == RTCPeerConnectionState.RTCPeerConnectionStateClosed) {
       closePeer(peerId);
+      return;
     }
+    _noteSetupState(peerId, pc, state);
+  }
+
+  /// Feeds a never-connected leg's state to its setup grace, which closes the
+  /// leg if it is still failed when the grace ends. Closing or connecting the
+  /// leg cancels it.
+  void _noteSetupState(
+      String peerId, RTCPeerConnection pc, RTCPeerConnectionState state) {
+    if (!identical(_peerConnections[peerId], pc)) return;
+    var held = _setupFailure[peerId];
+    if (held != null && !identical(held.pc, pc)) {
+      held.grace.cancel();
+      held = null;
+    }
+    if (held == null) {
+      if (state != RTCPeerConnectionState.RTCPeerConnectionStateFailed) return;
+      held = (
+        pc: pc,
+        grace: SetupFailureGrace(
+          grace: setupFailureGrace,
+          onExpired: () {
+            _setupFailure.remove(peerId);
+            _vcLog('[HOLLOW-VC] $peerId: still failed after the setup grace, '
+                'closing the leg');
+            closePeer(peerId);
+          },
+        ),
+      );
+      _setupFailure[peerId] = held;
+      _vcLog('[HOLLOW-VC] $peerId: failed before connect, holding '
+          '${setupFailureGrace.inSeconds}s for a late candidate');
+    }
+    held.grace.note(state);
   }
 
   /// Begin holding [peerId]'s leg open across network trouble. Idempotent:
   /// a leg that reconnects keeps the watchdog it already had.
   void _startLinkWatch(String peerId) {
+    _setupFailure.remove(peerId)?.grace.cancel();
     if (_linkWatch.containsKey(peerId)) return;
     _linkWatch[peerId] = LinkWatchdog(
       label: 'VC-LINK',
@@ -2867,14 +2924,21 @@ class VoiceChannelService {
     }
   }
 
-  Future<void> _flushPendingCandidates(String peerId) async {
+  /// Adds the candidates held for [pc] once [remoteSdp] is set on it, only
+  /// those of that session, and stops if the leg is replaced meanwhile.
+  Future<void> _flushPendingCandidates(
+      String peerId, RTCPeerConnection pc, String remoteSdp) async {
     final pending = _pendingCandidates.remove(peerId);
     if (pending == null || pending.isEmpty) return;
-    final pc = _peerConnections[peerId];
-    if (pc == null) return;
-
-    _vcLog('[HOLLOW-VC] Flushing ${pending.length} pending ICE candidates for $peerId');
-    for (final ice in pending) {
+    final ready = [
+      for (final ice in pending)
+        if (candidateFitsRemoteSdp(ice.candidate ?? '', remoteSdp)) ice,
+    ];
+    final stale = pending.length - ready.length;
+    _vcLog('[HOLLOW-VC] Flushing ${ready.length} pending ICE candidates for '
+        '$peerId${stale > 0 ? ' ($stale from an earlier session dropped)' : ''}');
+    for (final ice in ready) {
+      if (!identical(_peerConnections[peerId], pc)) return;
       try {
         await pc.addCandidate(ice);
       } catch (e) {

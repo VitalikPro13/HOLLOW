@@ -7,6 +7,7 @@ import 'dart:math';
 import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:hollow/src/core/services/at_rest.dart';
 
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 import '../../rust/api/network.dart' as network_api;
@@ -14,6 +15,7 @@ import 'ice_route_probe.dart';
 import 'rtc_signal_pairing.dart';
 import 'rtc_stream_intake.dart';
 import 'wire_transfer_id.dart';
+import 'setup_failure_grace.dart';
 
 /// Chunk size for WebRTC data channel transfers: 64KB is safe across every
 /// platform (the SCTP max is around 256KB) and, with getBufferedAmount()
@@ -178,6 +180,11 @@ class WebRtcService {
   /// Builds a peer connection from an ICE config; tests stand in for libwebrtc.
   final Future<RTCPeerConnection> Function(Map<String, dynamic> config)
       _newPeerConnection;
+
+  /// How long a `failed` before this link's first connect is held, waiting
+  /// for a late candidate, before it counts as a setup failure.
+  @visibleForTesting
+  Duration setupFailureGrace = kSetupFailureGrace;
 
   WebRtcService({
     required this.localPeerId,
@@ -768,6 +775,7 @@ class WebRtcService {
   /// _connections map, since the caller owns that entry (superseding an
   /// orphaned connection being replaced for the same peer).
   Future<void> _closeConn(_PeerConn conn) async {
+    conn.setupFailure?.cancel();
     conn.idleTimer?.cancel();
     conn.keepaliveTimer?.cancel();
     try {
@@ -1196,21 +1204,44 @@ class WebRtcService {
     _log('[HOLLOW-WEBRTC-DART] PC state: $peerId (${_tag(lane)}) -> $state');
     if (!_isCurrent(conn)) return;
     if (state == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
+      conn.everConnected = true;
       _logIceRoute(peerId, lane);
     }
-    if (state == RTCPeerConnectionState.RTCPeerConnectionStateFailed) {
-      _log('[HOLLOW-WEBRTC-DART] Connection FAILED with $peerId '
-          '(lane=${_tag(lane)}) — closing');
-      _cleanupConnection(peerId, lane);
-      _notifyDisconnected(peerId, lane);
-      if (lane == _Lane.share) {
-        // STUN-only and unreachable: no TURN fallback by design (§7A).
-        onShareConnectionFailed?.call(peerId);
+    if (!conn.everConnected) {
+      if (state == RTCPeerConnectionState.RTCPeerConnectionStateFailed) {
+        final grace = conn.setupFailure ??= SetupFailureGrace(
+          grace: setupFailureGrace,
+          onExpired: () => _failConnection(conn),
+        );
+        if (!grace.isHolding) {
+          _log('[HOLLOW-WEBRTC-DART] Connection failed before connect with '
+              '$peerId (lane=${_tag(lane)}) — holding '
+              '${grace.grace.inSeconds}s for a late candidate');
+        }
+        grace.note(state);
+        return;
       }
-      // Let _onDataChannelClosed or the share tick drive reconnection when
-      // it is actually needed.
+      conn.setupFailure?.note(state);
+    }
+    if (state == RTCPeerConnectionState.RTCPeerConnectionStateFailed) {
+      _failConnection(conn);
     }
     // Note: don't close on RTCPeerConnectionStateDisconnected — it can recover.
+  }
+
+  void _failConnection(_PeerConn conn) {
+    final peerId = conn.peerId;
+    final lane = conn.lane;
+    _log('[HOLLOW-WEBRTC-DART] Connection FAILED with $peerId '
+        '(lane=${_tag(lane)}) — closing');
+    _cleanupConnection(peerId, lane);
+    _notifyDisconnected(peerId, lane);
+    if (lane == _Lane.share) {
+      // STUN-only and unreachable: no TURN fallback by design (§7A).
+      onShareConnectionFailed?.call(peerId);
+    }
+    // Let _onDataChannelClosed or the share tick drive reconnection when
+    // it is actually needed.
   }
 
   Future<void> _logIceRoute(String peerId, _Lane lane) async {
@@ -1605,6 +1636,8 @@ class _PeerConn implements RtcSignalEndpoint {
   Timer? idleTimer;
   Timer? keepaliveTimer;
   final RtcSendSlots sendSlots = RtcSendSlots();
+  bool everConnected = false;
+  SetupFailureGrace? setupFailure;
 
   _PeerConn({
     required this.pc,

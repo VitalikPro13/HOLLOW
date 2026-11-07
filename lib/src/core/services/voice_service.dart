@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io' show Platform;
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 import '../../rust/api/network.dart' as network_api;
@@ -153,6 +154,14 @@ class VoiceService {
   RTCVideoRenderer? get localRenderer => _localRenderer;
   RTCVideoRenderer? get remoteRenderer => _remoteRenderer;
   RTCPeerConnection? get peerConnection => _pc;
+
+  /// Seat [pc] as the call's peer connection, before its remote description,
+  /// as call setup leaves it; null drops it the way a teardown does.
+  @visibleForTesting
+  void debugAdoptPeerConnection(RTCPeerConnection? pc, {String? callId}) {
+    _pc = pc;
+    if (callId != null) _activeCallId = callId;
+  }
 
   /// Audio quality preset; controls Opus bitrate and stereo via SDP munging.
   int opusBitrate = 96000;     // default: 96 kbps (voice)
@@ -2160,14 +2169,22 @@ class VoiceService {
   /// that call's: an entry for any other is stale by definition and libwebrtc
   /// would reject it against these ICE credentials.
   Future<void> _flushPendingCandidates() async {
+    final pc = _pc;
     final callId = _activeCallId;
-    if (_pc == null || callId == null) return;
+    if (pc == null || callId == null) return;
     final ready = _pendingCandidates.take(callId);
     if (ready.isEmpty) return;
     _log('[HOLLOW-VOICE] Flushing ${ready.length} pending ICE candidates');
-    for (final candidate in ready) {
+    for (var i = 0; i < ready.length; i++) {
+      // The flush outlives an await per candidate; a teardown or rebuild in
+      // between owns the call now, and these belong to the old ICE session.
+      if (!identical(_pc, pc) || _activeCallId != callId) {
+        _log('[HOLLOW-VOICE] Peer connection gone mid-flush, dropping '
+            '${ready.length - i} queued ICE candidate(s)');
+        return;
+      }
       try {
-        await _pc!.addCandidate(candidate);
+        await pc.addCandidate(ready[i]);
       } catch (e) {
         _log('[HOLLOW-VOICE] Failed to add queued ICE candidate: $e');
       }
