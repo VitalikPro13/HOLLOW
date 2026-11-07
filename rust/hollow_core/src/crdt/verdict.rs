@@ -406,7 +406,14 @@ impl ServerState {
     /// Section 7's one rule: after the cut only a `Counted` op folds. The founding op is
     /// the anchor its id proves, and a checkpoint is judged by eligibility instead.
     pub(crate) fn device_counts_here(&self, op: &CrdtOp) -> bool {
-        !self.cut || clause_exempt(op) || self.verdict(op) == Verdict::Counted
+        !self.cut || clause_exempt(op) || (self.verdict(op) == Verdict::Counted && self.lock_maker_counts(op))
+    }
+
+    /// A new join lock link counts only from a device the view counts (t14-lock R3).
+    fn lock_maker_counts(&self, op: &CrdtOp) -> bool {
+        let CrdtPayload::JoinLock { link, .. } = &op.payload else { return true };
+        self.anchor_owner()
+            .is_some_and(|owner| self.join_lock.link_allowed(&self.server_id, link, &owner, &|m: &str, d: &str| self.authority.counts(m, d)))
     }
 
     /// Whether the device clause under `cut` refuses `op` for a reason a roster can end
@@ -1887,6 +1894,130 @@ pub(crate) mod tests {
             let restart = mint_owner_base(&server, 1, &owner, Some(&nonce), &device).unwrap();
             old.apply(&restart.link, None, &none, &at(5));
             assert_eq!(old.chain().first(), Some(&restart.link), "the restart is pruned: the frozen chain never gives way here");
+        }
+    }
+
+    /// t14-hidden: a stranger joiner folds the join answer before it holds the owner's
+    /// roster. The owner's join lock op then parks like its other ops and folds with the
+    /// roster, so the joiner holds the door; a link made by a device the roster does not
+    /// count never folds.
+    #[test]
+    fn a_join_lock_waits_for_the_owners_roster_and_never_folds_from_an_uncounted_maker() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let lock_op = |device: u8| {
+            let (mut owner, founding) = owner_on(true);
+            let new = crate::node::join_lock::mint_owner_base(&owner.server_id, 1, &keys(OWNER).0, owner.founding_nonce().as_deref(), &keys(device).0)
+                .expect("a base");
+            let door = Some(super::super::operations::JoinSecret(hex::encode(new.door.as_slice())));
+            let op = owner.author_checked(P::JoinLock { link: new.link, door, grants: Default::default() }).expect("the owner locks");
+            (founding, op)
+        };
+        let owner_arrives = |arrived: Arc<AtomicBool>| {
+            let entry = authority::judge(&keys(OWNER).1, &KeyRule::FirstHeld, &[&roster_counting(&keys(PHONE).0)]);
+            ViewSource(Arc::new(move |_: &ServerState, _: &str| {
+                Some(if arrived.load(Ordering::SeqCst) { entry.clone() } else { ViewEntry::default() })
+            }))
+        };
+
+        let (founding, lock) = lock_op(PHONE);
+        let arrived = Arc::new(AtomicBool::new(false));
+        let mut r = ServerState::skeleton(founding.server_id.clone());
+        r.set_view_source(owner_arrives(arrived.clone()));
+        r.ingest_remote(&[founding.clone(), lock.clone()]);
+        assert!(r.cut && r.join_lock.newest_door().is_none(), "precondition: no roster, no door yet");
+        assert!(parked(&r, &lock), "the lock op waits for the owner's roster, never dropped");
+        arrived.store(true, Ordering::SeqCst);
+        let _ = r.rebuild_now();
+        assert!(folded(&r, &lock), "the roster arrives: the lock op folds");
+        assert!(r.join_lock.newest_door().is_some_and(|(n, _, _)| n == 1), "and the joiner holds the door");
+
+        let (founding, stolen) = lock_op(THIEF);
+        let mut t = ServerState::skeleton(founding.server_id.clone());
+        t.set_view_source(owner_arrives(Arc::new(AtomicBool::new(true))));
+        t.ingest_remote(&[founding, stolen.clone()]);
+        assert!(!folded(&t, &stolen) && t.join_lock.newest_door().is_none(), "a link a device the roster does not count made folds");
+    }
+
+    /// An owner lock op signed for (`base`, then each successor).
+    fn lock_ops(owner: &mut ServerState, maker: u8, moves: usize) -> Vec<CrdtOp> {
+        use super::super::operations::JoinSecret;
+        let door = |d: &[u8; 32]| Some(JoinSecret(hex::encode(d)));
+        let mut new = crate::node::join_lock::mint_owner_base(&owner.server_id, 1, &keys(OWNER).0, owner.founding_nonce().as_deref(), &keys(maker).0)
+            .expect("a base");
+        let mut ops = vec![owner.author_checked(P::JoinLock { link: new.link.clone(), door: door(&new.door), grants: Default::default() }).expect("the base")];
+        for _ in 0..moves {
+            new = crate::node::join_lock::mint_successor(&owner.server_id, &new.link, &new.change, &keys(OWNER).1, &keys(PHONE).0).expect("a move");
+            ops.push(owner.author_checked(P::JoinLock { link: new.link.clone(), door: door(&new.door), grants: Default::default() }).expect("the move"));
+        }
+        ops
+    }
+
+    fn door_n(s: &ServerState) -> Option<u64> {
+        s.join_lock.newest_door().map(|(n, _, _)| n)
+    }
+
+    /// t14-hidden F1 (i): the lock moved before anyone joined. A stranger joiner holds
+    /// neither lock op's maker until the owner's roster lands, so the base parks; the move
+    /// rests on it and waits too, never dropped, in one batch or two.
+    #[test]
+    fn a_lock_moved_before_a_stranger_joins_folds_whole_with_the_owners_roster() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let (mut owner, founding) = owner_on(true);
+        let ops = lock_ops(&mut owner, PHONE, 1);
+        assert_eq!(door_n(&owner), Some(2), "precondition: the owner holds door 2");
+        let entry = authority::judge(&keys(OWNER).1, &KeyRule::FirstHeld, &[&roster_counting(&keys(PHONE).0)]);
+        let joiner = |batches: &[&[CrdtOp]]| {
+            let arrived = Arc::new(AtomicBool::new(false));
+            let (a, entry) = (arrived.clone(), entry.clone());
+            let mut r = ServerState::skeleton(founding.server_id.clone());
+            r.set_view_source(ViewSource(Arc::new(move |_: &ServerState, _: &str| {
+                Some(if a.load(Ordering::SeqCst) { entry.clone() } else { ViewEntry::default() })
+            })));
+            for batch in batches {
+                r.ingest_remote(batch);
+            }
+            assert!(door_n(&r).is_none(), "precondition: no roster, no door");
+            arrived.store(true, Ordering::SeqCst);
+            let _ = r.rebuild_now();
+            door_n(&r)
+        };
+        assert_eq!(joiner(&[&[founding.clone(), ops[0].clone(), ops[1].clone()]]), Some(2), "one batch: the move was lost");
+        assert_eq!(joiner(&[&[founding.clone(), ops[0].clone()], &[ops[1].clone()]]), Some(2), "two batches: the move was lost");
+    }
+
+    /// t14-hidden F1 (ii): the device that made the base was removed, the lock moved on a
+    /// counted device and the owner compacted. The base never folds again, nor the move
+    /// that rests on it, so the owner's re-signing of the tip carries its door.
+    #[test]
+    fn a_joiner_after_the_base_makers_removal_holds_the_newest_door() {
+        let (mut owner, founding) = owner_on(true);
+        let ops = lock_ops(&mut owner, THIEF, 1);
+        let tip = owner.join_lock.chain().last().cloned().expect("a tip");
+        let base = crate::node::join_lock::owner_signed(&owner.server_id, &tip, &keys(OWNER).0, owner.founding_nonce().as_deref(), &keys(PHONE).0);
+        let compact = owner.author_checked(crate::node::lock_keeper::compact_op(&owner, base)).expect("the owner compacts");
+        let entry = authority::judge(&keys(OWNER).1, &KeyRule::FirstHeld, &[&roster_counting(&keys(PHONE).0)]);
+        let mut j = ServerState::skeleton(founding.server_id.clone());
+        j.set_view_source(ViewSource(Arc::new(move |_: &ServerState, _: &str| Some(entry.clone()))));
+        j.ingest_remote(&[founding, ops[0].clone(), ops[1].clone(), compact.clone()]);
+        assert!(!folded(&j, &ops[0]) && !folded(&j, &ops[1]), "precondition: the removed maker's base and the move on it stay out");
+        assert!(folded(&j, &compact), "the compaction folds");
+        assert_eq!(door_n(&j), Some(2), "the joiner holds the relay's newest door");
+    }
+
+    /// A link a device the owner's roster does not count made parks as a row, and no
+    /// rebuild folds it while its maker stays uncounted.
+    #[test]
+    fn a_link_an_uncounted_device_made_never_folds_on_a_rebuild() {
+        let (mut owner, founding) = owner_on(true);
+        let ops = lock_ops(&mut owner, THIEF, 0);
+        let entry = authority::judge(&keys(OWNER).1, &KeyRule::FirstHeld, &[&roster_counting(&keys(PHONE).0)]);
+        let mut t = ServerState::skeleton(founding.server_id.clone());
+        t.set_view_source(ViewSource(Arc::new(move |_: &ServerState, _: &str| Some(entry.clone()))));
+        t.ingest_remote(&[founding, ops[0].clone()]);
+        assert!(parked(&t, &ops[0]), "the link waits as a row");
+        for _ in 0..3 {
+            let _ = t.rebuild_now();
+            assert!(!folded(&t, &ops[0]) && door_n(&t).is_none(), "a link an uncounted device made folded on a rebuild");
         }
     }
 }

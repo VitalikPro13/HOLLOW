@@ -64922,3 +64922,264 @@ async fn w2d_a_first_time_joiners_ask_moves_no_admitters_clock() {
     assert!(lead < 60_000, "a stranger's ask moved the admitter's server clock {lead} ms ahead");
     drop(o);
 }
+
+// t14-hidden
+
+/// Two strangers whose devices are not their masters: the owner makes a server, the
+/// other joins by invite. The joiner's fold holds the join lock, the relay shows it
+/// the room, and the owner's channel post reaches it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn t14_hidden_a_stranger_joiner_holds_the_lock_and_hears_the_owner() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let mut o = spawn_node_on(&relay, 231, 232).await;
+    let mut j = spawn_node_on(&relay, 233, 234).await;
+    let server_id = create_server_and_wait(&mut o, "Strangers").await;
+    assert!(wait_until(15, async || !relay.lock_chain(&server_id, "").is_empty()).await, "precondition: the relay holds the lock");
+    j.cmd_tx.send(join_cmd(&server_id)).await.unwrap();
+    assert!(expect_joined(&mut j, &server_id, 25).await, "the stranger joins");
+    let tip = relay_tip(&relay, &server_id);
+    assert!(
+        wait_until(15, async || j.live_server_state(&server_id).await.and_then(|s| s.join_lock.newest_door()).is_some_and(|(n, _, _)| n == tip.n)).await,
+        "the joiner's fold holds the relay's newest door",
+    );
+    assert!(expect_sees_room(&relay, &server_id, &j.device_id).await, "the relay shows the joiner the room");
+    assert!(
+        wait_until(20, async || o.mls_members(&server_id).await.contains(&j.device_id) && j.mls_members(&server_id).await.contains(&j.device_id)).await,
+        "precondition: the joiner holds a leaf",
+    );
+    drain_events(&mut j);
+    o.cmd_tx
+        .send(NodeCommand::SendChannelMessage {
+            server_id: server_id.clone(),
+            channel_id: general_channel_of(&server_id),
+            text: "from the owner".to_string(),
+            message_id: "t14-hidden-1".to_string(),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        wait_event(&mut j, std::time::Duration::from_secs(15), |ev| matches!(ev, NetworkEvent::ChannelMessageReceived { text, .. } if text == "from the owner")).await,
+        "the owner's post reaches the joiner",
+    );
+}
+
+/// A member back from away whose state lacks the newest door asks the members for it.
+/// The relay answers its lock read slower than a member answers the ask: the ask waits
+/// for that read, so the grant is judged against the relay's chain and counts, and the
+/// member sees the room again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn t14_hidden_a_door_ask_waits_for_a_slow_lock_read() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let mut o = spawn_node_with_friends(&relay, 235, 235, &[]).await;
+    let server_id = create_server_and_wait(&mut o, "Slow Read").await;
+    let mut m = spawn_node_with_friends(&relay, 236, 236, &[]).await;
+    m.cmd_tx.send(join_cmd(&server_id)).await.unwrap();
+    assert!(expect_joined(&mut m, &server_id, 25).await, "M joins");
+    let mut j = spawn_node_with_friends(&relay, 237, 237, &[]).await;
+    j.cmd_tx.send(join_cmd(&server_id)).await.unwrap();
+    assert!(expect_joined(&mut j, &server_id, 25).await, "J joins too");
+    assert!(expect_sees_room(&relay, &server_id, &m.device_id).await);
+    expect_mls_group(&[&o, &m], &server_id, 30).await;
+
+    go_offline(&relay, &m, &server_id).await;
+    assert!(wait_until(10, async || !o.sees_peer(&m.device_id).await).await, "the owner sees M leave");
+    relay.hold_direct(&o.device_id, &m.device_id);
+    let first = relay_tip(&relay, &server_id);
+    o.cmd_tx.send(NodeCommand::KickMember { server_id: server_id.clone(), peer_id: j.master_id.clone() }).await.unwrap();
+    assert!(
+        wait_until(20, async || {
+            let tip = relay_tip(&relay, &server_id);
+            tip.n > first.n
+                && o.live_server_state(&server_id).await.and_then(|s| s.join_lock.newest_door()).is_some_and(|(n, _, _)| n == tip.n)
+        })
+        .await,
+        "precondition: the kick moves the lock and the owner holds the new door",
+    );
+    expect_relay_drained(&relay, &o, "lock-moved").await;
+    for kind in relay.held_kinds(&o.device_id, &m.device_id) {
+        relay.discard_held_kind(&o.device_id, &m.device_id, &kind);
+    }
+    relay.release_held(&o.device_id, &m.device_id);
+    let tip = relay_tip(&relay, &server_id);
+    relay.hold_lock_reads(&m.device_id);
+    relay.set_online(&m.device_id, true);
+    sleep_ms(2000).await;
+    assert!(!relay.sees_room(&server_id, &m.device_id), "precondition: M is hidden while its lock read waits");
+    relay.release_lock_reads(&m.device_id);
+    // Well inside the wait after which an ask goes without the read.
+    assert!(
+        wait_until(8, async || relay.sees_room(&server_id, &m.device_id)).await,
+        "M takes the newest door from a member as soon as the read lands, and proves it",
+    );
+    assert!(
+        wait_until(20, async || m.live_server_state(&server_id).await.and_then(|s| s.join_lock.newest_door()).is_some_and(|(n, _, _)| n == tip.n)).await,
+        "M's state catches up once it sees the room",
+    );
+    drop(j);
+}
+
+/// A phrase-rooted owner's server has the cut in force from its founding op. A stranger
+/// joiner folds the join answer before it holds the owner's roster: the owner's join lock
+/// op must wait for the roster the answer carries, so the joiner holds the door, proves
+/// it and hears the owner.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn t14_hidden_a_stranger_joiner_of_a_cut_server_holds_its_door() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o_tag, od_tag, or_tag) = (238u8, 239u8, 240u8);
+    let roster = crate::identity::roster::Roster::genesis(&tag_kp(o_tag), &tag_kp(or_tag), &tag_kp(od_tag), super::roster_book::now_ms());
+    let mut o = spawn_node_seeded(&relay, o_tag, od_tag, &[], Some(roster)).await;
+    let mut j = spawn_node_on(&relay, 246, 247).await;
+    let server_id = create_server_and_wait(&mut o, "Cut Strangers").await;
+    assert!(o.live_server_state(&server_id).await.is_some_and(|s| s.cut), "precondition: the cut is in force");
+    assert!(wait_until(15, async || !relay.lock_chain(&server_id, "").is_empty()).await, "precondition: the relay holds the lock");
+    // The door comes from the joiner's own fold, never a member's grant.
+    relay.swallow_kind(&o.device_id, "door_grant");
+    j.cmd_tx.send(join_cmd(&server_id)).await.unwrap();
+    assert!(expect_joined(&mut j, &server_id, 25).await, "the stranger joins");
+    let tip = relay_tip(&relay, &server_id);
+    assert!(
+        wait_until(15, async || j.live_server_state(&server_id).await.and_then(|s| s.join_lock.newest_door()).is_some_and(|(n, _, _)| n == tip.n)).await,
+        "the joiner's fold holds the relay's newest door",
+    );
+    assert!(expect_sees_room(&relay, &server_id, &j.device_id).await, "the relay shows the joiner the room");
+    assert!(
+        wait_until(20, async || o.mls_members(&server_id).await.contains(&j.device_id) && j.mls_members(&server_id).await.contains(&j.device_id)).await,
+        "precondition: the joiner holds a leaf",
+    );
+    drain_events(&mut j);
+    o.cmd_tx
+        .send(NodeCommand::SendChannelMessage {
+            server_id: server_id.clone(),
+            channel_id: general_channel_of(&server_id),
+            text: "from the cut owner".to_string(),
+            message_id: "t14-hidden-2".to_string(),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        wait_event(&mut j, std::time::Duration::from_secs(15), |ev| matches!(ev, NetworkEvent::ChannelMessageReceived { text, .. } if text == "from the cut owner")).await,
+        "the owner's post reaches the joiner",
+    );
+}
+
+/// A phrase-rooted owner with two devices (cut in force); `founder` 0 or 1 makes the
+/// server, so its device makes the first lock, and both hold it.
+async fn t14_hidden_cut_owner(relay: &MockRelay, tags: [u8; 4], founder: usize) -> (TestNode, TestNode, String) {
+    let [m_tag, d1_tag, d2_tag, r_tag] = tags;
+    let master = tag_kp(m_tag);
+    let m_id = master.peer_id();
+    let (d1_id, d2_id) = (tag_kp(d1_tag).peer_id(), tag_kp(d2_tag).peer_id());
+    super::resolver::seed_self(&m_id, &[d1_id, d2_id.clone()]);
+    let mut roster = crate::identity::roster::Roster::genesis(&master, &tag_kp(r_tag), &tag_kp(d1_tag), super::roster_book::now_ms());
+    roster.add_vouch(crate::identity::roster::sign_vouch(&tag_kp(d1_tag), &m_id, &roster.base(), &d2_id));
+    roster.add_consent(crate::identity::roster::sign_consent(&tag_kp(d2_tag), &m_id));
+    let d1 = spawn_node_seeded(relay, m_tag, d1_tag, &[], Some(roster.clone())).await;
+    sleep_ms(1500).await;
+    let d2 = spawn_node_seeded(relay, m_tag, d2_tag, &[], Some(roster)).await;
+    expect_siblings_ready(relay, &d1, &d2, 15).await;
+    let mut devices = [d1, d2];
+    let server_id = create_server_and_wait(&mut devices[founder], "Cut Lock Moves").await;
+    let [d1, d2] = devices;
+    assert!(d1.live_server_state(&server_id).await.is_some_and(|s| s.cut) || d2.live_server_state(&server_id).await.is_some_and(|s| s.cut), "precondition: the cut is in force");
+    assert!(
+        wait_until(30, async || {
+            d1.live_server_state(&server_id).await.is_some_and(|s| s.is_member(&m_id) && s.join_lock.has_lock())
+                && d2.live_server_state(&server_id).await.is_some_and(|s| s.is_member(&m_id) && s.join_lock.has_lock())
+        })
+        .await,
+        "precondition: both devices hold the server and its lock",
+    );
+    assert!(wait_until(15, async || !relay.lock_chain(&server_id, &m_id).is_empty()).await, "precondition: the relay holds the lock");
+    (d1, d2, server_id)
+}
+
+/// The first device removes the second: the lock moves on the first and the owner
+/// re-signs the tip. Returns the relay's newest lock.
+async fn t14_hidden_remove_and_move(relay: &MockRelay, d1: &TestNode, d2: TestNode, server_id: &str) -> super::join_lock::LockLink {
+    let first = relay_tip(relay, server_id);
+    d1.cmd_tx
+        .send(NodeCommand::RevokeDevice { device_peer_id: d2.device_id.clone(), mode: super::roster_book::RemoveMode::Retire, with_dependents: false })
+        .await
+        .unwrap();
+    assert!(wait_until(20, async || !relay.counts(&d1.master_id, &d2.device_id)).await, "the relay's fold drops the device");
+    drop(d2);
+    assert!(
+        wait_until(60, async || {
+            let chain = relay.lock_chain(server_id, &d1.master_id);
+            let tip = relay_tip(relay, server_id);
+            chain.len() == 1
+                && tip.n > first.n
+                && d1.live_server_state(server_id).await.and_then(|s| s.join_lock.newest_door()).is_some_and(|(n, _, _)| n == tip.n)
+        })
+        .await,
+        "precondition: the lock moved on the remover and the owner re-signed it, got {:?}",
+        relay.lock_chain(server_id, &d1.master_id).iter().map(|l| (l.n, l.is_base())).collect::<Vec<_>>(),
+    );
+    relay_tip(relay, server_id)
+}
+
+/// A stranger joins after the join answer's lock ops; door grants never reach it, so
+/// only its own fold can hold the relay's newest door.
+async fn t14_hidden_stranger_holds_the_newest_door(relay: &MockRelay, d1: &TestNode, j: &mut TestNode, server_id: &str, tip: &super::join_lock::LockLink) {
+    relay.swallow_kind(&d1.device_id, "door_grant");
+    j.cmd_tx.send(join_cmd(server_id)).await.unwrap();
+    assert!(expect_joined(j, server_id, 25).await, "the stranger joins");
+    assert!(
+        wait_until(20, async || j.live_server_state(server_id).await.and_then(|s| s.join_lock.newest_door()).is_some_and(|(n, _, _)| n == tip.n)).await,
+        "the joiner's fold holds the relay's newest door {}, got {:?}",
+        tip.n,
+        j.live_server_state(server_id).await.and_then(|s| s.join_lock.newest_door()).map(|(n, _, _)| n),
+    );
+    assert!(expect_sees_room(relay, server_id, &j.device_id).await, "the relay shows the joiner the room");
+}
+
+/// F1 (i): removing an owner device moves the lock of a server nobody joined yet. A
+/// stranger joiner folds the base and the move before it holds the owner's roster.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn t14_hidden_a_cut_joiner_after_a_lock_move_holds_the_newest_door() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (d1, d2, server_id) = t14_hidden_cut_owner(&relay, [248, 249, 250, 251], 0).await;
+    let tip = t14_hidden_remove_and_move(&relay, &d1, d2, &server_id).await;
+    let mut j = spawn_node_on(&relay, 252, 253).await;
+    t14_hidden_stranger_holds_the_newest_door(&relay, &d1, &mut j, &server_id, &tip).await;
+}
+
+/// F1 (ii): the device that made the first lock is removed, so neither that base nor the
+/// move resting on it folds at a joiner; the owner's re-signing of the tip carries the door.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn t14_hidden_a_cut_joiner_after_the_base_makers_removal_holds_the_newest_door() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (d1, d2, server_id) = t14_hidden_cut_owner(&relay, [224, 225, 226, 227], 1).await;
+    assert_eq!(
+        super::join_lock::link_device(&server_id, &relay.lock_chain(&server_id, &d1.master_id)[0]).map(|(_, d)| d),
+        Some(d2.device_id.clone()),
+        "precondition: the device about to be removed made the first lock",
+    );
+    let tip = t14_hidden_remove_and_move(&relay, &d1, d2, &server_id).await;
+    let mut j = spawn_node_on(&relay, 228, 229).await;
+    t14_hidden_stranger_holds_the_newest_door(&relay, &d1, &mut j, &server_id, &tip).await;
+}

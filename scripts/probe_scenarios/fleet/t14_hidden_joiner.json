@@ -1,0 +1,39 @@
+{
+  "_": [
+    "t14-hidden: two strangers. a makes a server, b joins by its invite; a posts, b must see it, and back.",
+    "Run it three times in a row with -Fresh onboarding between runs: a joiner the relay hides in the room never sees a's post."
+  ],
+  "peers": ["a", "b"],
+  "steps": [
+    { "peer": "all", "op": "wait_for", "provider": "connection", "equals": "connected", "timeout_ms": 120000 },
+    { "peer": "a", "op": "tap", "target": "semantics:Create a server" },
+    { "peer": "a", "op": "enter_text", "target": "hint:My Awesome Server", "value": "t14h-${RUN}" },
+    { "peer": "a", "op": "tap", "target": "text:Create", "index": 0 },
+    { "peer": "a", "op": "wait_for", "target": "server:t14h-${RUN}", "timeout_ms": 30000 },
+    { "peer": "a", "op": "open_server", "name": "t14h-${RUN}" },
+    { "peer": "a", "op": "wait_for", "target": "channel:general", "timeout_ms": 30000 },
+    { "peer": "a", "op": "right_click", "target": "server:t14h-${RUN}" },
+    { "peer": "a", "op": "tap", "target": "menu > text:Invite people" },
+    { "peer": "a", "op": "wait_for", "target": "type:HollowCopyField", "timeout_ms": 20000 },
+    { "peer": "a", "op": "capture", "target": "type:HollowCopyField", "as": "INVITE" },
+    { "peer": "a", "op": "key", "value": "escape" },
+    { "peer": "b", "op": "tap", "target": "semantics:Create a server" },
+    { "peer": "b", "op": "enter_text", "target": "hint:Invite link", "value": "${INVITE}" },
+    { "peer": "b", "op": "tap", "target": "text:Join", "index": 0 },
+    { "peer": "b", "op": "wait_for", "target": "server:t14h-${RUN}", "timeout_ms": 90000 },
+    { "peer": "b", "op": "open_server", "name": "t14h-${RUN}" },
+    { "peer": "b", "op": "open_channel", "name": "general" },
+    { "peer": "a", "op": "open_channel", "name": "general" },
+    { "peer": "a", "op": "enter_text", "target": "field", "value": "owner posts ${RUN}" },
+    { "peer": "a", "op": "key", "value": "enter" },
+    { "peer": "b", "op": "wait_for", "target": "text:owner posts ${RUN}", "timeout_ms": 60000 },
+    { "peer": "b", "op": "enter_text", "target": "field", "value": "joiner answers ${RUN}" },
+    { "peer": "b", "op": "key", "value": "enter" },
+    { "peer": "a", "op": "wait_for", "target": "text:joiner answers ${RUN}", "timeout_ms": 60000 },
+    { "peer": "a", "op": "enter_text", "target": "field", "value": "owner again ${RUN}" },
+    { "peer": "a", "op": "key", "value": "enter" },
+    { "peer": "b", "op": "wait_for", "target": "text:owner again ${RUN}", "timeout_ms": 60000 },
+    { "peer": "all", "op": "shot", "name": "t14h-joined" },
+    { "peer": "all", "op": "dump", "name": "t14h-converged" }
+  ]
+}

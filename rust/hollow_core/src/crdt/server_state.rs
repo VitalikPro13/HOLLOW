@@ -2071,9 +2071,9 @@ impl ServerState {
         let Some(owner) = self.anchor_owner() else { return false };
         role.priority() >= MemberRole::Moderator.priority()
             && (!link.is_base() || (*role == MemberRole::Owner && op.author == owner))
-            && self.join_lock.link_allowed(&self.server_id, link, &owner, &|m: &str, d: &str| {
-                !self.cut || self.authority.device_verdict(m, d) == super::authority::DeviceVerdict::Counted
-            })
+            // Who made the link is the device clause's (`device_counts_here`): a roster
+            // still on its way then parks the op rather than dropping it.
+            && self.join_lock.link_allowed(&self.server_id, link, &owner, &|_: &str, _: &str| true)
             && door.is_none_or(|d| super::lock_state::door_matches(d, link))
             && grants.len() <= 64
             && grants.iter().all(|(key, grant)| {

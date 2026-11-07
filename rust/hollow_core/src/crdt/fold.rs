@@ -2708,11 +2708,13 @@ fn print_of<'a>(hashes: impl Iterator<Item = &'a [u8; 32]>) -> String {
     format!("{n}:{sum:032x}")
 }
 
-/// Ops that can make a held op valid: an admission, a grant, or the anchor itself.
+/// Ops that can make a held op valid: an admission, a grant, a lock link the next one
+/// extends, or the anchor itself.
 pub(super) fn enables_others(payload: &CrdtPayload) -> bool {
     matches!(
         payload,
         CrdtPayload::MemberAdded { .. }
+            | CrdtPayload::JoinLock { .. }
             | CrdtPayload::RoleChanged { .. }
             | CrdtPayload::RolePermissionsChanged { .. }
             | CrdtPayload::MemberUnbanned { .. }

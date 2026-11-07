@@ -463,7 +463,7 @@ impl LockKeeper {
             }
             Offer::Compact(base) if accepted && tip.as_ref() == Some(&base) => {
                 self.misses.remove(server_id);
-                Some(CrdtPayload::JoinLock { link: base, door: None, grants: BTreeMap::new() })
+                Some(compact_op(state, base))
             }
             Offer::Chain if accepted => None,
             _ => {
@@ -852,6 +852,13 @@ pub(crate) fn door_sends(server_id: &str, door: &str) -> Vec<Vec<String>> {
         .filter(|(s, d, _)| s == server_id && d == door)
         .map(|(_, _, leaves)| leaves.clone())
         .collect()
+}
+
+/// The op for the owner's re-signing of the newest lock the relay took. It carries the
+/// door: a member whose fold cannot reach the tip through the links before it (a base a
+/// since-removed device made) holds the newest door from this op alone.
+pub(crate) fn compact_op(state: &ServerState, base: LockLink) -> CrdtPayload {
+    CrdtPayload::JoinLock { door: state.join_lock.door_of(&base), link: base, grants: BTreeMap::new() }
 }
 
 /// The op for a lock the relay took: its door for every member, its change key for

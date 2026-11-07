@@ -180,6 +180,11 @@ impl JoinLockState {
         self.links.iter().find(|l| l.same_lock(lock))
     }
 
+    /// The secret of the door `link` names, if we hold it.
+    pub fn door_of(&self, link: &LockLink) -> Option<JoinSecret> {
+        self.doors.get(&link.door).map(|d| d.secret.clone())
+    }
+
     pub fn holds_door(&self, door: &str) -> bool {
         self.doors.contains_key(door)
     }

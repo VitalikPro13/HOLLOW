@@ -4595,8 +4595,8 @@ async fn run_event_loop(
                         if !proved && server_states.contains_key(&room) {
                             join_hold.hidden(&room);
                         }
-                        // A hidden member asks the members for the newest door; reading the
-                        // relay's chain now lets us judge the grant that answers it.
+                        // A hidden member asks the members for the newest door once the relay's
+                        // chain is read again: a grant that beat the read would be dropped.
                         if door_rooms.on_status(&room, proved, &server_states, &local_peer_str, &ws_cmd_tx)
                             && let Some(owner) = server_states.get(&room).and_then(|s| s.anchor_owner())
                         {
@@ -5357,6 +5357,7 @@ async fn run_event_loop(
                                 );
                             }
                         }
+                        door_rooms.chain_read(&server, &ws_cmd_tx);
                         // A server we are joining: seal to it, and judge what waited for it.
                         let held = sync_handler::handle_join_lock_chain(
                             &mut pending_server_joins, &ws_cmd_tx, &ws_room_peers, &crdt_store, &device_peer_id, &server, links,
