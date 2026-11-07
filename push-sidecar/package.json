@@ -13,5 +13,8 @@
   },
   "optionalDependencies": {
     "firebase-admin": "^13.0.0"
+  },
+  "overrides": {
+    "uuid": "^11.1.1"
   }
 }

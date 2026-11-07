@@ -89,7 +89,7 @@ fn make_auth_message(nonce: &str) -> String {
 
 /// Asks for this socket's one-use challenge and returns its nonce.
 async fn challenge_nonce(ws: &mut WsStream) -> Option<String> {
-    ws.send(Message::Text(r#"{"type":"auth_hello"}"#.to_string())).await.ok()?;
+    ws.send(Message::Text(r#"{"type":"auth_hello"}"#.into())).await.ok()?;
     loop {
         match tokio::time::timeout(Duration::from_secs(10), ws.next()).await {
             Ok(Some(Ok(Message::Text(txt)))) => {
@@ -135,7 +135,7 @@ async fn connect_and_hold(
         FAILED.fetch_add(1, Ordering::Relaxed);
         return;
     };
-    if ws.send(Message::Text(make_auth_message(&nonce))).await.is_err() {
+    if ws.send(Message::Text(make_auth_message(&nonce).into())).await.is_err() {
         FAILED.fetch_add(1, Ordering::Relaxed);
         return;
     }

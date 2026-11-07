@@ -84,7 +84,7 @@ fn make_auth_message(nonce: &str) -> String {
 
 /// Asks for this socket's one-use challenge and returns its nonce.
 async fn challenge_nonce(ws: &mut WsStream) -> Option<String> {
-    ws.send(Message::Text(r#"{"type":"auth_hello"}"#.to_string())).await.ok()?;
+    ws.send(Message::Text(r#"{"type":"auth_hello"}"#.into())).await.ok()?;
     loop {
         match tokio::time::timeout(Duration::from_secs(10), ws.next()).await {
             Ok(Some(Ok(Message::Text(txt)))) => {
@@ -112,7 +112,7 @@ async fn connect_and_auth(
     .ok()?;
 
     let nonce = challenge_nonce(&mut ws).await?;
-    ws.send(Message::Text(make_auth_message(&nonce))).await.ok()?;
+    ws.send(Message::Text(make_auth_message(&nonce).into())).await.ok()?;
 
     let timeout = tokio::time::timeout(Duration::from_secs(10), ws.next()).await;
     match timeout {
@@ -124,7 +124,7 @@ async fn connect_and_auth(
 async fn join_room(ws: &Arc<Mutex<WsStream>>, room: &str) -> bool {
     let msg = json!({"type": "join", "room": room}).to_string();
     let mut ws = ws.lock().await;
-    if ws.send(Message::Text(msg)).await.is_err() {
+    if ws.send(Message::Text(msg.into())).await.is_err() {
         return false;
     }
     // drain the members response (and any peer_joined notifications)
