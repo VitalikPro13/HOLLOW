@@ -87,6 +87,23 @@ int main() {
     check("anything else turns them off", !server_stats::parse_public_stats("maybe"));
     check("only spaces means on, as empty does", server_stats::parse_public_stats("   "));
 
+    // The denylist's counts are an opt-in of their own, off unless named, and go with the
+    // rest of the activity when PUBLIC_STATS is off.
+    check("deny counts: unset means off", !server_stats::parse_opt_in(nullptr));
+    check("deny counts: empty means off", !server_stats::parse_opt_in("  "));
+    for (const char* t : {"on", "ON", " true", "1", "yes\n"}) {
+        check(std::string("deny counts: '") + t + "' means on", server_stats::parse_opt_in(t));
+    }
+    for (const char* t : {"off", "no", "0", "maybe"}) {
+        check(std::string("deny counts: '") + t + "' means off", !server_stats::parse_opt_in(t));
+    }
+    nlohmann::json with_deny = {{"mem_total_kb", 1000}, {"denylist", server_stats::deny_block(2, 1, 3)}};
+    check("deny counts name kinds and counts only",
+          keys(with_deny["denylist"]) == std::set<std::string>{"servers", "identities", "networks"} &&
+              with_deny["denylist"]["networks"] == 3);
+    server_stats::keep_public(with_deny, false);
+    check("public stats off drops the deny counts", !with_deny.contains("denylist"));
+
     // bandwidth_cap_mbps_comes_from_the_shapers_settings (deploy/hollow-cake.service).
     check("the shaper's bandwidth is the cap", server_stats::bandwidth_cap_mbps("on", "950") == 950);
     check("whatever HOLLOW_CAKE says short of off", server_stats::bandwidth_cap_mbps(nullptr, "800") == 800);

@@ -5,6 +5,7 @@
 #include "license_pool.h"
 #include <algorithm>
 #include <cstdio>
+#include <vector>
 
 static int failures = 0;
 static void check(const char* label, bool ok) {
@@ -61,6 +62,34 @@ int main() {
     tidy.validate(&k, "solo");
     tidy.release("solo");
     check("last release removes the entry", tidy.holders.empty());
+
+    // HOL-SEC-203: a keys.json of the wrong shape reads as nothing and changes nothing. The
+    // reload runs in a uSockets timer, where a throw ends the relay without its snapshot.
+    LicensePool held;
+    held.enabled = true;
+    held.keys = {k};
+    held.validate(&k, "member");
+    std::vector<std::string> gone;
+    bool reread = false;
+    for (const char* text : {R"({"enabled":"yes","keys":["QQ44-RT19-ZZ08-MN71"]})",
+                             R"({"enabled":true,"keys":"QQ44-RT19-ZZ08-MN71"})", R"(["QQ44-RT19-ZZ08-MN71"])",
+                             R"("enabled")", R"({"enabled":1})", "{", ""}) {
+        try {
+            reread = held.reload_text(text, gone);
+        } catch (...) {
+            reread = true;
+            check("a keys.json of the wrong shape never throws", false);
+        }
+        if (reread) break;
+    }
+    check("a keys.json with enabled as a string keeps the previous keys",
+          !reread && held.enabled && held.keys == std::unordered_set<std::string>{k} && gone.empty() &&
+              held.validate(&k, "member") == LicenseResult::Ok);
+    check("a good keys.json still reloads",
+          held.reload_text(R"({"enabled":true,"keys":["QQ44-RT19-ZZ08-MN71",5]})", gone) &&
+              held.keys == std::unordered_set<std::string>{other} && gone == std::vector<std::string>{"member"});
+    auto defaults = parse_keys_file("{}");
+    check("missing fields read as off with no keys", defaults && !defaults->enabled && defaults->keys.empty());
 
     printf("%d failure(s)\n", failures);
     return failures == 0 ? 0 : 1;

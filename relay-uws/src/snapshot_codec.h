@@ -26,10 +26,11 @@ namespace snapshot {
 // behind (`proven`, D5), 9 every resumable session with the fan-out buffers its
 // ring shares (`buffers`, `sessions`), 10 the report fingerprints' key
 // (`report_key`), which stays off every disk, 11 each report's address share
-// (`report_shares`, reports.h). An older snapshot still decodes, without the
+// (`report_shares`, reports.h), 12 the operator denylist in force and the devices learned
+// for its identities (`deny_*`, deny_list.h). An older snapshot still decodes, without the
 // newer fields, so a relay coming up on this build keeps the buffers the previous
 // one handed over.
-static constexpr uint32_t VERSION = 11;
+static constexpr uint32_t VERSION = 12;
 static constexpr uint32_t MIN_VERSION = 1;
 // One frame can never exceed the relay's maxPayloadLength, so a longer string
 // is corruption, not data.
@@ -198,6 +199,14 @@ struct Data {
     // v11: the address share each report fingerprint is charged to; on disk a report
     // names none.
     std::vector<std::pair<std::string, uint64_t>> report_shares;
+    // v12: the denylist the relay enforced and the devices it learned for each listed
+    // identity, least recently confirmed first. `has_deny` is false only for an older
+    // snapshot, which carried no list.
+    bool has_deny = false;
+    std::vector<std::string> deny_servers;
+    std::vector<std::string> deny_identities;
+    std::vector<std::string> deny_networks;
+    std::vector<std::pair<std::string, std::vector<std::string>>> deny_learned;
     // Records decode left out because they did not parse. Each record is its own
     // length-prefixed string, so a bad one costs that session alone.
     size_t sessions_dropped = 0;
@@ -540,6 +549,16 @@ inline std::string encode(const Data& d) {
         w.str(key);
         w.u64(share);
     }
+    for (const auto* list : {&d.deny_servers, &d.deny_identities, &d.deny_networks}) {
+        w.count(list->size());
+        for (const auto& e : *list) w.str(e);
+    }
+    w.count(d.deny_learned.size());
+    for (const auto& [master, devices] : d.deny_learned) {
+        w.str(master);
+        w.count(devices.size());
+        for (const auto& dev : devices) w.str(dev);
+    }
 
     w.out.append("HRSE", 4);
     return w.out;
@@ -739,6 +758,31 @@ inline bool decode(std::string_view bytes, Data& out) {
             uint64_t share = NO_SHARE;
             if (!r.str(key) || !r.u64(share)) return false;
             d.report_shares.push_back({std::move(key), share});
+        }
+    }
+
+    if (version >= 12) {
+        d.has_deny = true;
+        for (auto* list : {&d.deny_servers, &d.deny_identities, &d.deny_networks}) {
+            if (!r.count(n)) return false;
+            for (uint32_t i = 0; i < n; i++) {
+                std::string e;
+                if (!r.str(e)) return false;
+                list->push_back(std::move(e));
+            }
+        }
+        if (!r.count(n)) return false;
+        for (uint32_t i = 0; i < n; i++) {
+            std::string master;
+            uint32_t m = 0;
+            if (!r.str(master) || !r.count(m)) return false;
+            std::vector<std::string> devices;
+            for (uint32_t k = 0; k < m; k++) {
+                std::string dev;
+                if (!r.str(dev)) return false;
+                devices.push_back(std::move(dev));
+            }
+            d.deny_learned.push_back({std::move(master), std::move(devices)});
         }
     }
 

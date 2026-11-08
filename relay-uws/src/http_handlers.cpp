@@ -152,6 +152,10 @@ static void handle_server_stats(HttpResponse* res, RelayState& state, const Conf
     // with no shaper names no cap.
     static const int64_t cap_mbps = server_stats::bandwidth_cap_mbps(getenv("HOLLOW_CAKE"), getenv("HOLLOW_CAKE_MBIT"));
     if (cap_mbps > 0) resp["bandwidth_cap_mbps"] = cap_mbps;
+    if (config.public_deny_counts) {
+        resp["denylist"] = server_stats::deny_block(state.deny.list.servers.size(), state.deny.list.identities.size(),
+                                                    state.deny.list.networks.size());
+    }
     server_stats::keep_public(resp, config.public_stats);
     state.stats_cache.cached_json = resp.dump();
     state.stats_cache.fetched_at = now;
@@ -202,6 +206,10 @@ void setup_http_handlers(uWS::SSLApp& app, RelayState& state,
     // One payer's breaker buckets, for the live tests; never in a relay that serves anyone.
     app.get("/breaker-test", [](HttpResponse* res, HttpRequest* req) {
         res->end(breaker_test_report(std::string(req->getQuery("peer"))));
+    });
+    app.get("/deny-test", [](HttpResponse* res, HttpRequest* req) {
+        res->end(deny_test_report(std::string(req->getQuery("peer")), std::string(req->getQuery("room")),
+                                  std::string(req->getQuery("net"))));
     });
 #endif
     app.get("/health", [](HttpResponse* res, HttpRequest* /*req*/) {

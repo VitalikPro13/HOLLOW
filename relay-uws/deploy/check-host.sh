@@ -103,6 +103,39 @@ if [[ " ${units[*]} " == *" hollow-push "* ]]; then
     fi
 fi
 
+# The operator denylist (relay-uws/src/deny_list.h): root's to write, the relay's to read,
+# and readable by the relay's own reader. A missing or unreadable file keeps the list a
+# running relay holds and the one a restart carries over, but nothing new reaches it.
+if [[ " ${units[*]} " == *" hollow-relay "* ]]; then
+    echo "Denylist"
+    relay_exec=$(systemctl show -p ExecStart --value hollow-relay)
+    deny=$(grep -oE -- '--denylist-file [^ ;]+' <<<"$relay_exec" | head -n 1 | cut -d' ' -f2)
+    relay_bin=$(sed -n 's/.*path=\([^ ;]*\).*/\1/p' <<<"$relay_exec" | head -n 1)
+    relay_user=$(systemctl show -p User --value hollow-relay)
+    relay_group=$(systemctl show -p Group --value hollow-relay)
+    if [ -z "$deny" ]; then
+        bad "the relay names no --denylist-file, so it looks for denylist.json in its working directory"
+    elif [ ! -f "$deny" ]; then
+        bad "$deny is missing: write a valid one (sudo hollow-relay-setup --deny check says what it holds)"
+    else
+        if [ "$(stat -c '%a %U %G' "$deny")" != "640 root ${relay_group:-hollow-relay}" ]; then
+            bad "$deny is $(stat -c '%a %U:%G' "$deny"), should be 640 root:${relay_group:-hollow-relay}"
+        elif [ -n "$relay_user" ] && sudo -u "$relay_user" test -w "$deny" 2>/dev/null; then
+            bad "the relay can rewrite its own denylist $deny"
+        else
+            ok "$deny is root's to write and the relay's to read"
+        fi
+        if [ -z "$relay_bin" ] || [ ! -x "$relay_bin" ]; then
+            bad "the relay's program is not there to read $deny"
+        elif out=$("$relay_bin" --check-denylist "$deny" 2>&1); then
+            # Only the counts: the 32-hex warning is for the moment an entry is added.
+            ok "$deny reads: $(head -1 <<<"${out#ok: }")"
+        else
+            bad "$deny does not read ($out): the relay keeps its previous list until it does"
+        fi
+    fi
+fi
+
 echo "Private keys"
 open_keys=$(find /etc/letsencrypt/archive /etc/hollow-relay /etc/hollow-push /etc/hollow-forwarder \
     /etc/hollow-turn /etc/hollow-duckdns /var/lib/hollow-relay /var/lib/hollow-forwarder \

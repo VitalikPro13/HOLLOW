@@ -46,6 +46,7 @@ targets=(
     "fuzz_kill_order - json"
     "fuzz_snapshot_codec - snapshot_codec"
     "fuzz_crypto_inputs crypto -"
+    "fuzz_deny_list - json"
 )
 
 # crypto.cpp once, with the same flags but without the fuzzer's main.

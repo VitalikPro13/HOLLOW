@@ -12,6 +12,7 @@
 
 #include <App.h>
 #include "crypto.h"
+#include "deny_list.h"
 #include "door_room.h"
 #include "join_lock.h"
 #include "kill_list.h"
@@ -517,6 +518,10 @@ struct RelayState {
     // Every identity's roster, folded from the rosters shown on its inbox joins
     // (design ID-1R): who owns each inbox, removals no later roster takes back.
     RosterBook roster_book;
+
+    // The operator denylist (deny_list.h, design t14-deny): operator-written and bounded,
+    // never logged, carried across a restart in the snapshot.
+    deny::State deny;
 
     // The key share ids are hashed under, replaced every hour and never persisted,
     // so what the relay keeps past a connection names no address once its hour

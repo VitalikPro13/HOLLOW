@@ -33,6 +33,7 @@
 #include <signal.h>
 #include <sodium.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -3979,6 +3980,11 @@ static bool wait_for_file(const std::string& path, std::string& content, int tim
 // fdstore_restart.py looks this peer up in the reports file.
 static const char RESTART_REPORT_TARGET[] = "12D3KooWRestartReportTarget1111111111111111111111";
 
+// The denylist's part of the restart case (defined with the deny cases).
+static void deny_restart_before(const std::string& dir);
+static void deny_restart_first();
+static void deny_restart_after(const std::string& dir);
+
 static void hs_restart(const std::string& dir) {
     printf("handshake review: a session restored from a snapshot proves its doors again\n");
     Ident owner, change, master, d1, d2;
@@ -4016,6 +4022,7 @@ static void hs_restart(const std::string& dir) {
     b->send_bin(frame(0x03, {plain}, "rs-plain-before"));
     b->send_bin(frame(0x03, {locked}, "rs-locked-before"));
     settle({b.get()});
+    deny_restart_before(dir);
 
     if (FILE* f = fopen((dir + "/ready").c_str(), "w")) {
         fputs("1", f);
@@ -4027,6 +4034,7 @@ static void hs_restart(const std::string& dir) {
         return;
     }
     g_port = atoi(port.c_str());
+    deny_restart_first();
 
     auto b2 = login(idb);
     auto mb = join(*b2, locked, {{"door_proof", door_proof(*b2, locked, door)}});
@@ -4096,6 +4104,7 @@ static void hs_restart(const std::string& dir) {
                                                   discover(*b2, plain) == names({d1.peer}));
     e2->send({{"type", "active"}});
     check("until it says active", next(*b2, about("peer_joined", plain, ide.peer)).has_value());
+    deny_restart_after(dir);
 }
 
 // ---------------------------------------------------------------------------
@@ -6263,6 +6272,740 @@ static void test_lock_after_a_mutual_removal() {
     check("the walk's first device still resets it", put({base_lock(room, door2, change2, owner, nonce, true, 2, &first, false)}));
 }
 
+// ---------------------------------------------------------------------------
+// The operator denylist (src/deny_list.h, design t14-deny). run_live.sh starts a relay of
+// its own for these (RELAY_LIVE_ONLY=deny) and names its file in RELAY_LIVE_DENYLIST; the
+// relay re-reads it every 2 s, and /deny-test (test builds) says what it still holds.
+
+static std::string g_denylist;
+static std::string g_keys_file;
+// Past one reload tick and the slowest sanitized apply.
+static constexpr int DENY_WAIT_MS = 9000;
+
+struct DenyEntries {
+    std::vector<std::string> servers, identities, networks;
+};
+
+static std::string deny_text(const DenyEntries& e) {
+    json servers = json::array(), identities = json::array(), networks = json::array();
+    // One of each written as an object with an opaque `ref`, which the relay reads past.
+    for (size_t i = 0; i < e.servers.size(); i++) {
+        servers.push_back(i == 0 ? json{{"id", e.servers[i]}, {"ref", "N-1"}} : json(e.servers[i]));
+    }
+    for (size_t i = 0; i < e.identities.size(); i++) {
+        identities.push_back(i == 0 ? json{{"id", e.identities[i]}, {"ref", "N-2"}} : json(e.identities[i]));
+    }
+    for (size_t i = 0; i < e.networks.size(); i++) {
+        networks.push_back(i == 0 ? json{{"ip", e.networks[i]}, {"added", "2026-11-07"}} : json(e.networks[i]));
+    }
+    return json{{"version", 1}, {"servers", servers}, {"identities", identities}, {"networks", networks}}.dump(1);
+}
+
+// Replaced the way an operator's editor or `manage.sh deny` does: a new file renamed on.
+static void write_deny_raw(const std::string& text) {
+    const std::string tmp = g_denylist + ".tmp";
+    if (FILE* f = fopen(tmp.c_str(), "wb")) {
+        fwrite(text.data(), 1, text.size(), f);
+        fclose(f);
+    }
+    rename(tmp.c_str(), g_denylist.c_str());
+}
+
+// Rewritten in place (the same inode), its time set to `sec`.`nsec`.
+static void write_deny_in_place(const std::string& text, time_t sec, long nsec) {
+    if (FILE* f = fopen(g_denylist.c_str(), "r+b")) {
+        fwrite(text.data(), 1, text.size(), f);
+        fflush(f);
+        if (ftruncate(fileno(f), static_cast<off_t>(text.size())) != 0) check("(the file is cut to size)", false);
+        fclose(f);
+    }
+    struct timespec t[2] = {{sec, nsec}, {sec, nsec}};
+    utimensat(AT_FDCWD, g_denylist.c_str(), t, 0);
+}
+
+static void deny_set(const DenyEntries& e) { write_deny_raw(deny_text(e)); }
+
+static json deny_report(const std::string& peer, const std::string& room = "", const std::string& net = "") {
+    Socket s;
+    auto body = s.get("/deny-test?peer=" + peer + "&room=" + room + "&net=" + net);
+    json j = body ? json::parse(*body, nullptr, false) : json();
+    return j.is_object() ? j : json::object();
+}
+
+// Polls the relay's report until `pred` holds of it.
+static bool deny_until(const std::string& peer, const std::string& room, const std::string& net,
+                       const std::function<bool(const json&)>& pred, int timeout_ms = DENY_WAIT_MS) {
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    for (;;) {
+        if (pred(deny_report(peer, room, net))) return true;
+        if (left_ms(deadline) <= 0) return false;
+        sleep_ms(100);
+    }
+}
+
+static bool room_is_denied(const std::string& room, bool want) {
+    return deny_until("", room, "", [want](const json& j) { return j.value("server_denied", !want) == want; });
+}
+
+static bool peer_is_denied(const std::string& peer, bool want) {
+    return deny_until(peer, "", "", [want](const json& j) { return j.value("peer_denied", !want) == want; });
+}
+
+static void deny_clear() {
+    deny_set({});
+    check("(the list is empty again)",
+          deny_until("", "", "", [](const json& j) { return j.value("listed", json()) == json::array({0, 0, 0}); }));
+}
+
+// A login whose answer is read, whatever it is.
+static std::unique_ptr<Peer> login_quiet(const Ident& id, const std::string& mode = "full") {
+    auto p = open_socket(id);
+    p->send({{"type", "auth_hello"}});
+    auto ch = next_json(*p, typed("auth_challenge"));
+    if (!ch) return p;
+    p->nonce = ch->value("nonce", "");
+    p->relay_key = ch->value("door_key", "");
+    const uint64_t ts = client_now_secs();
+    json a = {{"type", "auth"}, {"v", 2}, {"peer_id", id.peer}, {"public_key", id.pub_b64}, {"timestamp", ts},
+              {"nonce", p->nonce}, {"domain", g_domain},
+              {"signature", id.sign(auth_v2_message(g_domain, p->nonce, id.peer, ts, mode, ""))}};
+    if (mode == "guest") a["guest"] = true;
+    if (mode == "fetch") a["fetch"] = true;
+    p->send(a);
+    auto r = next_json(*p, json_where([](const json& j) {
+        return j.value("type", "") == "auth_ok" || j.value("type", "") == "auth_failed";
+    }));
+    p->answer = r ? *r : json::object();
+    p->ok = r && r->value("type", "") == "auth_ok";
+    return p;
+}
+
+// Told `error` in an uncounted auth_failed, then closed 1008.
+static bool refused_with(Peer& p, const std::string& error) {
+    const bool told = (p.answer.is_object() && p.answer.value("error", "") == error) ||
+                      next(p, json_where([&](const json& j) {
+                          return j.value("type", "") == "auth_failed" && j.value("error", "") == error;
+                      })).has_value();
+    return told && closed_by_relay(p) && p.ws.close_code == 1008;
+}
+
+static bool is_room_denied(const json& j, const std::string& room) {
+    return j.value("type", "") == "room_denied" && j.value("room", "") == room &&
+           keys_of(j) == std::set<std::string>{"type", "room"};
+}
+
+static Pred room_denied_for(const std::string& room) {
+    return json_where([room](const json& j) { return is_room_denied(j, room); });
+}
+
+static std::string source_address(int n) {
+    return "127.0." + std::to_string(1 + n / 250) + "." + std::to_string(2 + n % 250);
+}
+
+static void deny_join_refused_for_member_guest_fetch() {
+    printf("denylist: a denied server's or meeting's room is never formed\n");
+    Ident owner, change;
+    Door door;
+    const std::string nonce = random_hex(16);
+    const std::string s = genesis_server_id(owner.peer, nonce);
+    const std::string meeting = "conf:" + random_hex(20);
+    const std::string open_room = random_hex(20);
+    std::string upper = s;
+    for (char& c : upper) c = static_cast<char>(toupper(static_cast<unsigned char>(c)));
+    deny_set({{s, meeting}, {}, {}});
+    check("the relay reads the list", room_is_denied(s, true) && room_is_denied(meeting, true));
+
+    auto a = login(Ident());
+    a->send({{"type", "join"}, {"room", s}});
+    auto r = next_json(*a, json_where([&](const json& j) { return j.value("room", "") == s; }));
+    check("a member's join is answered room_denied and nothing else", r && is_room_denied(*r, s));
+    a->send({{"type", "join"}, {"room", upper}});
+    check("in any case", next(*a, room_denied_for(upper)).has_value());
+    a->send({{"type", "join"}, {"room", meeting}});
+    check("a denied meeting's join too", next(*a, room_denied_for(meeting)).has_value());
+    auto g = login(Ident(), "guest");
+    g->send({{"type", "join"}, {"room", s}});
+    check("a guest's join (the web viewer, the server browser)", next(*g, room_denied_for(s)).has_value());
+    auto f = login(Ident(), "fetch");
+    f->send({{"type", "join"}, {"room", s}});
+    check("a fetch socket's join (a push wake)", next(*f, room_denied_for(s)).has_value());
+    settle({a.get(), g.get(), f.get()});
+    check("and none of them is told who is there",
+          !got(*a, typed("members", s)) && !got(*g, typed("members", s)) && !got(*f, typed("members", s)));
+    check("no room exists for it", deny_report("", s).value("room", true) == false);
+    check("a socket that asked is in no room", discover(*a, s) == Named{0, 0, false});
+
+    a->send({{"type", "lock_get"}, {"locks", json::array({{{"server", s}, {"owner", ""}}, {{"server", open_room}, {"owner", ""}}})}});
+    auto first = next_json(*a, json_where([](const json& j) {
+        const std::string t = j.value("type", "");
+        return t == "room_denied" || t == "lock_chain";
+    }));
+    check("a lock read of a denied server is answered room_denied", first && is_room_denied(*first, s));
+    auto second = next_json(*a, typed("lock_chain"));
+    check("and the rest of the read as before", second && second->value("server", "") == open_room);
+    a->send({{"type", "lock_put"}, {"server", s}, {"owner", ""}, {"links", base_link(s, door, change, owner, nonce, true)}});
+    auto put = next_json(*a, json_where([](const json& j) {
+        const std::string t = j.value("type", "");
+        return t == "room_denied" || t == "lock_chain";
+    }));
+    check("a lock write is answered room_denied", put && is_room_denied(*put, s));
+    check("and takes nothing", deny_report("", s).value("lock", true) == false);
+    auto m = join(*a, open_room);
+    check("a room nobody listed still forms", m && peers_of(*m) == std::set<std::string>{a->id.peer});
+    deny_clear();
+    auto again = join(*a, s);
+    check("the lifted server's room forms again", again && peers_of(*again) == std::set<std::string>{a->id.peer});
+}
+
+static void deny_add_clears_the_room() {
+    printf("denylist: an added server's room, rings and parked joins go at once\n");
+    Ident owner, change, ida, idb, idc;
+    Door door;
+    const std::string nonce = random_hex(16);
+    const std::string s = genesis_server_id(owner.peer, nonce);
+    auto a = login3(ida, "new", 0);
+    auto b = login3(idb, "new", 0);
+    auto c = login3(idc, "new", 0);
+    a->send({{"type", "lock_put"}, {"server", s}, {"owner", ""}, {"links", base_link(s, door, change, owner, nonce, true)}});
+    auto put = next_json(*a, typed("lock_chain"));
+    check("(the server's lock is taken)", put && put->value("put", false));
+    for (auto* p : {a.get(), b.get(), c.get()}) join(*p, s, {{"door_proof", door_proof(*p, s, door)}});
+    const std::string join_topic(door_room::JOIN_TOPIC);
+    a->send(ring_control(s, "", {"dc", join_topic}, change));
+    a->send_bin(frame(0x07, {s, "dc"}, "deny-ring"));
+    a->send_bin(frame(0x07, {s, join_topic}, "deny-parked"));
+    check("(the ring takes the frame)", next(*b, bin(frame(0x08, {s, "dc", ida.peer}, "deny-ring"))).has_value());
+    settle({a.get(), b.get(), c.get()});
+    check("(both rings hold frames)", deny_report("", s).value("rings", 0) == 2);
+    // A direct for a member not in the room yet waits in the offline buffer under the room.
+    Ident absent;
+    a->send_bin(frame(0x04, {s, absent.peer}, "deny-waiting"));
+    settle({a.get()});
+    check("(a direct waits for an absent member)", deny_report(absent.peer, s).value("queued_in_room", 0) == 1);
+    // A member whose phone dropped: its session holds the room in grace.
+    const uint64_t c_read = c->ws.counted;
+    c->ws.abort();
+    check("(the dropped member left presence)", next(*a, about("peer_left", s, idc.peer)).has_value() &&
+                                                    next(*b, about("peer_left", s, idc.peer)).has_value());
+    b->ws.inbox.clear();
+
+    deny_set({{s}, {}, {}});
+    auto ta = next_json(*a, room_denied_for(s), DENY_WAIT_MS);
+    auto tb = next_json(*b, room_denied_for(s), DENY_WAIT_MS);
+    check("every member is told room_denied within seconds", ta && tb);
+    // Back inside its grace (seconds in the live tests).
+    auto c2 = login3(idc, c->sid, c_read);
+    const auto upto = through(*c2, room_denied_for(s));
+    check("the member in grace is told room_denied on its resume", resumed(*c2) && !c2->answer.value("gap", true) &&
+                                                                       !upto.empty());
+    check("and is no longer in the room",
+          std::none_of(upto.begin(), upto.end(), [&](const Frame& fr) {
+              return is_json(fr, [&](const json& j) { return j.value("type", "") == "members" && j.value("room", "") == s; });
+          }));
+    settle({a.get(), b.get(), c2.get()});
+    check("the resume tells it once", !got(*c2, room_denied_for(s)));
+    check("each member is told once", !got(*a, room_denied_for(s)) && !got(*b, room_denied_for(s)));
+    check("and nobody is told anyone left", !got(*a, typed("peer_left", s)) && !got(*b, typed("peer_left", s)));
+
+    a->send_bin(frame(0x03, {s}, "deny-03"));
+    a->send_bin(frame(0x0A, {s}, "deny-0a"));
+    a->send_bin(frame(0x07, {s, "dc"}, "deny-07"));
+    a->send({{"type", "msg"}, {"room", s}, {"data", "deny-msg"}});
+    a->send_bin(channel_frame(s, idb.peer, "dc", "deny-09"));
+    a->send_bin(frame(0x02, {s, idb.peer}, "deny-02"));
+    b->send(catchup(s, "dc"));
+    b->send(catchup(s, join_topic));
+    settle({a.get(), b.get()});
+    check("afterwards nothing sent into it reaches a former member",
+          b->ws.inbox.empty() || std::none_of(b->ws.inbox.begin(), b->ws.inbox.end(), [&](const Frame& fr) {
+              return fr.data.find("deny-") != std::string::npos;
+          }));
+    b->ws.inbox.clear();
+    const json rep = deny_report(idb.peer, s);
+    check("its rings are gone, the parking ring too", rep.value("rings", -1) == 0);
+    check("the room is gone", rep.value("room", true) == false);
+    check("what waited in the buffer for the room is gone, and its channel copy was never kept",
+          rep.value("queued_for", -1) == 0 && rep.value("queued_in_room", -1) == 0);
+    check("the join lock record stays, frozen", rep.value("lock", false) == true);
+
+    deny_clear();
+    auto back = join(*a, s, {{"door_proof", door_proof(*a, s, door)}});
+    check("a lifted server's room forms again behind its door at once", back && back->value("proved", false));
+}
+
+static void deny_direct_layers() {
+    printf("denylist: directs into a denied room wake nobody and are never kept\n");
+    // Layer one: the 0x04 empty-room branch refuses a denied room before its deposit and
+    // its push wake.
+    const std::string s = random_hex(20);
+    Ident idt;
+    const std::string token = "deny-token-" + g_tag;
+    {
+        auto t = login(idt);
+        t->send({{"type", "register_push_token"}, {"token", token}, {"platform", "android"}});
+        check("(the target registers a token)", next(*t, typed("push_token_registered")).has_value());
+        t->ws.close_clean();
+    }
+    deny_set({{s}, {}, {}});
+    check("(the server is listed)", room_is_denied(s, true));
+    auto a = login(Ident());
+    a->send_bin(frame(0x04, {s, idt.peer}, "deny-wake"));
+    settle({a.get()});
+    const json quiet = deny_report(idt.peer, s);
+    check("a direct naming a denied room wakes nobody", quiet.value("woken", true) == false);
+    check("and is not kept", quiet.value("queued_for", -1) == 0);
+    const std::string plain = room_name("deny-plain");
+    a->send_bin(frame(0x04, {plain, idt.peer}, "deny-wake-plain"));
+    settle({a.get()});
+    const json woke = deny_report(idt.peer, plain);
+    check("(a direct into any other empty room does wake, and is kept)",
+          woke.value("woken", false) && woke.value("queued_in_room", 0) == 1);
+    {
+        auto t = login(idt);
+        join(*t, plain);
+        t->send({{"type", "unregister_push_token"}});
+        sync(*t);
+    }
+
+    // Layer two: the deposit choke point. A frame for the denied room still in a ring when
+    // its session runs out is never moved into the offline buffer.
+    deny_clear();
+    const std::string s2 = random_hex(20);
+    Ident idx, idy;
+    auto x = login3(idx, "new", 0);
+    auto y = login3(idy, "new", 0);
+    join(*x, s2);
+    join(*y, s2);
+    y->ws.abort();
+    check("(the receiver left presence)", next(*x, about("peer_left", s2, idy.peer)).has_value());
+    x->send_bin(frame(0x04, {s2, idy.peer}, "deny-held"));
+    settle({x.get()});
+    deny_set({{s2}, {}, {}});
+    check("(the server is listed)", room_is_denied(s2, true));
+    check("(the receiver's grace runs out)",
+          deny_until(idy.peer, s2, "", [](const json& j) { return j.value("session", true) == false; }, 15000));
+    const json rep = deny_report(idy.peer, s2);
+    check("its ring's frame for the denied room is not handed to the offline buffer",
+          rep.value("queued_for", -1) == 0 && rep.value("queued_in_room", -1) == 0);
+
+    // The choke point's other half: nothing is kept for a listed identity, its mailbox included.
+    Ident master;
+    deny_set({{}, {master.peer}, {}});
+    check("(the identity is listed)", peer_is_denied(master.peer, true));
+    const std::string inbox = "inbox:" + master.peer;
+    auto z = login(Ident());
+    join(*z, inbox);
+    z->send_bin(frame(0x04, {inbox, master.peer}, "deny-mailbox"));
+    z->send_bin(frame(0x04, {room_name("deny-dm"), master.peer}, "deny-dm"));
+    settle({z.get()});
+    check("a deposit for a listed identity, its mailbox included, is not kept",
+          deny_report(master.peer).value("queued_for", -1) == 0);
+    deny_clear();
+}
+
+static void deny_identity_bare_master() {
+    printf("denylist: a listed identity's own key logs in nowhere\n");
+    Ident master;
+    deny_set({{}, {master.peer}, {}});
+    check("(the identity is listed)", peer_is_denied(master.peer, true));
+    for (const char* mode : {"full", "fetch", "guest"}) {
+        auto p = login_quiet(master, mode);
+        check(std::string("a ") + mode + " login as the master is refused with account_denied",
+              !p->ok && refused_with(*p, "account_denied"));
+    }
+    auto other = login_quiet(Ident());
+    check("anyone else logs in", other->ok);
+    deny_clear();
+    auto back = login_quiet(master);
+    check("a lifted identity logs in again", back->ok);
+}
+
+static void deny_identity_stranger_inbox_join_looks_normal() {
+    printf("denylist: a stranger's inbox join learns nothing of a listing\n");
+    Ident listed, unlisted;
+    deny_set({{}, {listed.peer}, {}});
+    check("(the identity is listed)", peer_is_denied(listed.peer, true));
+    auto x = login(Ident());
+    auto mx = join(*x, "inbox:" + listed.peer);
+    auto my = join(*x, "inbox:" + unlisted.peer);
+    check("a plain join of a listed identity's inbox is answered as any other",
+          mx && my && keys_of(*mx) == keys_of(*my) && peers_of(*mx) == std::set<std::string>{x->id.peer} &&
+              peers_of(*my) == std::set<std::string>{x->id.peer});
+    check("and the socket stays", sync(*x));
+    deny_clear();
+}
+
+static void deny_identity_foreign_show_looks_normal() {
+    printf("denylist: a roster replayed from someone else's socket is answered as before (D4)\n");
+    Ident master, d1, d2;
+    deny_set({{}, {master.peer}, {}});
+    check("(the identity is listed)", peer_is_denied(master.peer, true));
+    auto x = login(Ident());
+    auto m = join(*x, "inbox:" + master.peer, {{"inbox_roster", legacy_roster(master, {&d1, &d2})}});
+    check("a friend replaying the roster is answered as a non-owner", m && peers_of(*m) == std::set<std::string>{x->id.peer});
+    check("and is never closed for it", sync(*x) && !x->ws.closed());
+    check("the identity's devices are learned from it all the same", peer_is_denied(d2.peer, true));
+    auto p = login_quiet(d1);
+    check("and refused at login", !p->ok && refused_with(*p, "account_denied"));
+    deny_clear();
+}
+
+static void deny_identity_learned_by_inbox_roster() {
+    printf("denylist: a listed identity's devices are learned from its inbox roster (D1, D11)\n");
+    Ident master, d1, e, f, outsider, other;
+    deny_set({{}, {master.peer}, {}});
+    check("(the identity is listed)", peer_is_denied(master.peer, true));
+    // E is a device of the identity the relay has not learned yet: it logs in, registers
+    // push, and leaves a direct in someone's buffer. F is one that never connects.
+    auto pe = login3(e, "new", 0);
+    pe->send({{"type", "register_push_token"}, {"token", "deny-e-" + g_tag}, {"platform", "android"}});
+    check("(an unlearned device logs in and registers)", next(*pe, typed("push_token_registered")).has_value());
+    pe->send({{"type", "set_push_prefs"}, {"prefs", {{random_hex(20), {{"level", "all"}}}}}});
+    const std::string r1 = room_name("deny-e-left");
+    pe->send_bin(frame(0x04, {r1, outsider.peer}, "deny-e-frame"));
+    auto a = login(Ident());
+    const std::string r2 = room_name("deny-f-waits");
+    a->send_bin(frame(0x04, {r2, f.peer}, "deny-for-f"));
+    settle({pe.get(), a.get()});
+    check("(its deposit and one for F are kept)", deny_report(e.peer).value("sent_by", 0) == 1 &&
+                                                      deny_report(f.peer).value("queued_for", 0) == 1 &&
+                                                      deny_report(e.peer).value("token", false));
+
+    // D1 shows the roster on its own socket, which is then closed: the relay must not use it.
+    auto p1 = login3(d1, "new", 0);
+    p1->send({{"type", "join"}, {"room", "inbox:" + master.peer}, {"inbox_roster", legacy_roster(master, {&d1, &e, &f})}});
+    check("the showing device is closed with account_denied", refused_with(*p1, "account_denied"));
+    auto alive = login(other);
+    check("and the relay goes on serving", alive->ok && sync(*alive) && sync(*a));
+    check("a device of the identity already online is closed too", refused_with(*pe, "account_denied"));
+    check("one that never connected is refused at login", [&] {
+        auto pf = login_quiet(f);
+        return !pf->ok && refused_with(*pf, "account_denied");
+    }());
+    check("the shower cannot come back", [&] {
+        auto again = login_quiet(d1);
+        return !again->ok && refused_with(*again, "account_denied");
+    }());
+    check("a device learned after the listing loses its token and prefs (D11)",
+          deny_until(e.peer, "", "", [](const json& j) { return !j.value("token", true) && !j.value("prefs", true); }));
+    check("and what waited for it", deny_report(f.peer).value("queued_for", -1) == 0);
+    check("and, within a tick, what it left in others' buffers",
+          deny_until(e.peer, "", "", [](const json& j) { return j.value("sent_by", -1) == 0; }));
+    deny_clear();
+    check("a lifted identity's learned devices log in again", [&] {
+        auto back = login_quiet(f);
+        return back->ok;
+    }());
+}
+
+static void deny_learns_no_unconsented_pending() {
+    printf("denylist: only the fold teaches devices, never a pending join without consent (D5)\n");
+    Ident master, d, innocent, joining;
+    deny_set({{}, {master.peer}, {}});
+    check("(the identity is listed)", peer_is_denied(master.peer, true));
+    roster::Roster r = roster::Roster::named(master.peer);
+    r.legacy.push_back({d.peer, master.sign(roster::legacy_payload(master.peer, d.peer))});
+    r.consents.push_back({d.peer, d.sign(roster::consent_payload(master.peer, d.peer))});
+    // A pending join the master signed naming a device that never consented, and one that did.
+    r.pendings.push_back({roster::LEGACY_BASE, innocent.peer,
+                          master.sign(roster::pending_payload(master.peer, roster::LEGACY_BASE, innocent.peer))});
+    r.pendings.push_back({roster::LEGACY_BASE, joining.peer,
+                          master.sign(roster::pending_payload(master.peer, roster::LEGACY_BASE, joining.peer))});
+    r.consents.push_back({joining.peer, joining.sign(roster::consent_payload(master.peer, joining.peer))});
+    std::sort(r.pendings.begin(), r.pendings.end());
+    std::sort(r.consents.begin(), r.consents.end());
+    auto x = login(Ident());
+    join(*x, "inbox:" + master.peer, {{"inbox_roster", json::parse(roster::to_json(r).dump())}});
+    check("(the member is learned)", peer_is_denied(d.peer, true));
+    check("a consented pending join is learned", peer_is_denied(joining.peer, true));
+    auto p = login_quiet(innocent);
+    check("a device named in a pending join it never signed logs in", p->ok);
+    deny_clear();
+}
+
+static void deny_identity_add_purges() {
+    printf("denylist: listing an identity the relay already knows closes and empties it\n");
+    Ident master, d, friend_id, stranger;
+    auto pd = login3(d, "new", 0);
+    auto shown = join(*pd, "inbox:" + master.peer, {{"inbox_roster", legacy_roster(master, {&d})}});
+    check("(the device owns its inbox)", shown && peers_of(*shown) == std::set<std::string>{d.peer});
+    pd->send({{"type", "register_push_token"}, {"token", "deny-d-" + g_tag}, {"platform", "android"}});
+    check("(it registers push)", next(*pd, typed("push_token_registered")).has_value());
+    const std::string r = room_name("deny-d-left");
+    pd->send_bin(frame(0x04, {r, friend_id.peer}, "deny-d-frame"));
+    auto s = login(stranger);
+    join(*s, "inbox:" + master.peer);
+    // The mailbox: a deposit for the master reaches its owner live and stays for its siblings.
+    s->send_bin(frame(0x04, {"inbox:" + master.peer, master.peer}, "deny-mail"));
+    check("(the owner gets the request)", next(*pd, bin(frame(0x06, {"inbox:" + master.peer, stranger.peer}, "deny-mail"))).has_value());
+    settle({pd.get(), s.get()});
+    check("(the relay holds its mailbox, token and frame)",
+          deny_report(master.peer).value("queued_for", 0) == 1 && deny_report(d.peer).value("token", false) &&
+              deny_report(d.peer).value("sent_by", 0) == 1);
+    deny_set({{}, {master.peer}, {}});
+    check("its online device is closed with account_denied", refused_with(*pd, "account_denied"));
+    const json rd = deny_report(d.peer);
+    check("its token and the frames it left go", !rd.value("token", true) && rd.value("sent_by", -1) == 0);
+    check("so does its mailbox", deny_report(master.peer).value("queued_for", -1) == 0);
+    check("a device the held roster names is refused at login", [&] {
+        auto again = login_quiet(d);
+        return !again->ok && refused_with(*again, "account_denied");
+    }());
+    check("the stranger stays", sync(*s));
+    deny_clear();
+}
+
+// Frames a listed device left in another device's session ring are not handed off to
+// offline_buffer when that session's grace ends (review R3); another sender's are.
+static void deny_identity_frames_in_a_held_ring_stay_gone() {
+    printf("denylist: a listed identity's frames in a ring in grace are not handed off\n");
+    Ident master, d, t, other;
+    auto pd = login3(d, "new", 0);
+    auto shown = join(*pd, "inbox:" + master.peer, {{"inbox_roster", legacy_roster(master, {&d})}});
+    check("(the device owns its inbox)", shown && peers_of(*shown) == std::set<std::string>{d.peer});
+    auto pt = login3(t, "new", 0);
+    auto po = login(other);
+    const std::string r = room_name("deny-held");
+    join(*pt, r);
+    join(*pd, r);
+    join(*po, r);
+    pt->ws.abort();
+    check("(the target is in grace)",
+          next(*pd, about("peer_left", r, t.peer)).has_value() && next(*po, about("peer_left", r, t.peer)).has_value());
+    pd->send_bin(frame(0x04, {r, t.peer}, "deny-held-listed"));
+    po->send_bin(frame(0x04, {r, t.peer}, "deny-held-other"));
+    check("(both frames are in its ring)", sync(*pd) && sync(*po) && deny_report(t.peer).value("queued_for", -1) == 0);
+    deny_set({{}, {master.peer}, {}});
+    check("the listed device is closed", refused_with(*pd, "account_denied"));
+    check("(the target is still in grace)", deny_report(t.peer).value("session", false));
+    const int grace_ms = static_cast<int>(pt->answer.value("grace_secs", 0) * 1000);
+    check("when its grace ends the ring is handed off",
+          deny_until(t.peer, "", "", [](const json& j) { return !j.value("session", true); }, grace_ms + DENY_WAIT_MS));
+    check("with the other sender's frame", deny_report(other.peer).value("sent_by", -1) == 1);
+    check("and not the listed device's", deny_report(d.peer).value("sent_by", -1) == 0 &&
+                                             deny_report(t.peer).value("queued_for", -1) == 1);
+    deny_clear();
+}
+
+static void deny_network() {
+    printf("denylist: a listed network is refused at the socket\n");
+    const int refused_src = 60201, held_src = 60202;
+    const std::string refused_ip = source_address(refused_src), held_ip = source_address(held_src);
+    g_pin_source = held_src;
+    auto held = login(Ident());
+    g_pin_source = -1;
+    check("(a socket from the address logs in)", held->ok);
+    deny_set({{}, {}, {refused_ip, held_ip}});
+    check("(the networks are listed)",
+          deny_until("", "", held_ip, [](const json& j) { return j.value("network_denied", false); }));
+    check("a socket from a listed network is closed with network_denied", refused_with(*held, "network_denied"));
+    g_pin_source = refused_src;
+    auto p = open_socket(Ident());
+    g_pin_source = -1;
+    p->send({{"type", "auth_hello"}});
+    check("a new one is refused before it is challenged",
+          refused_with(*p, "network_denied") && !got(*p, typed("auth_challenge")));
+    auto other = login_quiet(Ident());
+    check("every other address is let in", other->ok);
+    deny_clear();
+    g_pin_source = refused_src;
+    auto back = login_quiet(Ident());
+    g_pin_source = -1;
+    check("a lifted network is let in again", back->ok);
+}
+
+static void deny_reload() {
+    printf("denylist: reloads keep the last good list\n");
+    const std::string s = random_hex(20);
+    deny_set({{s}, {}, {}});
+    check("(the server is listed)", room_is_denied(s, true));
+    write_deny_raw("{\"version\":1,\"servers\":[");
+    sleep_ms(4500);
+    check("a file that does not parse keeps the last good list", room_is_denied(s, true));
+    write_deny_raw(R"({"version":1,"servers":5,"identities":{},"networks":[null]})");
+    sleep_ms(4500);
+    check("so does one of the wrong types", room_is_denied(s, true));
+    unlink(g_denylist.c_str());
+    sleep_ms(4500);
+    check("so does a missing file", room_is_denied(s, true));
+    auto alive = login(Ident());
+    check("and the relay never stopped", alive->ok && sync(*alive));
+    deny_clear();
+    check("a valid empty file clears it", room_is_denied(s, false));
+
+    // Two edits inside one second, of the same size, to the same inode: only the
+    // nanoseconds tell them apart.
+    const std::string s1 = random_hex(20), s2 = random_hex(20);
+    const time_t sec = time(nullptr) - 100;
+    write_deny_in_place(deny_text({{s1}, {}, {}}), sec, 100);
+    check("(the first edit is read)", room_is_denied(s1, true));
+    write_deny_in_place(deny_text({{s2}, {}, {}}), sec, 200);
+    check("a second edit in the same second is read too", room_is_denied(s2, true) && room_is_denied(s1, false));
+    // A file renamed on with the same size and the very same time: only its inode tells.
+    const std::string s3 = random_hex(20);
+    const std::string tmp = g_denylist + ".next";
+    if (FILE* f = fopen(tmp.c_str(), "wb")) {
+        const std::string text = deny_text({{s3}, {}, {}});
+        fwrite(text.data(), 1, text.size(), f);
+        fclose(f);
+    }
+    struct timespec t[2] = {{sec, 200}, {sec, 200}};
+    utimensat(AT_FDCWD, tmp.c_str(), t, 0);
+    rename(tmp.c_str(), g_denylist.c_str());
+    check("an atomic rename is read", room_is_denied(s3, true) && room_is_denied(s2, false));
+    deny_clear();
+}
+
+// HOL-SEC-203: keys.json is re-read every 30 s; a field of the wrong type once threw out of
+// that timer and ended the relay with no restart snapshot.
+static void deny_license_wrong_types() {
+    printf("keys.json of the wrong types keeps the relay up (HOL-SEC-203)\n");
+    if (g_keys_file.empty() || getenv("RELAY_LIVE_DENY_FAST")) {
+        printf("  skip (no RELAY_LIVE_KEYS, or RELAY_LIVE_DENY_FAST)\n");
+        return;
+    }
+    if (FILE* f = fopen(g_keys_file.c_str(), "wb")) {
+        fputs(R"({"enabled":"yes","keys":["AAAA-BBBB-CCCC-DDDD"]})", f);
+        fclose(f);
+    }
+    sleep_ms(32000);
+    auto p = login_quiet(Ident());
+    check("a keys.json with enabled as text leaves the relay serving, its keys as they were",
+          p->ok && sync(*p));
+    unlink(g_keys_file.c_str());
+}
+
+static void deny_stats_private() {
+    printf("denylist: /server-stats names no counts unless the operator opts in\n");
+    deny_set({{random_hex(20)}, {}, {}});
+    Socket s;
+    const auto body = s.get("/server-stats");
+    const json j = body ? json::parse(*body, nullptr, false) : json();
+    check("the stats carry no denylist field by default", j.is_object() && !j.contains("denylist"));
+    deny_clear();
+}
+
+
+// The denylist across restarts (fdstore_restart.py): devices learned before a restart stay
+// refused, an entry the operator added while no relay ran drops what the snapshot brought
+// back, and a file unreadable or missing at the next start keeps the list (review D8, D9).
+struct RestartDeny {
+    Ident master, kept, removed, owner, change, held;
+    Door door;
+    std::string server;
+    std::string held_sid;
+    uint64_t held_read = 0;
+};
+
+static RestartDeny& restart_deny() {
+    static RestartDeny r;
+    return r;
+}
+
+static void write_text_file(const std::string& path, const std::string& text) {
+    if (FILE* f = fopen(path.c_str(), "wb")) {
+        fwrite(text.data(), 1, text.size(), f);
+        fclose(f);
+    }
+}
+
+static void next_relay(const std::string& dir, int n) {
+    write_text_file(dir + "/ready" + std::to_string(n - 1), "1");
+    std::string port;
+    if (!wait_for_file(dir + "/port" + std::to_string(n), port, 30000)) {
+        check("the relay came back", false);
+        return;
+    }
+    g_port = atoi(port.c_str());
+}
+
+static void deny_restart_before(const std::string& dir) {
+    g_denylist = dir + "/denylist.json";
+    RestartDeny& r = restart_deny();
+    deny_set({{}, {r.master.peer}, {}});
+    check("(restart: the identity is listed)", peer_is_denied(r.master.peer, true));
+    auto x = login(Ident());
+    join(*x, "inbox:" + r.master.peer, {{"inbox_roster", legacy_roster(r.master, {&r.kept, &r.removed})}});
+    check("(restart: both of its devices are learned)", peer_is_denied(r.removed.peer, true));
+    // A later roster drops one of them; learned, it stays refused (no laundering).
+    join(*x, "inbox:" + r.master.peer, {{"inbox_roster", hs_roster(r.master, {&r.kept, &r.removed}, {{&r.removed, &r.kept}})}});
+    sync(*x);
+    const std::string nonce = random_hex(16);
+    r.server = genesis_server_id(r.owner.peer, nonce);
+    auto o = login(Ident());
+    o->send({{"type", "lock_put"}, {"server", r.server}, {"owner", ""},
+             {"links", base_link(r.server, r.door, r.change, r.owner, nonce, true)}});
+    next(*o, typed("lock_chain"));
+    join(*o, r.server, {{"door_proof", door_proof(*o, r.server, r.door)}});
+    o->send(ring_control(r.server, "", {"rc"}, r.change));
+    o->send_bin(frame(0x07, {r.server, "rc"}, "rs-deny-ring"));
+    sync(*o);
+    // A member whose phone is away across the restart: its session holds the room.
+    auto g = login3(r.held, "new", 0);
+    join(*g, r.server, {{"door_proof", door_proof(*g, r.server, r.door)}});
+    sync(*g);
+    r.held_sid = g->sid;
+    r.held_read = g->ws.counted;
+    g->ws.abort();
+    check("(restart: the server's ring holds a frame)", deny_report("", r.server).value("rings", 0) == 1);
+    // Listed while no relay runs: fdstore_restart.py moves it onto the file between the two.
+    write_text_file(dir + "/denylist.next1", deny_text({{r.server}, {r.master.peer}, {}}));
+}
+
+// The first thing after the relay comes back, well inside its first reload tick: what the
+// start itself applied to the state the snapshot brought back.
+static void deny_restart_first() {
+    RestartDeny& r = restart_deny();
+    auto g = login3(r.held, r.held_sid, r.held_read);
+    const auto upto = through(*g, room_denied_for(r.server));
+    check("a member away across the restart is told on its resume that the server is denied",
+          resumed(*g) && !upto.empty());
+    check("and is no longer in its room", std::none_of(upto.begin(), upto.end(), [&](const Frame& fr) {
+              return is_json(fr, [&](const json& j) {
+                  return j.value("type", "") == "members" && j.value("room", "") == r.server;
+              });
+          }));
+}
+
+static void deny_restart_after(const std::string& dir) {
+    printf("denylist across restarts\n");
+    RestartDeny& r = restart_deny();
+    check("a server listed while the relay was down has no ring after the restart",
+          room_is_denied(r.server, true) && deny_report("", r.server).value("rings", -1) == 0);
+    check("a device learned before the restart stays refused, though the roster now leaves it out", [&] {
+        auto p = login_quiet(r.removed);
+        return !p->ok && refused_with(*p, "account_denied");
+    }());
+    write_text_file(dir + "/denylist.next2", "{\"version\":1,\"servers\":[");
+    next_relay(dir, 3);
+    check("a file unreadable at start keeps the list the previous process held",
+          room_is_denied(r.server, true) && peer_is_denied(r.removed.peer, true) && peer_is_denied(r.master.peer, true));
+    write_text_file(dir + "/denylist.drop3", "1");
+    next_relay(dir, 4);
+    check("so does a file missing at start", room_is_denied(r.server, true) && peer_is_denied(r.removed.peer, true));
+    check("and its devices are still refused", [&] {
+        auto p = login_quiet(r.kept);
+        return !p->ok && refused_with(*p, "account_denied");
+    }());
+}
+
+static void test_denylist() {
+    deny_join_refused_for_member_guest_fetch();
+    deny_add_clears_the_room();
+    deny_direct_layers();
+    deny_identity_bare_master();
+    deny_identity_stranger_inbox_join_looks_normal();
+    deny_identity_foreign_show_looks_normal();
+    deny_identity_learned_by_inbox_roster();
+    deny_learns_no_unconsented_pending();
+    deny_identity_add_purges();
+    deny_identity_frames_in_a_held_ring_stay_gone();
+    deny_network();
+    deny_reload();
+    deny_stats_private();
+    deny_license_wrong_types();
+}
+
 int main(int argc, char** argv) {
     if (argc != 3) {
         fprintf(stderr, "usage: test_relay_live <port> <auth domain>\n");
@@ -6278,6 +7021,22 @@ int main(int argc, char** argv) {
     // RELAY_LIVE_RESTART=<dir>: the restart case alone, driven by test/run_restart.sh.
     if (const char* restart = getenv("RELAY_LIVE_RESTART")) {
         hs_restart(restart);
+        SSL_CTX_free(g_ctx);
+        if (failures) printf("%d FAILED\n", failures);
+        return failures ? 1 : 0;
+    }
+    // =deny: the operator denylist against a relay of its own, whose file is
+    // RELAY_LIVE_DENYLIST (run_live.sh); RELAY_LIVE_KEYS is its keys.json.
+    if (const char* deny_only = getenv("RELAY_LIVE_ONLY"); deny_only && std::string(deny_only) == "deny") {
+        const char* path = getenv("RELAY_LIVE_DENYLIST");
+        const char* keys = getenv("RELAY_LIVE_KEYS");
+        g_keys_file = keys ? keys : "";
+        if (!path || !*path) {
+            check("RELAY_LIVE_DENYLIST names the relay's denylist", false);
+        } else {
+            g_denylist = path;
+            test_denylist();
+        }
         SSL_CTX_free(g_ctx);
         if (failures) printf("%d FAILED\n", failures);
         return failures ? 1 : 0;

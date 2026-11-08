@@ -8,6 +8,8 @@
 #   RELAY_LIVE_BUILD=<dir>    keep the relay's objects there between runs
 #   RELAY_LIVE_PORTS=lo-hi    pick the relay's port in this range (a machine others share)
 #   RELAY_LIVE_JOBS=n         compile at most n objects at once
+#   RELAY_LIVE_VARIANTS="a b" run only these variants (main, deny, exempt, backpressure,
+#                             breaker_shadow, breaker_enforce, oom); "none" builds only
 cd "$(dirname "$0")" || exit 1
 
 skip() {
@@ -86,15 +88,22 @@ for f in main crypto license reports http_handlers snapshot; do
     compile "$f" "../src/$f.cpp" "$obj/$f.o" $relay_cxx
     objects+=("$obj/$f.o")
 done
+# Whether a variant runs (RELAY_LIVE_VARIANTS, a mutation pass's subset; all by default).
+wanted() { [ -z "${RELAY_LIVE_VARIANTS:-}" ] || [[ " $RELAY_LIVE_VARIANTS " == *" $1 "* ]]; }
 compile ws_handler_main ../src/ws_handler.cpp "$obj/ws_handler_main.o" $relay_cxx
 # The circuit breaker enforced (breaker.h); the main build runs it in shadow mode.
-compile ws_handler_enforce ../src/ws_handler.cpp "$obj/ws_handler_enforce.o" $relay_cxx -DHOLLOW_BREAKER_ENFORCE=1
+enforce_built=0
+if wanted breaker_enforce; then
+    compile ws_handler_enforce ../src/ws_handler.cpp "$obj/ws_handler_enforce.o" $relay_cxx -DHOLLOW_BREAKER_ENFORCE=1
+    enforce_built=1
+fi
 g++ -std=c++17 $flags -I../src test_relay_live.cpp ../src/crypto.cpp \
     -o "$dir/client" -lssl -lcrypto -lsodium > "$dir/client.build" 2>&1 &
 pids+=($!)
 names+=(client)
 wait_all
 for v in main enforce; do
+    [ $v = enforce ] && [ $enforce_built = 0 ] && continue
     g++ $flags "${objects[@]}" "$obj/ws_handler_$v.o" -o "$dir/relay_$v" -lssl -lcrypto -lsodium -lz -pthread \
         > "$dir/link_$v.build" 2>&1 || build_fail "link $v" "$dir/link_$v.build"
 done
@@ -130,14 +139,52 @@ for f in main crypto license reports http_handlers snapshot ws_handler; do
         fail=1
     fi
 done
+# --check-denylist reads a file the way the relay does: counts for a good one, where it is
+# wrong (never the entry) for a bad one, and an exit status for scripts.
+printf '{"version":1,"servers":["3F2A0B1C2D3E4F5061728394A5B6C7D8E9F00112"],"identities":[],"networks":["2001:db8:1:2::9"]}' \
+    > "$dir/deny_good.json"
+printf '{"version":1,"servers":["3f2a0b1c2d3e4f5061728394a5b6c7d8e9f00112","12D3KooWNotAServerId"],"identities":[],"networks":[]}' \
+    > "$dir/deny_bad.json"
+good_out=$("$dir/relay_main" --check-denylist "$dir/deny_good.json" 2>&1)
+good_rc=$?
+bad_out=$("$dir/relay_main" --check-denylist "$dir/deny_bad.json" 2>&1)
+bad_rc=$?
+missing_out=$("$dir/relay_main" --check-denylist "$dir/deny_none.json" 2>&1)
+missing_rc=$?
+if [ $good_rc = 0 ] && [ "$good_out" = "ok: 1 servers, 0 identities, 1 networks" ] && [ $bad_rc = 1 ] &&
+    grep -qF "servers, entry 2" <<<"$bad_out" && ! grep -qF "12D3KooWNotAServerId" <<<"$bad_out" &&
+    [ $missing_rc = 1 ]; then
+    echo "  ok   --check-denylist reads a file the way the relay does and names no entry"
+else
+    echo "  FAIL --check-denylist: good ($good_rc) $good_out / bad ($bad_rc) $bad_out / missing ($missing_rc) $missing_out"
+    fail=1
+fi
+# A bare 32-hex server entry, the shape DM and own rooms share, reads but is warned of
+# (review R7); a meeting id of that length is not.
+printf '{"version":1,"servers":["0A1B2C3D4E5F60718293A4B5C6D7E8F9","conf:00112233445566778899aabbccddeeff","3f2a0b1c2d3e4f5061728394a5b6c7d8e9f00112"],"identities":[],"networks":[]}' \
+    > "$dir/deny_legacy.json"
+legacy_out=$("$dir/relay_main" --check-denylist "$dir/deny_legacy.json" 2>&1)
+legacy_rc=$?
+if [ $legacy_rc = 0 ] && [ "$(head -1 <<<"$legacy_out")" = "ok: 3 servers, 0 identities, 0 networks" ] &&
+    grep -q "^warning: 1 server entry has 32 hexadecimal characters" <<<"$legacy_out" &&
+    ! grep -qi "0a1b2c3d4e5f60718293a4b5c6d7e8f9" <<<"$legacy_out"; then
+    echo "  ok   --check-denylist warns of a 32-hex server entry without naming it"
+else
+    echo "  FAIL --check-denylist legacy: ($legacy_rc) $legacy_out"
+    fail=1
+fi
 # A third argument is HOLLOW_CONN_RATE_EXEMPT for that run, which runs only the rate cases;
 # a fourth the relay's send buffer in bytes, which runs only the dropped-write case; a fifth
 # (shadow or enforce) scales the breaker down and runs only its cases; a sixth is the
 # relay's send-buffer memory budget in bytes, which runs only the OOM-budget case.
 run_variant() {
     local v=$1 name=${2:-$1} exempt=${3-} backpressure=${4-} breaker=${5-} budget=${6-} port tries=0 log=$dir/relay_${2:-$1}.log
-    local extra=() args=() only=${RELAY_LIVE_ONLY-} stall=
-    if [ -n "$breaker" ]; then
+    local extra=() args=() only=${RELAY_LIVE_ONLY-} stall= denylist=$dir/denylist_${2:-$1}.json
+    # Every relay starts with a valid empty denylist, the file the setup writes.
+    printf '{"version":1,"servers":[],"identities":[],"networks":[]}\n' > "$denylist"
+    if [ "$name" = deny ]; then
+        only=deny
+    elif [ -n "$breaker" ]; then
         # Budgets / 100 and times / 60: the numbers test_relay_live.cpp's BRK_W and BRK_T name.
         extra=(HOLLOW_RELAY_TEST_BREAKER_W=100 HOLLOW_RELAY_TEST_BREAKER_T=60)
         args=(--forwarder-peer-id 12D3KooWC4T1AXU2s2YBgGJ2FeaYVtsKoHZWJeubnWe9SnuSE7Zb)
@@ -166,7 +213,8 @@ run_variant() {
             -u HOLLOW_RELAY_TEST_BREAKER_T -u HOLLOW_RELAY_TEST_SEND_BUDGET -u HOLLOW_RELAY_TEST_STALL_MS \
             "${extra[@]}" TURN_SECRET=live-test "$dir/relay_$v" "${args[@]}" --port "$port" --domain "$domain" \
             --cert-file "$dir/cert.pem" --key-file "$dir/key.pem" \
-            --keys-file "$dir/no-keys.json" --reports-file "$dir/reports_$name.json" > "$log" 2>&1 &
+            --keys-file "$dir/no-keys.json" --reports-file "$dir/reports_$name.json" \
+            --denylist-file "$denylist" > "$log" 2>&1 &
         relay_pid=$!
         for _ in $(seq 100); do
             grep -q "Listening on port" "$log" && break
@@ -188,6 +236,7 @@ run_variant() {
 
     # The client's last case sends the relay SIGTERM itself (the drain hint); its pid
     # also lets a probe read the relay's memory. Under ASan the run takes about 96 s.
+    RELAY_LIVE_DENYLIST=$denylist RELAY_LIVE_KEYS=$dir/no-keys.json \
     RELAY_LIVE_ONLY=$only RELAY_LIVE_BACKPRESSURE=$backpressure RELAY_LIVE_SEND_BUDGET=$budget RELAY_LIVE_STALL_MS=$stall RELAY_LIVE_SANITIZED=${SANITIZE:-0} RELAY_LIVE_PID=$relay_pid timeout 240 "$dir/client" "$port" "$domain" \
         > "$dir/client_$name.log" 2>&1
     local rc=$?
@@ -215,6 +264,11 @@ run_variant() {
     elif grep -qF "rate exemption" "$log"; then
         said="an exemption line without a list"
     fi
+    # The denylist is announced by its counts alone: no server id, identity or address.
+    grep -qF "[deny] loaded: 0 servers, 0 identities, 0 networks" "$log" || said="no denylist count line"
+    if grep -E '^\[deny\]' "$log" | grep -qE '[0-9a-f]{32}|12D3KooW|127\.0\.[0-9]+\.[0-9]+'; then
+        said="a denylist line names an entry"
+    fi
     local checks
     checks=$(grep -c '  ok' "$dir/client_$name.log")
     if [ $rc = 0 ] && [ $exited = 1 ] && [ $relay_rc = 0 ] && [ "$said" = ok ] &&
@@ -237,14 +291,16 @@ run_variant() {
     fail=1
 }
 
-run_variant main
+wanted main && run_variant main
+# The operator denylist against a relay of its own: the client rewrites its file.
+wanted deny && run_variant main deny
 # The exemption list: a v4 address written v4-mapped, beside three entries it ignores.
-run_variant main exempt "::ffff:127.0.241.3, not-an-address,127.0.241, 0.0.0.0"
+wanted exempt && run_variant main exempt "::ffff:127.0.241.3, not-an-address,127.0.241, 0.0.0.0"
 # A 1 MiB send buffer: a test drains it and writes again inside one session tick.
-run_variant main backpressure "" 1048576
+wanted backpressure && run_variant main backpressure "" 1048576
 # The circuit breaker scaled down: shadow mode (every build's default), then enforced.
-run_variant main breaker_shadow "" "" shadow
-run_variant enforce breaker_enforce "" "" enforce
+wanted breaker_shadow && run_variant main breaker_shadow "" "" shadow
+wanted breaker_enforce && run_variant enforce breaker_enforce "" "" enforce
 # A 32 MiB send-buffer memory budget and a 5 s stall window: honest traffic passes, effects stay bounded.
-run_variant main oom "" "" "" 33554432
+wanted oom && run_variant main oom "" "" "" 33554432
 exit $fail

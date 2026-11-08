@@ -152,12 +152,42 @@ static snapshot::Data capture(const RelayState& st, Clock::time_point now) {
         auto share = st.reports.ledger.share_of(key);
         if (share && !ReportsState::is_own_share(*share)) d.report_shares.push_back({key, *share});
     }
+    // The list in force, which the next process keeps if its file is missing or unreadable.
+    d.deny_servers.assign(st.deny.list.servers.begin(), st.deny.list.servers.end());
+    d.deny_identities.assign(st.deny.list.identities.begin(), st.deny.list.identities.end());
+    d.deny_networks.assign(st.deny.list.networks.begin(), st.deny.list.networks.end());
+    d.deny_learned = st.deny.learned.entries();
     return d;
+}
+
+// The previous process's denylist, held aside until deny_start judges the file. Every
+// entry is read again by the file's own rules; one that no longer reads is left out.
+static void carry_denylist(RelayState& st, const snapshot::Data& d) {
+    if (!d.has_deny) return;
+    deny::List l;
+    for (const auto& e : d.deny_servers) {
+        if (auto k = deny::server_key(e)) l.servers.insert(*k);
+    }
+    for (const auto& e : d.deny_identities) {
+        if (auto k = deny::identity_key(e)) l.identities.insert(*k);
+    }
+    for (const auto& e : d.deny_networks) {
+        if (auto k = deny::network_key(e)) l.networks.insert(*k);
+    }
+    st.deny.carried = std::move(l);
+    for (const auto& [master, devices] : d.deny_learned) {
+        std::vector<std::string> kept;
+        for (const auto& dev : devices) {
+            if (is_peer_id_shape(dev)) kept.push_back(dev);
+        }
+        if (is_peer_id_shape(master) && !kept.empty()) st.deny.carried_learned.push_back({master, std::move(kept)});
+    }
 }
 
 // Only meaningful on an empty state: a fresh process, before it listens.
 static void apply(RelayState& st, snapshot::Data&& d, Clock::time_point now, int64_t grace_secs) {
     RestoredShares share;
+    carry_denylist(st, d);
     if (!d.report_key.empty()) st.reports.adopt_key(d.report_key);
     sodium_memzero(d.report_key.data(), d.report_key.size());
     for (auto& [key, s] : d.report_shares) st.reports.adopted_shares[std::move(key)] = s;

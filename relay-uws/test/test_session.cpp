@@ -114,6 +114,10 @@ int main() {
         check("the auth v3 session field reads the way the vectors say", shapes_ok == v["auth_v3_shape"].size());
     }
 
+    // The operator denylist's frames (t14-deny): a room's denial rides the stream and
+    // replays once on resume, a login's refusal is state like every auth_failed.
+    check("room_denied is a stream frame", session::relay_type_counts("room_denied"));
+    check("auth_failed stays uncounted whatever its code", !session::relay_type_counts("auth_failed"));
     check("a gap frame names its count", session::gap_frame(3) == R"({"type":"gap","n":3})");
     check("a sid is 32 lowercase hex", session::is_sid_shape("00112233445566778899aabbccddeeff") &&
                                            !session::is_sid_shape("00112233445566778899AABBCCDDEEFF") &&

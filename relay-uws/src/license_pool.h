@@ -1,8 +1,44 @@
 #pragma once
+#include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+
+#include "client_json.h"
+#include "json.hpp"
+
+// What keys.json says. A field of the wrong JSON type reads as nothing at all, never a
+// throw: the reload runs in a uSockets timer, where an exception ends the process with no
+// restart snapshot (HOL-SEC-203). Missing fields keep their defaults (off, no keys);
+// non-text keys are skipped as before.
+struct KeysFile {
+    bool enabled = false;
+    std::unordered_set<std::string> keys;
+};
+
+inline std::optional<KeysFile> parse_keys_file(std::string_view text) noexcept {
+    try {
+        if (text.find('\0') != std::string_view::npos || !client_json::depth_within(text, 8)) return std::nullopt;
+        nlohmann::json j = nlohmann::json::parse(text, nullptr, /*allow_exceptions=*/false);
+        if (!j.is_object()) return std::nullopt;
+        KeysFile out;
+        if (auto e = j.find("enabled"); e != j.end()) {
+            if (!e->is_boolean()) return std::nullopt;
+            out.enabled = e->get<bool>();
+        }
+        if (auto ks = j.find("keys"); ks != j.end()) {
+            if (!ks->is_array()) return std::nullopt;
+            for (const auto& k : *ks) {
+                if (k.is_string()) out.keys.insert(k.get<std::string>());
+            }
+        }
+        return out;
+    } catch (...) {
+        return std::nullopt;
+    }
+}
 
 enum class LicenseResult {
     Ok,
@@ -48,6 +84,15 @@ struct LicensePool {
             if (it->second.empty()) it = holders.erase(it);
             else ++it;
         }
+    }
+
+    // A reload of keys.json from `text`: false, changing nothing, when it does not read;
+    // else the keys are swapped and `kicked` names the holders of keys that went.
+    bool reload_text(std::string_view text, std::vector<std::string>& kicked) {
+        std::optional<KeysFile> file = parse_keys_file(text);
+        if (!file) return false;
+        kicked = replace_keys(std::move(file->keys), file->enabled);
+        return true;
     }
 
     // Swap in the reloaded file. Returns every holder of a key that vanished, in

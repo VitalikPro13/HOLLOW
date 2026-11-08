@@ -148,6 +148,17 @@ def crypto_inputs():
     yield b"2001:db8::1" + sep + b"::ffff:192.0.2.1" + sep + b"relay.example.com:443"
 
 
+def deny_files():
+    s40 = "3f2a0b1c2d3e4f5061728394a5b6c7d8e9f00112"
+    yield dumps({"version": 1, "servers": [], "identities": [], "networks": []})
+    yield dumps({"version": 1, "servers": [s40, {"id": "conf:" + s40[:32], "ref": "N-1"}],
+                 "identities": [PEER, {"id": PEER2, "ref": "N-2", "added": "2026-11-07"}],
+                 "networks": ["203.0.113.7", {"ip": "2001:db8:1:2::9"}, "2001:db8:1:2::/64", "::ffff:198.51.100.4"]})
+    yield dumps({"version": 1, "servers": [s40.upper()], "identities": [], "networks": ["10.0.0.0/24"]})
+    yield dumps({"version": 2, "servers": [], "identities": [], "networks": []})
+    yield b'{"version":1,"servers":[{"id":5}],"identities":[],"networks":[]}'
+
+
 TARGETS = {
     "fuzz_auth_frame": auth_frames,
     "fuzz_binary_frame": binary_frames,
@@ -157,6 +168,7 @@ TARGETS = {
     "fuzz_roster": roster_shows,
     "fuzz_kill_order": kill_inputs,
     "fuzz_crypto_inputs": crypto_inputs,
+    "fuzz_deny_list": deny_files,
 }
 
 

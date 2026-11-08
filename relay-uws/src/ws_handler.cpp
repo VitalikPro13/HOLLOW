@@ -45,6 +45,12 @@ static constexpr size_t CONNS_PER_IP = MAX_CONNS_PER_IP;
 static constexpr size_t MAX_CHECK_PEERS_QUERY = 256;
 static constexpr size_t MAX_CHECK_PEERS_SCAN = 65536;
 
+// The operator denylist's refusals (deny_list.h): no reason on the wire, only that this
+// relay does not carry the account, the network or the room.
+static constexpr std::string_view ACCOUNT_DENIED = R"({"type":"auth_failed","error":"account_denied"})";
+static constexpr std::string_view NETWORK_DENIED = R"({"type":"auth_failed","error":"network_denied"})";
+static json room_denied(const std::string& room) { return {{"type", "room_denied"}, {"room", room}}; }
+
 // The share a socket's writes are charged to: its address block hashed under the
 // current hour's key.
 static uint64_t socket_share(RelayState& state, const PerSocketData* data) {
@@ -604,6 +610,14 @@ static void handle_auth(SSLWebSocket* ws, PerSocketData* data,
     }
     data->door_nonce = challenge;
 
+    // A listed identity, or a device the relay learned is one of its (deny_list.h), is
+    // refused only once it proved it holds the key: no oracle for anyone else.
+    if (state.deny.peer_denied(peer_id)) {
+        write_raw(ws, ACCOUNT_DENIED, uWS::OpCode::TEXT);
+        ws->end(1008, "account_denied");
+        return;
+    }
+
     // The three license outcomes below are distinguishable to the caller, which
     // makes this a validity oracle for a license key. That is an ACCEPTED,
     // DOCUMENTED tradeoff, not an oversight: the client shows a different,
@@ -932,21 +946,33 @@ static json members_of(const RelayState& state, const std::string& room_name, co
     return j;
 }
 
+enum class InboxVerdict { NotOwner, Owner, Denied };
+
 // Ownership of an `inbox:{M}` join that shows a roster (design ID-1R): the roster is
 // folded into the one held for M and this socket owns the inbox only if its device
 // is a member of the result. A roster that does not parse, is too big or names
-// another master proves nothing, silently, like a plain join.
-static bool inbox_owner_by_roster(PerSocketData* data, const std::string& room,
-                                  const json& roster_json, RelayState& state) {
-    if (data->is_guest || !is_inbox_room(room)) return false;
+// another master proves nothing, silently, like a plain join. For a listed M the
+// fold's devices are learned and their purge queued (deny_settle); `Denied` only when
+// the shower's own device is one of them, so a roster replayed from anyone else's
+// socket is answered as before (review D4). Never closes anything here: the caller
+// still holds this socket (review D1).
+static InboxVerdict inbox_owner_by_roster(PerSocketData* data, const std::string& room,
+                                          const json& roster_json, RelayState& state) {
+    if (data->is_guest || !is_inbox_room(room)) return InboxVerdict::NotOwner;
     std::optional<roster::Roster> shown = roster::from_json(roster_json);
     // Measured as the relay would hold it, never by walking the client's own JSON again.
-    if (!shown || roster::to_json(*shown).dump().size() > roster::MAX_ROSTER_BYTES) return false;
+    if (!shown || roster::to_json(*shown).dump().size() > roster::MAX_ROSTER_BYTES) return InboxVerdict::NotOwner;
     const std::string master = room.substr(sizeof(INBOX_ROOM_PREFIX) - 1);
     RosterBook::Shown r = state.roster_book.show(master, *shown, data->peer_id, socket_share(state, data),
                                                  wall_now_ms(), relay_roster_crypto());
     if (r.changed) drop_inbox_owners(state, room, r.state);
-    return r.member;
+    // Learned from the fold only, never the roster as shown: a pending join counts once
+    // the device itself consented, so nobody can name an innocent device (review D5).
+    for (auto& fresh : state.deny.learn_fold(master, r.state.members, r.state.pending)) {
+        state.deny.purge_due.push_back(std::move(fresh));
+    }
+    if (state.deny.peer_denied(data->peer_id)) return InboxVerdict::Denied;
+    return r.member ? InboxVerdict::Owner : InboxVerdict::NotOwner;
 }
 
 // The DMs (the 0x06 kinds offline_buffer takes on expiry) that the device's session in grace
@@ -973,6 +999,12 @@ static void handle_join(SSLWebSocket* ws, PerSocketData* data,
         send_json(ws, {{"type", "error"}, {"error", "Invalid room code"}});
         return;
     }
+    // A denied server's or meeting's room is never formed again: no slot, no roster
+    // fold, no door judged.
+    if (state.deny.server_denied(room)) {
+        send_json(ws, room_denied(room));
+        return;
+    }
 
     auto pit = state.peer_rooms.find(data->peer_id);
     size_t max_rooms = data->is_guest ? MAX_GUEST_ROOMS : MAX_ROOMS_PER_PEER;
@@ -985,7 +1017,14 @@ static void handle_join(SSLWebSocket* ws, PerSocketData* data,
 
     // A shown roster decides on its own; only a plain re-join keeps an owner an owner.
     const bool shown = inbox_roster != nullptr;
-    const bool proved = shown && inbox_owner_by_roster(data, room, *inbox_roster, state);
+    const InboxVerdict verdict =
+        shown ? inbox_owner_by_roster(data, room, *inbox_roster, state) : InboxVerdict::NotOwner;
+    if (verdict == InboxVerdict::Denied) {
+        // Closed before any room is touched: past the close its user data is gone.
+        close_once(ws, 1008, "account_denied", ACCOUNT_DENIED);
+        return;
+    }
+    const bool proved = verdict == InboxVerdict::Owner;
 
     auto& ws_room = state.ws_rooms[room];
 
@@ -1345,6 +1384,12 @@ static void buffer_offline_msg(const std::string& target_peer_id,
                                std::string frame, RelayState& state,
                                const std::string& sender, uint64_t share,
                                bool is_image = false, bool is_channel = false) {
+    // Nothing is kept for a denied room, nor for a denied identity or device, which can
+    // never collect it: the second layer behind the direct handlers' own room checks. Nor
+    // from one: a ring's hand-off would bring back what the purge took (decision 3).
+    if (state.deny.server_denied(room) || state.deny.peer_denied(target_peer_id) || state.deny.peer_denied(sender)) {
+        return;
+    }
     breaker::bump(1);
     auto& q = state.offline_buffer[target_peer_id];
     uint64_t seq = state.buffer_index.stamp(target_peer_id, false, share, frame.size());
@@ -1750,6 +1795,11 @@ static void handle_lock_get(SSLWebSocket* ws, PerSocketData* data, const json& j
         std::string server = json_text(e, "server");
         std::string owner = json_text(e, "owner");
         if (!lock_key_shape(server, owner)) continue;
+        // The record stays, frozen, while the server is denied: a lift restores it at once.
+        if (state.deny.server_denied(server)) {
+            send_json(ws, room_denied(server));
+            continue;
+        }
         const auto* chain = state.join_locks.get(join_lock::record_key(server, owner));
         send_json(ws, {{"type", "lock_chain"},
                        {"server", server},
@@ -1820,6 +1870,10 @@ static void handle_lock_put(SSLWebSocket* ws, PerSocketData* data, const json& j
     std::string server = json_text(j, "server");
     std::string owner = json_text(j, "owner");
     if (!lock_key_shape(server, owner)) return;
+    if (state.deny.server_denied(server)) {
+        send_json(ws, room_denied(server));
+        return;
+    }
     auto links_it = j.find("links");
     if (links_it == j.end()) return;
     auto links = join_lock::links_from_json(*links_it);
@@ -2268,6 +2322,8 @@ static void handle_binary_channel_direct(PerSocketData* data,
     if (!f) return;
     const std::string_view room_code = f->room, target_peer = f->target, channel = f->channel, payload = f->payload;
     const bool mention = f->mention;
+    // Before any deposit or push wake (review D3).
+    if (state.deny.server_denied(room_code)) return;
 
     std::string room_str(room_code);
     std::string target_str(target_peer);
@@ -2349,6 +2405,8 @@ static void handle_direct(PerSocketData* data, const std::string& room,
     // The JSON twin of 0x04, refused to guests like the binary form: a deposit
     // wakes the target's phone.
     if (data->is_guest) return;
+    // Before any deposit or push wake (review D3).
+    if (state.deny.server_denied(room)) return;
     // The target becomes an offline_buffer KEY on the miss path below.
     if (!is_peer_id_shape(target)) return;
     if (!fwd_room::paired(room, data->peer_id, target)) return;
@@ -2487,6 +2545,8 @@ static void handle_binary_direct_msg(PerSocketData* data,
     const auto f = binary_frame::parse_direct(raw);
     if (!f) return;
     const std::string_view room_code = f->room, target_peer = f->target, payload = f->payload;
+    // Before the empty-room branch's deposit and push wake (review D3).
+    if (state.deny.server_denied(room_code)) return;
 
     std::string room_str(room_code);
     std::string target_str(target_peer);
@@ -3580,6 +3640,314 @@ static void resume_session(RelayState& state, SSLWebSocket* ws, PerSocketData* d
     settle_presence(state, ws, data);
 }
 
+// --- The operator denylist (deny_list.h, design t14-deny) --------------------------------
+//
+// The refusals sit where each frame arrives: socket open, login, join, lock read and
+// write, the three direct handlers and the deposit choke point. What follows is what an
+// entry ADDED to the list does to what the relay already holds. It runs as the relay's
+// own work (uncharged), collects every socket to close first and closes after (a close
+// enters grace, which erases from the rooms walked), and logs counts only.
+
+// The sockets an apply closes, each with the hint its client reads.
+using DenyCloses = std::vector<std::pair<SSLWebSocket*, std::string_view>>;
+
+static void run_closes(const DenyCloses& closes) {
+    std::unordered_set<SSLWebSocket*> done;
+    for (const auto& [ws, hint] : closes) {
+        if (!done.insert(ws).second) continue;
+        close_once(ws, 1008, hint == NETWORK_DENIED ? "network_denied" : "account_denied", hint);
+    }
+}
+
+// Every buffered DM-queue frame `drop` names leaves, keeping the byte budget in step.
+template <typename Pred>
+static void drop_offline_where(RelayState& state, Pred drop) {
+    for (auto it = state.offline_buffer.begin(); it != state.offline_buffer.end();) {
+        auto& q = it->second;
+        for (auto m = q.begin(); m != q.end();) {
+            if (drop(it->first, *m)) {
+                state.buffer_index.released(m->seq);
+                m = q.erase(m);
+            } else {
+                ++m;
+            }
+        }
+        it = q.empty() ? state.offline_buffer.erase(it) : std::next(it);
+    }
+}
+
+// The same for the frames of every topic ring.
+template <typename Pred>
+static void drop_ring_frames_where(RelayState& state, Pred drop) {
+    for (auto& [key, tb] : state.topic_buffers) {
+        for (auto f = tb.frames.begin(); f != tb.frames.end();) {
+            if (drop(*f)) {
+                tb.bytes -= std::min(tb.bytes, f->frame.size());
+                state.buffer_index.released(f->seq);
+                f = tb.frames.erase(f);
+            } else {
+                ++f;
+            }
+        }
+    }
+}
+
+// A denied server's or meeting's room goes whole: everyone in it is told once (a
+// session in grace into its ring, replayed on resume) and nothing of the room stays
+// for delivery, presence or a resume to find. No `peer_left`: everyone goes at once.
+static void drop_denied_room(RelayState& state, const std::string& room) {
+    auto rit = state.ws_rooms.find(room);
+    if (rit == state.ws_rooms.end()) return;
+    WsRoom& r = rit->second;
+    const Bytes notice = shared_bytes(room_denied(room).dump());
+    std::set<std::string> holders;
+    for (auto& [pid, sock] : r.peers) {
+        holders.insert(pid);
+        send_stream(sock, notice, false, Meta::answer());
+        PerSocketData* d = sock->getUserData();
+        d->fetch_rooms.erase(room);
+        d->presence_withheld.erase(room);
+        if (auto sub = d->subscriptions.find(room); sub != d->subscriptions.end()) {
+            d->subscription_topics -= std::min(d->subscription_topics, sub->second.size());
+            d->subscriptions.erase(sub);
+        }
+    }
+    for (const auto& pid : r.held) {
+        holders.insert(pid);
+        send_held(state, pid, notice, false, Meta::answer());
+    }
+    for (const auto& pid : holders) {
+        if (auto pr = state.peer_rooms.find(pid); pr != state.peer_rooms.end()) pr->second.erase(room);
+        if (auto sit = state.sessions.find(pid); sit != state.sessions.end()) {
+            sit->second.rooms.erase(room);
+            sit->second.subscriptions.erase(room);
+        }
+    }
+    state.door_grace_rooms.erase(room);
+    state.ws_rooms.erase(rit);
+}
+
+// Servers added: their rooms, rings (the `~join` parking ring too) and buffered copies
+// go, and their channel-push throttles. The join lock record stays, frozen.
+static void deny_servers(RelayState& state, const std::set<std::string>& servers) {
+    if (servers.empty()) return;
+    auto listed = [&](std::string_view room) { return servers.count(deny::lower(room)) != 0; };
+    std::vector<std::string> rooms;
+    for (const auto& [name, r] : state.ws_rooms) {
+        if (listed(name)) rooms.push_back(name);
+    }
+    for (const auto& name : rooms) drop_denied_room(state, name);
+    for (auto it = state.channel_push_state.begin(); it != state.channel_push_state.end();) {
+        for (auto c = it->second.begin(); c != it->second.end();) c = listed(c->first) ? it->second.erase(c) : std::next(c);
+        it = it->second.empty() ? state.channel_push_state.erase(it) : std::next(it);
+    }
+    for (auto it = state.topic_buffers.begin(); it != state.topic_buffers.end();) {
+        it = listed(std::string_view(it->first).substr(0, it->first.find('\0'))) ? erase_topic_buffer(state, it)
+                                                                                 : std::next(it);
+    }
+    drop_offline_where(state, [&](const std::string&, const RelayState::BufferedMsg& m) { return listed(m.room); });
+}
+
+// A listed identity's devices and the master itself: every socket of theirs closes, a
+// session in grace ends, and nothing they registered stays (decision 3). The frames
+// they put into anyone's buffer or ring go too, now or (`scan` false, a device learned
+// on a show) on the next deny tick, so a flood of fresh devices costs one walk a tick.
+static void purge_denied_peers(RelayState& state, const std::set<std::string>& peers, DenyCloses& closes,
+                               bool scan) {
+    if (peers.empty()) return;
+    for (auto* ws : state.open_sockets) {
+        const PerSocketData* d = ws->getUserData();
+        if (d->authenticated && !d->closing && peers.count(d->peer_id)) closes.push_back({ws, ACCOUNT_DENIED});
+    }
+    for (const auto& p : peers) {
+        if (grace_session(state, p)) end_session(state, p);
+        state.push_tokens.erase(p);
+        state.push_prefs.erase(p);
+        state.offline_optin.erase(p);
+        state.channel_push_state.erase(p);
+        state.last_channel_push_any.erase(p);
+        state.last_push_sent.erase(p);
+        state.push_budget.erase(p);
+        state.registrations.remove(p);
+        // Its own queue, and for the master its mailbox.
+        if (auto q = state.offline_buffer.find(p); q != state.offline_buffer.end()) {
+            for (const auto& m : q->second) state.buffer_index.released(m.seq);
+            state.offline_buffer.erase(q);
+        }
+    }
+    if (!scan) {
+        state.deny.scan_due.insert(peers.begin(), peers.end());
+        return;
+    }
+    drop_offline_where(state, [&](const std::string&, const RelayState::BufferedMsg& m) { return peers.count(m.sender) != 0; });
+    drop_ring_frames_where(state, [&](const RelayState::TopicFrame& f) { return peers.count(f.sender) != 0; });
+}
+
+// Networks added: every socket from one closes, and a session in grace that last came
+// from one ends.
+static void deny_networks(RelayState& state, const std::set<std::string>& nets, DenyCloses& closes) {
+    if (nets.empty()) return;
+    for (auto* ws : state.open_sockets) {
+        const PerSocketData* d = ws->getUserData();
+        if (!d->closing && !d->ip_key.empty() && nets.count(d->ip_key)) closes.push_back({ws, NETWORK_DENIED});
+    }
+    std::vector<std::string> ended;
+    for (const auto& [peer, s] : state.sessions) {
+        if (s.state == session::State::Grace && nets.count(s.ip_key)) ended.push_back(peer);
+    }
+    for (const auto& peer : ended) end_session(state, peer);
+}
+
+// What `d` changes about what the relay holds; the list it compares against is already
+// the one every refusal reads.
+static void apply_denials(RelayState& state, const deny::Diff& d) {
+    breaker::Uncharged relay_work;
+    for (const auto& m : d.removed.identities) state.deny.learned.forget(m);
+    std::set<std::string> peers(d.added.identities.begin(), d.added.identities.end());
+    for (const auto& m : d.added.identities) {
+        if (const auto* held = state.roster_book.get(m)) {
+            const roster::State st = state.roster_book.fold(*held, wall_now_ms(), relay_roster_crypto());
+            state.deny.learn_fold(m, st.members, st.pending);
+        }
+        for (auto& dev : state.deny.learned.devices_of(m)) peers.insert(std::move(dev));
+    }
+    DenyCloses closes;
+    deny_servers(state, d.added.servers);
+    purge_denied_peers(state, peers, closes, /*scan=*/true);
+    deny_networks(state, d.added.networks, closes);
+    run_closes(closes);
+}
+
+// Devices learned on a show since the last call: their sockets close and their data
+// goes now, their frames in other people's buffers on the next deny tick. Runs after a
+// loop iteration (main.cpp), never inside a handler.
+void deny_settle(RelayState& state) {
+    if (state.deny.purge_due.empty()) return;
+    try {
+        breaker::Uncharged relay_work;
+        const std::set<std::string> peers(state.deny.purge_due.begin(), state.deny.purge_due.end());
+        state.deny.purge_due.clear();
+        DenyCloses closes;
+        purge_denied_peers(state, peers, closes, /*scan=*/false);
+        run_closes(closes);
+    } catch (const std::exception&) {
+        fprintf(stderr, "[deny] settling learned devices stopped short\n");
+    }
+}
+
+static void deny_scan(RelayState& state) {
+    if (state.deny.scan_due.empty()) return;
+    const std::set<std::string> peers = std::move(state.deny.scan_due);
+    state.deny.scan_due.clear();
+    drop_offline_where(state, [&](const std::string&, const RelayState::BufferedMsg& m) { return peers.count(m.sender) != 0; });
+    drop_ring_frames_where(state, [&](const RelayState::TopicFrame& f) { return peers.count(f.sender) != 0; });
+}
+
+static void print_deny_counts(const char* what, const deny::List& l) {
+    fprintf(stderr, "[deny] %s: %zu servers, %zu identities, %zu networks\n", what, l.servers.size(),
+            l.identities.size(), l.networks.size());
+}
+
+static void deny_take(RelayState& state, const deny::Loaded& l) {
+    deny::take(state.deny, l, [&state](const deny::Diff& d) { apply_denials(state, d); });
+}
+
+// Once, before the relay listens and after the restart snapshot is back: the file, or
+// when it is missing or unreadable the list the previous process held (review D8, D9).
+void deny_start(RelayState& state, const std::string& path) {
+    deny::State& st = state.deny;
+    deny::Loaded l = deny::load(path);
+    if (l.read != deny::Read::Ok) {
+        const char* why = l.read == deny::Read::Missing ? "missing" : "unreadable";
+        if (st.carried) {
+            fprintf(stderr, "[deny] WARNING %s is %s at start: keeping the list the previous process held\n",
+                    path.c_str(), why);
+            l.list = *st.carried;
+        } else {
+            fprintf(stderr, "[deny] WARNING %s is %s at start and no previous list came over: nothing is refused\n",
+                    path.c_str(), why);
+        }
+        if (l.read == deny::Read::Bad) fprintf(stderr, "[deny] %s\n", l.error.c_str());
+        // Judged as it stands (its stamp is kept): an unchanged file is not read again.
+        l.read = deny::Read::Ok;
+    }
+    for (const auto& [master, devices] : st.carried_learned) {
+        if (!l.list.identities.count(master)) continue;
+        for (const auto& dev : devices) st.learned.learn(master, {dev});
+    }
+    st.carried.reset();
+    st.carried_learned.clear();
+    try {
+        deny_take(state, l);
+    } catch (const std::exception&) {
+        fprintf(stderr, "[deny] applying the list at start stopped short; the next tick tries again\n");
+    }
+    print_deny_counts("loaded", st.list);
+}
+
+// Every two seconds (main.cpp): what learned devices left in other people's buffers,
+// then the file if it changed. A file missing or unreadable keeps the list in force.
+void deny_tick(RelayState& state, const std::string& path) {
+    try {
+        deny_settle(state);
+        deny_scan(state);
+        if (!deny::due(state.deny, file_stamp(path))) {
+            if (state.deny.applied != state.deny.list) deny_take(state, deny::Loaded{deny::Read::Bad, {}, {}, state.deny.judged});
+            return;
+        }
+        const deny::Loaded l = deny::load(path);
+        if (l.read != deny::Read::Ok) {
+            fprintf(stderr, "[deny] %s is %s, keeping the previous list (%zu servers, %zu identities, %zu networks)\n",
+                    path.c_str(), l.read == deny::Read::Missing ? "missing" : "unreadable",
+                    state.deny.list.servers.size(), state.deny.list.identities.size(),
+                    state.deny.list.networks.size());
+        }
+        deny_take(state, l);
+        if (l.read == deny::Read::Ok) print_deny_counts("loaded", state.deny.list);
+    } catch (const std::exception&) {
+        fprintf(stderr, "[deny] applying the list stopped short; the next tick tries again\n");
+    }
+}
+
+#ifdef HOLLOW_RELAY_TEST_LOOPBACK
+// What the relay still holds of `peer` and `room` (test builds only): the live tests read
+// each layer of a refusal through it.
+std::string deny_test_report(const std::string& peer, const std::string& room, const std::string& net) {
+    if (!g_state) return "{}";
+    RelayState& state = *g_state;
+    const std::string want = deny::lower(room);
+    size_t queued_for = 0, queued_in_room = 0, sent_by = 0, rings = 0;
+    if (auto q = state.offline_buffer.find(peer); q != state.offline_buffer.end()) queued_for = q->second.size();
+    for (const auto& [target, q] : state.offline_buffer) {
+        for (const auto& m : q) {
+            if (!want.empty() && deny::lower(m.room) == want) queued_in_room++;
+            if (m.sender == peer) sent_by++;
+        }
+    }
+    for (const auto& [key, tb] : state.topic_buffers) {
+        if (!want.empty() && deny::lower(std::string_view(key).substr(0, key.find('\0'))) == want) rings++;
+        for (const auto& f : tb.frames) sent_by += f.sender == peer;
+    }
+    return json{{"queued_for", queued_for},
+                {"queued_in_room", queued_in_room},
+                {"sent_by", sent_by},
+                {"rings", rings},
+                {"room", !want.empty() && state.ws_rooms.count(room) != 0},
+                {"token", state.push_tokens.count(peer) != 0},
+                {"prefs", state.push_prefs.count(peer) != 0},
+                {"session", state.sessions.count(peer) != 0},
+                {"learned", state.deny.learned.has(peer)},
+                {"lock", state.join_locks.get(join_lock::record_key(room, "")) != nullptr},
+                {"server_denied", state.deny.server_denied(room)},
+                {"peer_denied", state.deny.peer_denied(peer)},
+                {"network_denied", state.deny.network_denied(net)},
+                {"woken", state.last_push_sent.count(peer) != 0},
+                {"listed", json::array({state.deny.list.servers.size(), state.deny.list.identities.size(),
+                                        state.deny.list.networks.size()})}}
+        .dump();
+}
+#endif
+
 // The relay's count of what the device sent, which lets the device drop what it kept.
 static void send_ack(SSLWebSocket* ws, session::Session& s) {
     // The relay's own bookkeeping: never charged to the device (N3).
@@ -4419,6 +4787,12 @@ void setup_ws_handler(uWS::SSLApp& app, RelayState& state, const Config& config)
             data->share_block = share_block(remote);
             data->budget_share = share_id(state.send_share_key, data->share_block);
             state.open_sockets.insert(ws);
+
+            // A listed network takes no slot and spends no rate budget (deny_list.h).
+            if (state.deny.network_denied(ip)) {
+                close_once(ws, 1008, "network_denied", NETWORK_DENIED);
+                return;
+            }
 
             // A refused socket never took a slot, so its close must give none back:
             // `ip_key` is set only once the slot is taken. At the cap, a socket comes in

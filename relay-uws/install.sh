@@ -7,6 +7,8 @@
 #   sudo bash install.sh --dry-run        what it would do, changing nothing
 #   sudo bash install.sh --answers FILE   no questions, the answers come from FILE
 #   sudo bash install.sh --plain          plain prompts instead of whiptail screens
+#   sudo bash install.sh --deny check     the operator denylist: check it, or
+#        --deny add|remove <server|identity|network> <entry>   change one entry
 #
 # test/installer/answers.example lists every answer. Nothing changes before the
 # plan screen, and every step can be run again after a failure.
@@ -67,8 +69,10 @@ usage() {
 
 ANSWERS_FILE=""
 AFTER_UPDATE=0
+DENY_ARGS=()
 while [ $# -gt 0 ]; do
     case "$1" in
+    --deny) shift; DENY_ARGS=("$@"); [ ${#DENY_ARGS[@]} -gt 0 ] || DENY_ARGS=(usage); break ;;
     --dry-run) DRY_RUN=1 ;;
     --after-update) AFTER_UPDATE=1 UI_MODE=plain ;;
     --answers) ANSWERS_FILE=${2:-}; [ -n "$ANSWERS_FILE" ] || die "--answers needs a file."; shift ;;
@@ -297,6 +301,12 @@ fi
 if adopt_interrupted; then
     adopt_resume_main
     exit 0
+fi
+
+if [ ${#DENY_ARGS[@]} -gt 0 ]; then
+    [ -r "$CONF_FILE" ] || die "the relay is not set up by this setup here, so there is no denylist it manages."
+    manage_deny "${DENY_ARGS[@]}"
+    exit $?
 fi
 
 if [ -r "$CONF_FILE" ]; then

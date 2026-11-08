@@ -1,7 +1,10 @@
-"""Plays systemd's file descriptor store across one relay restart, for hs_restart in
-test_relay_live.cpp: on SIGTERM the first relay hands its snapshot memfd to the notify
-socket here, and the second gets it back as LISTEN_FDS, exactly as under the real unit.
-Prints pass or FAIL the way run_live.sh does.
+"""Plays systemd's file descriptor store across relay restarts, for hs_restart in
+test_relay_live.cpp: on SIGTERM a relay hands its snapshot memfd to the notify socket
+here, and the next gets it back as LISTEN_FDS, exactly as under the real unit. The client
+asks for each restart by writing `ready` (then `ready2`, `ready3`, ...); while no relay
+runs, a `denylist.next<n>` it left is renamed onto the denylist file and a
+`denylist.drop<n>` removes that file, as an operator might between two starts. Prints
+pass or FAIL the way run_live.sh does.
 
     python3 -I fdstore_restart.py <relay> <client> <live dir> [lo-hi ports]
 """
@@ -23,7 +26,8 @@ REPORT_TARGET = "12D3KooWRestartReportTarget1111111111111111111111"
 def fail(why, work=None):
     print(f"FAIL test_relay_restart ({why})")
     if work:
-        for name in ("client.log", "relay1.log", "relay2.log"):
+        names = ["client.log"] + sorted(n for n in os.listdir(work) if n.startswith("relay") and n.endswith(".log"))
+        for name in names:
             path = os.path.join(work, name)
             if os.path.exists(path):
                 with open(path, encoding="utf-8", errors="replace") as f:
@@ -46,6 +50,9 @@ def main():
            if not k.startswith("LISTEN_") and k not in ("NOTIFY_SOCKET", "HOLLOW_PUSH_TOKEN")}
     env["TURN_SECRET"] = "live-test"
     env["NOTIFY_SOCKET"] = notify_path
+    denylist = os.path.join(work, "denylist.json")
+    with open(denylist, "w") as f:
+        f.write('{"version":1,"servers":[],"identities":[],"networks":[]}\n')
 
     def start(log_name, stored=None):
         log_path = os.path.join(work, log_name)
@@ -54,7 +61,8 @@ def main():
             args = [relay, "--port", str(port), "--domain", "relay.live.test",
                     "--cert-file", os.path.join(live, "cert.pem"), "--key-file", os.path.join(live, "key.pem"),
                     "--keys-file", os.path.join(work, "no-keys.json"),
-                    "--reports-file", os.path.join(work, "reports.json")]
+                    "--reports-file", os.path.join(work, "reports.json"),
+                    "--denylist-file", denylist]
             child_env = dict(env)
             pass_fds = ()
             if stored is not None:
@@ -87,43 +95,57 @@ def main():
         with open(os.path.join(work, "client.log"), "w") as log:
             c = subprocess.Popen([client, str(port1), "relay.live.test"], env=client_env,
                                  stdout=log, stderr=subprocess.STDOUT)
-        deadline = time.time() + 60
-        while not os.path.exists(os.path.join(work, "ready")):
-            if c.poll() is not None or time.time() > deadline:
-                fail("the client never reached the restart", work)
-            time.sleep(0.05)
-
-        p1.send_signal(signal.SIGTERM)
-        stored = None
-        deadline = time.time() + 15
-        while time.time() < deadline:
-            try:
-                msg, fds, _, _ = socket.recv_fds(notify, 4096, 4)
-            except socket.timeout:
-                if p1.poll() is not None:
+        rcs = []
+        current = p1
+        n = 1
+        while True:
+            ready = os.path.join(work, "ready" if n == 1 else f"ready{n}")
+            deadline = time.time() + 60
+            while not os.path.exists(ready):
+                if c.poll() is not None:
                     break
-                continue
-            if b"FDSTORE=1" in msg and fds:
-                if stored is not None:
-                    os.close(stored)
-                stored, rest = fds[0], fds[1:]
-            else:
-                rest = fds
-            for f in rest:
-                os.close(f)
-        rc1 = p1.wait(timeout=10)
-        if stored is None:
-            fail("the first relay stored no snapshot", work)
-
-        p2, port2 = start("relay2.log", stored)
-        relays.append(p2)
-        os.close(stored)
-        with open(os.path.join(work, "port2.tmp"), "w") as f:
-            f.write(str(port2))
-        os.rename(os.path.join(work, "port2.tmp"), os.path.join(work, "port2"))
+                if time.time() > deadline:
+                    fail("the client never reached the restart", work)
+                time.sleep(0.05)
+            if not os.path.exists(ready):
+                break
+            current.send_signal(signal.SIGTERM)
+            stored = None
+            deadline = time.time() + 15
+            while time.time() < deadline:
+                try:
+                    msg, fds, _, _ = socket.recv_fds(notify, 4096, 4)
+                except socket.timeout:
+                    if current.poll() is not None:
+                        break
+                    continue
+                if b"FDSTORE=1" in msg and fds:
+                    if stored is not None:
+                        os.close(stored)
+                    stored, rest = fds[0], fds[1:]
+                else:
+                    rest = fds
+                for f in rest:
+                    os.close(f)
+            rcs.append(current.wait(timeout=10))
+            if stored is None:
+                fail(f"relay {n} stored no snapshot", work)
+            # What the operator changed while no relay ran.
+            moved = os.path.join(work, f"denylist.next{n}")
+            if os.path.exists(moved):
+                os.rename(moved, denylist)
+            if os.path.exists(os.path.join(work, f"denylist.drop{n}")) and os.path.exists(denylist):
+                os.unlink(denylist)
+            n += 1
+            current, port = start(f"relay{n}.log", stored)
+            relays.append(current)
+            os.close(stored)
+            with open(os.path.join(work, f"port{n}.tmp"), "w") as f:
+                f.write(str(port))
+            os.rename(os.path.join(work, f"port{n}.tmp"), os.path.join(work, f"port{n}"))
         client_rc = c.wait(timeout=60)
-        p2.send_signal(signal.SIGTERM)
-        rc2 = p2.wait(timeout=10)
+        current.send_signal(signal.SIGTERM)
+        rcs.append(current.wait(timeout=10))
     except subprocess.TimeoutExpired:
         fail("hung", work)
     finally:
@@ -133,15 +155,32 @@ def main():
                 p.wait()
 
     logs = {}
-    for name in ("client.log", "relay1.log", "relay2.log"):
+    relay_logs = [f"relay{i}.log" for i in range(1, len(rcs) + 1)]
+    for name in ["client.log"] + relay_logs:
         with open(os.path.join(work, name), encoding="utf-8", errors="replace") as f:
             logs[name] = f.read()
-    if "[snapshot] restored" not in logs["relay2.log"]:
-        fail("the second relay restored nothing", work)
-    if any(m in logs["relay1.log"] + logs["relay2.log"] for m in SANITIZER_MARKS):
+    for name in relay_logs[1:]:
+        if "[snapshot] restored" not in logs[name]:
+            fail(f"{name} restored nothing", work)
+    if any(m in "".join(logs[n] for n in relay_logs) for m in SANITIZER_MARKS):
         fail("a sanitizer fired", work)
-    if client_rc != 0 or rc1 != 0 or rc2 != 0:
-        fail(f"client {client_rc}, relays {rc1} and {rc2}", work)
+    if client_rc != 0 or any(rc != 0 for rc in rcs):
+        fail(f"client {client_rc}, relays {rcs}", work)
+    # The denylist across the restarts (hs_restart's deny phases): the second relay reads the
+    # file the operator changed while none ran; the third finds it unreadable and the fourth
+    # finds none, and both keep the list the previous process held, saying so loudly.
+    if len(relay_logs) >= 4:
+        for name in relay_logs[1:4]:
+            if "[deny] loaded: 1 servers, 1 identities, 0 networks" not in logs[name]:
+                fail(f"{name} did not keep the denylist", work)
+        for name in relay_logs[2:4]:
+            if "keeping the list the previous process held" not in logs[name]:
+                fail(f"{name} kept the previous list without saying so", work)
+    for name in relay_logs:
+        for line in logs[name].splitlines():
+            if line.startswith("[deny]") and ("12D3KooW" in line or any(
+                    len(w) >= 32 and all(ch in "0123456789abcdef" for ch in w) for w in line.replace(",", " ").split())):
+                fail(f"{name} names a denylist entry", work)
     # The report key rides the snapshot and never a file, so the repeat after the restart
     # was deduped against the fingerprint the first relay saved.
     if os.path.exists(os.path.join(work, "reports.json.key")):

@@ -118,6 +118,8 @@ vendor/ffmpeg/
 *.pem
 alpha_keys.txt
 keys.json
+# The operator denylist names blocked people: never in a clone
+denylist.json
 turnserver.conf
 android/app/google-services.json
 # Firebase config — match GoogleService-Info.plist anywhere under ios/ (repo is

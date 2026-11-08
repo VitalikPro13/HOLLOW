@@ -80,6 +80,10 @@ services:
       - ${RELAY_HOST}
       - --keys-file
       - /keys/keys.json
+      # The operator denylist (SELF_HOSTING.md, "Blocking a server, an identity or an
+      # address"), in the same read-only mount; re-read within seconds of an edit.
+      - --denylist-file
+      - /keys/denylist.json
       - --reports-file
       - /data/reports.json
       - --cert-file

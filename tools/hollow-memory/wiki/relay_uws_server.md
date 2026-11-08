@@ -111,7 +111,8 @@ Binary name: `hollow-relay`
   `fuzz_ring_auth`, `fuzz_join_lock` (a held chain always verifies under its record's
   owner), `fuzz_roster` (shows through `RosterBook`: within caps, round-trips, a repeat
   show changes nothing), `fuzz_kill_order`, `fuzz_snapshot_codec`, `fuzz_crypto_inputs`
-  (base58 decode and encode agree). Rules behind signatures run on stand-in crypto
+  (base58 decode and encode agree), `fuzz_deny_list` (the operator denylist file: never a
+  throw, every kept entry already in its compared form). Rules behind signatures run on stand-in crypto
   (`fuzz/fuzz_support.h`: a signature counts unless empty or starting with `!`).
   `fuzz/build.sh` builds them (macOS needs Homebrew llvm); `run_tests.sh` replays every
   seed (`fuzz/make_seeds.py`, from the test vectors) and every input in
@@ -646,9 +647,23 @@ Everything the relay holds is RAM. A service restart used to empty it: three day
 
 **Unit requirements** (`deploy/hollow-relay.service` and the box): `NotifyAccess=main`, `FileDescriptorStoreMax=1` (without both systemd drops the datagram), `LimitCORE=0`. `FileDescriptorStorePreserve` stays at its default `restart`: the store survives restarts and is cleared on a full `stop`. Host: NO swap (a 2 GB swapfile was live until 2026-09-07) and apport disabled, because the heap and the memfd are ordinary pageable memory and a core dump is the heap on disk. Docker: no fd store, the handoff no-ops.
 
-**Rules:** a new RAM registry an offline peer cannot re-send joins the codec (bump `VERSION`; an old snapshot is then discarded whole, which is intended). Snapshot BEFORE `app.close()`. Log counts, never keys. Memory peak at shutdown ≈ 3x buffered bytes, at restore ≈ 2x; stream-encode from state before a multi-GB budget.
+**Rules:** a new RAM registry an offline peer cannot re-send joins the codec (bump `VERSION`; an old snapshot is then discarded whole, which is intended). VERSION 12 (0.14, t14-deny) carries the operator denylist in force and the devices learned for its identities; a rollback from a v12 relay to a v11 binary (0.13) discards the whole snapshot on that restart, buffers, rings, sessions and push tokens included. Snapshot BEFORE `app.close()`. Log counts, never keys. Memory peak at shutdown ≈ 3x buffered bytes, at restore ≈ 2x; stream-encode from state before a multi-GB budget.
 
 **Proof:** `scripts/fleet_relay_restart.ps1` (two real instances; b closed, a sends a DM and a channel message and closes, relay restarted with nobody connected, b returns alone and sees both). Journal at that restart: `handed to the fd store: 6 DM frames in 2 queues, 4 topic frames in 2 rings, 2 opt-ins` and `restored ... 10 frames live after expiry`.
+
+---
+
+## Operator denylist (t14-deny, 0.14)
+
+One operator file refuses server and meeting ids, master identities and network addresses; the gate rows are wiki `security_write_gates` §66 and the operator guide is `relay-uws/SELF_HOSTING.md`, "Blocking a server, an identity or an address". Shape:
+
+- **File:** `--denylist-file` (systemd `/etc/hollow-relay/denylist.json` 0640 root:hollow-relay; Docker `keys/denylist.json` 0640 root:999 in the read-only `/keys` mount). `{"version":1,"servers":[...],"identities":[...],"networks":[...]}`, entries as strings or objects (`id`, `ip`; an opaque `ref` read past and kept nowhere). Read all or nothing by `deny::parse` (`src/deny_list.h`, pure, never throws). The setup writes a valid empty file once and never over an existing one.
+- **Reload:** a 2 s timer compares `file_stamp` (ns mtime, size, inode, device) and applies the difference (`deny::take`: the list in force first, applied and judged only once the apply returns). Missing or unreadable keeps the list in force, at start too (the snapshot's list), with a loud line. Log lines carry counts only.
+- **Refusals:** `.open` (network: `auth_failed network_denied`, 1008, no slot), `handle_auth` (listed master or learned device after the signature: `account_denied`), `handle_join` / lock_get / lock_put (`{"type":"room_denied","room":...}`, a counted stream frame), the three direct handlers' tops and `buffer_offline_msg` (no deposit, no wake). Room ids compare lower-cased (`is_valid_room_code` takes upper case).
+- **Learning devices:** from the roster FOLD of a listed master's shown rosters (members and consented pending joins), in `inbox_owner_by_roster`, which returns a verdict and never closes; `handle_join` closes the showing socket only when its OWN device was learned and returns before touching any room. Learned devices stay until the entry goes (512 per identity, 262,144 in all).
+- **On add:** `apply_denials` empties a server's room (members told `room_denied` once, sessions in grace in their ring), rings incl. `~join`, buffered copies; closes an identity's sockets, ends its grace sessions, drops its registrations, its queue and mailbox and every frame it sent; closes a network's sockets. A device learned later gets the same purge (`deny_settle` after the loop iteration, the frame walk in the next tick). The join lock record stays frozen; kill orders stay parked.
+- **Operator tools:** `hollow-relay --check-denylist <path>`; `sudo hollow-relay-setup --deny check | add|remove <server|identity|network> <entry> [ref]`; `check-host.sh` checks owner, mode and that it reads. `/server-stats` names counts per kind only with `PUBLIC_DENY_COUNTS=on` (and public stats on).
+- **Tests:** `test_deny_list`, `test_snapshot_codec` (v12), `fuzz_deny_list`, `run_live.sh` variant `deny` (`RELAY_LIVE_ONLY=deny`, file in `RELAY_LIVE_DENYLIST`, test-only `/deny-test` report), `run_restart.sh` (four relays: learned devices survive, an entry added while down drops the restored ring, an unreadable and a missing file at start keep the list).
 
 ---
 
@@ -789,12 +804,10 @@ The ONE thing the relay persists about peers. Small, but since file v3 (0.14) no
 ### license.cpp:load_from_file()
 
 Initial load on startup:
-1. Open and read the JSON file.
-2. Parse `enabled` boolean (defaults to `false`).
-3. Parse `keys` array into the `keys` set.
-4. Record `last_mtime` via `stat()` for change detection.
-5. Log key count and enabled status to stderr.
-6. Returns `false` if file doesn't exist or can't be parsed (non-fatal — license system stays disabled).
+1. Take the file's stamp (`file_stamp.h`: mtime with nanoseconds, size, inode, device), then read it.
+2. `parse_keys_file` (`license_pool.h`, never throws): a non-object, an `enabled` that is not a boolean or `keys` that is not a list read as nothing (HOL-SEC-203: `j.value("enabled", false)` on a string threw out of the reload timer and ended the relay with no snapshot). Missing fields: off, no keys; non-text keys skipped.
+3. Log key count and enabled status to stderr.
+4. Returns `false` if the file doesn't exist or doesn't read (non-fatal: the license system stays disabled).
 
 ### license.cpp:validate_key()
 
@@ -813,12 +826,9 @@ Called when a peer disconnects (`cleanup_peer()`). Removes the peer_id from ever
 ### license.cpp:try_reload()
 
 Called every 30 seconds by the license reload timer:
-1. `stat()` the keys file. If `st_mtime == last_mtime`, return (no change).
-2. Re-read and parse the JSON file.
-3. Build a new key set.
-4. `replace_keys()`: every holder of a key that is NOT in the new set is returned as `peers_to_kick` and forgotten; `enabled` and `keys` are swapped in.
-5. Update `last_mtime`.
-7. **Active connection revocation:** For each peer to kick, look up their `SSLWebSocket*` in `state.peer_sockets`, send `{"type":"auth_failed","error":"invalid_license_key"}`, and call `ws->end(1008, "license_revoked")`. This triggers the close handler which calls `cleanup_peer()`.
+1. Take the stamp; an unchanged one (or a missing file) returns. The stamp is kept whatever the outcome, so a broken file is judged once per change.
+2. `reload_text`: a file that does not read changes nothing ("keeping the previous keys"); else `replace_keys()` returns every holder of a key NOT in the new set as `peers_to_kick`, forgotten, and `enabled` and `keys` are swapped in. The timer callback in `main.cpp` sits in try/catch too.
+3. **Active connection revocation:** For each peer to kick, look up their `SSLWebSocket*` in `state.peer_sockets`, send `{"type":"auth_failed","error":"invalid_license_key"}`, and call `ws->end(1008, "license_revoked")`. This triggers the close handler which calls `cleanup_peer()`.
 
 The 30-second reload cycle means key revocation takes at most 30 seconds to take effect on active connections.
 

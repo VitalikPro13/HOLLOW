@@ -39,6 +39,7 @@ run test_breaker
 run test_client_json
 run test_conn_rate
 run test_conn_rate_exempt
+run test_deny_list
 run test_derive_peer_id ../src/crypto.cpp $LIBS
 run test_door_room ../src/crypto.cpp $LIBS
 run test_fair_share
@@ -99,6 +100,7 @@ if python3 ../fuzz/make_seeds.py "$out/seeds" && mkdir -p "$out/seeds/fuzz_snaps
     replay fuzz_binary_frame
     replay fuzz_client_json
     replay fuzz_crypto_inputs ../src/crypto.cpp $LIBS
+    replay fuzz_deny_list
     replay fuzz_join_lock
     replay fuzz_kill_order
     replay fuzz_ring_auth

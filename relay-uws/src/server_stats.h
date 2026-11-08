@@ -60,6 +60,24 @@ inline int64_t bandwidth_cap_mbps(const char* cake, const char* mbit) {
     return (v >= 1 && v <= 100000) ? v : 0;
 }
 
+// An opt-in switch from the environment (PUBLIC_DENY_COUNTS): on, true, yes or 1 turn it
+// on; anything else, unset included, leaves it off.
+inline bool parse_opt_in(const char* text) {
+    std::string v = text ? text : "";
+    const auto first = v.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) return false;
+    v = v.substr(first, v.find_last_not_of(" \t\r\n") - first + 1);
+    for (const char* on : {"on", "true", "yes", "1"}) {
+        if (strcasecmp(v.c_str(), on) == 0) return true;
+    }
+    return false;
+}
+
+// How many entries of each kind the operator denylist holds, for an opted-in /server-stats.
+inline nlohmann::json deny_block(size_t servers, size_t identities, size_t networks) {
+    return {{"servers", servers}, {"identities", identities}, {"networks", networks}};
+}
+
 // PUBLIC_STATS from the relay's environment, trimmed and in any case: unset, empty, on,
 // true, yes or 1 keep the public activity; off, false, no or 0 turn it off. Anything else
 // turns it off too, with a line saying so: a typo must not leave a relay's activity public.

@@ -211,6 +211,12 @@ env_kept_block() {
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# The operator denylist the relay reads (relay-uws/src/deny_list.h): a valid empty one,
+# which the setup writes once so an operator only edits it. Never over an existing one.
+deny_empty() {
+    printf '{\n  "version": 1,\n  "servers": [],\n  "identities": [],\n  "networks": []\n}\n'
+}
+
 # apt_install <package...>, quietly, without questions.
 APT_UPDATED=0
 apt_install() {

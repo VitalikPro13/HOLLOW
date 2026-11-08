@@ -87,7 +87,7 @@ plain_copy() {
 # arg_value <flag> <program> <word...>: the value the relay takes for <flag>,
 # read as its config.h reads argv: the last copy wins, and the word after any
 # flag that takes one is that flag's value, never a flag of its own.
-RELAY_VALUE_FLAGS=" --port --public-ip --domain --keys-file --reports-file --cert-file --key-file --forwarder-peer-id --session-grace-secs "
+RELAY_VALUE_FLAGS=" --port --public-ip --domain --keys-file --denylist-file --reports-file --cert-file --key-file --forwarder-peer-id --session-grace-secs "
 arg_value() {
     local flag=$1 i v=""
     shift

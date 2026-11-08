@@ -125,6 +125,10 @@ static snapshot::Data sample() {
     d.sessions.push_back(c);
     d.report_key = std::string("\x00report\x00key", 11) + std::string(21, '\x5a');
     d.report_shares = {{std::string(64, 'a'), 77}, {std::string(64, 'b'), 0xfedcba9876543210ull}};
+    d.deny_servers = {"3f2a0b1c2d3e4f5061728394a5b6c7d8e9f00112", "conf:00112233445566778899aabbccddeeff"};
+    d.deny_identities = {"12D3KooWMasterTwo"};
+    d.deny_networks = {"198.51.100.4", "2001:db8:1:2::/64"};
+    d.deny_learned = {{"12D3KooWMasterTwo", {"12D3KooWOldDevice", "12D3KooWNewDevice"}}};
     return d;
 }
 
@@ -228,7 +232,51 @@ static snapshot::Data v1_sample() {
     return d;
 }
 
+// A byte-exact VERSION 12 snapshot: one DM frame and the denylist with one learned device.
+// Pinned so a change to the section's layout shows here before a deploy hands it over.
+// 322 bytes, VERSION 12
+static const unsigned char V12_FIXTURE[] = {
+    0x48, 0x52, 0x53, 0x4e, 0x0c, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x15, 0x00, 0x00, 0x00,
+    0x31, 0x32, 0x44, 0x33, 0x4b, 0x6f, 0x6f, 0x57, 0x46, 0x69, 0x78, 0x74, 0x75, 0x72, 0x65, 0x54,
+    0x61, 0x72, 0x67, 0x65, 0x74, 0x01, 0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00, 0x64, 0x6d, 0x72,
+    0x6f, 0x6f, 0x6d, 0x05, 0x00, 0x00, 0x00, 0x06, 0x00, 0x70, 0x61, 0x79, 0x15, 0x00, 0x00, 0x00,
+    0x31, 0x32, 0x44, 0x33, 0x4b, 0x6f, 0x6f, 0x57, 0x46, 0x69, 0x78, 0x74, 0x75, 0x72, 0x65, 0x53,
+    0x65, 0x6e, 0x64, 0x65, 0x72, 0x3c, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x09, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x28, 0x00, 0x00, 0x00, 0x33, 0x66, 0x32, 0x61, 0x30,
+    0x62, 0x31, 0x63, 0x32, 0x64, 0x33, 0x65, 0x34, 0x66, 0x35, 0x30, 0x36, 0x31, 0x37, 0x32, 0x38,
+    0x33, 0x39, 0x34, 0x61, 0x35, 0x62, 0x36, 0x63, 0x37, 0x64, 0x38, 0x65, 0x39, 0x66, 0x30, 0x30,
+    0x31, 0x31, 0x32, 0x01, 0x00, 0x00, 0x00, 0x15, 0x00, 0x00, 0x00, 0x31, 0x32, 0x44, 0x33, 0x4b,
+    0x6f, 0x6f, 0x57, 0x46, 0x69, 0x78, 0x74, 0x75, 0x72, 0x65, 0x4d, 0x61, 0x73, 0x74, 0x65, 0x72,
+    0x01, 0x00, 0x00, 0x00, 0x0c, 0x00, 0x00, 0x00, 0x31, 0x39, 0x38, 0x2e, 0x35, 0x31, 0x2e, 0x31,
+    0x30, 0x30, 0x2e, 0x34, 0x01, 0x00, 0x00, 0x00, 0x15, 0x00, 0x00, 0x00, 0x31, 0x32, 0x44, 0x33,
+    0x4b, 0x6f, 0x6f, 0x57, 0x46, 0x69, 0x78, 0x74, 0x75, 0x72, 0x65, 0x4d, 0x61, 0x73, 0x74, 0x65,
+    0x72, 0x01, 0x00, 0x00, 0x00, 0x15, 0x00, 0x00, 0x00, 0x31, 0x32, 0x44, 0x33, 0x4b, 0x6f, 0x6f,
+    0x57, 0x46, 0x69, 0x78, 0x74, 0x75, 0x72, 0x65, 0x44, 0x65, 0x76, 0x69, 0x63, 0x65, 0x48, 0x52,
+    0x53, 0x45
+};
+
+static snapshot::Data v12_sample() {
+    snapshot::Data d;
+    snapshot::DmQueue q;
+    q.target = "12D3KooWFixtureTarget";
+    q.frames.push_back({"dmroom", std::string("\x06\x00pay", 5), "12D3KooWFixtureSender", 60, false, false, 3, 9});
+    d.dm.push_back(q);
+    d.deny_servers = {"3f2a0b1c2d3e4f5061728394a5b6c7d8e9f00112"};
+    d.deny_identities = {"12D3KooWFixtureMaster"};
+    d.deny_networks = {"198.51.100.4"};
+    d.deny_learned = {{"12D3KooWFixtureMaster", {"12D3KooWFixtureDevice"}}};
+    return d;
+}
+
 static bool same(const snapshot::Data& a, const snapshot::Data& b) {
+    if (a.deny_servers != b.deny_servers || a.deny_identities != b.deny_identities ||
+        a.deny_networks != b.deny_networks || a.deny_learned != b.deny_learned) {
+        return false;
+    }
     if (a.report_key != b.report_key) return false;
     if (a.report_shares != b.report_shares) return false;
     if (a.dm.size() != b.dm.size()) return false;
@@ -347,11 +395,34 @@ static bool same(const snapshot::Data& a, const snapshot::Data& b) {
     return true;
 }
 
-// The bytes of the v11 report shares.
+// The bytes of the v12 denylist section, the last before the end tag.
+static size_t deny_bytes(const snapshot::Data& d) {
+    size_t n = 4;
+    for (const auto* list : {&d.deny_servers, &d.deny_identities, &d.deny_networks}) {
+        n += 4;
+        for (const auto& e : *list) n += 4 + e.size();
+    }
+    for (const auto& [master, devices] : d.deny_learned) {
+        n += 4 + master.size() + 4;
+        for (const auto& dev : devices) n += 4 + dev.size();
+    }
+    return n;
+}
+
+// `d` without what v12 added, as a v11 build held it.
+static snapshot::Data without_deny(snapshot::Data d) {
+    d.deny_servers.clear();
+    d.deny_identities.clear();
+    d.deny_networks.clear();
+    d.deny_learned.clear();
+    return d;
+}
+
+// The bytes of the v11 report shares and the v12 denylist after them.
 static size_t report_shares_bytes(const snapshot::Data& d) {
     size_t n = 4;
     for (const auto& [key, share] : d.report_shares) n += 4 + key.size() + 8;
-    return n;
+    return n + deny_bytes(d);
 }
 
 // The bytes of the v9 `buffers` and `sessions` sections and the v10 report key and v11
@@ -366,6 +437,7 @@ static size_t sessions_bytes(const snapshot::Data& d) {
 
 // `d` without what v9 added, as a v8 build held it.
 static snapshot::Data without_sessions(snapshot::Data d) {
+    d = without_deny(std::move(d));
     d.report_key.clear();
     d.report_shares.clear();
     d.buffers.clear();
@@ -538,7 +610,7 @@ int main() {
         v9[4] = 9;
         snapshot::Data out;
         check("a v9 snapshot decodes under this reader", snapshot::decode(v9, out));
-        snapshot::Data no_key = in;
+        snapshot::Data no_key = without_deny(in);
         no_key.report_key.clear();
         no_key.report_shares.clear();
         check("and carries no report key", out.report_key.empty() && same(no_key, out));
@@ -557,11 +629,39 @@ int main() {
         v10[4] = 10;
         snapshot::Data out;
         check("a v10 snapshot decodes under this reader", snapshot::decode(v10, out));
-        snapshot::Data no_shares = in;
+        snapshot::Data no_shares = without_deny(in);
         no_shares.report_shares.clear();
         check("and carries no report shares", out.report_shares.empty() && same(no_shares, out));
-        std::string cut = bytes.substr(0, bytes.size() - 4 - 8) + bytes.substr(bytes.size() - 4);
+        const size_t shares_end = bytes.size() - 4 - deny_bytes(in);
+        std::string cut = bytes.substr(0, shares_end - 8) + bytes.substr(shares_end);
         check("a report share cut short is refused", !snapshot::decode(cut, out));
+    }
+
+    // The relay that carries the denylist takes back what the v11 build running before it
+    // handed over: the same bytes, less the list, under version 11. A rollback the other
+    // way drops the whole v12 snapshot (a newer version is refused), as the deploy notes say.
+    {
+        snapshot::Data in = sample();
+        std::string bytes = snapshot::encode(in);
+        snapshot::Data out;
+        check("a snapshot carries the denylist and the learned devices",
+              snapshot::decode(bytes, out) && out.has_deny && same(in, out) &&
+                  out.deny_learned[0].second == std::vector<std::string>{"12D3KooWOldDevice", "12D3KooWNewDevice"});
+        std::string v11 = bytes.substr(0, bytes.size() - 4 - deny_bytes(in)) + bytes.substr(bytes.size() - 4);
+        v11[4] = 11;
+        snapshot::Data old;
+        check("a v11 snapshot decodes under this reader", snapshot::decode(v11, old));
+        check("and carries no list, so the file alone decides", !old.has_deny && same(without_deny(in), old));
+        bool cuts_refused = true;
+        for (size_t k = 1; k <= deny_bytes(in); k++) {
+            std::string cut = bytes.substr(0, bytes.size() - 4 - k) + bytes.substr(bytes.size() - 4);
+            snapshot::Data o;
+            cuts_refused = cuts_refused && !snapshot::decode(cut, o);
+        }
+        check("a denylist section cut anywhere is refused", cuts_refused);
+        snapshot::Data none;
+        check("an empty list is carried as a list", snapshot::decode(snapshot::encode(snapshot::Data{}), none) &&
+                                                       none.has_deny && none.deny_servers.empty());
     }
 
     // The report key is 32 bytes or absent; any other length is corruption.
@@ -789,6 +889,15 @@ int main() {
         check("the v2 fixture decodes under this reader", snapshot::decode(v2, out));
         check("a v2 snapshot carries no marks", out.marks.empty());
         check("every v2 field is unchanged", same(v2_sample(), out));
+    }
+
+    // The v12 layout, byte for byte.
+    {
+        std::string_view v12(reinterpret_cast<const char*>(V12_FIXTURE), sizeof(V12_FIXTURE));
+        snapshot::Data out;
+        check("the v12 fixture decodes under this reader", snapshot::decode(v12, out));
+        check("with its denylist and learned device", out.has_deny && same(v12_sample(), out));
+        check("and this build writes it byte for byte", snapshot::encode(v12_sample()) == std::string(v12));
     }
 
     if (failures) {

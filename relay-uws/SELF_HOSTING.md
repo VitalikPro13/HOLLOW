@@ -892,6 +892,113 @@ When you restart or update the relay, it first tells every connected app to come
 back 2 to 10 seconds later, each at a different moment, so they don't all
 reconnect at once.
 
+### Blocking a server, an identity or an address
+
+A relay can refuse three things and nothing finer: a server or a meeting, by its
+id; a person's identity, with its devices; and a network address. You list them
+in one file. The relay reads it again within a couple of seconds of a change, with
+no restart, and it deletes nothing on anyone's device.
+
+The file is `/etc/hollow-relay/denylist.json` under systemd and
+`relay-uws/keys/denylist.json` under Docker. The setup writes an empty one:
+
+```json
+{
+  "version": 1,
+  "servers": [],
+  "identities": [],
+  "networks": []
+}
+```
+
+The setup changes it for you. It checks the result the way the relay reads it,
+then writes the whole file in one step and keeps its owner and permissions:
+
+```bash
+sudo hollow-relay-setup --deny add server 3f2a0b1c2d3e4f5061728394a5b6c7d8e9f00112 N-2026-014
+sudo hollow-relay-setup --deny add identity 12D3KooWAx1yGq5n7mCgS2kS8wYk7c2XQGtB4V3pX8XnZfnwq7mD
+sudo hollow-relay-setup --deny add network 203.0.113.7
+sudo hollow-relay-setup --deny remove server 3f2a0b1c2d3e4f5061728394a5b6c7d8e9f00112
+sudo hollow-relay-setup --deny check
+```
+
+What each list takes:
+
+- **servers**: a server's id, the 40 (or, for older servers, 32) hexadecimal
+  characters from its invite link. A meeting is `conf:` followed by its id. To the
+  relay, an older server's 32-character id looks the same as the code of a direct
+  message between two people or of one person's own devices. Such an entry blocks
+  whatever room has that code, so list one only when you are sure it names the
+  server. The check warns about each one.
+- **identities**: a person's identity id, which starts with `12D3KooW`. The relay
+  refuses that key at once, and each of the identity's devices once any of them
+  has shown the relay its device list, which the app does every time it connects.
+  A device stays refused until you remove the identity, even if a later list
+  leaves it out.
+- **networks**: an IPv4 address, or an IPv6 address, which stands for its whole
+  `/64` (write any address in it, or the block as `2001:db8:1:2::/64`). Nothing
+  wider.
+
+By hand, an entry is either the bare text or an object with `id` (`ip` for a
+network). An object may carry `ref`, a pointer into your own record of the notice
+you acted on; the relay reads past it and never keeps it. Keep reasons, names and
+evidence off the server, which can be seized or broken into. Before you save, check
+the file the way the relay reads it:
+
+```bash
+hollow-relay --check-denylist /etc/hollow-relay/denylist.json
+```
+
+One entry the relay can't read makes it ignore the whole file and keep the list
+it already has, so a typo never lifts a block quietly. The same goes for a file
+that is missing, even across a restart: the relay keeps the list it held and says
+so in its log, and the host check fails until the file is back. To lift every
+block, write the empty file above.
+
+What people see:
+
+- The members of a blocked server or meeting see that it is not available on this
+  relay. Their messages, files and the server itself stay on their devices, and
+  their direct messages and other servers keep working.
+- A blocked identity's app, on every one of its devices, says this relay does not
+  accept the account.
+- People behind a blocked address are told that this relay does not accept
+  connections from their network.
+
+The apps ask again on their own every few hours, and when someone chooses to try
+again, so lifting a block needs nothing from them.
+
+The relay logs no refusal and no entry, only the counts each time it loads the
+list. It keeps the list in memory and hands it to the next process across a
+restart, like the rest of what it holds. `/server-stats` shows how many entries of
+each kind there are only if you set `PUBLIC_DENY_COUNTS=on` beside `PUBLIC_STATS`;
+it is off by default.
+
+What a block does not stop:
+
+- Anything already on the members' devices.
+- Members moving to another relay, such as one of their own.
+- What is already connected directly between devices: calls and voice rooms in
+  progress and file transfers under way. TURN credentials already handed out last
+  up to an hour.
+- A server founded again under a new id, or a person who makes a new identity.
+- A device of a blocked identity that the relay has not seen yet, until its first
+  connection shows its device list. A modified app that never shows it is never
+  recognised.
+- A device of a blocked identity that has left its device list, once that
+  identity has shown the relay more than 512 newer devices. The relay remembers
+  that many per identity and lets the oldest go first.
+- A modified app passing a blocked server's encrypted traffic through other rooms,
+  such as direct messages, which the relay cannot tell apart. The Hollow app stops
+  sending it.
+- A VPN or a new address. One address can also stand for many people, on a mobile
+  network or in an office, and blocking it refuses everyone behind it.
+- Pages a guest already loaded in a browser, and other relays.
+
+Anyone who has a server's id can find out that your relay blocks it, because a
+join is answered with "not available". The relay never scans or matches content:
+it acts only on the ids you write down.
+
 ## Connect the app
 
 On desktop, open Settings, then Network. Under Relay, choose **Change**, then
@@ -1087,7 +1194,7 @@ own firewall in front of the server, open them there too.
 | The programs | `/usr/local/bin/hollow-relay`, `/usr/local/bin/hollow-forwarder` |
 | The setup's own copy | `/usr/local/lib/hollow-relay/installer`, run as `sudo hollow-relay-setup` |
 | Your answers, no secrets | `/etc/hollow-relay/install.conf` |
-| Relay settings, keys and secrets | `/etc/hollow-relay/` |
+| Relay settings, keys, the denylist and secrets | `/etc/hollow-relay/` |
 | TURN, push, forwarder, DuckDNS settings | `/etc/hollow-turn/`, `/etc/hollow-push/`, `/etc/hollow-forwarder/`, `/etc/hollow-duckdns/` |
 | Report counts and their key | `/var/lib/hollow-relay/` |
 | The forwarder's identity | `/var/lib/hollow-forwarder/` |
@@ -1177,6 +1284,15 @@ Notes for people who already run a relay, newest first.
 
 ### 0.14
 
+- The relay reads a denylist, `/etc/hollow-relay/denylist.json` (Docker:
+  `keys/denylist.json`), to refuse a server, an identity or an address. The setup
+  writes an empty one and the `--denylist-file` flag when you update; a relay you
+  run by hand needs both, or it looks for `denylist.json` in its working directory
+  and blocks nothing. See [Blocking a server, an identity or an
+  address](#blocking-a-server-an-identity-or-an-address).
+- A 0.14 relay hands its memory to the next process in a newer form. Going back to
+  a 0.13 relay after that loses, on that one restart, the messages waiting for
+  offline people, the channel history it held and the phones' push registrations.
 - The setup puts CAKE on the server's upload, so a full line is shared fairly
   between the addresses the relay sends to. On a relay the setup put up before,
   choose it under **Change a setting**. Until then the host checks fail.

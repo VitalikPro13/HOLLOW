@@ -18,7 +18,7 @@ ROOT=${FUZZ_NIGHTLY_ROOT:-$HOME/dev/fuzz-nightly}
 LABEL=com.anonlisten.hollow.fuzz-nightly
 PLIST=$HOME/Library/LaunchAgents/$LABEL.plist
 TARGETS=(fuzz_auth_frame fuzz_binary_frame fuzz_client_json fuzz_ring_auth fuzz_join_lock fuzz_roster
-    fuzz_kill_order fuzz_snapshot_codec fuzz_crypto_inputs)
+    fuzz_kill_order fuzz_snapshot_codec fuzz_crypto_inputs fuzz_deny_list)
 here=$(cd "$(dirname "$0")" && pwd)
 
 notify() {

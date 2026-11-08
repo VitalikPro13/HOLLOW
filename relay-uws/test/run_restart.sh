@@ -16,4 +16,4 @@ command -v python3 > /dev/null || {
     echo "skip test_relay_restart (no python3)"
     exit 0
 }
-timeout 150 python3 -I fdstore_restart.py "$relay" "$live/client" "$live" "${RELAY_LIVE_PORTS:-}"
+timeout 240 python3 -I fdstore_restart.py "$relay" "$live/client" "$live" "${RELAY_LIVE_PORTS:-}"

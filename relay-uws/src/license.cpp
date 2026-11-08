@@ -1,42 +1,40 @@
 #include "license.h"
 #include "state.h"
-#include "json.hpp"
 #include <cstdio>
 #include <fstream>
 #include <sstream>
-#include <sys/stat.h>
 
-using json = nlohmann::json;
+static std::optional<std::string> read_text(const std::string& path) {
+    std::ifstream f(path);
+    if (!f.is_open()) return std::nullopt;
+    std::stringstream buf;
+    buf << f.rdbuf();
+    return buf.str();
+}
+
+static std::optional<KeysFile> read_keys_file(const std::string& path) {
+    std::optional<std::string> text = read_text(path);
+    if (!text) return std::nullopt;
+    return parse_keys_file(*text);
+}
 
 bool LicenseState::load_from_file(const std::string& path) {
     file_path = path;
-
-    std::ifstream f(path);
-    if (!f.is_open()) return false;
-
-    std::stringstream buf;
-    buf << f.rdbuf();
-
-    json j;
+    // Taken before the read: a write landing meanwhile is read on the next reload.
+    const FileStamp stamp = file_stamp(path);
+    std::optional<KeysFile> file;
     try {
-        j = json::parse(buf.str());
+        file = read_keys_file(path);
     } catch (...) {
-        fprintf(stderr, "[license] Failed to parse %s\n", path.c_str());
+        file.reset();
+    }
+    if (!file) {
+        if (stamp.exists) fprintf(stderr, "[license] Failed to parse %s\n", path.c_str());
         return false;
     }
-
-    enabled = j.value("enabled", false);
-    keys.clear();
-    if (j.contains("keys") && j["keys"].is_array()) {
-        for (auto& k : j["keys"]) {
-            if (k.is_string()) keys.insert(k.get<std::string>());
-        }
-    }
-
-    struct stat st;
-    if (stat(path.c_str(), &st) == 0) {
-        last_mtime = st.st_mtime;
-    }
+    enabled = file->enabled;
+    keys = std::move(file->keys);
+    last_stamp = stamp;
 
     fprintf(stderr, "[license] Loaded %zu key(s), enabled=%s\n",
             keys.size(), enabled ? "true" : "false");
@@ -55,38 +53,24 @@ void LicenseState::release_key(const std::string& peer_id) {
 void LicenseState::try_reload(RelayState& state) {
     if (file_path.empty()) return;
 
-    struct stat st;
-    if (stat(file_path.c_str(), &st) != 0) return;
+    const FileStamp stamp = file_stamp(file_path);
+    if (!stamp.exists || stamp == last_stamp) return;
 
-    if (st.st_mtime == last_mtime) return;
-
-    std::ifstream f(file_path);
-    if (!f.is_open()) {
-        fprintf(stderr, "[license] Failed to re-read %s\n", file_path.c_str());
-        return;
-    }
-
-    std::stringstream buf;
-    buf << f.rdbuf();
-
-    json j;
+    // Judged once per change: the previous keys stay until the file reads.
+    last_stamp = stamp;
+    std::vector<std::string> peers_to_kick;
+    bool read = false;
     try {
-        j = json::parse(buf.str());
+        std::optional<std::string> text = read_text(file_path);
+        read = text && reload_text(*text, peers_to_kick);
     } catch (...) {
-        fprintf(stderr, "[license] Failed to parse on reload\n");
+        read = false;
+    }
+    if (!read) {
+        fprintf(stderr, "[license] Failed to parse on reload, keeping the previous keys\n");
         return;
     }
-
-    std::unordered_set<std::string> new_keys;
-    if (j.contains("keys") && j["keys"].is_array()) {
-        for (auto& k : j["keys"]) {
-            if (k.is_string()) new_keys.insert(k.get<std::string>());
-        }
-    }
-
     // No logging of the revoked peer_ids (user-identifying).
-    std::vector<std::string> peers_to_kick = replace_keys(std::move(new_keys), j.value("enabled", false));
-    last_mtime = st.st_mtime;
 
     fprintf(stderr, "[license] Reloaded: %zu key(s), enabled=%s\n",
             keys.size(), enabled ? "true" : "false");

@@ -134,6 +134,8 @@ TURN_SECRET=your_secret ./build/hollow-relay \
 | `--port` | `443` | Listen port |
 | `--domain` | `relay.anonlisten.com` | Public host clients connect to. The TURN URIs handed to clients are built from it, so a self-hosted relay must set it |
 | `--keys-file` | `keys.json` | License keys JSON path |
+| `--denylist-file` | `denylist.json` | Operator denylist: servers, identities and addresses this relay refuses; re-read within about 2 seconds of a change |
+| `--check-denylist <path>` | | Reads a denylist file the way the relay does, prints its counts or its first error, and exits (0 only for a good file); warns, by count, of 32-hex server entries, which an older server id shares with DM and own-device rooms |
 | `--reports-file` | `reports.json` | User report counts JSON path; the dedup key lives only in memory and the restart snapshot (a `<path>.key` left by an older relay is zeroed and removed) |
 | `--cert-file` | `/etc/letsencrypt/live/relay.anonlisten.com/fullchain.pem` | TLS certificate chain |
 | `--key-file` | `/etc/letsencrypt/live/relay.anonlisten.com/privkey.pem` | TLS private key |
@@ -150,7 +152,20 @@ TURN_SECRET=your_secret ./build/hollow-relay \
 
 Where keyN is four groups of four characters [A-Z0-9] separated by hyphens. (eg. AB12-CD32-BA30-LJ50)
 
-The file is hot-reloaded every 30 seconds. Removing a key revokes the active connections using it. One key admits up to 5 devices at a time, so a person's linked devices share one key.
+The file is hot-reloaded every 30 seconds. Removing a key revokes the active connections using it. One key admits up to 5 devices at a time, so a person's linked devices share one key. A file that does not read (a field of the wrong type included) keeps the keys the relay already has.
+
+### Denylist format (`denylist.json`)
+
+```json
+{
+  "version": 1,
+  "servers": ["3f2a0b1c2d3e4f5061728394a5b6c7d8e9f00112", {"id": "conf:00112233445566778899aabbccddeeff", "ref": "N-2026-014"}],
+  "identities": [{"id": "12D3KooW...", "ref": "N-2026-015"}],
+  "networks": ["203.0.113.7", "2001:db8:1:2::/64"]
+}
+```
+
+All three lists are required; an entry is text or an object (`id`, `ip` for networks; `ref` is read past and kept nowhere). One bad entry makes the relay keep the list it has, and so does a missing file. See `SELF_HOSTING.md`, "Blocking a server, an identity or an address", for what each kind refuses and what a block does not stop.
 
 ## Deployment
 

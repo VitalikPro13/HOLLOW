@@ -16,6 +16,7 @@ ExecStart=/usr/local/bin/hollow-relay \
     --port 443 \
     --domain relay.anonlisten.com \
     --keys-file /etc/hollow-relay/keys.json \
+    --denylist-file /etc/hollow-relay/denylist.json \
     --reports-file /var/lib/hollow-relay/reports.json \
     --cert-file /etc/hollow-relay/fullchain.pem \
     --key-file /etc/hollow-relay/privkey.pem \

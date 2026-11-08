@@ -6,6 +6,7 @@
 #include <string>
 
 #include "conn_rate_exempt.h"
+#include "deny_list.h"
 #include "server_stats.h"
 #include "session.h"
 
@@ -15,6 +16,8 @@ struct Config {
     std::string public_ip;
     std::string domain = "relay.anonlisten.com";
     std::string keys_file = "keys.json";
+    // The operator denylist (deny_list.h): read at start, re-read on every change.
+    std::string denylist_file = "denylist.json";
     std::string reports_file = "reports.json";
     std::string cert_file = "/etc/letsencrypt/live/relay.anonlisten.com/fullchain.pem";
     std::string key_file = "/etc/letsencrypt/live/relay.anonlisten.com/privkey.pem";
@@ -32,6 +35,9 @@ struct Config {
     // PUBLIC_STATS=off: /server-stats leaves out the online count and the activity
     // counters (server_stats.h). On by default.
     bool public_stats = true;
+    // PUBLIC_DENY_COUNTS=on: /server-stats also names how many servers, identities and
+    // networks the denylist holds (never which). Off by default, and only with PUBLIC_STATS.
+    bool public_deny_counts = false;
 #ifdef HOLLOW_RELAY_TEST_LOOPBACK
     // HOLLOW_RELAY_TEST_BACKPRESSURE: a send buffer the live tests drain inside one
     // session tick (run_live.sh). Never compiled into a relay that serves anyone.
@@ -74,6 +80,8 @@ inline void print_help() {
         "  --port <port>         Listen port (default: 443)\n"
         "  --domain <host>       Public host clients connect to; used for the TURN URIs (default: relay.anonlisten.com)\n"
         "  --keys-file <path>    License keys JSON file (default: keys.json)\n"
+        "  --denylist-file <path>  Servers, identities and addresses this relay refuses (default: denylist.json)\n"
+        "  --check-denylist <path> Read a denylist file the way the relay would, print its counts or its first error, and exit\n"
         "  --reports-file <path> User reports JSON file (default: reports.json)\n"
         "  --cert-file <path>    TLS certificate file\n"
         "  --key-file <path>     TLS private key file\n"
@@ -83,12 +91,44 @@ inline void print_help() {
     );
 }
 
+// --check-denylist: the operator's check before a write (deploy/lib/manage.sh, check-host.sh).
+// Prints counts or where the file is wrong, never an entry; exit 0 only for a good file.
+inline int check_denylist(const char* path) {
+    deny::Loaded l = deny::load(path);
+    if (l.read == deny::Read::Missing) {
+        printf("missing: %s\n", path);
+        return 1;
+    }
+    if (l.read == deny::Read::Bad) {
+        printf("unreadable: %s\n", l.error.c_str());
+        return 1;
+    }
+    printf("ok: %zu servers, %zu identities, %zu networks\n", l.list.servers.size(), l.list.identities.size(),
+           l.list.networks.size());
+    if (const size_t n = deny::legacy_shaped(l.list)) {
+        printf("warning: %zu server %s 32 hexadecimal characters. Older servers have ids like that, and so do the "
+               "rooms of direct messages and of a person's own devices, so such an entry blocks whatever room has "
+               "that id. Keep it only if you are sure it names a server.\n",
+               n, n == 1 ? "entry has" : "entries have");
+    }
+    return 0;
+}
+
 inline Config parse_args(int argc, char** argv) {
     Config config;
+    for (int i = 1; i < argc; i++) {
+        if (std::string(argv[i]) != "--check-denylist") continue;
+        if (i + 1 >= argc) {
+            fprintf(stderr, "[config] --check-denylist takes the file to check\n");
+            exit(2);
+        }
+        exit(check_denylist(argv[i + 1]));
+    }
 
     const char* turn_env = getenv("TURN_SECRET");
     if (turn_env) config.turn_secret = turn_env;
     config.public_stats = server_stats::parse_public_stats(getenv("PUBLIC_STATS"));
+    config.public_deny_counts = server_stats::parse_opt_in(getenv("PUBLIC_DENY_COUNTS"));
     if (!config.public_stats) fprintf(stderr, "[config] Public stats off: /server-stats shows memory only\n");
     const char* exempt = getenv("HOLLOW_CONN_RATE_EXEMPT");
     if (exempt && *exempt) {
@@ -121,6 +161,7 @@ inline Config parse_args(int argc, char** argv) {
         else if (arg == "--public-ip" && i + 1 < argc) config.public_ip = argv[++i];
         else if (arg == "--domain" && i + 1 < argc) config.domain = argv[++i];
         else if (arg == "--keys-file" && i + 1 < argc) config.keys_file = argv[++i];
+        else if (arg == "--denylist-file" && i + 1 < argc) config.denylist_file = argv[++i];
         else if (arg == "--reports-file" && i + 1 < argc) config.reports_file = argv[++i];
         else if (arg == "--cert-file" && i + 1 < argc) config.cert_file = argv[++i];
         else if (arg == "--key-file" && i + 1 < argc) config.key_file = argv[++i];

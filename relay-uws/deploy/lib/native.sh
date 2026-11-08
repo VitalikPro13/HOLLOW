@@ -1006,6 +1006,7 @@ render_relay_unit() {
                     print "    --port 443 \\"
                     print "    --domain " host " \\"
                     print "    --keys-file /etc/hollow-relay/keys.json \\"
+                    print "    --denylist-file /etc/hollow-relay/denylist.json \\"
                     print "    --reports-file /var/lib/hollow-relay/reports.json \\"
                     print "    --cert-file /etc/hollow-relay/fullchain.pem \\"
                     line = "    --key-file /etc/hollow-relay/privkey.pem"
@@ -1147,6 +1148,10 @@ relay_settings() {
     [ "$CFG_MEMBERS_ONLY" = yes ] && enabled=true
     # The relay rereads it every 30 seconds, so no restart.
     keys_json "$enabled" "${all[@]}" | put_file "$RELAY_ETC/keys.json" 0640 root hollow-relay
+    # Readable by the relay, never writable by it; the operator's edits are its own.
+    if [ ! -e "$RELAY_ETC/denylist.json" ]; then
+        deny_empty | put_file "$RELAY_ETC/denylist.json" 0640 root hollow-relay
+    fi
 }
 
 render_turn_env() {

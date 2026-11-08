@@ -116,6 +116,9 @@ int main(int argc, char** argv) {
 
     setup_ws_handler(app, state, config);
     setup_http_handlers(app, state, config);
+    // After the snapshot (its list stands in for a missing or unreadable file) and before
+    // the relay listens, so the first socket already meets the list.
+    deny_start(state, config.denylist_file);
 
     g_shutdown.state = &state;
     g_shutdown.app = &app;
@@ -136,16 +139,41 @@ int main(int argc, char** argv) {
             // it can run inside a loop over those buffers.
             uWS::Loop::get()->addPostHandler(&state, [&state](uWS::Loop*) {
                 if (state.buffer_index.bytes() > MAX_BUFFER_TOTAL_BYTES) enforce_buffer_budget(state);
+                // Devices a show taught the denylist, outside the handler that learned them.
+                deny_settle(state);
             });
 
-            // License reload timer (30s)
+            // License reload timer (30s). A throw out of a uSockets callback ends the
+            // process without its restart snapshot (HOL-SEC-203).
             auto* license_timer = us_create_timer(loop, 0, sizeof(RelayState*));
             *reinterpret_cast<RelayState**>(us_timer_ext(license_timer)) = &state;
             us_timer_set(license_timer, [](struct us_timer_t* t) {
                 auto* s = *reinterpret_cast<RelayState**>(us_timer_ext(t));
-                s->license.try_reload(*s);
+                try {
+                    s->license.try_reload(*s);
+                } catch (...) {
+                    fprintf(stderr, "[license] reload failed, keeping the previous keys\n");
+                }
             }, 30000, 30000);
             g_shutdown.timers.push_back(license_timer);
+
+            // Denylist reload timer (2s): seconds from an edit to the refusal, no restart.
+            struct DenyWatch {
+                RelayState* state;
+                const Config* config;
+            };
+            static DenyWatch deny_watch{&state, &config};
+            auto* deny_timer = us_create_timer(loop, 0, sizeof(DenyWatch*));
+            *reinterpret_cast<DenyWatch**>(us_timer_ext(deny_timer)) = &deny_watch;
+            us_timer_set(deny_timer, [](struct us_timer_t* t) {
+                auto* w = *reinterpret_cast<DenyWatch**>(us_timer_ext(t));
+                try {
+                    deny_tick(*w->state, w->config->denylist_file);
+                } catch (...) {
+                    fprintf(stderr, "[deny] reload failed, keeping the previous list\n");
+                }
+            }, 2000, 2000);
+            g_shutdown.timers.push_back(deny_timer);
 
             // TLS certificate reload timer (60s)
             g_cert_watch.config = &config;

@@ -149,6 +149,9 @@ docker_keys() {
     local enabled=false
     [ "$CFG_MEMBERS_ONLY" = yes ] && enabled=true
     keys_json "$enabled" "${all[@]}" | put_file "$STACK_DIR/keys/keys.json" 0640 root 999
+    if [ ! -e "$STACK_DIR/keys/denylist.json" ]; then
+        deny_empty | put_file "$STACK_DIR/keys/denylist.json" 0640 root 999
+    fi
 }
 
 docker_apply() {

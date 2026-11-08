@@ -500,6 +500,109 @@ manage_keys_text() {
     return 0
 }
 
+# ---------------------------------------------------------------- denylist
+
+# The operator denylist (SELF_HOSTING.md, "Blocking a server, an identity or an address"):
+#   hollow-relay-setup --deny check
+#   hollow-relay-setup --deny add <server|identity|network> <entry> [ref]
+#   hollow-relay-setup --deny remove <server|identity|network> <entry>
+# Every result is read by the relay's own reader before it is written, then written whole
+# in one rename that keeps the owner and mode; the relay reads it within seconds. `ref` is
+# an opaque pointer into your own notice log: no reasons or names on this machine.
+deny_file() {
+    if [ "$CFG_MODE" = docker ]; then echo "$STACK_DIR/keys/denylist.json"; else echo "$RELAY_ETC/denylist.json"; fi
+}
+
+deny_group() {
+    if [ "$CFG_MODE" = docker ]; then echo 999; else echo hollow-relay; fi
+}
+
+# deny_check_file <path>: prints the counts or the first thing wrong; false when wrong.
+deny_check_file() {
+    if [ "$CFG_MODE" = docker ]; then
+        compose run --rm --no-deps -T -v "$1:/check/denylist.json:ro" relay --check-denylist /check/denylist.json
+    else
+        /usr/local/bin/hollow-relay --check-denylist "$1"
+    fi
+}
+
+# deny_edit <add|remove> <kind> <entry> <ref> <file>: the file with the entry added (any
+# entry with the same key replaced) or removed, on stdout; exit 3 when there was none.
+deny_edit() {
+    python3 -I - "$@" <<'PY'
+import ipaddress
+import json
+import sys
+
+action, kind, entry, ref, path = sys.argv[1:6]
+name, field = {"server": ("servers", "id"), "identity": ("identities", "id"), "network": ("networks", "ip")}[kind]
+
+
+def key(text):
+    if kind == "server":
+        return text.lower()
+    if kind == "identity":
+        return text
+    try:
+        addr = ipaddress.ip_address(text.split("/")[0])
+    except ValueError:
+        return text
+    if addr.version == 6 and addr.ipv4_mapped:
+        return str(addr.ipv4_mapped)
+    if addr.version == 6:
+        return str(ipaddress.ip_network(str(addr) + "/64", strict=False))
+    return str(addr)
+
+
+def named(e):
+    if isinstance(e, str):
+        return e
+    if isinstance(e, dict) and isinstance(e.get(field), str):
+        return e[field]
+    return None
+
+
+with open(path, encoding="utf-8") as f:
+    doc = json.load(f)
+items = doc[name]
+kept = [e for e in items if named(e) is None or key(named(e)) != key(entry)]
+if action == "add":
+    kept.append({field: entry, "ref": ref} if ref else entry)
+elif len(kept) == len(items):
+    sys.exit(3)
+doc[name] = kept
+json.dump(doc, sys.stdout, indent=2)
+sys.stdout.write("\n")
+PY
+}
+
+manage_deny() {
+    conf_load
+    local file action=${1:-} kind=${2:-} entry=${3:-} ref=${4:-} out rc=0
+    file=$(deny_file)
+    case "$action" in
+    check)
+        [ -f "$file" ] || die "$file is missing. A running relay keeps the list it holds; write a valid one (sudo hollow-relay-setup --deny add ...) to change it."
+        deny_check_file "$file"
+        return $? ;;
+    add | remove) ;;
+    *) die "use --deny check, --deny add <server|identity|network> <entry> [ref] or --deny remove <server|identity|network> <entry>." ;;
+    esac
+    case "$kind" in server | identity | network) ;; *) die "the kind is server, identity or network." ;; esac
+    [ -n "$entry" ] || die "name the $kind to $action."
+    [ "$action" = add ] || [ -z "$ref" ] || die "a ref goes with add only."
+    [ -f "$file" ] || deny_empty | put_file "$file" 0640 root "$(deny_group)"
+    deny_check_file "$file" >/dev/null || die "$file does not read as it stands. See what is wrong: sudo hollow-relay-setup --deny check"
+    deny_edit "$action" "$kind" "$entry" "$ref" "$file" >"$WORK_DIR/denylist.json" || rc=$?
+    [ "$rc" = 3 ] && die "that $kind is not on the list. Nothing changed."
+    [ "$rc" = 0 ] || die "$file could not be changed. Nothing changed."
+    chmod 0644 "$WORK_DIR/denylist.json"
+    out=$(deny_check_file "$WORK_DIR/denylist.json") || die "the relay would not read the result (${out:-no answer}), so nothing changed. Check the $kind as written."
+    put_file "$file" 0640 root "$(deny_group)" <"$WORK_DIR/denylist.json"
+    say "$out"
+    say "The relay applies it within a few seconds; nothing else needs restarting."
+}
+
 manage_check() {
     step "Checking the machine"
     if [ "$CFG_MODE" = native ] || [ "$DRY_RUN" = 0 ]; then
