@@ -304,9 +304,11 @@ pub(crate) type CarryTx = UnboundedSender<CarryRequest>;
 /// inside Olm, and nothing queued after it leaves before the frames it became: wire
 /// order stays program order, so a plaintext frame never overtakes the carried state
 /// it depends on.
+/// Nothing scoped to a server or meeting in `denials` passes it.
 pub(crate) fn spawn_sealer(
     keypair: NativeKeypair,
     relay: UnboundedSender<WsCommand>,
+    denials: super::relay_denial::Denials,
 ) -> (UnboundedSender<WsCommand>, tokio::sync::mpsc::UnboundedReceiver<CarryRequest>) {
     const CARRY_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -314,6 +316,15 @@ pub(crate) fn spawn_sealer(
     tokio::spawn(async move {
         let mut mls_releases = super::olm_lane::MlsReleases::default();
         while let Some(cmd) = rx.recv().await {
+            // A carry goes to the node even when refused: the node frees its carry-book
+            // place and encrypts nothing (`OlmLane::deliver`).
+            let cmd = match cmd {
+                WsCommand::Carry { .. } => cmd,
+                cmd => {
+                    let Some(cmd) = denials.pass(cmd) else { continue };
+                    cmd
+                }
+            };
             let out = match cmd {
                 WsCommand::Carry { .. } => {
                     let (done_tx, done_rx) = tokio::sync::oneshot::channel();
@@ -333,6 +344,7 @@ pub(crate) fn spawn_sealer(
             // An Olm frame waits here for its session save, and so does all that follows it.
             let mut relay_gone = false;
             for cmd in out {
+                let Some(cmd) = denials.pass(cmd) else { continue };
                 #[cfg(test)]
                 super::test_harness::g1_probe::note_olm(&cmd);
                 if let Some(cmd) = super::olm_lane::released(cmd, &carry_tx, &mut mls_releases).await

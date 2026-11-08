@@ -15,6 +15,7 @@ import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/notification_provider.dart';
 import 'package:hollow/src/core/providers/pending_join_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
+import 'package:hollow/src/core/providers/relay_denial_provider.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/server_settings_provider.dart';
@@ -55,6 +56,7 @@ import 'package:hollow/src/ui/components/server_folder_popup.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:hollow/src/ui/components/voice_here_badge.dart';
 import 'package:hollow/src/ui/dialogs/create_server_dialog.dart';
+import 'package:hollow/src/ui/dialogs/relay_denied_dialog.dart';
 import 'package:hollow/src/ui/shell/new_server_entry.dart';
 import 'package:hollow/src/ui/shell/server_context_menus.dart';
 import 'package:hollow/src/ui/shell/voice_quick_controls.dart';
@@ -379,7 +381,18 @@ class DockIdentity extends ConsumerWidget {
             call.direction == CallDirection.incoming);
 
     final Widget? line;
-    if (!overall.isOnline && !invisible) {
+    final refusal = overall == OverallConnection.refused
+        ? ref.watch(relayLoginDenialProvider)
+        : null;
+    if (refusal != null && !invisible) {
+      line = HollowPressable(
+        subtle: true,
+        semanticLabel: '${visual.label}, show why',
+        onTap: () => showRelayLoginDenial(context, refusal),
+        borderRadius: BorderRadius.circular(hollow.radiusXs),
+        child: _statusLine(visual.label, hollow.warning),
+      );
+    } else if (!overall.isOnline && !invisible) {
       line = _statusLine(visual.label, hollow.warning);
     } else if (dmCallShown) {
       final who = dmCallPeerName(ref, callMaster);
@@ -852,7 +865,9 @@ class _ServerListState extends ConsumerState<_ServerList> {
     final hollow = HollowTheme.of(context);
     final rejected = ref.watch(
         pendingJoinsProvider.select((m) => m[serverId]?.isRejected ?? false));
-    final title = pendingJoinTitle(rejected: rejected);
+    final title = pendingJoinTitle(
+        rejected: rejected,
+        denied: ref.watch(serverRelayDeniedProvider(serverId)));
 
     return _DockSlot(
       marked: false,

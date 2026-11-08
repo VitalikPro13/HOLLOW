@@ -302,6 +302,7 @@ void showLegalDocument(
   required String title,
   required String assetPath,
   bool? touch,
+  Widget? notice,
 }) async {
   final hollow = HollowTheme.of(context);
   final body = await loadLegalMarkdownBody(assetPath);
@@ -309,7 +310,7 @@ void showLegalDocument(
   if (!context.mounted) return;
 
   if (touch ?? SettingsDensity.touchOf(context)) {
-    _showLegalSheet(context, hollow, title, body);
+    _showLegalSheet(context, hollow, title, body, notice);
     return;
   }
 
@@ -341,6 +342,7 @@ void showLegalDocument(
             ),
           ),
           const HollowDivider(),
+          ?notice,
           Expanded(
             child: legalMarkdownView(
               hollow,
@@ -355,8 +357,8 @@ void showLegalDocument(
 }
 
 /// A phone reads the document in a tall sheet it can drag away.
-void _showLegalSheet(
-    BuildContext context, HollowTheme hollow, String title, String body) {
+void _showLegalSheet(BuildContext context, HollowTheme hollow, String title,
+    String body, Widget? notice) {
   showHollowSheet(
     context: context,
     scrollControlled: true,
@@ -378,6 +380,7 @@ void _showLegalSheet(
             ),
           ),
           const HollowDivider(),
+          ?notice,
           Expanded(
             child: legalMarkdownView(
               hollow,

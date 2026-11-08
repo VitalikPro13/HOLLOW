@@ -9,6 +9,7 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
+import 'package:hollow/src/core/providers/relay_denial_provider.dart';
 import 'package:hollow/src/core/providers/sibling_call_provider.dart';
 import 'package:hollow/src/core/providers/audio_route_provider.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
@@ -670,6 +671,13 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   }
 
   Future<void> joinChannel(String serverId, String channelId) async {
+    // The relay refuses this server or meeting: no voice through it.
+    if (ref.read(serverRelayDeniedProvider(serverId))) {
+      _showInfoToast(serverId.startsWith('conf:')
+          ? kMeetingDeniedText
+          : kServerDeniedText);
+      return;
+    }
     final elsewhere = ref.read(callElsewhereProvider);
     if (elsewhere != null) {
       _showInfoToast(callElsewhereReason(elsewhere));

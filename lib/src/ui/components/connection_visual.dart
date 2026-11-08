@@ -50,7 +50,10 @@ ConnectionVisual connectionVisual(
         color: hollow.textSecondary,
         filled: false,
       ),
-    OverallConnection.offline || OverallConnection.error => ConnectionVisual(
+    OverallConnection.offline ||
+    OverallConnection.error ||
+    OverallConnection.refused =>
+      ConnectionVisual(
         label: connection.label,
         color: hollow.warning,
         filled: false,

@@ -146,6 +146,19 @@ struct Relay {
     got_at: Vec<Instant>,
     /// Every auth frame's timestamp.
     auth_stamps: Vec<u64>,
+    /// Refuse every socket before its challenge with this `auth_failed` code, as the relay
+    /// does a network on its denylist.
+    deny_hello: Option<&'static str>,
+    /// Refuse every login with this `auth_failed` code, as the relay does a listed account.
+    deny_auth: Option<&'static str>,
+}
+
+/// The operator's refusal: its code, then the 1008 close.
+async fn deny(w: &mut SplitSink<tokio_tungstenite::WebSocketStream<TcpStream>, Message>, code: &str) {
+    let _ = w.send(Message::Text(json!({ "type": "auth_failed", "error": code }).to_string().into())).await;
+    let close = tokio_tungstenite::tungstenite::protocol::CloseFrame { code: 1008.into(), reason: "denied".into() };
+    let _ = w.send(Message::Close(Some(close))).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
 }
 
 fn relay_now(off_secs: i64) -> u64 {
@@ -321,6 +334,11 @@ async fn serve(state: Arc<Mutex<Relay>>, tcp: TcpStream) {
         Some(Ok(Message::Text(t))) if t.contains("auth_hello") => {}
         _ => return,
     }
+    let refused = state.lock().unwrap().deny_hello;
+    if let Some(code) = refused {
+        deny(&mut w, code).await;
+        return;
+    }
     let (offer, door_key) = {
         let s = state.lock().unwrap();
         (s.offer_sessions, s.door_key.clone())
@@ -351,6 +369,11 @@ async fn serve(state: Arc<Mutex<Relay>>, tcp: TcpStream) {
     };
     if let Some(d) = delay {
         tokio::time::sleep(d).await;
+    }
+    let refused = state.lock().unwrap().deny_auth;
+    if let Some(code) = refused {
+        deny(&mut w, code).await;
+        return;
     }
     let cooldown = state.lock().unwrap().cooldown_next.take();
     if let Some(ms) = cooldown {
@@ -2435,4 +2458,124 @@ async fn a_shadow_relays_credit_never_makes_the_client_wait() {
     }
     tokio::time::sleep(Duration::from_millis(500)).await;
     assert_eq!(relay.with(|r| r.joins().len()), 30, "an enforcing relay's resume makes the client wait for its mirror");
+}
+
+
+// -- t14-deny: the operator's denylist --
+
+const DENIED: &str = "0123456789abcdef0123456789abcdef01234567";
+
+fn room_denied() -> Message {
+    Message::Text(json!({ "type": "room_denied", "room": DENIED }).to_string().into())
+}
+
+fn joins_of(relay: &FakeRelay, room: &str) -> usize {
+    relay.with(|r| r.joins().iter().filter(|(_, v)| v["room"] == room).count())
+}
+
+/// Review D7: a refusal rides the session's ring and comes back once on resume; a join
+/// written before it went out is sent again as it was, and one queued after it is never
+/// written. Both ends stay in step: the next resume takes, with nothing lost or doubled.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_denied_join_queued_across_a_resume_keeps_both_counts() {
+    let relay = FakeRelay::start(true).await;
+    let mut c = spawn_client(&relay.url(), quick());
+    c.wait_kind("Connected", T).await;
+    c.send(WsCommand::JoinRoom { room_code: ROOM.into() });
+    c.send(WsCommand::JoinRoom { room_code: DENIED.into() });
+    relay.wait("both joins", T, |r| r.joins().len() == 2).await;
+
+    relay.zombie();
+    // Written into the dead socket before the refusal is known: a numbered frame.
+    c.send(WsCommand::Subscribe { room_code: DENIED.into(), topics: vec!["t".into()] });
+    relay.push(room_denied());
+    c.wait_kind("Suspended", T).await;
+    c.wait_kind("Resumed", T).await;
+    assert!(matches!(c.wait_kind("RoomDenied", T).await, WsEvent::RoomDenied { room } if room == DENIED));
+    relay.wait("the subscribe sent again as it was", T, |r| r.texts().iter().any(|(_, v)| v["type"] == "subscribe")).await;
+    c.send(WsCommand::RefuseRoom { room: DENIED.into() });
+    assert!(matches!(c.wait_kind("LeftRoom", T).await, WsEvent::LeftRoom { room } if room == DENIED));
+
+    // Queued after the refusal: never written, never counted.
+    c.send(WsCommand::JoinRoom { room_code: DENIED.into() });
+    c.send(WsCommand::Subscribe { room_code: DENIED.into(), topics: vec!["t".into()] });
+    c.post(1);
+    relay.wait("the post", T, |r| r.binaries() == posts(1..=1)).await;
+
+    relay.zombie();
+    c.post(2);
+    relay.push(direct(b"after"));
+    c.wait_kind("Suspended", T).await;
+    c.wait_kind("Resumed", T).await;
+    c.wait_directs(&[b"after"], T).await;
+    relay.wait("every post once", T, |r| r.binaries() == posts(1..=2)).await;
+    c.settle(Duration::from_millis(300)).await;
+    assert_eq!(c.log, ["Connected", "Suspended", "Resumed{gap:false}", "Suspended", "Resumed{gap:false}"], "both ends counted alike");
+    assert_eq!(joins_of(&relay, DENIED), 1, "no join of the refused room after the refusal");
+    let subscribes = relay.with(|r| r.texts().iter().filter(|(_, v)| v["type"] == "subscribe").count());
+    assert_eq!(subscribes, 1, "only the subscribe written before the refusal");
+}
+
+/// A fresh session joins every room again except a refused one; asked again, the client
+/// joins it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_fresh_session_rejoins_no_refused_room_until_asked_again() {
+    let relay = FakeRelay::start(true).await;
+    let mut c = spawn_client(&relay.url(), quick());
+    c.wait_kind("Connected", T).await;
+    c.send(WsCommand::JoinRoom { room_code: ROOM.into() });
+    c.send(WsCommand::JoinRoom { room_code: DENIED.into() });
+    relay.wait("both joins", T, |r| r.joins().len() == 2).await;
+    relay.push(room_denied());
+    c.wait_kind("RoomDenied", T).await;
+    c.send(WsCommand::RefuseRoom { room: DENIED.into() });
+    c.wait_kind("LeftRoom", T).await;
+
+    relay.with(|r| r.forget_sessions = true);
+    relay.kill();
+    c.wait_kind("Connected", T).await;
+    relay.wait("the other room joined again", T, |r| r.joins().iter().filter(|(_, v)| v["room"] == ROOM).count() == 2).await;
+    c.settle(Duration::from_millis(300)).await;
+    assert_eq!(joins_of(&relay, DENIED), 1, "the refused room is not joined again");
+
+    c.send(WsCommand::RetryDenied { room: Some(DENIED.into()) });
+    c.send(WsCommand::JoinRoom { room_code: DENIED.into() });
+    relay.wait("the retry's join", T, |r| r.joins().iter().filter(|(_, v)| v["room"] == DENIED).count() == 2).await;
+}
+
+/// An account the relay refuses at sign-in: told once, then no socket for nudges, a
+/// network change or a foreground; the person's retry dials, and a lifted refusal
+/// connects.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_account_stops_until_asked_again() {
+    let relay = FakeRelay::start_on(TcpListener::bind("127.0.0.1:0").await.unwrap(), true, |r| r.deny_auth = Some("account_denied"));
+    let mut c = spawn_client(&relay.url(), quick());
+    assert!(matches!(c.wait_kind("RelayDenied", T).await, WsEvent::RelayDenied { kind: RelayDenial::Account }));
+    let accepts = relay.with(|r| r.tcp_accepts);
+    for _ in 0..3 {
+        c.nudge();
+        let _ = c.ctl.send(Control::Nudge { reason: "network".into(), external: true });
+    }
+    c.settle(Duration::from_millis(800)).await;
+    assert_eq!(relay.with(|r| r.tcp_accepts), accepts, "no socket while the login is refused");
+
+    c.send(WsCommand::RetryDenied { room: None });
+    relay.wait("the retry's socket", T, |r| r.tcp_accepts > accepts).await;
+    assert!(matches!(c.wait_kind("RelayDenied", T).await, WsEvent::RelayDenied { kind: RelayDenial::Account }), "asked again, refused again");
+
+    relay.with(|r| r.deny_auth = None);
+    c.send(WsCommand::RetryDenied { room: None });
+    c.wait_kind("Connected", T).await;
+}
+
+/// A network the relay refuses is told so before any challenge: a denial, never "the
+/// relay needs updating".
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_refused_network_is_a_denial_at_the_challenge() {
+    let relay = FakeRelay::start_on(TcpListener::bind("127.0.0.1:0").await.unwrap(), true, |r| r.deny_hello = Some("network_denied"));
+    let mut c = spawn_client(&relay.url(), quick());
+    assert!(matches!(c.wait_kind("RelayDenied", T).await, WsEvent::RelayDenied { kind: RelayDenial::Network }));
+    c.settle(Duration::from_millis(800)).await;
+    assert_eq!(relay.with(|r| r.tcp_accepts), 1, "one socket, then nothing");
+    assert_eq!(relay.with(|r| r.auths_seen), 0, "refused before any sign-in");
 }

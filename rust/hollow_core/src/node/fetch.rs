@@ -98,11 +98,20 @@ pub(crate) async fn run_fetch(
         if server_room.is_some() { "server" } else { "DM" }
     );
 
-    let ws_stream = ws_client::connect_and_auth(
+    let ws_stream = match ws_client::connect_and_auth(
         &relay_url, peer_id, keypair_proto, pub_key_b64, license_key, true,
     )
     .await
-    .map_err(|e| e.to_string())?;
+    {
+        Ok(stream) => stream,
+        // The relay's operator refuses this account or network: nothing to fetch, and
+        // nothing worth a retry or an alarm from a background wake.
+        Err(ws_client::ConnectError::Denied(_)) => {
+            hollow_log!("[HOLLOW-FETCH] The relay does not accept this device now, nothing fetched");
+            return Ok(Vec::new());
+        }
+        Err(e) => return Err(e.to_string()),
+    };
 
     let (mut write, mut read) = ws_stream.split();
 
@@ -324,6 +333,9 @@ fn handle_text_frame(text: &str) {
             }
             "peer_joined" => {
                 // Sender came online in the room — messages may follow.
+            }
+            "room_denied" => {
+                hollow_log!("[HOLLOW-FETCH] The relay does not carry this room, nothing to fetch");
             }
             _ => {}
         }

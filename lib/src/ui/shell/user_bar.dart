@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
+import 'package:hollow/src/core/providers/relay_denial_provider.dart';
 import 'package:hollow/src/core/providers/room_budget_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/settings_place_provider.dart';
@@ -22,7 +23,22 @@ import 'package:hollow/src/ui/components/overlay_mic_indicator.dart';
 import 'package:hollow/src/ui/components/profile_card_popup.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:hollow/src/ui/dialogs/mnemonic_dialog.dart';
+import 'package:hollow/src/ui/dialogs/relay_denied_dialog.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+
+/// The status line, tappable while the relay refuses our login: it opens the
+/// dialog that says why and asks again, the only retry once that is closed.
+Widget _refusalTap(
+    BuildContext context, String? refusal, String label, Widget line) {
+  if (refusal == null) return line;
+  return HollowPressable(
+    subtle: true,
+    semanticLabel: '$label, show why',
+    onTap: () => showRelayLoginDenial(context, refusal),
+    borderRadius: BorderRadius.circular(HollowTheme.of(context).radiusXs),
+    child: line,
+  );
+}
 
 /// Bottom bar in the channel sidebar, showing the local identity and status.
 class UserBar extends ConsumerWidget {
@@ -77,6 +93,9 @@ class UserBar extends ConsumerWidget {
       };
     }
 
+    final refusal = !amInvisible && overall == OverallConnection.refused
+        ? ref.watch(relayLoginDenialProvider)
+        : null;
     final statusText = visual.label;
     final statusColor = visual.color;
     final statusFilled = visual.filled;
@@ -163,7 +182,11 @@ class UserBar extends ConsumerWidget {
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                     ),
-                    Row(
+                    _refusalTap(
+                      context,
+                      refusal,
+                      statusText,
+                      Row(
                       children: [
                         StatusDot(
                           color: statusColor,
@@ -188,6 +211,7 @@ class UserBar extends ConsumerWidget {
                           ),
                         ),
                       ],
+                    ),
                     ),
                   ],
                 ),

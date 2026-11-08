@@ -3,6 +3,8 @@ import 'dart:io';
 
 import 'package:hollow/src/core/friendly_error.dart';
 import 'package:flutter/material.dart';
+import 'package:hollow/src/core/providers/relay_denial_provider.dart';
+import 'package:hollow/src/ui/chat/relay_denied_notice.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:hollow/src/ui/components/hollow_icon_button.dart';
@@ -2470,6 +2472,10 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane>
         (serverId: widget.serverId, channelId: widget.channelId)));
     final removed =
         _isConference ? null : recoveryComposerBlock(ref, widget.serverId);
+    if (ref.watch(serverRelayDeniedProvider(widget.serverId))) {
+      return RelayDeniedNotice(
+          serverId: widget.serverId, meeting: _isConference);
+    }
     if (!canPost || mute != null || removed != null) {
       return Container(
         padding: const EdgeInsets.symmetric(

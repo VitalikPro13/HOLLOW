@@ -671,6 +671,13 @@ pub(crate) enum NetworkEvent {
     ShareNeedWebRtc { peer_id: String, hidden: bool },
     // -- License key events --
     LicenseError { reason: String },
+    // -- Relay operator denylist (t14-deny) --
+    /// This relay does not carry the server or meeting (`conf:{id}`); nothing was deleted.
+    ServerUnavailable { server_id: String },
+    /// This relay carries it again.
+    ServerAvailable { server_id: String },
+    /// This relay refuses our login (`account_denied`) or our network (`network_denied`).
+    RelayDenied { kind: String },
     // -- Twitch verification events --
     TwitchJoinRejected { server_id: String, reason: String },
     // -- Room budget events --
@@ -1209,6 +1216,8 @@ pub(crate) enum NodeCommand {
     /// Ask the chosen SOURCE sibling to re-announce all its servers and re-share
     /// its friends to us. `source_device_id` is that device's peer_id.
     RequestStateSync { source_device_id: String },
+    /// Ask the relay again about every refusal it gave us (the person's "Try again").
+    RetryRelayDenials,
     /// Fan a personal emote change (one row after an add/remove, or the full set)
     /// to our OWN other devices. Bytes never ride it; they pull over the asset rail.
     SyncPersonalEmotes { emotes: Vec<PersonalEmoteEntry> },
@@ -1596,6 +1605,7 @@ impl NodeCommand {
             Self::KillAck => "KillAck",
             Self::DepositKillSignal { .. } => "DepositKillSignal",
             Self::RequestStateSync { .. } => "RequestStateSync",
+            Self::RetryRelayDenials => "RetryRelayDenials",
             Self::SyncPersonalEmotes { .. } => "SyncPersonalEmotes",
             Self::RegisterPushToken { .. } => "RegisterPushToken",
             Self::SetPushPrefs { .. } => "SetPushPrefs",
@@ -4751,6 +4761,148 @@ impl HavenMessage {
             | Self::RecoverySealed { .. }
             | Self::MeetingSealed { .. }
             | Self::ShareSealed { .. } => Lane::Relay,
+        }
+    }
+
+    /// The server or meeting this message is about (lowercase, a subgroup folded into
+    /// its server), `None` for one about no server. What a relay that refuses a server
+    /// keeps from leaving ([`super::relay_denial`]). Exhaustive on purpose: a new
+    /// variant must say whether it belongs to a server.
+    pub(crate) fn server_scope(&self) -> Option<String> {
+        let server = |id: &str| {
+            let id = id.split('#').next().unwrap_or(id);
+            (!id.is_empty()).then(|| id.to_ascii_lowercase())
+        };
+        let meeting = |id: &str| (!id.is_empty()).then(|| super::conference::conf_server_id(&id.to_ascii_lowercase()));
+        match self {
+            Self::SyncRequest { server_id, .. }
+            | Self::SyncResponse { server_id, .. }
+            | Self::ServerStateSnapshot { server_id, .. }
+            | Self::CrdtOpBroadcast { server_id, .. }
+            | Self::ServerJoinRequest { server_id, .. }
+            | Self::ServerJoinRejected { server_id, .. }
+            | Self::ServerJoinResolved { server_id, .. }
+            | Self::DoorAsk { server_id, .. }
+            | Self::DoorGrant { server_id, .. }
+            | Self::MemberKickBroadcast { server_id, .. }
+            | Self::ChannelSyncRequest { server_id, .. }
+            | Self::SiblingServerAnnounce { server_id, .. }
+            | Self::MlsChannelMessage { server_id, .. }
+            | Self::MlsKeyPackage { server_id, .. }
+            | Self::MlsWelcome { server_id, .. }
+            | Self::MlsCommit { server_id, .. }
+            | Self::MlsKeyPackageRequest { server_id, .. }
+            | Self::MlsEpochProbe { server_id, .. }
+            | Self::MlsKeyPackageForward { server_id, .. }
+            | Self::MlsKeyPackageAck { server_id, .. }
+            | Self::MlsUpdateTurn { server_id, .. }
+            | Self::MlsUpdateTurnCommit { server_id, .. }
+            | Self::MlsUpdateTurnDeclined { server_id, .. }
+            | Self::MlsCommitCatchup { server_id, .. }
+            | Self::ChannelNotificationHint { server_id, .. }
+            | Self::PublicChannelMessage { server_id, .. }
+            | Self::PublicChannelEdit { server_id, .. }
+            | Self::PublicLinkPreviewSet { server_id, .. }
+            | Self::PublicChannelDelete { server_id, .. }
+            | Self::PublicChannelAddReaction { server_id, .. }
+            | Self::PublicChannelRemoveReaction { server_id, .. }
+            | Self::PublicChannelListRequest { server_id, .. }
+            | Self::PublicChannelListResponse { server_id, .. }
+            | Self::PublicChannelSyncRequest { server_id, .. }
+            | Self::PublicChannelSyncResponse { server_id, .. }
+            | Self::PublicChannelConfigChanged { server_id, .. }
+            | Self::TypingIndicator { server_id, .. }
+            | Self::PeerExchange { server_id, .. }
+            | Self::VoiceChannelJoin { server_id, .. }
+            | Self::VoiceChannelLeave { server_id, .. }
+            | Self::VoiceChannelAudioState { server_id, .. }
+            | Self::VoiceChannelScreenState { server_id, .. }
+            | Self::VoiceChannelCameraState { server_id, .. }
+            | Self::VoiceChannelRecordingState { server_id, .. }
+            | Self::RecoveryHello { server_id, .. } => server(server_id),
+            Self::PublicFileHeader { sid, .. } => server(sid),
+            Self::ConferenceJoinRequest { conf_id, .. }
+            | Self::ConferenceJoinDenied { conf_id, .. }
+            | Self::ConferenceLobbyInfo { conf_id, .. }
+            | Self::ConferenceChat { conf_id, .. }
+            | Self::ConferenceEnded { conf_id, .. }
+            | Self::ConferenceKicked { conf_id, .. } => meeting(conf_id),
+            Self::KeyRequest { .. }
+            | Self::KeyBundle { .. }
+            | Self::Encrypted { .. }
+            | Self::JoinSealed { .. }
+            | Self::DmSyncRequest { .. }
+            | Self::DmSiblingSyncRequest { .. }
+            | Self::MeetingSealed { .. }
+            | Self::ProfileUpdate { .. }
+            | Self::FriendRequest { .. }
+            | Self::FriendCard { .. }
+            | Self::FriendAccept { .. }
+            | Self::FriendReject { .. }
+            | Self::FriendRemove { .. }
+            | Self::IdentityDestroyed { .. }
+            | Self::FriendListSync { .. }
+            | Self::FriendListRequest
+            | Self::SiblingStateSyncRequest
+            | Self::ReadMarkers { .. }
+            | Self::SiblingCallState { .. }
+            | Self::DeviceKind { .. }
+            | Self::PersonalEmoteSync { .. }
+            | Self::LinkPake { .. }
+            | Self::LinkPakeReply { .. }
+            | Self::LinkSealed { .. }
+            | Self::LinkDeclined
+            | Self::LinkSnapshotAck { .. }
+            | Self::StatusUpdate { .. }
+            | Self::AutoDownloadPref { .. }
+            | Self::FileRequest { .. }
+            | Self::FileUnavailable { .. }
+            | Self::RtcOffer { .. }
+            | Self::RtcAnswer { .. }
+            | Self::RtcIceCandidate { .. }
+            | Self::RtcShareOffer { .. }
+            | Self::RtcShareAnswer { .. }
+            | Self::RtcShareIceCandidate { .. }
+            | Self::CallInvite { .. }
+            | Self::CallAccept { .. }
+            | Self::CallReject { .. }
+            | Self::CallEnd { .. }
+            | Self::CallBusy { .. }
+            | Self::CallMediaRestart { .. }
+            | Self::CallAnsweredElsewhere { .. }
+            | Self::CallSdpOffer { .. }
+            | Self::CallSdpAnswer { .. }
+            | Self::CallIceCandidate { .. }
+            | Self::CallVideoState { .. }
+            | Self::CallAudioState { .. }
+            | Self::CallScreenState { .. }
+            | Self::CallScreenOffer { .. }
+            | Self::CallScreenAnswer { .. }
+            | Self::CallScreenIce { .. }
+            | Self::CallScreenWatch { .. }
+            | Self::CallRecordingState { .. }
+            | Self::ProfileRequest
+            | Self::EmoteRequest { .. }
+            | Self::EmoteAssets { .. }
+            | Self::OverlayLookAsk { .. }
+            | Self::OverlayLookAnswer { .. }
+            | Self::ProfileRequestFor { .. }
+            | Self::ProfileRelay { .. }
+            | Self::ProfileCard { .. }
+            | Self::RosterNotice { .. }
+            | Self::SharedServers { .. }
+            | Self::RosterSync { .. }
+            | Self::RecoveryWelcome { .. }
+            | Self::RecoveryTransferPlan { .. }
+            | Self::RecoveryShardReceived { .. }
+            | Self::RecoveryStop
+            | Self::RecoverySealed { .. }
+            | Self::ShareManifestRequest { .. }
+            | Self::ShareManifestResponse { .. }
+            | Self::ShareHave { .. }
+            | Self::ShareChunkRequest { .. }
+            | Self::ShareChunkResponse { .. }
+            | Self::ShareSealed { .. } => None,
         }
     }
 }

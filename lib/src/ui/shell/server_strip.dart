@@ -1,5 +1,6 @@
 ﻿import 'package:flutter/material.dart';
 import 'package:hollow/src/core/name_initials.dart';
+import 'package:hollow/src/core/providers/relay_denial_provider.dart';
 import 'package:hollow/src/ui/components/hollow_count_badge.dart';
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -495,7 +496,9 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
   Widget _buildPendingIcon({required String serverId}) {
     final info = ref.watch(pendingJoinsProvider)[serverId];
     final rejected = info?.isRejected ?? false;
-    final title = pendingJoinTitle(rejected: rejected);
+    final title = pendingJoinTitle(
+        rejected: rejected,
+        denied: ref.watch(serverRelayDeniedProvider(serverId)));
 
     return Builder(builder: (iconContext) {
       void open(Offset anchor) => showPendingJoinMenu(

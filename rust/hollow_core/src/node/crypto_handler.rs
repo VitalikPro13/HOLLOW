@@ -2000,7 +2000,7 @@ pub(crate) fn is_vault_coordinator(
     local_peer: &str,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
 ) -> bool {
-    if !mls.has_group(server_id) || super::ws_client::backgrounded() {
+    if !mls.has_group(server_id) || super::ws_client::backgrounded() || super::relay_denial::denied(server_id) {
         return false;
     }
     let members = mls.group_members(server_id);
@@ -2522,6 +2522,27 @@ fn subgroup_committer(
     holders.sort();
     holders.into_iter().next()
         .or_else(|| elect_subgroup_coordinator(server, cid, local_peer, ws_room_peers, &rule))
+}
+
+/// The groups the batch tick commits for now, in key order: none off our turn; a
+/// group a turn blocks or the relay's refusal froze is left out, so its queued
+/// removals and KeyPackages stay where they are for a later tick (the lift).
+pub(crate) fn batch_commit_groups(
+    removals: &HashMap<String, Vec<String>>,
+    key_packages: &HashMap<String, Vec<(String, Vec<u8>)>>,
+    our_turn: bool,
+    mls_mgr: &mut MlsManager,
+    mut turn_blocks: impl FnMut(&mut MlsManager, &str) -> bool,
+) -> Vec<String> {
+    if !our_turn {
+        return Vec::new();
+    }
+    let mut groups: Vec<String> = removals.keys().chain(key_packages.keys()).cloned().collect();
+    groups.sort();
+    groups.dedup();
+    groups.retain(|g| !turn_blocks(mls_mgr, g));
+    groups.retain(|g| !mls_mgr.is_frozen(g));
+    groups
 }
 
 /// Every group we hold that still seats someone our view removed, which no send
@@ -4263,6 +4284,34 @@ mod tests {
             !as_node(true, || is_vault_coordinator(&mls, "vc_srv", &anchored, &me, &sibling)).await,
             "our identity is the coordinator, and the sibling the others see acts for it",
         );
+        super::super::resolver::clear_all();
+    }
+
+    /// A server the relay refuses gets no vault repair from us: the repair would send its
+    /// shards through that relay.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // the resolver is process-global
+    async fn no_vault_repair_runs_for_a_server_the_relay_refuses() {
+        let _lock = super::super::resolver::test_lock();
+        super::super::resolver::clear_all();
+        let kp = crate::identity::native_identity::NativeKeypair::from_secret_bytes(&[43; 32]);
+        let me = kp.peer_id();
+        super::super::resolver::update("vd_my_sibling", &me);
+        let mut mls = MlsManager::new(&kp, &kp).unwrap();
+        mls.create_group("vd_srv").unwrap();
+        let rooms = make_room_peers(&[("vd_srv", &["vd_my_sibling"])]);
+        let state = crate::crdt::server_state::ServerState::skeleton("0123456789abcdef0123456789abcdef01234567".into());
+        let (mls, state, me, rooms) = (&mls, &state, &me, &rooms);
+        let leads = move |deny: bool| {
+            super::super::relay_denial::with_denials(as_node(false, move || {
+                if deny {
+                    super::super::relay_denial::current().deny("vd_srv", std::time::Instant::now());
+                }
+                is_vault_coordinator(mls, "vd_srv", state, me, rooms)
+            }))
+        };
+        assert!(leads(false).await, "precondition: we run the vault's repair");
+        assert!(!leads(true).await, "the vault's repair ran for a server the relay refuses");
         super::super::resolver::clear_all();
     }
 
@@ -6565,6 +6614,43 @@ mod tests {
 }
 
 /// A failed MLS save took its rows off the changed list: the next one writes the store whole.
+#[cfg(test)]
+mod t14_deny_batch_tick {
+    use super::*;
+
+    #[test]
+    fn a_frozen_group_keeps_its_queued_key_package_until_the_lift() {
+        let (mut mls, _) = crate::crypto::mls_manager_test_keys::bound(1, 2);
+        let mut key_packages: HashMap<String, Vec<(String, Vec<u8>)>> = HashMap::from([
+            ("aa11".to_string(), vec![("12D3KooWJoiner".to_string(), vec![7u8; 4])]),
+            ("bb22".to_string(), vec![("12D3KooWOther".to_string(), vec![8u8; 4])]),
+        ]);
+        let mut removals: HashMap<String, Vec<String>> =
+            HashMap::from([("aa11#chan".to_string(), vec!["12D3KooWGone".to_string()])]);
+        let no_turn = |_: &mut MlsManager, _: &str| false;
+        assert!(batch_commit_groups(&removals, &key_packages, false, &mut mls, no_turn).is_empty());
+
+        mls.set_frozen(["AA11".to_string()]);
+        let groups = batch_commit_groups(&removals, &key_packages, true, &mut mls, no_turn);
+        assert_eq!(groups, vec!["bb22".to_string()], "a frozen server and its subgroup take no turn");
+        for g in &groups {
+            key_packages.remove(g);
+            removals.remove(g);
+        }
+        assert!(key_packages.contains_key("aa11"), "the frozen group's KeyPackage was popped and lost");
+        assert!(removals.contains_key("aa11#chan"), "the frozen subgroup's removal was popped");
+
+        mls.set_frozen(Vec::new());
+        assert_eq!(
+            batch_commit_groups(&removals, &key_packages, true, &mut mls, no_turn),
+            vec!["aa11".to_string(), "aa11#chan".to_string()],
+            "after the lift the kept queues commit"
+        );
+        let blocked = |_: &mut MlsManager, g: &str| g == "aa11";
+        assert_eq!(batch_commit_groups(&removals, &key_packages, true, &mut mls, blocked), vec!["aa11#chan".to_string()]);
+    }
+}
+
 #[cfg(test)]
 mod g13_mls_saves {
     use super::*;

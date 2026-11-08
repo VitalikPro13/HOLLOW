@@ -15,6 +15,7 @@ import 'package:hollow/src/core/services/push_notification_service.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/theme/hollow_colors.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
+import 'package:hollow/src/ui/dialogs/relay_denied_dialog.dart';
 import 'package:hollow/src/ui/mobile/mobile_chat_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_connection_indicator.dart';
 import 'package:hollow/src/ui/mobile/mobile_nav_bar.dart';
@@ -64,6 +65,7 @@ class _MobileShellState extends ConsumerState<MobileShell> {
   @override
   void initState() {
     super.initState();
+    listenForRelayLoginDenial(ref, () => context, touch: true);
     // Push taps land here, including the buffered cold-start ones, which are
     // delivered on registration.
     if (Platform.isAndroid || Platform.isIOS) {

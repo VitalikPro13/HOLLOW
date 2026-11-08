@@ -8,6 +8,7 @@ import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/layout_prefs_provider.dart';
 import 'package:hollow/src/core/providers/local_nickname_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
+import 'package:hollow/src/core/providers/relay_denial_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/role_hierarchy.dart';
@@ -64,10 +65,15 @@ final memberListProvider = Provider.autoDispose
   final me = ref.watch(identityProvider).peerId;
   final amInvisible = ref.watch(invisibleModeProvider);
   final foldedKeys = ref.watch(collapsedMemberGroupsProvider);
+  // A server the relay refuses has no presence here: nobody is seen in it.
+  final relayDenied = ref.watch(serverRelayDeniedProvider(serverId));
 
   return membersAsync.whenData((members) {
-    bool isOnline(crdt_api.MemberFfi m) =>
-        m.peerId == me ? !amInvisible : onlineIdentities.contains(m.peerId);
+    bool isOnline(crdt_api.MemberFfi m) => relayDenied
+        ? false
+        : m.peerId == me
+            ? !amInvisible
+            : onlineIdentities.contains(m.peerId);
     String sortName(crdt_api.MemberFfi m) =>
         (m.nickname.isNotEmpty ? m.nickname : m.displayName).toLowerCase();
     int byName(crdt_api.MemberFfi a, crdt_api.MemberFfi b) =>
@@ -128,9 +134,7 @@ class MemberList extends ConsumerWidget {
     final link = ref.watch(overallConnectionProvider);
     // Presence rides our relay link, so without it everyone else reads as
     // offline; saying why beats a list that silently empties.
-    final presenceStale = link == OverallConnection.offline ||
-        link == OverallConnection.reconnecting ||
-        link == OverallConnection.error;
+    final presenceStale = link.isDown;
     final side = touch ? 0.0 : HollowSpacing.sm;
 
     return list.when(

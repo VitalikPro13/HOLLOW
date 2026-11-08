@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/relay_denial_provider.dart';
 import 'package:hollow/src/ui/components/hollow_divider.dart';
 import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/message_preview.dart';
@@ -877,12 +878,13 @@ class _PendingJoinRow extends ConsumerWidget {
     final hollow = HollowTheme.of(context);
     final info = ref.watch(pendingJoinsProvider)[serverId];
     final rejected = info?.isRejected ?? false;
+    final denied = ref.watch(serverRelayDeniedProvider(serverId));
 
     return HollowPressable(
       onTap: onTap,
       onLongPress: onLongPress,
       semanticLabel:
-          '${pendingJoinTitle(rejected: rejected)}, show actions',
+          '${pendingJoinTitle(rejected: rejected, denied: denied)}, show actions',
       subtle: true,
       borderRadius: BorderRadius.zero,
       padding: const EdgeInsets.symmetric(
@@ -900,7 +902,7 @@ class _PendingJoinRow extends ConsumerWidget {
             ),
             alignment: Alignment.center,
             child: Icon(
-              rejected ? LucideIcons.ban : LucideIcons.clock,
+              rejected || denied ? LucideIcons.ban : LucideIcons.clock,
               size: 20,
               color: hollow.textTertiary,
             ),
@@ -911,7 +913,7 @@ class _PendingJoinRow extends ConsumerWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  pendingJoinTitle(rejected: rejected),
+                  pendingJoinTitle(rejected: rejected, denied: denied),
                   style: HollowTypography.subheading.copyWith(
                     color: hollow.textSecondary,
                     fontWeight: FontWeight.w500,
@@ -923,6 +925,7 @@ class _PendingJoinRow extends ConsumerWidget {
                   pendingJoinSubtitle(
                     rejected: rejected,
                     reason: info?.reason ?? '',
+                    denied: denied,
                   ),
                   style: HollowTypography.body
                       .copyWith(color: hollow.textTertiary),

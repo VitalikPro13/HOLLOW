@@ -239,6 +239,12 @@ pub enum WsCommand {
     /// File a user report with the relay. One-shot: never replayed by a fresh
     /// session (the relay also dedups per (reporter, target, category) via hashed keys).
     ReportUser { target: String, category: String },
+    /// The node confirms the relay's refusal of `room` (one of its servers or meetings):
+    /// leave it everywhere and write nothing more for it. Never reaches the relay.
+    RefuseRoom { room: String },
+    /// Forget this relay's refusal of `room` (every refusal, our login's included, for
+    /// `None`) so the next join asks it again. Never reaches the relay.
+    RetryDenied { room: Option<String> },
 }
 
 /// Events received from the WebSocket relay, forwarded to the swarm.
@@ -283,6 +289,13 @@ pub enum WsEvent {
     BinaryDirect { room: String, from: String, data: Vec<u8> },
     /// License key validation failed — do not auto-reconnect.
     LicenseError { reason: String },
+    /// The relay will not carry this server or meeting room (its operator's denylist),
+    /// spelled as we joined it. Nothing changes until the node, which alone knows its
+    /// servers from a DM room of the same shape, answers [`WsCommand::RefuseRoom`].
+    RoomDenied { room: String },
+    /// The relay refuses our login, or connections from our network: no reconnect until
+    /// the quiet retry or the person asks again.
+    RelayDenied { kind: RelayDenial },
     /// Room budget update — current count and server-side cap.
     RoomBudgetUpdate { joined: u32, limit: u32 },
     /// The relay's clock minus ours, in ms ([`super::relay_clock`]), when it moved;
@@ -345,6 +358,8 @@ impl WsEvent {
             Self::DirectMessage { .. } => "DirectMessage",
             Self::BinaryDirect { .. } => "BinaryDirect",
             Self::LicenseError { .. } => "LicenseError",
+            Self::RoomDenied { .. } => "RoomDenied",
+            Self::RelayDenied { .. } => "RelayDenied",
             Self::RoomBudgetUpdate { .. } => "RoomBudgetUpdate",
             Self::ClockOffset { .. } => "ClockOffset",
             Self::RoomCapHit { .. } => "RoomCapHit",
@@ -464,6 +479,9 @@ enum ServerMsg {
         #[serde(default)] links: Vec<super::join_lock::LockLink>,
         #[serde(default)] put: Option<bool>,
     },
+    /// The relay will not carry this room: the answer to a join or a lock read or write
+    /// of it, and the notice to every member when the operator adds it.
+    RoomDenied { room: String },
     /// The relay's count of our stream frames, answering a heartbeat, and its clock.
     HbAck { h: u64, #[serde(default)] now: Option<serde_json::Value> },
     Ack { h: u64 },
@@ -769,6 +787,62 @@ struct Rooms {
     bounds: HashMap<String, u32>,
     /// The largest list the relay sent per room lately, and when.
     listed: HashMap<String, (u32, Instant)>,
+    /// Rooms the relay refuses to carry (lowercase): nothing for them is written until the
+    /// node asks again ([`WsCommand::RetryDenied`]).
+    denied: HashSet<String>,
+    /// Servers whose join lock we read or wrote (lowercase): a refusal may answer those too.
+    lock_asked: HashSet<String>,
+}
+
+/// The most servers [`Rooms::lock_asked`] remembers; past it the set starts over.
+const LOCK_ASKED_MAX: usize = 4096;
+
+impl Rooms {
+    fn note_lock_asked(&mut self, server: &str) {
+        if self.lock_asked.len() >= LOCK_ASKED_MAX {
+            self.lock_asked.clear();
+        }
+        self.lock_asked.insert(super::relay_denial::room_key(server));
+    }
+
+    fn is_denied(&self, room: &str) -> bool {
+        !self.denied.is_empty() && self.denied.contains(&super::relay_denial::room_key(room))
+    }
+
+    /// `cmd` as it may be written while some rooms are refused, `None` when it is all
+    /// for refused ones: a frame never written is never counted, so both ends stay in step.
+    fn unrefused(&self, cmd: &WsCommand) -> Option<Option<WsCommand>> {
+        if self.denied.is_empty() {
+            return Some(None);
+        }
+        match cmd {
+            WsCommand::LockGet { locks } => {
+                let kept: Vec<(String, String)> = locks.iter().filter(|(s, _)| !self.is_denied(s)).cloned().collect();
+                if kept.is_empty() {
+                    None
+                } else if kept.len() < locks.len() {
+                    Some(Some(WsCommand::LockGet { locks: kept }))
+                } else {
+                    Some(None)
+                }
+            }
+            WsCommand::LockPut { server, .. } => (!self.is_denied(server)).then_some(None),
+            WsCommand::JoinRoom { room_code }
+            | WsCommand::JoinInbox { room_code, .. }
+            | WsCommand::Subscribe { room_code, .. }
+            | WsCommand::SetTopicBuffer { room_code, .. }
+            | WsCommand::TopicCatchup { room_code, .. }
+            | WsCommand::DiscoverPeers { room_code }
+            | WsCommand::SendToRoom { room_code, .. }
+            | WsCommand::SendPublic { room_code, .. }
+            | WsCommand::SendToRoomTopic { room_code, .. }
+            | WsCommand::SendDirect { room_code, .. }
+            | WsCommand::SendDirectImage { room_code, .. }
+            | WsCommand::SendBinaryDirect { room_code, .. }
+            | WsCommand::SendChannelDirect { room_code, .. } => (!self.is_denied(room_code)).then_some(None),
+            _ => Some(None),
+        }
+    }
 }
 
 /// How long a room's largest list keeps lifting its price.
@@ -913,6 +987,8 @@ struct Client {
     breaker_paused: bool,
     /// What each written join was priced at, until its answer says what it cost.
     join_spend: HashMap<String, (relay_pace::Cost, i64)>,
+    /// The relay refused our login: no socket before the quiet retry or a `RetryDenied`.
+    login_denied: Option<RelayDenial>,
 }
 
 /// The socket's next frame; never while `held` (a move is under way).
@@ -974,6 +1050,7 @@ impl Client {
             cooldown_until: None,
             breaker_paused: false,
             join_spend: HashMap::new(),
+            login_denied: None,
         }
     }
 
@@ -1088,9 +1165,30 @@ impl Client {
                 self.rooms.bounds.insert(room_code.clone(), *devices);
                 return;
             }
+            WsCommand::RetryDenied { room } => {
+                self.retry_denied(room.as_deref());
+                return;
+            }
+            WsCommand::RefuseRoom { room } => {
+                self.refuse_room(room);
+                return;
+            }
             WsCommand::JoinRoom { room_code } => {
+                if self.rooms.is_denied(room_code) {
+                    return;
+                }
                 self.rooms.joined.insert(room_code.clone());
                 true
+            }
+            WsCommand::LockGet { locks } => {
+                for (server, _) in locks {
+                    self.rooms.note_lock_asked(server);
+                }
+                false
+            }
+            WsCommand::LockPut { server, .. } => {
+                self.rooms.note_lock_asked(server);
+                false
             }
             WsCommand::JoinInbox { room_code, roster } => {
                 self.rooms.inbox_rosters.insert(room_code.clone(), roster.clone());
@@ -1113,7 +1211,9 @@ impl Client {
                 true
             }
             WsCommand::Subscribe { room_code, topics } => {
-                self.rooms.subscriptions.insert(room_code.clone(), topics.clone());
+                if !self.rooms.is_denied(room_code) {
+                    self.rooms.subscriptions.insert(room_code.clone(), topics.clone());
+                }
                 false
             }
             WsCommand::SetOfflineBuffer { enabled, retention_secs } => {
@@ -1129,6 +1229,44 @@ impl Client {
             });
         }
         self.push(cmd);
+    }
+
+    /// The relay refuses `room`: it leaves every room table (the node purges its presence on
+    /// [`WsEvent::LeftRoom`]) and nothing for it is written until a retry.
+    fn refuse_room(&mut self, room: &str) {
+        let key = super::relay_denial::room_key(room);
+        let spelled: Vec<String> = self.rooms.joined.iter().filter(|r| super::relay_denial::room_key(r) == key).cloned().collect();
+        for name in spelled.iter().chain(std::iter::once(&room.to_string())) {
+            self.rooms.joined.remove(name);
+            self.rooms.subscriptions.remove(name);
+            self.rooms.inbox_rosters.remove(name);
+            self.rooms.audit.forget(name);
+            self.replayed_joins.remove(name);
+        }
+        self.rooms.denied.insert(key);
+        let _ = self.event_tx.send(WsEvent::LeftRoom { room: room.to_string() });
+        let _ = self.event_tx.send(WsEvent::RoomBudgetUpdate { joined: self.rooms.joined.len() as u32, limit: ROOM_BUDGET_LIMIT });
+    }
+
+    /// Forget a refusal so the node's next join or lock read asks the relay again; for
+    /// `None` every refused room and a refused login too, which dials at once.
+    fn retry_denied(&mut self, room: Option<&str>) {
+        match room {
+            Some(room) => {
+                self.rooms.denied.remove(&super::relay_denial::room_key(room));
+            }
+            None => {
+                self.rooms.denied.clear();
+                if self.login_denied.take().is_some() {
+                    hollow_log!("[HOLLOW-WS] Asking the relay again whether it takes our login");
+                    self.backoff.reset();
+                    self.refused = false;
+                    if self.socket.is_none() && self.attempt.is_none() {
+                        self.reconnect_at = Some(Instant::now());
+                    }
+                }
+            }
+        }
     }
 
     fn push(&mut self, cmd: WsCommand) {
@@ -1339,11 +1477,15 @@ impl Client {
     /// The frame an entry becomes on this socket, and whether it is room state a
     /// fresh session rebuilds. None: nothing to write.
     fn render(&mut self, entry: &Entry<WsCommand>) -> Option<(Frame, bool)> {
+        // A frame written in a lost session goes again as it was, refused room or not:
+        // dropping it would skip a number both ends count (review D7).
         let (cmd, replay) = match entry {
             Entry::Frame(f) => return Some((f.clone(), false)),
             Entry::Command(c) => (c, false),
             Entry::Replay(c) => (c, true),
         };
+        let narrowed = self.rooms.unrefused(cmd)?;
+        let cmd = narrowed.as_ref().unwrap_or(cmd);
         match cmd {
             WsCommand::JoinRoom { room_code } => {
                 self.render_join(room_code, None, replay).map(|t| (Frame::text(t), true))
@@ -1728,6 +1870,10 @@ impl Client {
     /// so focus and push wakes cannot spend the address's new-connection allowance.
     /// While the app keeps the socket closed, only its coming back counts.
     async fn nudge(&mut self, reason: &str, external: bool) {
+        // A refused login is asked again only by its quiet retry or the person.
+        if self.login_denied.is_some() {
+            return;
+        }
         let reopens = relay_session::ends_suspend(reason, external);
         if self.suspended || self.suspending.is_some() {
             if !reopens {
@@ -1972,6 +2118,10 @@ impl Client {
                         self.stopped = true;
                         return;
                     }
+                    ConnectError::Denied(kind) => {
+                        self.on_login_denied(kind, held);
+                        return;
+                    }
                     ConnectError::Refused(_) | ConnectError::Other(_) | ConnectError::Cooldown(_) => {}
                 }
                 if !held {
@@ -1990,6 +2140,21 @@ impl Client {
             self.notify(relay_session::on_drop(held));
         }
         self.establish_on(stream, door, established, path).await;
+    }
+
+    /// The relay's operator refuses our login or our network: say so once, then wait for
+    /// the quiet retry or the person. Nothing is deleted; a session it held is gone.
+    fn on_login_denied(&mut self, kind: RelayDenial, held: bool) {
+        hollow_log!("[HOLLOW-WS] The relay does not accept this {}: not retrying for now", kind.noun());
+        if self.login_denied.is_none() {
+            let _ = self.event_tx.send(WsEvent::RelayDenied { kind });
+        }
+        self.login_denied = Some(kind);
+        if held {
+            self.lose_session();
+        }
+        let _ = self.event_tx.send(WsEvent::SessionLost);
+        self.reconnect_at = Some(super::relay_denial::retry_at(Instant::now()));
     }
 
     /// A move that failed signing in leaves the old socket as it was: read and judged again
@@ -2089,6 +2254,7 @@ impl Client {
     }
 
     fn up(&mut self, now: Instant) {
+        self.login_denied = None;
         self.cooldown_until = None;
         self.backoff.reset();
         self.license_busy_notified = false;
@@ -2429,7 +2595,9 @@ fn command_frame(cmd: &WsCommand) -> Option<Frame> {
         | WsCommand::Carry { .. }
         | WsCommand::AfterSave { .. }
         | WsCommand::AfterMlsSave { .. }
-        | WsCommand::MlsSaveAgain { .. } => None,
+        | WsCommand::MlsSaveAgain { .. }
+        | WsCommand::RetryDenied { .. }
+        | WsCommand::RefuseRoom { .. } => None,
     }
 }
 
@@ -2458,7 +2626,42 @@ pub(crate) enum ConnectError {
     /// The relay's circuit breaker paused our session: try again after this long. The
     /// session is held meanwhile, so this is no refusal.
     Cooldown(Duration),
+    /// The relay's operator refuses this account or this network (`auth_failed` with
+    /// one of its exact codes, then a 1008 close).
+    Denied(RelayDenial),
     Other(String),
+}
+
+/// What a relay's operator refuses at login. Only the relay's exact codes count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelayDenial {
+    Account,
+    Network,
+}
+
+impl RelayDenial {
+    pub(crate) fn from_code(code: &str) -> Option<Self> {
+        match code {
+            "account_denied" => Some(Self::Account),
+            "network_denied" => Some(Self::Network),
+            _ => None,
+        }
+    }
+
+    /// The relay's code, which the UI keys its message on.
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Account => "account_denied",
+            Self::Network => "network_denied",
+        }
+    }
+
+    fn noun(self) -> &'static str {
+        match self {
+            Self::Account => "account",
+            Self::Network => "network",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2494,6 +2697,7 @@ impl std::fmt::Display for ConnectError {
             Self::License(r) => write!(f, "{}", r.code()),
             Self::Refused(why) => write!(f, "refused by the relay ({why})"),
             Self::Cooldown(wait) => write!(f, "the relay paused this connection for {} s", wait.as_secs().max(1)),
+            Self::Denied(kind) => write!(f, "{}", kind.code()),
             Self::Other(e) => write!(f, "{e}"),
         }
     }
@@ -2758,6 +2962,10 @@ async fn challenge(dial: &Dial, timing: &Timing) -> Result<Challenged, ConnectEr
     let offered = challenge.offers_sessions();
     let (nonce, door_key) = match challenge {
         AuthReply::AuthChallenge { nonce, door_key, .. } if is_auth_nonce(&nonce) => (nonce, door_key),
+        // A network the operator refuses is told so before any challenge.
+        AuthReply::AuthFailed { error, .. } if RelayDenial::from_code(&error).is_some() => {
+            return Err(ConnectError::Denied(RelayDenial::from_code(&error).unwrap_or(RelayDenial::Network)));
+        }
         // A relay older than 0.12 answers the hello as a bad auth frame.
         AuthReply::AuthFailed { .. } => {
             return Err("The relay offers no auth challenge (it needs updating)".to_string().into());
@@ -2816,9 +3024,10 @@ async fn sign_in(
         (reply @ AuthReply::AuthFailed { .. }, _) if relay_session::cooldown(&reply).is_some() => {
             Err(ConnectError::Cooldown(relay_session::cooldown(&reply).unwrap_or_default()))
         }
-        (AuthReply::AuthFailed { error, .. }, _) => Err(match LicenseRefusal::from_code(&error) {
-            Some(refusal) => ConnectError::License(refusal),
-            None => ConnectError::Refused(log_word(&error)),
+        (AuthReply::AuthFailed { error, .. }, _) => Err(match (RelayDenial::from_code(&error), LicenseRefusal::from_code(&error)) {
+            (Some(denial), _) => ConnectError::Denied(denial),
+            (None, Some(refusal)) => ConnectError::License(refusal),
+            (None, None) => ConnectError::Refused(log_word(&error)),
         }),
         (AuthReply::AuthChallenge { .. }, kind) => Err(format!("Auth rejected: a {kind} frame").into()),
         (reply, _) => {
@@ -2938,6 +3147,21 @@ pub(crate) mod presence_hooks {
     pub(super) fn note(me: &str, room: &str, verdict: Verdict) {
         VERDICTS.lock().unwrap_or_else(|e| e.into_inner()).push((me.to_string(), room.to_string(), verdict));
     }
+}
+
+/// The room a `room_denied` may refuse, spelled as we joined it: only a server's or a
+/// meeting's room we are in or whose lock we asked for (review D12).
+fn deniable_ask(rooms: &Rooms, room: &str) -> Option<String> {
+    if !super::relay_denial::deniable_room(room) {
+        return None;
+    }
+    let key = super::relay_denial::room_key(room);
+    rooms
+        .joined
+        .iter()
+        .find(|joined| super::relay_denial::room_key(joined) == key)
+        .cloned()
+        .or_else(|| (rooms.lock_asked.contains(&key) || rooms.denied.contains(&key)).then_some(key))
 }
 
 fn handle_server_message(
@@ -3089,6 +3313,14 @@ fn handle_server_message(
             return;
         }
         ServerMsg::LockChain { server, links, put } => WsEvent::LockChain { server, links, put },
+        ServerMsg::RoomDenied { room } => {
+            let Some(room) = deniable_ask(rooms, &room) else {
+                hollow_log!("[HOLLOW-WS] Ignored a refusal naming a room we never asked for or that no refusal can name");
+                return;
+            };
+            hollow_log!("[HOLLOW-WS] The relay says it does not carry room {room}");
+            WsEvent::RoomDenied { room }
+        }
         ServerMsg::HbAck { .. } | ServerMsg::Ack { .. } | ServerMsg::Reconnect { .. } => return,
     };
 
@@ -3123,6 +3355,7 @@ pub(crate) mod fuzz_hooks {
                     let _ = relay_session::cooldown(&reply);
                     if let AuthReply::AuthFailed { error, .. } = &reply {
                         let _ = LicenseRefusal::from_code(error);
+                        let _ = RelayDenial::from_code(error);
                     }
                     let asks = [relay_session::Ask::V2, relay_session::Ask::New, relay_session::Ask::Resume { sid: "s".repeat(43), in_h: 3 }];
                     for (i, ask) in asks.iter().enumerate() {
@@ -3172,6 +3405,104 @@ mod tests {
             }
         }
         out
+    }
+
+    const DENIED: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    fn events(rx: &mut mpsc::UnboundedReceiver<WsEvent>) -> Vec<String> {
+        let mut out = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            match ev {
+                WsEvent::LeftRoom { room } => out.push(format!("left {room}")),
+                WsEvent::RoomDenied { room } => out.push(format!("denied {room}")),
+                other => out.push(other.kind().to_string()),
+            }
+        }
+        out
+    }
+
+    /// t14-deny: a refused room leaves every room table, the node hears it left and then
+    /// why, and nothing more is written for it until the node asks again.
+    #[test]
+    fn a_room_denial_purges_the_room_and_blocks_what_follows() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut rooms = Rooms::default();
+        rooms.joined.insert(DENIED.into());
+        rooms.subscriptions.insert(DENIED.into(), vec!["t".into()]);
+        feed(&tx, &mut rooms, false, &format!(r#"{{"type":"room_denied","room":"{}"}}"#, DENIED.to_ascii_uppercase()));
+        assert_eq!(events(&mut rx), [format!("denied {DENIED}")], "our spelling, and nothing changes before the node says so");
+        assert!(rooms.joined.contains(DENIED) && rooms.denied.is_empty());
+        let mut client = Client::new(
+            Dial { url: "wss://relay.example/ws".into(), peer_id: "me".into(), keypair_proto: vec![], pub_key_b64: String::new(), license_key: None, fetch: false },
+            Timing::default(),
+            tx.clone(),
+            false,
+        );
+        client.rooms = rooms;
+        client.enqueue(WsCommand::RefuseRoom { room: DENIED.into() });
+        assert_eq!(events(&mut rx), [format!("left {DENIED}"), "RoomBudgetUpdate".to_string()]);
+        let rooms = &mut client.rooms;
+        assert!(!rooms.joined.contains(DENIED) && !rooms.subscriptions.contains_key(DENIED));
+        assert!(rooms.is_denied(DENIED));
+        for cmd in [
+            WsCommand::JoinRoom { room_code: DENIED.into() },
+            WsCommand::Subscribe { room_code: DENIED.into(), topics: vec![] },
+            WsCommand::TopicCatchup { room_code: DENIED.into(), channel_id: "c".into(), max_age_secs: 0, end: true },
+            WsCommand::SetTopicBuffer { room_code: DENIED.into(), channels: vec![], retention_secs: 0, clear: true, auth: None },
+            WsCommand::LockPut { server: DENIED.into(), owner: String::new(), links: vec![] },
+            WsCommand::LockGet { locks: vec![(DENIED.into(), String::new())] },
+            WsCommand::SendToRoom { room_code: DENIED.into(), data: vec![1] },
+        ] {
+            assert!(rooms.unrefused(&cmd).is_none(), "{:?} is written", command_frame(&cmd));
+        }
+        let other = "f".repeat(40);
+        let narrowed = rooms.unrefused(&WsCommand::LockGet { locks: vec![(DENIED.into(), String::new()), (other.clone(), String::new())] });
+        assert!(matches!(narrowed, Some(Some(WsCommand::LockGet { locks })) if locks == vec![(other.clone(), String::new())]));
+        assert!(matches!(rooms.unrefused(&WsCommand::JoinRoom { room_code: other }), Some(None)));
+        assert!(matches!(rooms.unrefused(&WsCommand::LeaveRoom { room_code: DENIED.into() }), Some(None)));
+    }
+
+    /// t14-deny, review D12: a refusal names only a server's or a meeting's room we joined
+    /// or whose lock we asked for; anything else is ignored and the room stays.
+    #[test]
+    fn a_refusal_of_a_room_no_refusal_can_name_is_ignored() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut rooms = Rooms::default();
+        let inbox = format!("inbox:{DENIED}");
+        let fwd = format!("fwd:{DENIED}");
+        for room in [&inbox, &fwd] {
+            rooms.joined.insert(room.clone());
+        }
+        let never_asked = "e".repeat(40);
+        for room in [&inbox, &fwd, &never_asked] {
+            feed(&tx, &mut rooms, false, &format!(r#"{{"type":"room_denied","room":"{room}"}}"#));
+        }
+        assert!(events(&mut rx).is_empty(), "nothing is refused");
+        assert!(rooms.denied.is_empty());
+        for room in [&inbox, &fwd] {
+            assert!(rooms.joined.contains(room.as_str()), "{room} stays joined");
+        }
+        // A lock read asks about a server we are not in yet: its refusal counts.
+        rooms.note_lock_asked(&never_asked);
+        let meeting = format!("conf:{}", "c".repeat(40));
+        rooms.joined.insert(meeting.clone());
+        feed(&tx, &mut rooms, false, &format!(r#"{{"type":"room_denied","room":"{never_asked}"}}"#));
+        feed(&tx, &mut rooms, false, &format!(r#"{{"type":"room_denied","room":"{meeting}"}}"#));
+        assert_eq!(events(&mut rx), [format!("denied {never_asked}"), format!("denied {meeting}")]);
+    }
+
+    /// t14-deny: only the relay's exact codes refuse a login; at the challenge and at
+    /// sign-in alike they stop the client, never read as a relay needing an update.
+    #[test]
+    fn only_the_exact_denial_codes_refuse_a_login() {
+        assert_eq!(RelayDenial::from_code("account_denied"), Some(RelayDenial::Account));
+        assert_eq!(RelayDenial::from_code("network_denied"), Some(RelayDenial::Network));
+        for code in ["Account_denied", "account_denied ", "denied", "license_key_in_use", ""] {
+            assert_eq!(RelayDenial::from_code(code), None, "{code}");
+        }
+        assert_eq!(RelayDenial::Account.code(), "account_denied");
+        assert_eq!(RelayDenial::Network.code(), "network_denied");
+        assert_eq!(LicenseRefusal::from_code("account_denied"), None, "a denial is no license refusal");
     }
 
     /// g13: the audit asks for a digest, and old asks are gone from the wire.

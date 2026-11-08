@@ -153,6 +153,11 @@ Future<void> requestStateSync({required String sourceDeviceId}) => RustLib
     .api
     .crateApiNetworkRequestStateSync(sourceDeviceId: sourceDeviceId);
 
+/// Ask the relay again about everything it refused: a blocked server or meeting, our
+/// account or our network. Never switches relays.
+Future<void> retryRelayDenials() =>
+    RustLib.instance.api.crateApiNetworkRetryRelayDenials();
+
 /// Set (or clear, when `label` is empty) the local human label for a device.
 /// Local-only, so a person's two devices may show different labels for a third.
 Future<void> setDeviceLabel({
@@ -2475,6 +2480,19 @@ sealed class NetworkEvent with _$NetworkEvent {
   }) = NetworkEvent_ShareNeedWebRtc;
   const factory NetworkEvent.licenseError({required String reason}) =
       NetworkEvent_LicenseError;
+
+  /// This relay does not carry the server or meeting (`conf:{id}`): the server opens
+  /// read-only, nothing was deleted.
+  const factory NetworkEvent.serverUnavailable({required String serverId}) =
+      NetworkEvent_ServerUnavailable;
+
+  /// This relay carries the server or meeting again.
+  const factory NetworkEvent.serverAvailable({required String serverId}) =
+      NetworkEvent_ServerAvailable;
+
+  /// This relay refuses our account (`account_denied`) or our network (`network_denied`).
+  const factory NetworkEvent.relayDenied({required String kind}) =
+      NetworkEvent_RelayDenied;
   const factory NetworkEvent.twitchJoinRejected({
     required String serverId,
     required String reason,

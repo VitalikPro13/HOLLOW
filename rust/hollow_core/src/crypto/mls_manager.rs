@@ -557,6 +557,8 @@ pub(crate) struct MlsManager {
     leaf_cache: LeafCache,
     /// Leafless walks and silent responders (RAM-only).
     pub(crate) lead: crate::node::standing::LeadBook,
+    /// Servers whose groups take no change while the relay refuses them ([`Self::set_frozen`]).
+    frozen: HashSet<String>,
 }
 
 /// Commits kept per group for catch-up replay. A desktop, the device that answers
@@ -637,6 +639,7 @@ impl MlsManager {
             seat_cache: Mutex::new(HashMap::new()),
             leaf_cache: Mutex::new(HashMap::new()),
             lead: Default::default(),
+            frozen: HashSet::new(),
         }
     }
 
@@ -862,6 +865,7 @@ impl MlsManager {
     /// lets it repair our leaf there. Unless `parked` (a join's, Welcomed days later),
     /// older ones for the group are dropped once superseded for a while.
     pub fn generate_key_package_for(&self, group_key: &str, parked: bool) -> Result<Vec<u8>, String> {
+        self.refuse_frozen(group_key)?;
         let bundle = KeyPackage::builder()
             .leaf_node_capabilities(self.leaf_capabilities())
             .leaf_node_extensions(self.new_leaf_extensions(group_key))
@@ -1012,6 +1016,7 @@ impl MlsManager {
 
     /// Create a new MLS group for a server (called by server owner).
     pub fn create_group(&mut self, server_id: &str) -> Result<(), String> {
+        self.refuse_frozen(server_id)?;
         let group_id = GroupId::from_slice(server_id.as_bytes());
         // A meeting's guests may run 0.13, whose knocks list no tally.
         let required = if self.old_shaped() || self.founds_unrequired() || crate::node::conference::is_conference_sid(server_id) {
@@ -1075,6 +1080,7 @@ impl MlsManager {
         adds: &[(String, Vec<u8>)],
         rate_exempt: bool,
     ) -> Result<MembershipCommit, String> {
+        self.refuse_frozen(group_key)?;
         let tree = self.leaf_records(group_key);
         let old_shaped = self.old_shaped();
         let group = self.groups.get_mut(group_key)
@@ -1365,6 +1371,7 @@ impl MlsManager {
     /// we hand it to decides whether it takes the epoch, and its broadcast of these
     /// bytes is what merges it here (`OwnPendingCommit`).
     pub(crate) fn stage_self_update(&mut self, group_key: &str, tally: &super::mls_tally::Tally) -> Result<Vec<u8>, String> {
+        self.refuse_frozen(group_key)?;
         if self.old_shaped() {
             return Err("a 0.12.2-shaped leaf takes no turns".to_string());
         }
@@ -2062,6 +2069,26 @@ impl MlsManager {
     }
 
     /// Check if an MLS group exists for a server.
+    /// The servers and meetings (`conf:{id}`) whose groups and subgroups this device may
+    /// not change: the relay refuses to carry them, so a commit would merge into a void
+    /// on every member at once and fork the group (review D6). RAM only.
+    pub fn set_frozen(&mut self, servers: impl IntoIterator<Item = String>) {
+        self.frozen = servers.into_iter().map(|s| s.to_ascii_lowercase()).collect();
+    }
+
+    /// Whether `group_key` (a server, a meeting or a channel subgroup) is frozen.
+    pub fn is_frozen(&self, group_key: &str) -> bool {
+        let server = group_key.split('#').next().unwrap_or(group_key);
+        !self.frozen.is_empty() && self.frozen.contains(&server.to_ascii_lowercase())
+    }
+
+    fn refuse_frozen(&self, group_key: &str) -> Result<(), String> {
+        if self.is_frozen(group_key) {
+            return Err("the relay does not carry this server: its group takes no change".to_string());
+        }
+        Ok(())
+    }
+
     pub fn has_group(&self, server_id: &str) -> bool {
         self.groups.contains_key(server_id)
     }

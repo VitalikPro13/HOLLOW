@@ -960,6 +960,9 @@ mod tests {
         assert_eq!(relay_text_counts(r#"{"type":"gap"}"#), 1);
         assert_eq!(relay_text_counts(r#"{"type":null}"#), 1);
         assert_eq!(relay_text_counts(r#" {"type":"members","room":"r","peers":[]}"#), 0);
+        // t14-deny: a refusal is a stream frame, ringed and replayed once on resume.
+        assert_eq!(relay_text_counts(r#"{"type":"room_denied","room":"0123456789abcdef0123456789abcdef01234567"}"#), 1);
+        assert_eq!(relay_text_counts(r#"{"type":"auth_failed","error":"account_denied"}"#), 0);
         assert_eq!(client_text_counts(r#"  {"type":"hb","h":1}"#), 0);
     }
 

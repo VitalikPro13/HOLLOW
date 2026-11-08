@@ -2,6 +2,7 @@
 import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
+import 'package:hollow/src/core/providers/relay_denial_provider.dart';
 import 'package:hollow/src/core/providers/sibling_call_provider.dart';
 import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/message_limits.dart';
@@ -33,6 +34,7 @@ import 'package:hollow/src/core/providers/event_provider.dart';
 import 'package:hollow/src/core/providers/file_transfer_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
+import 'package:hollow/src/ui/chat/relay_denied_notice.dart';
 import 'package:hollow/src/ui/dialogs/report_user_dialog.dart';
 import 'package:hollow/src/core/providers/blocked_users_provider.dart';
 import 'package:hollow/src/ui/chat/blocked_conversation_notice.dart';
@@ -1849,6 +1851,13 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute>
       )));
       // The message area says why (#107); nothing to type into.
       if (!chatOpen) return const SizedBox.shrink();
+      if (ref.watch(serverRelayDeniedProvider(widget.serverId!))) {
+        return SafeArea(
+          top: false,
+          child: RelayDeniedNotice(
+              serverId: widget.serverId!, meeting: _isConference, touch: true),
+        );
+      }
       if (!canPost || muteText != null || removed != null) {
         return _buildBlockedBanner(hollow, removed ?? muteText);
       }

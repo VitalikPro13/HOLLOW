@@ -90,6 +90,7 @@ import 'package:hollow/src/core/providers/device_proof_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/rust/api/network.dart';
 import 'package:hollow/src/rust/api/share.dart' as share_api;
+import 'package:hollow/src/core/providers/relay_denial_provider.dart';
 import 'package:hollow/src/ui/dialogs/friends_manager_dialog.dart'
     show handleNicknameLookupFailed, handleNicknameResolved;
 import 'package:hollow/src/ui/dialogs/twitch_join_dialog.dart' show showTwitchJoinDialog, handleTwitchJoinResult, showJoinRejectedDialog, showNsfwConfirmDialog;
@@ -105,6 +106,26 @@ String? shareAutoDownloadScope({
 }) {
   if (serverId.isEmpty) return 'dm:$senderIdentity';
   return serverSyncDone ? 'server:$serverId' : null;
+}
+
+/// A voice channel or meeting of a server the relay now refuses cannot go on
+/// through it: leave it (a meeting through its own path, so it is not stranded)
+/// and say why.
+@visibleForTesting
+void leaveRefusedVoice(Ref ref, String serverId) {
+  final key = serverId.toLowerCase();
+  final voice = ref.read(voiceChannelProvider);
+  final meeting = key.startsWith('conf:');
+  if (!voice.isInVoiceChannel || voice.currentServerId?.toLowerCase() != key) {
+    return;
+  }
+  if (meeting) {
+    ref.read(conferenceProvider.notifier).leaveMeeting().catchError((_) {});
+  } else {
+    ref.read(voiceChannelProvider.notifier).leaveChannel().catchError((_) {});
+  }
+  showEventToast(meeting ? kMeetingDeniedText : kServerDeniedText,
+      kind: 'relay_denied_voice', id: key);
 }
 
 /// A toast raised by an event, in the root Navigator's overlay. The Navigator's own
@@ -1176,6 +1197,7 @@ class EventStreamNotifier extends Notifier<bool> {
         ref.read(connectionStatusProvider.notifier).onRelayEvent(event);
 
       case NetworkEvent_RelayConnected():
+        ref.read(relayLoginDenialProvider.notifier).state = null;
         ref.read(connectionStatusProvider.notifier).onRelayEvent(event);
         // After the status, so the link flow reads the relay as up.
         ref.read(deviceLinkSyncProvider.notifier).onRelayConnected();
@@ -1778,6 +1800,19 @@ class EventStreamNotifier extends Notifier<bool> {
 
       case NetworkEvent_LicenseError(:final reason):
         ref.read(licenseErrorProvider.notifier).state = reason;
+
+      // The relay's operator refuses a server or meeting: it opens read-only.
+      case NetworkEvent_ServerUnavailable(:final serverId):
+        final denied = ref.read(relayDeniedServersProvider.notifier);
+        denied.state = {...denied.state, serverId.toLowerCase()};
+        leaveRefusedVoice(ref, serverId);
+
+      case NetworkEvent_ServerAvailable(:final serverId):
+        final stillDenied = ref.read(relayDeniedServersProvider.notifier);
+        stillDenied.state = {...stillDenied.state}..remove(serverId.toLowerCase());
+
+      case NetworkEvent_RelayDenied(:final kind):
+        ref.read(relayLoginDenialProvider.notifier).state = kind;
 
       case NetworkEvent_RelayClockOffset(:final offsetSecs):
         ref.read(clockSkewProvider.notifier).onOffset(offsetSecs?.toInt());

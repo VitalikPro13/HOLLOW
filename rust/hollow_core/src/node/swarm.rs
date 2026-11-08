@@ -654,11 +654,11 @@ pub(crate) async fn spawn_node(
     };
 
     let loop_device = device_keypair.clone();
-    let handle = tokio::spawn(super::ws_client::with_relay_domain(ring_domain, super::olm_lane::with_carry_book(super::door_room::with_heard_routes(super::join_stash::with_join_stash(super::lock_keeper::with_loop_device(loop_device, Box::pin(run_event_loop(
+    let handle = tokio::spawn(super::relay_denial::with_denials(super::ws_client::with_relay_domain(ring_domain, super::olm_lane::with_carry_book(super::door_room::with_heard_routes(super::join_stash::with_join_stash(super::lock_keeper::with_loop_device(loop_device, Box::pin(run_event_loop(
         event_tx, cmd_rx, cmd_tx, olm, crypto_store, crdt_store,
         bundle_keypair, device_keypair, ws_cmd_tx, ws_event_rx, master_peer_id.clone(), device_peer_id,
         initial_invisible, db_path, db_passphrase,
-    ))))))));
+    )))))))));
 
     // The app's "my peer id" (friendships, display) is the MASTER id.
     Ok((master_peer_id, handle))
@@ -706,11 +706,11 @@ pub(crate) async fn spawn_node_mock(
     let away = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let metered = db_path.clone();
     let loop_device = device_keypair.clone();
-    let handle = tokio::spawn(super::ws_client::with_test_away(away.clone(), super::ws_client::with_relay_domain(super::ws_client::HARNESS_RELAY_DOMAIN.to_string(), super::olm_lane::with_carry_book(super::door_room::with_heard_routes(super::join_stash::with_join_stash(super::lock_keeper::with_loop_device(loop_device, crate::storage::store_pool::meter::OnLoop::new(Box::pin(run_event_loop(
+    let handle = tokio::spawn(super::ws_client::with_test_away(away.clone(), super::relay_denial::with_denials(super::ws_client::with_relay_domain(super::ws_client::HARNESS_RELAY_DOMAIN.to_string(), super::olm_lane::with_carry_book(super::door_room::with_heard_routes(super::join_stash::with_join_stash(super::lock_keeper::with_loop_device(loop_device, crate::storage::store_pool::meter::OnLoop::new(Box::pin(run_event_loop(
         event_tx, cmd_rx, cmd_tx, olm, crypto_store, crdt_store,
         bundle_keypair, device_keypair, ws_cmd_tx, ws_event_rx, master_peer_id.clone(), device_peer_id,
         initial_invisible, db_path, db_passphrase,
-    )), &metered))))))));
+    )), &metered)))))))));
 
     Ok((master_peer_id, handle, ws_cmd_rx, ws_event_tx, away))
 }
@@ -750,7 +750,10 @@ async fn run_event_loop(
     let master_keypair = bundle_keypair.clone();
     let master_peer_str = local_peer_str.clone();
     crypto_handler::bind_olm_identity(&mut olm, &device_keypair);
-    let (ws_cmd_tx, mut carry_rx) = super::frame_auth::spawn_sealer(device_keypair.clone(), ws_cmd_tx);
+    // What this relay refuses to carry (t14-deny): the sealing stage keeps back every
+    // frame scoped to it, whatever room it would ride.
+    let denials = super::relay_denial::current();
+    let (ws_cmd_tx, mut carry_rx) = super::frame_auth::spawn_sealer(device_keypair.clone(), ws_cmd_tx, denials.clone());
     let mut frame_replays = super::frame_auth::ReplayGuard::load(&crypto_store, Duration::from_secs(5)).await;
 
     // Decrypt-failure cooldown per peer: prevents session thrashing when many
@@ -2045,6 +2048,11 @@ async fn run_event_loop(
                         }
                     }
 
+                    NodeCommand::RetryRelayDenials => {
+                        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::RetryDenied { room: None });
+                        let rooms = denials.probe_all();
+                        super::relay_denial::send_probes(&ws_cmd_tx, &rooms, &mut pending_server_joins);
+                    }
                     NodeCommand::RequestStateSync { source_device_id } => {
                         // Manual sync: ask a chosen SOURCE sibling to push us its
                         // servers + friends. SECURITY: only meaningful for our own
@@ -3652,6 +3660,7 @@ async fn run_event_loop(
 
                     // -- Recovery pool commands (Evidence Recovery) --
                     NodeCommand::InitiateRecoveryPool { server_id, token } => {
+                        denials.alias(&super::recovery_pool::pool_room(&server_id, &token), &server_id);
                         vault_ops::handle_initiate_recovery_pool(
                             &mut recovery_pool_state,
                             &event_tx, &ws_cmd_tx,
@@ -3661,6 +3670,7 @@ async fn run_event_loop(
                         ).await;
                     }
                     NodeCommand::JoinRecoveryPool { server_id, token } => {
+                        denials.alias(&super::recovery_pool::pool_room(&server_id, &token), &server_id);
                         vault_ops::handle_join_recovery_pool(
                             &mut recovery_pool_state,
                             &event_tx, &ws_cmd_tx,
@@ -4759,6 +4769,19 @@ async fn run_event_loop(
                     }
                     WsEvent::RoomMembers { room, peers } => {
                         hollow_log!("[HOLLOW-WS] Room {room}: {} members", peers.len());
+                        // The relay let us in again: whatever it refused, it carries now.
+                        if denials.lift(&room) {
+                            hollow_log!("[HOLLOW-WS] The relay carries {room} again");
+                            // What was refused was never caught up: ask again on this socket.
+                            relay_catchup_done.retain(|(r, _)| !r.eq_ignore_ascii_case(&room));
+                            if let Some(m) = mls.as_mut() {
+                                m.set_frozen(denials.rooms());
+                            }
+                            let _ = event_tx.send(NetworkEvent::ServerAvailable { server_id: super::relay_denial::room_key(&room) }).await;
+                            if let Some(owner) = server_states.get(&room).and_then(|s| s.anchor_owner()) {
+                                lock_keeper.watch(&room, &owner, &ws_cmd_tx);
+                            }
+                        }
                         if awaiting_inbox_answer.as_deref() == Some(room.as_str()) {
                             awaiting_inbox_answer = None;
                             let _ = event_tx.send(NetworkEvent::RelayConnected).await;
@@ -5469,6 +5492,29 @@ async fn run_event_loop(
                             ).await;
                             sync_handler::note_completed_join(&mut recent_joins, &pending_server_joins, &server_states, &local_peer_str, &server, joining);
                         }
+                    }
+                    WsEvent::RoomDenied { room } => {
+                        let ours = |key: &str| {
+                            server_states.contains_key(key)
+                                || pending_server_joins.contains_key(key)
+                                || guest_rooms.rooms().any(|g| g == key)
+                                || leave_book.holds_room(key)
+                        };
+                        let Some(key) = super::relay_denial::ours_to_refuse(&room, ours) else {
+                            hollow_log!("[HOLLOW-WS] Ignored a refusal of a room that is none of our servers");
+                            continue;
+                        };
+                        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::RefuseRoom { room: room.clone() });
+                        if denials.deny(&key, std::time::Instant::now()) {
+                            hollow_log!("[HOLLOW-WS] The relay does not carry {key}: sending nothing for it until it does");
+                            if let Some(m) = mls.as_mut() {
+                                m.set_frozen(denials.rooms());
+                            }
+                            let _ = event_tx.send(NetworkEvent::ServerUnavailable { server_id: key }).await;
+                        }
+                    }
+                    WsEvent::RelayDenied { kind } => {
+                        let _ = event_tx.send(NetworkEvent::RelayDenied { kind: kind.code().to_string() }).await;
                     }
                     WsEvent::LicenseError { reason } => {
                         hollow_log!("[HOLLOW-WS] License error: {reason}");
@@ -6245,16 +6291,12 @@ async fn run_event_loop(
                     // current member's leaf leaves only alongside a re-add of its device,
                     // exactly what receivers accept; the rest waits for its KeyPackage.
                     // Off our turn both queues stay as they are.
-                    let mut group_keys: Vec<String> = if our_turn {
-                        pending_mls_removals.keys().chain(pending_mls_key_packages.keys()).cloned().collect()
-                    } else {
-                        Vec::new()
-                    };
-                    group_keys.sort();
-                    group_keys.dedup();
                     // A turn of ours is out, or our own self-update may still be relayed:
                     // the queues wait for the next tick.
-                    group_keys.retain(|g| !turn_book.blocks_commit(mls_mgr, g));
+                    let group_keys = crate::node::crypto_handler::batch_commit_groups(
+                        &pending_mls_removals, &pending_mls_key_packages, our_turn, mls_mgr,
+                        |m, g| turn_book.blocks_commit(m, g),
+                    );
                     let mut committed_this_tick: std::collections::HashSet<String> = std::collections::HashSet::new();
                     let ourselves = crate::crypto::LeafIdentity {
                         device: device_peer_id.clone(),
@@ -6601,6 +6643,8 @@ async fn run_event_loop(
 
             _ = rebootstrap_timer.tick() => {
                 arm_started = Some(("timer", "rebootstrap", std::time::Instant::now()));
+                let due = denials.probe_due(std::time::Instant::now());
+                super::relay_denial::send_probes(&ws_cmd_tx, &due, &mut pending_server_joins);
                 frame_replays.prune(super::frame_auth::now_ms());
                 if let Some(nickname) = nick_hold.due(std::time::Instant::now()) {
                     super::nick_claim::send_claim(&ws_cmd_tx, &master_keypair, &device_peer_id, &nickname);
@@ -15553,6 +15597,13 @@ async fn handle_incoming_request_inner(
                         // `requester_is_member` also picks the header transport below.
                         if crate::node::blocklist::is_blocked(peer_str) {
                             hollow_log!("[HOLLOW-SECURITY] REJECTED FileRequest from {peer_str} — blocked");
+                            return;
+                        }
+                        // A server the relay refuses to carry: none of its files leave through it.
+                        if file_meta.context_type == "channel"
+                            && file_meta.context_id.split(':').next().is_some_and(super::relay_denial::denied)
+                        {
+                            hollow_log!("[HOLLOW-FILE] Not serving {file_id}: the relay does not carry its server");
                             return;
                         }
                         let requester_master = super::resolver::resolve(peer_str);

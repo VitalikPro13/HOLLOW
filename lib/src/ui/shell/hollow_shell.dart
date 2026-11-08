@@ -11,6 +11,7 @@ import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/services/destroy_flow.dart';
 import 'package:hollow/src/core/services/overlay_publisher.dart';
 import 'package:hollow/src/core/providers/overlay_settings_provider.dart';
+import 'package:hollow/src/ui/dialogs/relay_denied_dialog.dart';
 import 'package:hollow/src/ui/settings/stream_overlay/overlay_port_toast.dart';
 import 'package:hollow/src/core/services/app_lock_service.dart';
 import 'package:hollow/src/core/services/channel_topic_service.dart';
@@ -319,6 +320,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
     });
     _bootstrap();
     _listenForLicenseErrors();
+    listenForRelayLoginDenial(ref, () => context);
     _listenForNicknameChanges();
     _listenForRecordingEvents();
   }

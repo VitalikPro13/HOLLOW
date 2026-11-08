@@ -397,9 +397,7 @@ class _ActiveNow extends ConsumerWidget {
     // Presence rides OUR relay link, so while it is down nobody reads as
     // around, which is our doing, not theirs.
     final link = ref.watch(overallConnectionProvider);
-    final linkDown = link == OverallConnection.offline ||
-        link == OverallConnection.reconnecting ||
-        link == OverallConnection.error;
+    final linkDown = link.isDown;
     final nobody = rooms.isEmpty && onlineFriends.isEmpty;
 
     return Column(

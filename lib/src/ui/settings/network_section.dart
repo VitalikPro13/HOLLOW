@@ -259,7 +259,8 @@ class _ActiveRelayRow extends ConsumerWidget {
           text: connection.label,
           style: TextStyle(
             color: connection == OverallConnection.error ||
-                    connection == OverallConnection.offline
+                    connection == OverallConnection.offline ||
+                    connection == OverallConnection.refused
                 ? hollow.error
                 : hollow.warning,
           ),

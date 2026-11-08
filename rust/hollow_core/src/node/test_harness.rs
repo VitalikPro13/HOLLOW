@@ -255,6 +255,8 @@ fn cmd_kind(cmd: &WsCommand) -> &'static str {
         WsCommand::LockGet { .. } => "lock_get",
         WsCommand::LockPut { .. } => "lock_put",
         WsCommand::ReportUser { .. } => "report_user",
+        WsCommand::RetryDenied { .. } => "retry_denied",
+        WsCommand::RefuseRoom { .. } => "refuse_room",
     }
 }
 
@@ -270,6 +272,12 @@ struct RelayInner {
     relay_idle: std::time::Duration,
     /// Every command the relay handled: (device, kind, room, source).
     cmd_log: Vec<(String, &'static str, Option<String>, CmdSource)>,
+    /// Rooms the operator's denylist names ([`MockRelay::deny_room`]).
+    denied_rooms: HashSet<String>,
+    /// Every refusal a node confirmed to its ws_client: (device, room).
+    refused: Vec<(String, String)>,
+    /// While set, every frame's server scope, read through Olm too: (device, scope).
+    scope_log: Option<Vec<(String, String)>>,
     /// The latest device bound each node told its ws_client per room (`WsCommand::RoomBound`).
     room_bounds: HashMap<(String, String), u32>,
     /// device -> joins a slow relay has not answered yet ([`MockRelay::hold_joins`]).
@@ -457,6 +465,7 @@ static CARRIED_LABELS: std::sync::LazyLock<std::sync::Mutex<HashMap<String, supe
 /// tests keep naming, reading and re-sending those frames after they moved inside Olm.
 pub(crate) fn label_carried_frame(frame: &[u8], plaintext: &str) {
     note_sealed_channel_batch(frame, plaintext);
+    t14_deny::note_olm(frame, plaintext);
     let Ok(super::types::MessageEnvelope::Carried { msg, .. }) = serde_json::from_str(plaintext) else { return };
     if let super::types::HavenMessage::CrdtOpBroadcast { op_json, .. } = msg.as_ref()
         && let Ok(super::types::HavenMessage::Encrypted { body, .. }) = serde_json::from_slice(super::frame_auth::unchecked_body(frame))
@@ -813,6 +822,52 @@ impl MockRelay {
     pub(crate) fn sees_room(&self, room: &str, device: &str) -> bool {
         let inner = self.inner.lock().unwrap();
         inner.peer_in_room(room, device) && inner.receives(room, device)
+    }
+
+    /// The operator adds `room` to the denylist: every member is told and the room goes,
+    /// with no `peer_left`; joins and lock reads and writes of it are refused from now on.
+    pub(crate) fn deny_room(&self, room: &str) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.denied_rooms.insert(room.to_string());
+        let members: Vec<String> = inner.rooms.remove(room).map(|s| s.into_iter().collect()).unwrap_or_default();
+        for dev in members {
+            inner.refuse_room(&dev, room);
+        }
+    }
+
+    /// The operator takes `room` off the denylist; members learn of it on their next try.
+    pub(crate) fn lift_room(&self, room: &str) {
+        self.inner.lock().unwrap().denied_rooms.remove(room);
+    }
+
+    /// Start reading every frame's server scope, Olm frames included.
+    pub(crate) fn watch_scopes(&self) {
+        t14_deny::watch(true);
+        self.inner.lock().unwrap().scope_log = Some(Vec::new());
+    }
+
+    /// How many frames from `dev` were scoped to `scope` since the watch began or was
+    /// last cleared.
+    pub(crate) fn scoped(&self, dev: &str, scope: &str) -> usize {
+        let inner = self.inner.lock().unwrap();
+        inner.scope_log.iter().flatten().filter(|(from, s)| from == dev && s == scope).count()
+    }
+
+    /// Whether `dev`'s node told its ws_client to leave and refuse `room`.
+    pub(crate) fn confirmed_refusal(&self, dev: &str, room: &str) -> bool {
+        self.confirmed_refusals(dev, room) > 0
+    }
+
+    /// How many times `dev`'s node took a refusal of `room`.
+    pub(crate) fn confirmed_refusals(&self, dev: &str, room: &str) -> usize {
+        self.inner.lock().unwrap().refused.iter().filter(|(d, r)| d == dev && r == room).count()
+    }
+
+    /// Start the scope log over.
+    pub(crate) fn clear_scoped(&self) {
+        if let Some(log) = self.inner.lock().unwrap().scope_log.as_mut() {
+            log.clear();
+        }
     }
 
     /// Enable the load meter (scaling benchmark). Resets counts to zero. After
@@ -1747,6 +1802,10 @@ impl RelayInner {
             }
             WsCommand::LockGet { locks } => {
                 for (server, owner) in locks.into_iter().take(256) {
+                    if inner.denied_rooms.contains(&server) {
+                        inner.refuse_room(from, &server);
+                        continue;
+                    }
                     let links = inner.locks.get(&super::join_lock::record_key(&server, &owner)).cloned().unwrap_or_default();
                     let read = WsEvent::LockChain { server, links, put: None };
                     if let Some(held) = inner.held_lock_reads.get_mut(from) {
@@ -1757,6 +1816,7 @@ impl RelayInner {
                 }
             }
             WsCommand::LockPut { .. } if inner.lost_lock_puts.contains(from) => {}
+            WsCommand::LockPut { server, .. } if inner.denied_rooms.contains(&server) => inner.refuse_room(from, &server),
             WsCommand::LockPut { server, owner, links } => {
                 let before = inner.room_door(&server);
                 let (mut current, accepted) = relay_lock_put(&mut inner.locks, &inner.inbox_rosters, &server, &owner, &links);
@@ -2054,6 +2114,10 @@ impl RelayInner {
     /// owners and a non-owner nobody, and tells nobody about a non-owner; a door-locked
     /// room does the same for its provers.
     fn join(&mut self, from: &str, room: &str, owner: bool) {
+        if self.denied_rooms.contains(room) {
+            self.refuse_room(from, room);
+            return;
+        }
         let inbox = room.starts_with("inbox:");
         // A re-join is quiet only for a socket the room already saw (`already_present`).
         let saw_before = self.peer_in_room(room, from) && (self.room_door(room).is_none() || self.sees_door(room, from));
@@ -2625,6 +2689,11 @@ impl RelayInner {
     }
 
     /// A frame a test hands `dev`: through its session when it has one, else straight in.
+    /// `room_denied` to `dev`.
+    fn refuse_room(&mut self, dev: &str, room: &str) {
+        self.write(dev, WsEvent::RoomDenied { room: room.to_string() });
+    }
+
     fn deliver_any(&mut self, dev: &str, ev: WsEvent) {
         if self.sessions.contains_key(dev) {
             self.write(dev, ev);
@@ -2668,6 +2737,16 @@ impl RelayInner {
             self.handle(from, cmd);
             return;
         }
+        // ws_client's own: it never reaches the relay. A confirmed refusal leaves the room.
+        if let WsCommand::RefuseRoom { room } = &cmd {
+            self.refused.push((from.to_string(), room.clone()));
+            let left = WsEvent::LeftRoom { room: room.clone() };
+            self.deliver_any(from, left);
+            return;
+        }
+        if matches!(cmd, WsCommand::RetryDenied { .. }) {
+            return;
+        }
         // ws_client keeps it for its pacer; it never reaches the relay.
         if let WsCommand::RoomBound { room_code, devices } = &cmd {
             self.room_bounds.insert((from.to_string(), room_code.clone()), *devices);
@@ -2700,6 +2779,9 @@ impl RelayInner {
             s.in_h += 1;
         }
         self.cmd_log.push((from.to_string(), cmd_kind(&cmd), cmd_room(&cmd).map(str::to_string), source));
+        if let Some(log) = self.scope_log.as_mut() {
+            log.extend(t14_deny::scopes(&cmd).into_iter().map(|scope| (from.to_string(), scope)));
+        }
         if matches!(cmd, WsCommand::JoinRoom { .. } | WsCommand::JoinInbox { .. })
             && let Some(held) = self.held_joins.get_mut(from)
         {
@@ -27608,7 +27690,9 @@ fn harness_fixed_sleep_budget_does_not_grow() {
     // 2026-11-07: t14-reset's missing-key sweep tests, a spawn stagger and two absence
     // proofs (two batch ticks each with no key minted, 11.5 s).
     // 2026-11-07: merged onto Track A, w2-d and t14-hidden: scan 1146.3 s, slack 2.2 s.
-    const BUDGET_MS: u64 = 1_148_500;
+    // 2026-11-08: t14-deny-client added four absences, nothing sent for a refused server
+    // by members, a waiting joiner, a recovery pool and a relaunched leaver (20.3 s).
+    const BUDGET_MS: u64 = 1_168_800;
 
     let src = include_str!("test_harness.rs");
     // Built from pieces so this scan does not count its own source text.
@@ -65147,10 +65231,16 @@ async fn t14_hidden_stranger_holds_the_newest_door(relay: &MockRelay, d1: &TestN
     relay.swallow_kind(&d1.device_id, "door_grant");
     j.cmd_tx.send(join_cmd(server_id)).await.unwrap();
     assert!(expect_joined(j, server_id, 25).await, "the stranger joins");
+    // A removal moves the lock twice (before the removal, and once the leaf has left
+    // every group), so the newest door is read at each check, never the tip before.
+    let newest = || relay_tip(relay, server_id).n;
     assert!(
-        wait_until(20, async || j.live_server_state(server_id).await.and_then(|s| s.join_lock.newest_door()).is_some_and(|(n, _, _)| n == tip.n)).await,
+        wait_until(20, async || {
+            j.live_server_state(server_id).await.and_then(|s| s.join_lock.newest_door()).is_some_and(|(n, _, _)| n >= tip.n && n == newest())
+        })
+        .await,
         "the joiner's fold holds the relay's newest door {}, got {:?}",
-        tip.n,
+        newest(),
         j.live_server_state(server_id).await.and_then(|s| s.join_lock.newest_door()).map(|(n, _, _)| n),
     );
     assert!(expect_sees_room(relay, server_id, &j.device_id).await, "the relay shows the joiner the room");
@@ -65815,4 +65905,406 @@ async fn fuzz_corpus_never_kills_a_node() {
     for _ in 0..3 {
         alive("message_envelope", envelopes.len()).await;
     }
+}
+
+// t14-deny
+
+/// Reading which server a frame is about, Olm frames too, for the denylist tests.
+mod t14_deny {
+    use super::*;
+
+    static WATCH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    static OLM_SCOPES: std::sync::LazyLock<std::sync::Mutex<HashMap<String, String>>> =
+        std::sync::LazyLock::new(Default::default);
+
+    pub(super) fn watch(on: bool) {
+        WATCH.store(on, std::sync::atomic::Ordering::Relaxed);
+        if !on {
+            OLM_SCOPES.lock().unwrap_or_else(|p| p.into_inner()).clear();
+        }
+    }
+
+    /// Remember the server an Olm frame's plaintext is about, keyed by its ciphertext.
+    pub(super) fn note_olm(frame: &[u8], plaintext: &str) {
+        if !WATCH.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
+        let Some(scope) = super::super::relay_denial::envelope_scope(plaintext.as_bytes()) else { return };
+        if let Ok(super::super::types::HavenMessage::Encrypted { body, .. }) =
+            serde_json::from_slice(super::super::frame_auth::unchecked_body(frame))
+        {
+            OLM_SCOPES.lock().unwrap_or_else(|p| p.into_inner()).insert(body, scope);
+        }
+    }
+
+    fn of_body(data: &[u8]) -> Option<String> {
+        let body = super::super::frame_auth::unchecked_body(data);
+        match serde_json::from_slice::<super::super::types::HavenMessage>(body) {
+            Ok(super::super::types::HavenMessage::Encrypted { body, .. }) => {
+                OLM_SCOPES.lock().unwrap_or_else(|p| p.into_inner()).get(&body).cloned()
+            }
+            Ok(msg) => msg.server_scope(),
+            Err(_) => None,
+        }
+    }
+
+    /// Every server or meeting a command reaching the relay is about: its room, a lock it
+    /// names, and what its payload says, read through Olm.
+    pub(super) fn scopes(cmd: &WsCommand) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        let mut room = |r: &str| {
+            if super::super::relay_denial::deniable_room(r) {
+                out.push(super::super::relay_denial::room_key(r));
+            }
+        };
+        match cmd {
+            WsCommand::LockGet { locks } => locks.iter().for_each(|(s, _)| room(s)),
+            WsCommand::LockPut { server, .. } => room(server),
+            WsCommand::Subscribe { room_code, .. }
+            | WsCommand::SetTopicBuffer { room_code, .. }
+            | WsCommand::DiscoverPeers { room_code } => room(room_code),
+            other => {
+                if let Some(r) = cmd_room(other) {
+                    room(r);
+                }
+            }
+        }
+        let data = match cmd {
+            WsCommand::SendToRoom { data, .. }
+            | WsCommand::SendPublic { data, .. }
+            | WsCommand::SendToRoomTopic { data, .. }
+            | WsCommand::SendDirect { data, .. }
+            | WsCommand::SendDirectImage { data, .. }
+            | WsCommand::SendChannelDirect { data, .. } => Some(data),
+            _ => None,
+        };
+        out.extend(data.and_then(|d| of_body(d)));
+        out
+    }
+}
+
+/// The commands `dev` sent the relay since `mark` that name `room`.
+fn t14_room_commands(relay: &MockRelay, dev: &str, mark: usize, room: &str) -> Vec<&'static str> {
+    relay
+        .commands_since(dev, mark)
+        .into_iter()
+        .filter(|(_, r, _)| r.as_deref() == Some(room))
+        .map(|(kind, _, _)| kind)
+        .collect()
+}
+
+/// A server the relay refuses: every member is told, sends nothing scoped to it through
+/// the relay by any room (Olm copies to friends included), commits nothing in its group,
+/// and keeps the server, its state and its messages; a DM between two members still
+/// goes. Lifted, one "Try again" brings the member back into the room.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn t14_deny_a_refused_server_sends_nothing_for_it_and_keeps_everything() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o, a, m, sid) = vault_trio(&relay, 161, 162, 163).await;
+    let channel = general_channel_of(&sid);
+    post_channel(&a, &sid, &channel, "before the block").await;
+    assert!(
+        wait_until(20, async || m.channel_messages(&sid, &channel).iter().any(|x| x.text == "before the block")).await,
+        "precondition: the server carries messages",
+    );
+    let epoch = o.mls_epoch(&sid).await;
+    assert!(epoch.is_some(), "precondition: the owner holds the group");
+
+    relay.watch_scopes();
+    let mut nodes = [o, a, m];
+    relay.deny_room(&sid);
+    for node in nodes.iter_mut() {
+        let told = wait_event(node, std::time::Duration::from_secs(10), |ev| {
+            matches!(ev, NetworkEvent::ServerUnavailable { server_id } if *server_id == sid)
+        })
+        .await;
+        assert!(told, "{} hears the server is unavailable", node.device_id);
+        let dev = node.device_id.clone();
+        assert!(wait_until(5, async || relay.confirmed_refusal(&dev, &sid)).await, "{dev} leaves the room in its ws_client");
+    }
+    let mark = relay.log_mark();
+    relay.clear_scoped();
+    let [o, a, m] = &mut nodes;
+
+    // Traffic scoped to the server from every kind of path: a post (MLS + Olm twins), a
+    // typing signal, and a removal the owner queues (a CRDT op and an MLS commit).
+    post_channel(a, &sid, &channel, "after the block").await;
+    a.cmd_tx.send(NodeCommand::SendTypingIndicator { server_id: sid.clone(), channel_id: channel.clone() }).await.unwrap();
+    o.cmd_tx.send(NodeCommand::KickMember { server_id: sid.clone(), peer_id: m.master_id.clone() }).await.unwrap();
+    // A DM between two members is no traffic of the server's.
+    send_dms(a, &m.master_id, "t14-deny-dm", 1).await;
+    let dm_heard = wait_event(m, std::time::Duration::from_secs(15), |ev| {
+        matches!(ev, NetworkEvent::MessageReceived { text, .. } if text == "dm t14-deny-dm-0")
+    })
+    .await;
+    assert!(dm_heard, "a DM between members still goes");
+    // Batch ticks (2 s) and the sync and retry timers run meanwhile.
+    sleep_ms(8000).await;
+
+    for node in [&*o, &*a, &*m] {
+        assert_eq!(relay.scoped(&node.device_id, &sid), 0, "{} sent frames scoped to the refused server", node.device_id);
+        assert!(
+            t14_room_commands(&relay, &node.device_id, mark, &sid).is_empty(),
+            "{} sent commands for the refused room: {:?}",
+            node.device_id,
+            t14_room_commands(&relay, &node.device_id, mark, &sid),
+        );
+        assert!(node.servers().contains(&sid), "{} keeps the server", node.device_id);
+        assert!(node.live_server_state(&sid).await.is_some(), "{} keeps its state", node.device_id);
+        assert!(
+            node.channel_messages(&sid, &channel).iter().any(|x| x.text == "before the block"),
+            "{} keeps its messages",
+            node.device_id,
+        );
+    }
+    assert_eq!(o.mls_epoch(&sid).await, epoch, "the owner commits nothing while the relay refuses the server");
+
+    // Lifted: the person's "Try again" asks the relay again, and the member is back.
+    relay.lift_room(&sid);
+    let mark = relay.log_mark();
+    a.cmd_tx.send(NodeCommand::RetryRelayDenials).await.unwrap();
+    let back = wait_event(a, std::time::Duration::from_secs(10), |ev| {
+        matches!(ev, NetworkEvent::ServerAvailable { server_id } if *server_id == sid)
+    })
+    .await;
+    assert!(back, "the member hears the server is available again");
+    assert!(t14_room_commands(&relay, &a.device_id, mark, &sid).contains(&"join"), "the retry joins the room");
+    assert!(wait_until(10, async || relay.room_devices(&sid).contains(&a.device_id)).await, "the member is in the room again");
+    assert!(
+        wait_until(10, async || t14_room_commands(&relay, &a.device_id, mark, &sid).contains(&"topic_catchup")).await,
+        "the lifted server is caught up again on the same socket",
+    );
+
+    // The owner's queued removal commits once the owner is let back in, and the two
+    // remaining members land on one epoch (no fork); posts go both ways.
+    o.cmd_tx.send(NodeCommand::RetryRelayDenials).await.unwrap();
+    assert!(
+        wait_event(o, std::time::Duration::from_secs(10), |ev| {
+            matches!(ev, NetworkEvent::ServerAvailable { server_id } if *server_id == sid)
+        })
+        .await,
+        "the owner hears the server is available again",
+    );
+    let before = epoch.unwrap();
+    assert!(
+        wait_until(30, async || {
+            let (eo, ea) = (o.mls_epoch(&sid).await, a.mls_epoch(&sid).await);
+            eo.is_some_and(|e| e > before) && eo == ea
+        })
+        .await,
+        "after the lift the removal commits and both members share its epoch: owner {:?}, member {:?}",
+        o.mls_epoch(&sid).await,
+        a.mls_epoch(&sid).await,
+    );
+    post_channel(a, &sid, &channel, "after the lift from a").await;
+    post_channel(o, &sid, &channel, "after the lift from o").await;
+    assert!(
+        wait_until(20, async || o.channel_messages(&sid, &channel).iter().any(|x| x.text == "after the lift from a")).await,
+        "the owner hears the member after the lift",
+    );
+    assert!(
+        wait_until(20, async || a.channel_messages(&sid, &channel).iter().any(|x| x.text == "after the lift from o")).await,
+        "the member hears the owner after the lift",
+    );
+    t14_deny::watch(false);
+}
+
+/// A join waiting for a server the relay refuses stops asking (no lock reads, no joins,
+/// no requests) and keeps its row; lifted, a "Try again" asks again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn t14_deny_a_pending_join_stops_asking_and_keeps_its_row() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let mut o = spawn_node_with_friends(&relay, 164, 164, &[]).await;
+    let sid = create_server_and_wait(&mut o, "Refused").await;
+    go_offline(&relay, &o, &sid).await;
+    relay.deny_room(&sid);
+
+    let mut j = spawn_node_with_friends(&relay, 165, 165, &[]).await;
+    relay.watch_scopes();
+    j.cmd_tx
+        .send(NodeCommand::JoinServer {
+            server_id: sid.clone(),
+            twitch_proof_json: None,
+            nsfw_confirmed: false,
+            owner_pin: None,
+            join_key: invite_key(&sid),
+        })
+        .await
+        .unwrap();
+    let told = wait_event(&mut j, std::time::Duration::from_secs(15), |ev| {
+        matches!(ev, NetworkEvent::ServerUnavailable { server_id } if *server_id == sid)
+    })
+    .await;
+    assert!(told, "the joiner hears the server is unavailable");
+    j.crdt_committed().await;
+    let mark = relay.log_mark();
+    relay.clear_scoped();
+    // A new session joins every pending server again and reads its lock afresh; then
+    // past the join's own retries.
+    relay.set_online(&j.device_id, false);
+    sleep_ms(300).await;
+    relay.set_online(&j.device_id, true);
+    sleep_ms(8000).await;
+    assert!(
+        t14_room_commands(&relay, &j.device_id, mark, &sid).is_empty(),
+        "the joiner kept asking: {:?}",
+        t14_room_commands(&relay, &j.device_id, mark, &sid),
+    );
+    assert_eq!(relay.scoped(&j.device_id, &sid), 0, "the joiner sent frames for the refused server");
+    assert!(j.pending_joins().iter().any(|(s, _, _)| *s == sid), "the pending join keeps its row");
+
+    relay.lift_room(&sid);
+    let mark = relay.log_mark();
+    j.cmd_tx.send(NodeCommand::RetryRelayDenials).await.unwrap();
+    assert!(
+        wait_until(10, async || t14_room_commands(&relay, &j.device_id, mark, &sid).contains(&"join")).await,
+        "a retry joins the room again",
+    );
+    assert!(
+        wait_until(10, async || relay.commands_since(&j.device_id, mark).iter().any(|(kind, _, _)| *kind == "lock_get")).await,
+        "a retry reads the lock again",
+    );
+    t14_deny::watch(false);
+}
+
+/// A member that holds a refused server's file serves it to nobody through this relay,
+/// a fellow member asking by a DM room included: the bytes would leave scoped to the
+/// server under a room the refusal does not name.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn t14_deny_a_refused_server_s_file_is_served_to_nobody() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut o, a, m, sid) = vault_trio(&relay, 166, 167, 168).await;
+    let channel = general_channel_of(&sid);
+    let src = global_tmp.path().join("refused.txt");
+    std::fs::write(&src, b"bytes of a server the relay refuses").expect("write src file");
+    let fid = post_channel_file(&mut o, &sid, &channel, &src, "t14-deny-file").await;
+    // A DM file the holder also serves: its stream, asked after the refused file, shows
+    // the holder read both asks.
+    let dm_src = global_tmp.path().join("dm.txt");
+    std::fs::write(&dm_src, b"bytes of a DM").expect("write dm file");
+    drain_events(&mut o);
+    o.cmd_tx
+        .send(NodeCommand::SendFile(Box::new(super::types::SendFilePayload {
+            peer_id: Some(a.master_id.clone()),
+            server_id: None,
+            channel_id: None,
+            file_path: dm_src.to_str().unwrap().to_string(),
+            message_id: "t14-deny-dm-file".to_string(),
+            message_text: String::new(),
+            vthumb: None,
+            override_width: None,
+            override_height: None,
+            share_ref: None,
+            voice: false,
+            poster: None,
+            album: None,
+        })))
+        .await
+        .unwrap();
+    let mut dm_fid = None;
+    wait_event(&mut o, std::time::Duration::from_secs(8), |ev| {
+        if let NetworkEvent::FileCompleted { file_id, .. } = ev {
+            dm_fid = Some(file_id.clone());
+        }
+        dm_fid.is_some()
+    })
+    .await;
+    let dm_fid = dm_fid.expect("the DM file completes on the holder");
+    let ask = |f: &str| super::types::HavenMessage::FileRequest { file_id: f.to_string(), chunks: Vec::new(), offset: 0 };
+    let opens = |f: &str| {
+        let id = super::file_handler::file_stream_id(f, &o.device_id, &a.device_id);
+        relay.stream_opens(&o.device_id, &a.device_id).iter().filter(|s| **s == id).count()
+    };
+    let idle = async || super::ws_stream_transfer::relay_streams_running(&o.device_id) == 0;
+
+    assert!(wait_until(20, idle).await, "precondition: the posts' own pushes end");
+    let before = opens(&fid);
+    carry_as(&a, &o, ask(&fid)).await;
+    assert!(wait_until(10, async || opens(&fid) > before).await, "precondition: the holder serves a member's ask");
+    assert!(wait_until(20, idle).await, "precondition: that stream ends");
+
+    relay.deny_room(&sid);
+    let dev = o.device_id.clone();
+    assert!(wait_until(10, async || relay.confirmed_refusal(&dev, &sid)).await, "the holder takes the refusal");
+    let (refused_before, dm_before) = (opens(&fid), opens(&dm_fid));
+    carry_as(&a, &o, ask(&fid)).await;
+    carry_as(&a, &o, ask(&dm_fid)).await;
+    assert!(wait_until(10, async || opens(&dm_fid) > dm_before).await, "the holder still serves a DM file");
+    assert_eq!(opens(&fid), refused_before, "the holder streamed a refused server's file through the relay");
+    drop(m);
+}
+
+/// A recovery pool's room carries its server's traffic under another name: while the
+/// relay refuses the server, opening or joining its pool sends nothing for the pool room.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn t14_deny_a_refused_server_s_recovery_pool_stays_shut() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let mut o = spawn_node_with_friends(&relay, 169, 169, &[]).await;
+    let sid = create_server_and_wait(&mut o, "Refused pool").await;
+    relay.deny_room(&sid);
+    let told = wait_event(&mut o, std::time::Duration::from_secs(10), |ev| {
+        matches!(ev, NetworkEvent::ServerUnavailable { server_id } if *server_id == sid)
+    })
+    .await;
+    assert!(told, "precondition: the owner takes the refusal");
+
+    let mark = relay.log_mark();
+    o.cmd_tx.send(NodeCommand::InitiateRecoveryPool { server_id: sid.clone(), token: "tok-open".into() }).await.unwrap();
+    o.cmd_tx.send(NodeCommand::JoinRecoveryPool { server_id: sid.clone(), token: "tok-join".into() }).await.unwrap();
+    sleep_ms(1000).await; // absence: pool joins and hellos that must never leave
+    for token in ["tok-open", "tok-join"] {
+        let pool = super::recovery_pool::pool_room(&sid, token);
+        assert!(
+            t14_room_commands(&relay, &o.device_id, mark, &pool).is_empty(),
+            "the owner sent {:?} for the pool room of a refused server ({token})",
+            t14_room_commands(&relay, &o.device_id, mark, &pool),
+        );
+    }
+}
+
+/// A server left while the relay refuses it: after a relaunch the pending leave still
+/// holds its room, so the relay's refusal is taken again and nothing goes out for it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn t14_deny_a_leave_after_a_relaunch_still_obeys_the_refusal() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (_o, m, _j, sid) = owner_member_and_joiner(&relay, 170, 171, 172).await;
+    relay.deny_room(&sid);
+    let dev = m.device_id.clone();
+    assert!(wait_until(10, async || relay.confirmed_refusal(&dev, &sid)).await, "precondition: the member takes the refusal");
+    m.cmd_tx.send(NodeCommand::LeaveServer { server_id: sid.clone() }).await.unwrap();
+    assert!(wait_until(10, async || !m.servers().contains(&sid)).await, "precondition: the member leaves");
+
+    let taken = relay.confirmed_refusals(&dev, &sid);
+    let m = restart_node(&relay, m, 171, 171).await;
+    relay.watch_scopes();
+    assert!(
+        wait_until(15, async || relay.confirmed_refusals(&dev, &sid) > taken).await,
+        "after a relaunch the member ignored the refusal of the server it is leaving",
+    );
+    // Before the relay names the room again nothing tells a fresh launch about it; from
+    // then on its pending leave sends nothing for the server.
+    relay.clear_scoped();
+    sleep_ms(3000).await; // absence: the leave's twins and re-joins, past a tick
+    assert_eq!(relay.scoped(&m.device_id, &sid), 0, "the relaunched member sent frames for the refused server");
+    t14_deny::watch(false);
 }

@@ -59,10 +59,7 @@ String conferenceDenyMessage(String? reason) {
 }
 
 /// Whether OUR relay link is down, the one reason a knock cannot travel.
-bool conferenceLinkDown(OverallConnection link) =>
-    link == OverallConnection.offline ||
-    link == OverallConnection.reconnecting ||
-    link == OverallConnection.error;
+bool conferenceLinkDown(OverallConnection link) => link.isDown;
 
 /// The lobby's title and note. LobbyInfo is the host's reply to our knock, so
 /// until it arrives the meeting has not started. Shared with mobile.

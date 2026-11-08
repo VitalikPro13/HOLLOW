@@ -58,6 +58,7 @@ pub(crate) mod presence_audit;
 pub(crate) mod profile_card;
 pub(crate) mod recovery_pool;
 pub(crate) mod relay_clock;
+pub(crate) mod relay_denial;
 pub(crate) mod relay_pace;
 pub(crate) mod relay_session;
 pub(crate) mod resolver;

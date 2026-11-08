@@ -89,7 +89,7 @@ pub(crate) async fn run(
         {
             Ok(ws) => ws,
             Err(e) => {
-                if let ws_client::ConnectError::License(_) = e {
+                if let ws_client::ConnectError::License(_) | ws_client::ConnectError::Denied(_) = e {
                     // License refusals never heal by retrying.
                     return Err(format!("relay refused auth: {e}"));
                 }

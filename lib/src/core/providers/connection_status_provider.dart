@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/models/node_status.dart';
 import 'package:hollow/src/core/providers/node_provider.dart';
+import 'package:hollow/src/core/providers/relay_denial_provider.dart';
 import 'package:hollow/src/rust/api/network.dart';
 
 /// Granular connection stage for a peer.
@@ -338,7 +339,17 @@ final connectionStatusProvider =
 ///
 /// The local node reaches `connected` the instant it starts, even with no
 /// internet, so the node phase only gates loading/error; the relay state decides.
-enum OverallConnection { loading, error, connecting, reconnecting, connected, offline }
+enum OverallConnection {
+  loading,
+  error,
+  connecting,
+  reconnecting,
+  connected,
+  offline,
+
+  /// The relay refuses our account or network.
+  refused,
+}
 
 extension OverallConnectionLabel on OverallConnection {
   String get label => switch (this) {
@@ -348,7 +359,15 @@ extension OverallConnectionLabel on OverallConnection {
         OverallConnection.reconnecting => 'Reconnecting…',
         OverallConnection.connected => 'Connected',
         OverallConnection.offline => 'No connection',
+        OverallConnection.refused => kRelayRefusedStatus,
       };
+
+  /// The relay link is down, whatever the reason.
+  bool get isDown =>
+      this == OverallConnection.offline ||
+      this == OverallConnection.reconnecting ||
+      this == OverallConnection.error ||
+      this == OverallConnection.refused;
 
   /// True only when fully connected to the relay — the only state that should
   /// render a green/"online" indicator.
@@ -365,7 +384,12 @@ final overallConnectionProvider = Provider<OverallConnection>((ref) {
     return OverallConnection.connecting;
   }
   // Node is up — the relay WS connection is the ground truth.
-  return switch (ref.watch(connectionStatusProvider).relayStatus) {
+  final relay = ref.watch(connectionStatusProvider).relayStatus;
+  if (relay != RelayConnectionStatus.connected &&
+      ref.watch(relayLoginDenialProvider) != null) {
+    return OverallConnection.refused;
+  }
+  return switch (relay) {
     RelayConnectionStatus.connected => OverallConnection.connected,
     RelayConnectionStatus.connecting => OverallConnection.connecting,
     RelayConnectionStatus.reconnecting => OverallConnection.reconnecting,

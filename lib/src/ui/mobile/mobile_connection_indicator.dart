@@ -7,19 +7,24 @@ import 'package:hollow/src/core/providers/app_lock_provider.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
+import 'package:hollow/src/core/providers/relay_denial_provider.dart';
 import 'package:hollow/src/theme/hollow_shadows.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/components/connection_visual.dart';
+import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:hollow/src/ui/components/overlay_hosts.dart';
+import 'package:hollow/src/ui/dialogs/relay_denied_dialog.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// How long the link must stay down, with the app on screen, before the phone
 /// says so. Returning to the app usually resumes the session in under a second.
 const Duration kConnectionIndicatorDelay = Duration(milliseconds: 1500);
+
+const double _touchTarget = 44;
 
 typedef ConnectionIndicatorContent = ({String label, bool busy});
 
@@ -38,6 +43,7 @@ ConnectionIndicatorContent? connectionIndicatorContent(
           label: OverallConnection.offline.label,
           busy: false,
         ),
+      OverallConnection.refused => (label: connection.label, busy: false),
     };
 
 /// Keeps [MobileConnectionIndicator] in the root overlay while the mobile
@@ -121,8 +127,9 @@ class _MobileConnectionIndicatorHostState
 /// bar, over whatever screen is open, once the relay link has been down for
 /// [delay] with the app on screen. It leaves the moment the link is back.
 ///
-/// Never takes a tap. Silent while the app lock is up, while a call rings in
-/// full screen, and over a [ConnectionIndicatorCover].
+/// Takes a tap only while the relay refuses our login, to show why and ask
+/// again. Silent while the app lock is up, while a call rings in full screen,
+/// and over a [ConnectionIndicatorCover].
 class MobileConnectionIndicator extends ConsumerStatefulWidget {
   final Duration delay;
 
@@ -241,6 +248,9 @@ class _MobileConnectionIndicatorState
         c.status == CallStatus.ringing &&
         c.direction == CallDirection.incoming));
     final content = connectionIndicatorContent(connection);
+    final refusal = connection == OverallConnection.refused
+        ? ref.watch(relayLoginDenialProvider)
+        : null;
 
     // Before an identity there is no relay to reach (welcome, launch prompt).
     _track(content != null && hasIdentity);
@@ -261,12 +271,28 @@ class _MobileConnectionIndicatorState
     if (said == null || (!visible && _motion.isDismissed)) {
       return const SizedBox.shrink();
     }
+    final tap = visible && refusal != null
+        ? () => showRelayLoginDenial(context, refusal, touch: true)
+        : null;
+    Widget card = _Card(said: said);
+    if (tap != null) {
+      // The card keeps its size; a finger gets 44 px.
+      card = HollowPressable(
+        subtle: true,
+        onTap: tap,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(minHeight: _touchTarget),
+          child: Center(widthFactor: 1, child: card),
+        ),
+      );
+    }
 
     return Positioned(
       top: MediaQuery.paddingOf(context).top + HollowSpacing.sm,
       left: HollowSpacing.lg,
       right: HollowSpacing.lg,
       child: IgnorePointer(
+        ignoring: tap == null,
         child: Center(
           child: AnimatedBuilder(
             animation: _shown,
@@ -280,8 +306,11 @@ class _MobileConnectionIndicatorState
                 container: true,
                 liveRegion: visible,
                 label: visible ? said.label : null,
+                hint: tap == null ? null : 'Show why',
+                button: tap != null,
+                onTap: tap,
                 excludeSemantics: true,
-                child: _Card(said: said),
+                child: card,
               ),
             ),
           ),

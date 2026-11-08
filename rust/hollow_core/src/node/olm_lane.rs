@@ -147,6 +147,11 @@ pub(crate) fn carry(ws_cmd_tx: &WsCmdTx, device: &str, room: Option<&str>, msg: 
 
 /// [`carry`] for an envelope already built with [`carried_json`].
 pub(crate) fn carry_json(ws_cmd_tx: &WsCmdTx, device: &str, room: Option<&str>, json: String, no_session: NoSession) {
+    // A refused server's envelope takes no place in the carry book: a direct send would
+    // encrypt it and nothing would ever send it.
+    if super::relay_denial::current().refuses_carry(room, &json) {
+        return;
+    }
     let ticket = WAITING.try_with(|waiting| waiting.borrow_mut().enter(device, &json)).ok();
     let _ = ws_cmd_tx.send(WsCommand::Carry {
         device: device.to_string(),
@@ -374,6 +379,13 @@ impl<'a> OlmLane<'a> {
     /// place. A device in no room we share, with no `room` pinned, is treated like one
     /// without a session.
     pub(crate) fn deliver(&mut self, device: &str, room: Option<&str>, json: &str, no_session: NoSession, ticket: Option<u64>) -> Vec<WsCommand> {
+        // Refused since it was queued: its place in the book goes, nothing is encrypted.
+        if super::relay_denial::current().refuses_carry(room, json) {
+            if let Some(ticket) = ticket {
+                let _ = WAITING.try_with(|waiting| waiting.borrow_mut().take(ticket));
+            }
+            return Vec::new();
+        }
         if no_session == NoSession::Park {
             let live = serde_json::from_str::<MessageEnvelope>(json).is_ok_and(|env| env.live_only());
             if !live && !self.pending_messages.get(device).is_some_and(|queue| queue.iter().any(|q| q == json)) {
@@ -482,6 +494,51 @@ mod tests {
                 assert!(bob.decrypt("alice", kind, &ciphertext).is_ok(), "frame {i} on the wire did not decrypt");
             }
         })
+        .await;
+    }
+
+    const REFUSED: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    fn refused_carry_json() -> String {
+        carried_json(&HavenMessage::CrdtOpBroadcast { server_id: REFUSED.into(), op_json: "{}".into() }).unwrap()
+    }
+
+    /// A refused server's envelope never takes a carry-book place, so no direct send
+    /// to the device encrypts it.
+    #[tokio::test]
+    async fn a_refused_carry_leaves_no_waiting_ticket() {
+        super::super::relay_denial::with_denials(with_carry_book(async {
+            super::super::relay_denial::current().deny(REFUSED, Instant::now());
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            carry_json(&tx, "bob", None, refused_carry_json(), NoSession::Queue);
+            assert!(rx.try_recv().is_err(), "a refused carry went to the sealing stage");
+            assert!(WAITING.with(|waiting| waiting.borrow().carries.is_empty()), "a refused carry holds a ticket");
+        }))
+        .await;
+    }
+
+    /// Refused after it was queued: the node frees its place and encrypts nothing.
+    #[tokio::test]
+    async fn a_carry_refused_after_queueing_is_released_unencrypted() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let path = tmp.path().join("lane.db").to_string_lossy().into_owned();
+        let store = CryptoStore::open(path, "6c".repeat(32)).unwrap();
+        super::super::relay_denial::with_denials(with_carry_book(async {
+            let (mut alice, _bob) = established();
+            let keypair = NativeKeypair::from_secret_bytes(&[9; 32]);
+            let (rooms, mut pending, mut asked) = (WsRoomPeers::new(), HashMap::new(), HashMap::new());
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let json = refused_carry_json();
+            carry_json(&tx, "bob", Some("dm:1"), json.clone(), NoSession::Queue);
+            let Ok(WsCommand::Carry { ticket: Some(ticket), .. }) = rx.try_recv() else {
+                panic!("precondition: queued before the refusal, the carry holds a ticket");
+            };
+            super::super::relay_denial::current().deny(REFUSED, Instant::now());
+            let mut lane = OlmLane::new(&mut alice, &store, &rooms, &mut pending, &mut asked, &keypair, "alice");
+            assert!(lane.deliver("bob", Some("dm:1"), &json, NoSession::Queue, Some(ticket)).is_empty(), "a refused carry was encrypted");
+            assert!(pending.is_empty(), "a refused carry was parked for later");
+            assert!(WAITING.with(|waiting| waiting.borrow().carries.is_empty()), "a refused carry kept its ticket");
+        }))
         .await;
     }
 
@@ -952,7 +1009,7 @@ mod g13_mls_save_retry {
     async fn frames_behind_an_mls_save_keep_their_order() {
         let keypair = NativeKeypair::from_secret_bytes(&[9; 32]);
         let (relay, mut wire) = tokio::sync::mpsc::unbounded_channel();
-        let (sealer, _carry) = super::super::frame_auth::spawn_sealer(keypair, relay);
+        let (sealer, _carry) = super::super::frame_auth::spawn_sealer(keypair, relay, Default::default());
         let (settle, saved) = MlsSaved::pending_for_test(1);
         sealer.send(frame(saved.clone(), 0)).unwrap();
         let copy = WsCommand::SendChannelDirect { room_code: "srv".into(), target_peer: "x".into(), channel_id: "c".into(), mention: false, data: vec![1] };

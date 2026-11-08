@@ -509,6 +509,14 @@ pub enum NetworkEvent {
     ShareNeedWebRtc { peer_id: String, hidden: bool },
     // -- License key events --
     LicenseError { reason: String },
+    // -- Relay operator denylist --
+    /// This relay does not carry the server or meeting (`conf:{id}`): the server opens
+    /// read-only, nothing was deleted.
+    ServerUnavailable { server_id: String },
+    /// This relay carries the server or meeting again.
+    ServerAvailable { server_id: String },
+    /// This relay refuses our account (`account_denied`) or our network (`network_denied`).
+    RelayDenied { kind: String },
     // -- Twitch verification events --
     TwitchJoinRejected { server_id: String, reason: String },
     // -- Room budget events --
@@ -1396,6 +1404,9 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         node::NetworkEvent::LicenseError { reason } => {
             NetworkEvent::LicenseError { reason }
         }
+        node::NetworkEvent::ServerUnavailable { server_id } => NetworkEvent::ServerUnavailable { server_id },
+        node::NetworkEvent::ServerAvailable { server_id } => NetworkEvent::ServerAvailable { server_id },
+        node::NetworkEvent::RelayDenied { kind } => NetworkEvent::RelayDenied { kind },
         node::NetworkEvent::TwitchJoinRejected { server_id, reason } => {
             hollow_log!("[HOLLOW] Twitch join rejected for {server_id}: {reason}");
             NetworkEvent::TwitchJoinRejected { server_id, reason }
@@ -1880,6 +1891,13 @@ pub fn revoke_device(device_peer_id: String, lost_since_ms: Option<i64>, with_de
 #[frb]
 pub fn request_state_sync(source_device_id: String) -> Result<(), String> {
     send_node_command(node::NodeCommand::RequestStateSync { source_device_id })
+}
+
+/// Ask the relay again about everything it refused: a blocked server or meeting, our
+/// account or our network. Never switches relays.
+#[frb]
+pub fn retry_relay_denials() -> Result<(), String> {
+    send_node_command(node::NodeCommand::RetryRelayDenials)
 }
 
 /// A local human label for a device (Step 8 Devices panel).

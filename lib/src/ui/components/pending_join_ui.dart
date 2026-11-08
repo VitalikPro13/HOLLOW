@@ -23,25 +23,36 @@ import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/hollow_list_row.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/core/providers/relay_domain_provider.dart';
+import 'package:hollow/src/core/providers/relay_denial_provider.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:hollow/src/ui/components/hollow_sheet.dart';
 
 /// What the tile, the row and the menu all call the two states.
-String pendingJoinTitle({required bool rejected}) =>
-    rejected ? 'Join request declined' : 'Join request pending';
+/// [denied]: the relay refuses the server, so the join waits for nothing.
+String pendingJoinTitle({required bool rejected, bool denied = false}) =>
+    denied
+        ? kPendingJoinDeniedTitle
+        : rejected
+            ? 'Join request declined'
+            : 'Join request pending';
 
 /// The sentence under that title.
-String pendingJoinSubtitle({required bool rejected, required String reason}) =>
-    rejected
-        ? pendingJoinReasonText(reason)
-        : 'You will be added when a member comes online';
+String pendingJoinSubtitle(
+        {required bool rejected, required String reason, bool denied = false}) =>
+    denied
+        ? kServerDeniedText
+        : rejected
+            ? pendingJoinReasonText(reason)
+            : 'You will be added when a member comes online';
 
 /// The longer form, for the menu header where there is room for it.
 String pendingJoinExplanation(
-        {required bool rejected, required String reason}) =>
-    rejected
-        ? pendingJoinReasonText(reason)
-        : 'You will be added as soon as a member of this server comes online.';
+        {required bool rejected, required String reason, bool denied = false}) =>
+    denied
+        ? kServerDeniedText
+        : rejected
+            ? pendingJoinReasonText(reason)
+            : 'You will be added as soon as a member of this server comes online.';
 
 /// What the flair on an admitted-but-not-yet-set-up server says.
 const String kAwaitingSetupTooltip = 'Waiting for a member to finish setup';
@@ -90,10 +101,12 @@ void showPendingJoinMenu({
       final info = menuRef.watch(pendingJoinsProvider)[serverId];
       final rejected = info?.isRejected ?? false;
       final reason = info?.reason ?? '';
+      final denied = menuRef.watch(serverRelayDeniedProvider(serverId));
 
       return <HollowMenuEntry>[
         HollowMenuNote(
-          pendingJoinExplanation(rejected: rejected, reason: reason),
+          pendingJoinExplanation(
+              rejected: rejected, reason: reason, denied: denied),
         ),
         const HollowMenuDivider(),
         if (rejected)
@@ -168,6 +181,7 @@ class _PendingJoinSheet extends ConsumerWidget {
     final info = ref.watch(pendingJoinsProvider)[serverId];
     final rejected = info?.isRejected ?? false;
     final reason = info?.reason ?? '';
+    final denied = ref.watch(serverRelayDeniedProvider(serverId));
 
     Widget row(IconData icon, String label, VoidCallback onTap) =>
         HollowListRow(
@@ -181,12 +195,13 @@ class _PendingJoinSheet extends ConsumerWidget {
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        HollowSheetTitle(pendingJoinTitle(rejected: rejected)),
+        HollowSheetTitle(pendingJoinTitle(rejected: rejected, denied: denied)),
         Padding(
           padding: const EdgeInsets.fromLTRB(
               HollowSpacing.lg, 0, HollowSpacing.lg, HollowSpacing.sm),
           child: Text(
-            pendingJoinExplanation(rejected: rejected, reason: reason),
+            pendingJoinExplanation(
+                rejected: rejected, reason: reason, denied: denied),
             style: HollowTypography.body.copyWith(color: hollow.textSecondary),
           ),
         ),
