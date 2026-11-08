@@ -1542,7 +1542,7 @@ async fn run_event_loop(
                 let fwd_bridge: FwdBridge = (&mut embedded_fwd, &cmd_tx);
                 #[cfg(not(all(feature = "forwarder", not(any(target_os = "android", target_os = "ios")))))]
                 let fwd_bridge: FwdBridge = std::marker::PhantomData;
-                super::join_verdict::OLD_LINK.scope(ask.old_link, Box::pin(handle_incoming_request(
+                super::join_verdict::OLD_LINK.scope(ask.old_link, handle_incoming_request(
                     &mut olm, &crypto_store, &crdt_store, &mut crdt_resync, &event_tx,
                     &mut pending_messages, &mut frame_budget, &mut key_request_in_flight,
                     &mut server_states, &bundle_keypair,
@@ -1595,7 +1595,7 @@ async fn run_event_loop(
                     ask.msg,
                     ask.frame_ts,
                     &mut None,
-                )))
+                ))
                 .await;
             }
             loop_stall.check("join_hold", "release", started);
@@ -2783,18 +2783,22 @@ async fn run_event_loop(
 
                     NodeCommand::SetPushPrefs { prefs_json } => {
                         push_prefs = Some(prefs_json);
-                        Box::pin(push_age_gate(
+                        if let Some(step) = push_age_gate(
                             &mut age_sent, &db_path, &db_passphrase, &server_states, push_prefs.as_deref(), true, false, &ws_cmd_tx, &event_tx,
-                        )).await;
+                        ) {
+                            step.await;
+                        }
                     }
 
                     NodeCommand::AgeGateChanged => {
                         super::age_gate::share_with_own_devices(
                             &ws_cmd_tx, &ws_room_peers, &local_peer_str, &device_peer_id, &db_path, &db_passphrase,
                         );
-                        Box::pin(push_age_gate(
+                        if let Some(step) = push_age_gate(
                             &mut age_sent, &db_path, &db_passphrase, &server_states, push_prefs.as_deref(), true, true, &ws_cmd_tx, &event_tx,
-                        )).await;
+                        ) {
+                            step.await;
+                        }
                     }
 
                     NodeCommand::SetOfflineInbox { enabled, retention_secs } => {
@@ -4056,9 +4060,11 @@ async fn run_event_loop(
                             });
                         }
                         let force = push_prefs.is_some();
-                        Box::pin(push_age_gate(
+                        if let Some(step) = push_age_gate(
                             &mut age_sent, &db_path, &db_passphrase, &server_states, push_prefs.as_deref(), force, false, &ws_cmd_tx, &event_tx,
-                        )).await;
+                        ) {
+                            step.await;
+                        }
                     }
 
                     // The socket is gone, the relay holds our session: every room, peer, call,
@@ -4788,16 +4794,10 @@ async fn run_event_loop(
                         hollow_log!("[HOLLOW-WS] Room {room}: {} members", peers.len());
                         // The relay let us in again: whatever it refused, it carries now.
                         if denials.lift(&room) {
-                            hollow_log!("[HOLLOW-WS] The relay carries {room} again");
-                            // What was refused was never caught up: ask again on this socket.
-                            relay_catchup_done.retain(|(r, _)| !r.eq_ignore_ascii_case(&room));
-                            if let Some(m) = mls.as_mut() {
-                                m.set_frozen(denials.rooms());
-                            }
-                            let _ = event_tx.send(NetworkEvent::ServerAvailable { server_id: super::relay_denial::room_key(&room) }).await;
-                            if let Some(owner) = server_states.get(&room).and_then(|s| s.anchor_owner()) {
-                                lock_keeper.watch(&room, &owner, &ws_cmd_tx);
-                            }
+                            relay_carries_again(
+                                &room, &denials, &mut relay_catchup_done, &mut mls, &server_states, &mut lock_keeper, &ws_cmd_tx, &event_tx,
+                            )
+                            .await;
                         }
                         if awaiting_inbox_answer.as_deref() == Some(room.as_str()) {
                             awaiting_inbox_answer = None;
@@ -5521,17 +5521,12 @@ async fn run_event_loop(
                             hollow_log!("[HOLLOW-WS] Ignored a refusal of a room that is none of our servers");
                             continue;
                         };
-                        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::RefuseRoom { room: room.clone() });
-                        if denials.deny(&key, std::time::Instant::now()) {
-                            hollow_log!("[HOLLOW-WS] The relay does not carry {key}: sending nothing for it until it does");
-                            if let Some(m) = mls.as_mut() {
-                                m.set_frozen(denials.rooms());
-                            }
-                            let _ = event_tx.send(NetworkEvent::ServerUnavailable { server_id: key }).await;
+                        if let Some(step) = relay_refuses(room, key, &denials, &mut mls, &ws_cmd_tx, &event_tx) {
+                            step.await;
                         }
                     }
                     WsEvent::RelayDenied { kind } => {
-                        let _ = event_tx.send(NetworkEvent::RelayDenied { kind: kind.code().to_string() }).await;
+                        emit_boxed(&event_tx, NetworkEvent::RelayDenied { kind: kind.code().to_string() }).await;
                     }
                     WsEvent::LicenseError { reason } => {
                         hollow_log!("[HOLLOW-WS] License error: {reason}");
@@ -6074,7 +6069,7 @@ async fn run_event_loop(
                                             super::join_verdict::OLD_LINK.scope(old_link, request).await;
                                         }
                                         if let Some((sid, _)) = &synced {
-                                            Box::pin(settle_age_gate_and_tell(&event_tx, &db_path, &db_passphrase, sid)).await;
+                                            settle_age_gate_and_tell(&event_tx, &db_path, &db_passphrase, sid).await;
                                         }
                                         join_hold.synced(synced);
                                     }
@@ -7482,9 +7477,11 @@ async fn run_event_loop(
             // it (a flag, a gate change, a join not caught up yet), and tells Dart.
             _ = age_gate_timer.tick(), if super::age_gate::Platform::current() != super::age_gate::Platform::Desktop => {
                 arm_started = Some(("timer", "age_gate", std::time::Instant::now()));
-                Box::pin(push_age_gate(
+                if let Some(step) = push_age_gate(
                     &mut age_sent, &db_path, &db_passphrase, &server_states, push_prefs.as_deref(), false, true, &ws_cmd_tx, &event_tx,
-                )).await;
+                ) {
+                    step.await;
+                }
             }
 
             _ = grant_sweep_timer.tick() => {
@@ -8758,11 +8755,12 @@ async fn after_welcome_joined(
 }
 
 
-/// Handle an incoming request from a peer. Boxed: four call sites in `run_event_loop`
-/// would each hold the body's future, the union of every arm, in a debug poll frame
-/// that sits near the worker stack.
+/// Handle an incoming request from a peer, as a boxed future. Not an `async fn`: the
+/// body's future (the union of every arm) is built in this short frame and boxed, so
+/// neither the event loop's poll frame nor a wrapper's holds a copy of it while the
+/// request runs near the bottom of the worker stack.
 #[allow(clippy::too_many_arguments)]
-async fn handle_incoming_request(
+fn handle_incoming_request(
     olm: &mut OlmManager,
     crypto_store: &CryptoStore,
     crdt_store: &super::crdt_store::CrdtStore,
@@ -8838,7 +8836,7 @@ async fn handle_incoming_request(
     // A `MessageEnvelope::Carried` decrypted here and when it was written, for the
     // caller to dispatch next.
     carried_out: &mut Option<(Box<HavenMessage>, i64)>,
-) {
+) -> std::pin::Pin<Box<impl std::future::Future<Output = ()>>> {
     Box::pin(handle_incoming_request_inner(
         olm, crypto_store, crdt_store, crdt_resync, event_tx, pending_messages, frame_budget, key_request_in_flight,
         server_states, bundle_keypair, master_keypair, device_keypair, master_peer_str, device_peer_id,
@@ -8855,7 +8853,6 @@ async fn handle_incoming_request(
         pending_public_file_requests, requested_file_receipts, declined_file_ids, peer_auto_dl, fwd_bridge,
         request, frame_ts_ms, carried_out,
     ))
-    .await
 }
 
 /// A `SyncResponse`: out of line so its locals stay out of `handle_incoming_request`'s
@@ -9405,63 +9402,75 @@ async fn handle_sync_response(
 
 /// A member's digest catch-up of `state` ended: what the server is flagged as is known
 /// now, so a phone stops hiding it for being unsettled.
-pub(super) async fn settle_age_gate(
-    event_tx: &mpsc::Sender<NetworkEvent>,
-    state: &ServerState,
+pub(super) fn settle_age_gate<'a>(
+    event_tx: &'a mpsc::Sender<NetworkEvent>,
+    state: &'a ServerState,
     member_device: &str,
-    db_path: &str,
-    db_passphrase: &str,
-) {
+    db_path: &'a str,
+    db_passphrase: &'a str,
+) -> BoxedStep<'a> {
     if state.is_member(&super::resolver::resolve(member_device)) {
-        Box::pin(settle_age_gate_and_tell(event_tx, db_path, db_passphrase, &state.server_id)).await;
+        settle_age_gate_and_tell(event_tx, db_path, db_passphrase, &state.server_id)
+    } else {
+        Box::pin(std::future::ready(()))
     }
 }
 
+/// A future boxed in a short non-async frame: the event loop and the request handler
+/// sit near the bottom of the worker stack, and a debug poll frame keeps a copy of
+/// every future built in it, so the age-gate and relay-refusal steps build theirs here.
+pub(super) type BoxedStep<'a> = std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>;
+
 /// Runs an age-gate store op on a blocking thread: its callers sit near the bottom of
 /// the worker stack, with no room left for SQLCipher's frames in a debug build.
-async fn off_worker_stack<T: Send + 'static>(
+fn off_worker_stack<T: Send + 'static>(
     db_path: &str,
     db_passphrase: &str,
     server_id: &str,
     op: fn(&str, &str, &str) -> T,
-) -> Option<T> {
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<T>> + Send>> {
     let (path, pass, sid) = (db_path.to_owned(), db_passphrase.to_owned(), server_id.to_owned());
-    tokio::task::spawn_blocking(move || op(&path, &pass, &sid)).await.ok()
+    Box::pin(async move { tokio::task::spawn_blocking(move || op(&path, &pass, &sid)).await.ok() })
 }
 
 /// Marks `server_id` caught up and, when that shows it, tells Dart.
-async fn settle_age_gate_and_tell(event_tx: &mpsc::Sender<NetworkEvent>, db_path: &str, db_passphrase: &str, server_id: &str) {
-    if off_worker_stack(db_path, db_passphrase, server_id, super::age_gate::note_settled_at).await == Some(true) {
-        let _ = event_tx.send(NetworkEvent::ServerUpdated { server_id: server_id.to_string() }).await;
-    }
+fn settle_age_gate_and_tell<'a>(event_tx: &'a mpsc::Sender<NetworkEvent>, db_path: &str, db_passphrase: &str, server_id: &str) -> BoxedStep<'a> {
+    let settled = off_worker_stack(db_path, db_passphrase, server_id, super::age_gate::note_settled_at);
+    let server_id = server_id.to_string();
+    Box::pin(async move {
+        if settled.await == Some(true) {
+            let _ = event_tx.send(NetworkEvent::ServerUpdated { server_id }).await;
+        }
+    })
 }
 
 /// A sibling's [`HavenMessage::AgeGateSync`], off the worker stack like the rest.
-async fn take_sibling_age_gate(
-    event_tx: &mpsc::Sender<NetworkEvent>,
+fn take_sibling_age_gate<'a>(
+    event_tx: &'a mpsc::Sender<NetworkEvent>,
     sender: &str,
     local_master: &str,
     entry: super::age_gate::AgeGateEntry,
     frame_ts_ms: i64,
     db_path: &str,
     db_passphrase: &str,
-) {
+) -> BoxedStep<'a> {
     let (sender, master, path, pass) = (sender.to_owned(), local_master.to_owned(), db_path.to_owned(), db_passphrase.to_owned());
-    let moved = tokio::task::spawn_blocking(move || {
-        super::age_gate::take_sibling_at(&sender, &master, entry, frame_ts_ms, &path, &pass)
+    Box::pin(async move {
+        let moved = tokio::task::spawn_blocking(move || {
+            super::age_gate::take_sibling_at(&sender, &master, entry, frame_ts_ms, &path, &pass)
+        })
+        .await
+        .ok()
+        .flatten();
+        if let Some(allowed) = moved {
+            let _ = event_tx.send(NetworkEvent::AgeGateChanged { allowed }).await;
+        }
     })
-    .await
-    .ok()
-    .flatten();
-    if let Some(allowed) = moved {
-        let _ = event_tx.send(NetworkEvent::AgeGateChanged { allowed }).await;
-    }
 }
 
-/// What the relay mutes and Dart hides, pushed when it moved (or `force`); awaited
-/// boxed so the event loop's poll frame does not grow by its locals.
+/// What the relay mutes and Dart hides, pushed when it moved (or `force`).
 #[allow(clippy::too_many_arguments)]
-async fn push_age_gate(
+fn push_age_gate<'a>(
     age_sent: &mut super::age_gate::Sent,
     db_path: &str,
     db_passphrase: &str,
@@ -9470,15 +9479,68 @@ async fn push_age_gate(
     force: bool,
     tell_dart: bool,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
-    event_tx: &mpsc::Sender<NetworkEvent>,
-) {
+    event_tx: &'a mpsc::Sender<NetworkEvent>,
+) -> Option<BoxedStep<'a>> {
     let (prefs, moved) = age_sent.due(db_path, db_passphrase, server_states, push_prefs, force, tell_dart);
     if let Some(prefs_json) = prefs {
         let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SetPushPrefs { prefs_json });
     }
-    if let Some(allowed) = moved {
-        let _ = event_tx.send(NetworkEvent::AgeGateChanged { allowed }).await;
+    moved.map(|allowed| emit_boxed(event_tx, NetworkEvent::AgeGateChanged { allowed }))
+}
+
+/// The relay let us into `room` again after refusing it: whatever it refused, it
+/// carries now.
+#[allow(clippy::too_many_arguments)]
+fn relay_carries_again<'a>(
+    room: &'a str,
+    denials: &'a super::relay_denial::Denials,
+    relay_catchup_done: &'a mut std::collections::HashSet<(String, String)>,
+    mls: &'a mut Option<MlsManager>,
+    server_states: &'a ServerStates,
+    lock_keeper: &'a mut super::lock_keeper::LockKeeper,
+    ws_cmd_tx: &'a tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    event_tx: &'a mpsc::Sender<NetworkEvent>,
+) -> BoxedStep<'a> {
+    Box::pin(async move {
+        hollow_log!("[HOLLOW-WS] The relay carries {room} again");
+        // What was refused was never caught up: ask again on this socket.
+        relay_catchup_done.retain(|(r, _)| !r.eq_ignore_ascii_case(room));
+        if let Some(m) = mls.as_mut() {
+            m.set_frozen(denials.rooms());
+        }
+        let _ = event_tx.send(NetworkEvent::ServerAvailable { server_id: super::relay_denial::room_key(room) }).await;
+        if let Some(owner) = server_states.get(room).and_then(|s| s.anchor_owner()) {
+            lock_keeper.watch(room, &owner, ws_cmd_tx);
+        }
+    })
+}
+
+/// The relay refused `room`, one of ours under `key`: nothing goes out for it until it
+/// lets us in again. The step left tells Dart, the first time.
+fn relay_refuses<'a>(
+    room: String,
+    key: String,
+    denials: &super::relay_denial::Denials,
+    mls: &mut Option<MlsManager>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    event_tx: &'a mpsc::Sender<NetworkEvent>,
+) -> Option<BoxedStep<'a>> {
+    let _ = ws_cmd_tx.send(super::ws_client::WsCommand::RefuseRoom { room });
+    if !denials.deny(&key, std::time::Instant::now()) {
+        return None;
     }
+    hollow_log!("[HOLLOW-WS] The relay does not carry {key}: sending nothing for it until it does");
+    if let Some(m) = mls.as_mut() {
+        m.set_frozen(denials.rooms());
+    }
+    Some(emit_boxed(event_tx, NetworkEvent::ServerUnavailable { server_id: key }))
+}
+
+/// `event_tx.send(event)` as a [`BoxedStep`].
+fn emit_boxed(event_tx: &mpsc::Sender<NetworkEvent>, event: NetworkEvent) -> BoxedStep<'_> {
+    Box::pin(async move {
+        let _ = event_tx.send(event).await;
+    })
 }
 
 /// A `SyncRequest`: out of line for the same reason as [`handle_sync_response`].
@@ -12878,14 +12940,14 @@ async fn handle_incoming_request_inner(
                 announced_at: frame_ts_ms,
                 ..Default::default()
             };
-            Box::pin(off_worker_stack(db_path, db_passphrase, &server_id, |p, k, s| super::age_gate::unsettle_at(p, k, s))).await;
+            off_worker_stack(db_path, db_passphrase, &server_id, super::age_gate::unsettle_at).await;
             sync_handler::request_join_lock(ws_cmd_tx, &server_id, &mut pending);
             let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom { room_code: server_id.clone() });
             pending_server_joins.insert(server_id, pending);
         }
 
         HavenMessage::AgeGateSync { entry } => {
-            Box::pin(take_sibling_age_gate(event_tx, peer_str, local_peer_str, entry, frame_ts_ms, db_path, db_passphrase)).await;
+            take_sibling_age_gate(event_tx, peer_str, local_peer_str, entry, frame_ts_ms, db_path, db_passphrase).await;
         }
 
         // -- MLS message handlers --
