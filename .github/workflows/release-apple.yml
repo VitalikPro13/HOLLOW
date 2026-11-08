@@ -189,7 +189,7 @@ jobs:
           tar -C build/macos/Build/Products/Release -cf "$RUNNER_TEMP/hollow-app.tar" Hollow.app
           echo "sha256=$(shasum -a 256 "$RUNNER_TEMP/hollow-app.tar" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         id: upload
         with:
           name: macos-app-built
@@ -213,7 +213,7 @@ jobs:
       - name: Select Xcode
         run: sudo xcode-select -s "$XCODE_APP"
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           artifact-ids: ${{ needs.macos-build.outputs.artifact_id }}
           path: ${{ runner.temp }}/handoff
@@ -228,7 +228,7 @@ jobs:
           VERSION: ${{ needs.prepare.outputs.version }}
         run: bash scripts/build_macos_release.sh --unsigned --stage package "$VERSION"
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: hollow-${{ needs.prepare.outputs.version }}-macos-UNSIGNED
           path: |
@@ -258,7 +258,7 @@ jobs:
       - name: Select Xcode
         run: sudo xcode-select -s "$XCODE_APP"
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           artifact-ids: ${{ needs.macos-build.outputs.artifact_id }}
           path: ${{ runner.temp }}/handoff
@@ -313,7 +313,7 @@ jobs:
           { echo "dmg=$dmg"; echo "zip=$zip"; } >> "$GITHUB_OUTPUT"
           { echo "### macOS $VERSION sha256"; echo '```'; echo "$dmg  hollow-$VERSION.dmg"; echo "$zip  hollow-$VERSION-macos.zip"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         id: upload
         with:
           name: hollow-${{ needs.prepare.outputs.version }}-macos
@@ -336,7 +336,7 @@ jobs:
       id-token: write # the OIDC token Sigstore certifies the attestation with
       attestations: write # store the attestation on this repository
     steps:
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           artifact-ids: ${{ needs.macos-release.outputs.artifact_id }}
           path: ${{ runner.temp }}/release
@@ -434,7 +434,7 @@ jobs:
           tar -C build/ios_release -cf "$RUNNER_TEMP/ios-archive.tar" Runner.xcarchive
           echo "sha256=$(shasum -a 256 "$RUNNER_TEMP/ios-archive.tar" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         id: upload
         with:
           name: ios-archive-unsigned
@@ -458,7 +458,7 @@ jobs:
       - name: Select Xcode
         run: sudo xcode-select -s "$XCODE_APP"
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           artifact-ids: ${{ needs.ios-build.outputs.artifact_id }}
           path: ${{ runner.temp }}/handoff
@@ -491,7 +491,7 @@ jobs:
       - name: Select Xcode
         run: sudo xcode-select -s "$XCODE_APP"
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           artifact-ids: ${{ needs.ios-build.outputs.artifact_id }}
           path: ${{ runner.temp }}/handoff
