@@ -27690,9 +27690,14 @@ fn harness_fixed_sleep_budget_does_not_grow() {
     // 2026-11-07: t14-reset's missing-key sweep tests, a spawn stagger and two absence
     // proofs (two batch ticks each with no key minted, 11.5 s).
     // 2026-11-07: merged onto Track A, w2-d and t14-hidden: scan 1146.3 s, slack 2.2 s.
+    // 2026-11-07: t14-agegate added two absences, a removed device's age-gate entry and
+    // an 18+ server's public send, nobody makes (3.0 s).
+    // 2026-11-08: t14-agegate added one absence, a guest list no member of an 18+ server
+    // answers though its channel flag is still on (1.5 s), and one spawn stagger for the
+    // closed phone's join (1.5 s).
     // 2026-11-08: t14-deny-client added four absences, nothing sent for a refused server
     // by members, a waiting joiner, a recovery pool and a relaunched leaver (20.3 s).
-    const BUDGET_MS: u64 = 1_168_800;
+    const BUDGET_MS: u64 = 1_174_800;
 
     let src = include_str!("test_harness.rs");
     // Built from pieces so this scan does not count its own source text.
@@ -66307,4 +66312,471 @@ async fn t14_deny_a_leave_after_a_relaunch_still_obeys_the_refusal() {
     sleep_ms(3000).await; // absence: the leave's twins and re-joins, past a tick
     assert_eq!(relay.scoped(&m.device_id, &sid), 0, "the relaunched member sent frames for the refused server");
     t14_deny::watch(false);
+}
+
+
+// t14-agegate
+
+fn ag_held(node: &TestNode) -> Option<super::age_gate::AgeGateEntry> {
+    super::age_gate::held(&node.store())
+}
+
+/// What the desktop Settings switch does on `node`: the stored choice, then the node told.
+async fn ag_author(node: &TestNode, allow: bool) {
+    super::age_gate::author(&node.store(), super::age_gate::Platform::Desktop, allow, super::frame_auth::now_ms()).expect("author");
+    node.cmd_tx.send(NodeCommand::AgeGateChanged).await.unwrap();
+}
+
+fn ag_sync(allow: bool, at: i64) -> super::types::HavenMessage {
+    super::types::HavenMessage::AgeGateSync { entry: super::age_gate::AgeGateEntry { allow, at } }
+}
+
+/// The computer's choice reaches our other device live, and an OFF made while that
+/// device was away reaches it on return though the computer is gone by then (A5).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn agegate_the_desktop_choice_reaches_every_own_device_and_its_lifting_too() {
+    ag_off_reaches_a_returning_phone([71, 72, 73], false).await;
+}
+
+/// The same when the phone's socket died unannounced, so the computer still counts it
+/// present and sends the OFF straight to it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn agegate_an_off_sent_to_a_phone_that_just_dropped_still_reaches_it() {
+    ag_off_reaches_a_returning_phone([98, 99, 100], true).await;
+}
+
+#[allow(clippy::await_holding_lock)]
+async fn ag_off_reaches_a_returning_phone(seeds: [u8; 3], silent_drop: bool) {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (b, c) = sibling_pair(&relay, seeds[0], seeds[1], seeds[2]).await;
+
+    ag_author(&b, true).await;
+    assert!(wait_until(15, async || ag_held(&c).is_some_and(|e| e.allow)).await, "the online phone must hear ON");
+    let phone_opens = super::age_gate::allowed_here(&c.store(), super::age_gate::Platform::Ios);
+    assert!(phone_opens, "an iPhone holding ON shows age-restricted servers");
+
+    if silent_drop {
+        relay.drop_socket_silently(&c.device_id);
+    } else {
+        relay.set_online(&c.device_id, false);
+    }
+    assert!(wait_until(10, async || !relay.online_devices().contains(&c.device_id)).await);
+    if silent_drop {
+        assert!(b.sees_peer(&c.device_id).await, "control: b must still count the dropped phone present");
+    }
+    ag_author(&b, false).await;
+    let off_carried = async || b.carried_to(&c.device_id).await.iter().any(|m| {
+        matches!(m, super::types::HavenMessage::AgeGateSync { entry } if !entry.allow)
+    });
+    assert!(wait_until(10, off_carried).await, "b never carried the OFF to the away phone");
+    // b leaves only once the relay has taken everything b queued, the OFF included.
+    expect_relay_drained(&relay, &b, "agegate-off").await;
+    relay.set_online(&b.device_id, false);
+    assert!(wait_until(10, async || !relay.online_devices().contains(&b.device_id)).await);
+    relay.set_online(&c.device_id, true);
+    assert!(
+        wait_until(20, async || ag_held(&c).is_some_and(|e| !e.allow)).await,
+        "a phone back from away must learn the OFF with no computer online, held {:?}",
+        ag_held(&c),
+    );
+    assert!(!super::age_gate::allowed_here(&c.store(), super::age_gate::Platform::Ios), "and hide again");
+}
+
+/// Only our own device sets the identity's choice: a friend's frame sets nothing, nor
+/// does a stamp past its frame.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn authz_a_friends_list_never_sets_our_age_gate() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (d1, mut d2, x) = siblings_and_friend(&relay, [74, 75, 76, 77, 78], &[]).await;
+    let now = super::frame_auth::now_ms();
+
+    carry_and_settle(&x, &mut d2, ag_sync(true, now)).await;
+    assert_eq!(ag_held(&d2), None, "a friend opened our phones");
+
+    carry_and_settle(&d1, &mut d2, ag_sync(true, now + 24 * 3_600_000)).await;
+    assert_eq!(ag_held(&d2), None, "an entry stamped past its frame landed");
+
+    carry_and_settle(&d1, &mut d2, ag_sync(true, now)).await;
+    assert_eq!(ag_held(&d2).map(|e| e.allow), Some(true), "control: our own device's entry lands");
+}
+
+/// A device our identity removed sets nothing for us.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn authz_a_revoked_device_never_sets_our_age_gate() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut b, c) = sibling_pair(&relay, 79, 80, 81).await;
+    let now = super::frame_auth::now_ms();
+    carry_and_settle(&c, &mut b, ag_sync(false, now)).await;
+    assert_eq!(ag_held(&b).map(|e| e.allow), Some(false), "control: our own device's entry lands");
+
+    super::resolver::mark_revoked(std::slice::from_ref(&c.device_id));
+    carry_as(&c, &b, ag_sync(true, now + 1)).await;
+    sleep_ms(1500).await; // absence: a removed device's entry nobody applies
+    assert_eq!(ag_held(&b).map(|e| e.allow), Some(false), "a removed device opened our phones");
+}
+
+/// A server a sibling joins is hidden on a closed phone until a member's catch-up
+/// answer lands, then shows; the founder's own server is settled from the start (A4).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn agegate_a_sibling_joined_server_settles_after_catch_up() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut b, mut c) = sibling_pair(&relay, 82, 83, 84).await;
+    drain_events(&mut c);
+    let server_id = create_server_and_wait(&mut b, "Settles").await;
+    assert!(super::age_gate::is_settled(&b.store(), &server_id), "the founder holds all of it");
+    assert!(
+        wait_event(&mut c, std::time::Duration::from_secs(20), |ev| matches!(
+            ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id
+        ))
+        .await,
+        "the sibling joins",
+    );
+    let phone_hides = |c: &TestNode| {
+        let st = c.server_state(&server_id);
+        st.is_some_and(|s| super::age_gate::hidden(&c.store(), super::age_gate::Platform::Ios, &server_id, &s))
+    };
+    assert!(
+        wait_until(20, async || super::age_gate::is_settled(&c.store(), &server_id)).await,
+        "a member's catch-up answer must settle the joined server",
+    );
+    assert!(!phone_hides(&c), "a settled clean server shows on a closed phone");
+
+    // A new join forgets what it knew, so a server flagged since never shows early.
+    super::age_gate::unsettle(&c.store(), &server_id);
+    assert!(phone_hides(&c), "an unsettled server hides on a closed phone");
+}
+
+/// An age-restricted server has no public channel: guests are told it closed, every
+/// member's own state refuses their list, and posts no longer go out in the clear.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn authz_an_age_restricted_server_shows_guests_no_public_channel() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o, _m, x, server_id) = three_member_server(&relay, 85, 86, 87).await;
+    let mut g = spawn_node_with_friends(&relay, 88, 88, &[]).await;
+    let general = general_channel_of(&server_id);
+
+    o.cmd_tx
+        .send(NodeCommand::SetChannelPublic { server_id: server_id.clone(), channel_id: general.clone(), is_public: true })
+        .await
+        .unwrap();
+    let public = async |node: &TestNode| node.live_server_state(&server_id).await.is_some_and(|s| s.is_channel_public(&general));
+    assert!(wait_until(15, async || public(&o).await && public(&x).await).await, "O and X hold it public");
+
+    let guest_lists = async |g: &mut TestNode| {
+        g.cmd_tx.send(NodeCommand::RequestPublicChannels { server_id: server_id.clone() }).await.unwrap();
+        let mut listed: Vec<Vec<String>> = Vec::new();
+        wait_event(g, std::time::Duration::from_secs(10), |ev| {
+            if let NetworkEvent::PublicChannelListReceived { server_id: sid, channels, .. } = ev
+                && *sid == server_id
+            {
+                listed.push(channels.iter().map(|c| c.channel_id.clone()).collect());
+            }
+            listed.len() == 2
+        })
+        .await;
+        listed
+    };
+    let before = guest_lists(&mut g).await;
+    assert!(before.iter().any(|ids| ids.contains(&general)), "control: the guest sees the public channel, {before:?}");
+    assert!(ag_posts_in_the_clear(&relay, &o, &server_id, &general, "hello guests", true).await > 0, "control: a public post goes out in the clear");
+
+    drain_events(&mut g);
+    o.cmd_tx
+        .send(NodeCommand::UpdateServerSetting { server_id: server_id.clone(), key: "is_nsfw".into(), value: "true".into() })
+        .await
+        .unwrap();
+    assert!(
+        wait_event(&mut g, std::time::Duration::from_secs(10), |ev| matches!(
+            ev, NetworkEvent::PublicChannelConfigChanged { channel_id, is_public: false, .. } if *channel_id == general
+        ))
+        .await,
+        "the guest browsing is told the channel closed",
+    );
+    let adult = async |node: &TestNode| node.live_server_state(&server_id).await.is_some_and(|s| s.is_nsfw());
+    assert!(wait_until(15, async || adult(&o).await && adult(&x).await).await, "O and X hold the 18+ flag");
+    let flag_gone = async |node: &TestNode| {
+        node.live_server_state(&server_id).await.is_some_and(|s| s.channels.get(&general).is_some_and(|c| !c.is_public))
+    };
+    assert!(wait_until(15, async || flag_gone(&o).await && flag_gone(&x).await).await, "the public flag goes too");
+
+    // X's own fold answers the guest: whatever any channel's flag says, none is public.
+    x.cmd_tx
+        .send(NodeCommand::SetChannelPublic { server_id: server_id.clone(), channel_id: general.clone(), is_public: true })
+        .await
+        .unwrap();
+    for ids in guest_lists(&mut g).await {
+        assert!(!ids.contains(&general), "a member named a public channel of an 18+ server: {ids:?}");
+    }
+
+    assert_eq!(ag_posts_in_the_clear(&relay, &o, &server_id, &general, "members only", false).await, 0, "a post in an 18+ server went out in the clear");
+}
+
+/// How many plain public sends `node` makes for one post to `channel_id`; `expect_some`
+/// polls for the first one, otherwise the window is an absence proof.
+async fn ag_posts_in_the_clear(relay: &MockRelay, node: &TestNode, server_id: &str, channel_id: &str, text: &str, expect_some: bool) -> usize {
+    let mark = relay.log_mark();
+    node.cmd_tx
+        .send(NodeCommand::SendChannelMessage {
+            server_id: server_id.to_string(), channel_id: channel_id.to_string(), text: text.to_string(),
+            message_id: format!("ag-{}", text.replace(' ', "-")), reply_to_mid: None, link_preview: None,
+        })
+        .await
+        .unwrap();
+    let count = || relay.commands_since(&node.device_id, mark).iter().filter(|(kind, ..)| *kind == "send_public").count();
+    if expect_some {
+        wait_until(10, async || count() > 0).await;
+    } else {
+        sleep_ms(1500).await; // absence: a public send nobody makes
+    }
+    count()
+}
+
+/// A member whose fold holds the 18+ flag while a channel's public flag is still on
+/// (it heard the flag before the unpublish, or from an old author) names no channel to
+/// a guest: the list answer reads the server rule, not the channel flag.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn authz_a_member_holding_the_18_plus_flag_but_a_public_channel_lists_none_to_guests() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o, m, x, server_id) = three_member_server(&relay, 89, 90, 91).await;
+    let mut g = spawn_node_with_friends(&relay, 92, 92, &[]).await;
+    let general = general_channel_of(&server_id);
+
+    o.cmd_tx
+        .send(NodeCommand::SetChannelPublic { server_id: server_id.clone(), channel_id: general.clone(), is_public: true })
+        .await
+        .unwrap();
+    let public = async |node: &TestNode| node.live_server_state(&server_id).await.is_some_and(|s| s.is_channel_public(&general));
+    assert!(wait_until(15, async || public(&o).await && public(&m).await && public(&x).await).await, "every member holds it public");
+
+    // The owner's flag alone, without the unpublish its own client sends with it.
+    let flag = forge_crdt_op(
+        &server_id,
+        &o.master_id,
+        crate::crdt::operations::CrdtPayload::ServerSettingChanged { key: "is_nsfw".into(), value: "true".into() },
+        0,
+        Some(&o.master_kp),
+    );
+    carry_as(&x, &o, crdt_broadcast(&server_id, &flag)).await;
+    carry_as(&o, &m, crdt_broadcast(&server_id, &flag)).await;
+    carry_as(&o, &x, crdt_broadcast(&server_id, &flag)).await;
+    let flagged_but_open = async |node: &TestNode| {
+        node.live_server_state(&server_id)
+            .await
+            .is_some_and(|s| s.is_nsfw() && s.channels.get(&general).is_some_and(|c| c.effective_public()))
+    };
+    assert!(
+        wait_until(15, async || flagged_but_open(&o).await && flagged_but_open(&m).await && flagged_but_open(&x).await).await,
+        "precondition: every member holds the 18+ flag with the channel flag still on",
+    );
+
+    drain_events(&mut g);
+    g.cmd_tx.send(NodeCommand::RequestPublicChannels { server_id: server_id.clone() }).await.unwrap();
+    sleep_ms(1500).await; // absence: a guest list no member answers
+    let listed: Vec<Vec<String>> = take_events(&mut g)
+        .into_iter()
+        .filter_map(|ev| match ev {
+            NetworkEvent::PublicChannelListReceived { server_id: sid, channels, .. } if sid == server_id => {
+                Some(channels.iter().map(|c| c.channel_id.clone()).collect())
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(listed.is_empty(), "a member named a public channel of an 18+ server to a guest: {listed:?}");
+}
+
+/// The phone's own node: every thread of this test process is an iPhone until the
+/// guard drops, so the event loops judge as one.
+fn ag_phone() -> super::age_gate::TestPlatformGuard {
+    super::age_gate::phone_process_for_test(super::age_gate::Platform::Ios)
+}
+
+fn ag_prefs_sent(relay: &MockRelay, node: &TestNode, mark: usize) -> usize {
+    relay.commands_since(&node.device_id, mark).iter().filter(|(kind, ..)| *kind == "set_push_prefs").count()
+}
+
+/// A push-filter resend landing between a server becoming hidden and the next tick
+/// mutes it at the relay, and Dart still hears the move (F1).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn agegate_a_prefs_resend_between_a_flag_and_the_tick_still_tells_dart() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let mut p = spawn_node_with_friends(&relay, 93, 93, &[]).await;
+    let server_id = create_server_and_wait(&mut p, "Flagged later").await;
+    let _phone = ag_phone();
+
+    let mark = relay.log_mark();
+    p.cmd_tx.send(NodeCommand::SetPushPrefs { prefs_json: "{}".into() }).await.unwrap();
+    assert!(wait_until(10, async || ag_prefs_sent(&relay, &p, mark) > 0).await, "Dart's prefs reach the relay");
+    drain_events(&mut p);
+
+    p.cmd_tx
+        .send(NodeCommand::UpdateServerSetting { server_id: server_id.clone(), key: "is_nsfw".into(), value: "true".into() })
+        .await
+        .unwrap();
+    p.cmd_tx.send(NodeCommand::SetPushPrefs { prefs_json: "{}".into() }).await.unwrap();
+    assert!(
+        wait_event(&mut p, std::time::Duration::from_secs(15), |ev| matches!(ev, NetworkEvent::AgeGateChanged { allowed: false })).await,
+        "the hidden server must reach Dart though a resend muted it first",
+    );
+}
+
+/// A phone that reconnects hands the relay its filters again, hidden servers muted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn agegate_a_phone_mutes_its_hidden_servers_again_on_reconnect() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let mut p = spawn_node_with_friends(&relay, 94, 94, &[]).await;
+    let server_id = create_server_and_wait(&mut p, "Muted again").await;
+    p.cmd_tx
+        .send(NodeCommand::UpdateServerSetting { server_id: server_id.clone(), key: "is_nsfw".into(), value: "true".into() })
+        .await
+        .unwrap();
+    assert!(wait_until(10, async || p.live_server_state(&server_id).await.is_some_and(|s| s.is_nsfw())).await);
+    let _phone = ag_phone();
+    let mark = relay.log_mark();
+    p.cmd_tx.send(NodeCommand::SetPushPrefs { prefs_json: "{}".into() }).await.unwrap();
+    assert!(wait_until(10, async || ag_prefs_sent(&relay, &p, mark) > 0).await, "control: the prefs go out");
+
+    relay.set_online(&p.device_id, false);
+    assert!(wait_until(10, async || !relay.online_devices().contains(&p.device_id)).await);
+    relay.set_online(&p.device_id, true);
+    let back = relay.log_mark();
+    assert!(
+        wait_until(15, async || ag_prefs_sent(&relay, &p, back) > 0).await,
+        "a fresh relay session must get the filters with the hidden server muted",
+    );
+}
+
+/// A closed phone's join carries no 18+ consent, whatever the UI asked: the member
+/// refuses it, and the same ask from a computer joins.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn agegate_a_closed_phone_joins_with_no_18_plus_consent() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(95)).peer_id();
+    let j_master = NativeKeypair::from_secret_bytes(&seed_bytes(96)).peer_id();
+    let mut o = spawn_node_with_friends(&relay, 95, 95, &[&j_master]).await;
+    sleep_ms(1500).await; // spawn stagger
+    let mut j = spawn_node_with_friends(&relay, 96, 96, &[&o_master]).await;
+    expect_dm_pair_ready(&relay, &o, &j, 15).await;
+    let server_id = create_server_and_wait(&mut o, "Adult").await;
+    o.cmd_tx
+        .send(NodeCommand::UpdateServerSetting { server_id: server_id.clone(), key: "is_nsfw".into(), value: "true".into() })
+        .await
+        .unwrap();
+    assert!(wait_until(10, async || o.live_server_state(&server_id).await.is_some_and(|s| s.is_nsfw())).await);
+    drain_events(&mut j);
+
+    let join = || NodeCommand::JoinServer {
+        server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: true, owner_pin: None, join_key: invite_key(&server_id),
+    };
+    let phone = ag_phone();
+    j.cmd_tx.send(join()).await.unwrap();
+    let asked_consent = wait_event(&mut j, std::time::Duration::from_secs(10), |ev| {
+        matches!(ev, NetworkEvent::TwitchJoinRejected { server_id: sid, reason } if *sid == server_id && reason.starts_with("nsfw_confirm:"))
+    })
+    .await;
+    assert!(asked_consent, "a closed phone's join carried 18+ consent");
+    assert!(!j.raw_crdt_member_keys(&server_id).contains(&j_master));
+    drop(phone);
+
+    drain_events(&mut j);
+    j.cmd_tx.send(join()).await.unwrap();
+    assert!(
+        wait_event(&mut j, std::time::Duration::from_secs(10), |ev| matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)).await,
+        "control: a computer's consent joins",
+    );
+}
+
+/// The owner's own client refuses to publish a channel of an 18+ server: the raw flag
+/// stays off and the person is told why, whatever the read-time rule would hide.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn authz_an_owner_cannot_publish_a_channel_of_an_18_plus_server() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let mut o = spawn_node_with_friends(&relay, 97, 97, &[]).await;
+    let server_id = create_server_and_wait(&mut o, "No public").await;
+    let general = general_channel_of(&server_id);
+    o.cmd_tx
+        .send(NodeCommand::UpdateServerSetting { server_id: server_id.clone(), key: "is_nsfw".into(), value: "true".into() })
+        .await
+        .unwrap();
+    assert!(wait_until(10, async || o.live_server_state(&server_id).await.is_some_and(|s| s.is_nsfw())).await);
+    drain_events(&mut o);
+
+    o.cmd_tx
+        .send(NodeCommand::SetChannelPublic { server_id: server_id.clone(), channel_id: general.clone(), is_public: true })
+        .await
+        .unwrap();
+    let told = wait_event(&mut o, std::time::Duration::from_secs(10), |ev| {
+        matches!(ev, NetworkEvent::Error { message } if message == super::sync_handler::PUBLIC_OFF_FOR_ADULT_SERVERS)
+    })
+    .await;
+    assert!(told, "the owner was not told public channels are off");
+    let raw = o.live_server_state(&server_id).await.and_then(|s| s.channels.get(&general).map(|c| c.is_public));
+    assert_eq!(raw, Some(false), "the channel flag went on in an 18+ server");
+}
+
+/// A catch-up answer from someone who is not a member says nothing about what the
+/// server is, so it settles nothing; a member's does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn agegate_a_non_members_catch_up_settles_nothing() {
+    let _g = test_guard();
+    let tmp = crate::test_tmp::tempdir().expect("tmp");
+    let path = tmp.path().join("age.db").to_string_lossy().into_owned();
+    let pass = "cd".repeat(32);
+    let state = ServerState::new("srv-settle".into(), "s".into(), "member-m".into());
+    {
+        let store = crate::storage::MessageStore::open(&path, &pass).expect("open");
+        super::age_gate::init_settled(&store, std::iter::empty());
+    }
+    let settled = || super::age_gate::is_settled(&crate::storage::MessageStore::lease(&path, &pass).unwrap(), "srv-settle");
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(8);
+    assert!(!settled(), "precondition: a server mid-join");
+
+    super::swarm::settle_age_gate(&event_tx, &state, "stranger-x", &path, &pass).await;
+    assert!(!settled(), "a stranger's catch-up settled the server");
+    assert!(event_rx.try_recv().is_err());
+
+    super::swarm::settle_age_gate(&event_tx, &state, "member-m", &path, &pass).await;
+    assert!(settled(), "control: a member's catch-up settles it");
+    assert!(matches!(event_rx.try_recv(), Ok(NetworkEvent::ServerUpdated { .. })));
 }

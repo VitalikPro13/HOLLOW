@@ -75,6 +75,12 @@ pub(crate) async fn run_fetch(
         hollow_log!("[HOLLOW-FETCH] Channel wake for a server we are not a member of, nothing fetched");
         return Ok(Vec::new());
     }
+    if let Some(sid) = server_room
+        && wake_age_hidden(db_path, db_passphrase, sid)
+    {
+        hollow_log!("[HOLLOW-FETCH] Channel wake for a server this phone hides as age-restricted, nothing fetched");
+        return Ok(Vec::new());
+    }
     let room = match server_room {
         Some(sid) => sid.to_string(),
         None => {
@@ -770,6 +776,17 @@ pub(crate) fn channel_notification_level(
 }
 
 /// Our stored view of a server: the fetch node runs no CRDT of its own.
+/// Whether this phone hides `server_id` as age-restricted; a store that will not open
+/// hides it.
+fn wake_age_hidden(db_path: &str, db_passphrase: &str, server_id: &str) -> bool {
+    let platform = super::age_gate::Platform::current();
+    if platform == super::age_gate::Platform::Desktop {
+        return false;
+    }
+    crate::storage::MessageStore::open(db_path, db_passphrase)
+        .map_or(true, |store| super::age_gate::server_hidden_in(&store, platform, server_id))
+}
+
 fn stored_server_state(
     db_path: &str,
     db_passphrase: &str,
@@ -2223,6 +2240,39 @@ mod tests {
         assert!(
             matches!(fetched.as_deref(), Ok([])),
             "a wake for a foreign server tried to connect: {:?}",
+            fetched.err(),
+        );
+    }
+
+    /// A phone that hides an age-restricted server fetches nothing for its wake, so no
+    /// banner names it or shows its posts.
+    #[tokio::test]
+    async fn agegate_a_wake_for_a_hidden_server_fetches_nothing() {
+        let (_tmp, path, pass) = temp_store();
+        let me = kp(183);
+        let sid = "srv-adult";
+        let mut state = server_with(sid, &[(&me.peer_id(), "me")]);
+        state.settings.insert(
+            "is_nsfw".into(),
+            crate::crdt::admin_lww::AdminLwwReg::new("true".into(), crate::crdt::hlc::HlcTimestamp::zero(""), 0),
+        );
+        crate::storage::MessageStore::open(&path, &pass).unwrap()
+            .save_server_state(sid, &serde_json::to_string(&state).unwrap()).unwrap();
+        crate::node::age_gate::set_test_platform(Some(crate::node::age_gate::Platform::Ios));
+        let mut olm = OlmManager::new();
+        let mut mls = None;
+        let crypto_store = CryptoStore::open(path.clone(), pass.clone()).unwrap();
+        let proto = me.to_protobuf_encoding().unwrap();
+        let fetched = run_fetch(
+            "127.0.0.1:9", &me.peer_id(), &me.peer_id(), &proto, &pk_b64(&me), None,
+            &kp(184).peer_id(), Some(sid), Duration::from_secs(2),
+            &mut olm, &mut mls, &crypto_store, &path, &pass,
+        )
+        .await;
+        crate::node::age_gate::set_test_platform(None);
+        assert!(
+            matches!(fetched.as_deref(), Ok([])),
+            "a wake for a hidden server tried to connect: {:?}",
             fetched.err(),
         );
     }

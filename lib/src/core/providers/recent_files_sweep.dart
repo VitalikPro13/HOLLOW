@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/age_gate.dart';
 import 'package:hollow/src/core/providers/blocked_users_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/file_transfer_provider.dart';
@@ -31,13 +32,15 @@ class RecentFileAsk {
 /// The files a linked device pulls on its own: from the last [kRecentFilesWindow],
 /// newest first, and only what the auto-download settings would have pulled for
 /// that conversation (voice notes exempt, as everywhere). Nothing of a blocked
-/// identity: [blocked] takes any peer id, device or master.
+/// identity: [blocked] takes any peer id, device or master. Nothing of a server
+/// this device hides as age-restricted.
 List<RecentFileAsk> selectRecentFilesToFetch(
   Iterable<StoredFileInfo> missing, {
   required DateTime now,
   required int Function(String contextKey) effectiveMb,
   required bool Function(String fileId) busy,
   required bool Function(String peerId) blocked,
+  required bool Function(String serverId) hiddenServer,
   int limit = kRecentFilesMaxAsks,
 }) {
   final since = now.subtract(kRecentFilesWindow).millisecondsSinceEpoch;
@@ -59,7 +62,7 @@ List<RecentFileAsk> selectRecentFilesToFetch(
         peer = f.contextId;
       case 'channel':
         final server = f.contextId.split(':').first;
-        if (server.isEmpty) continue;
+        if (server.isEmpty || hiddenServer(server)) continue;
         key = 'server:$server';
         peer = f.senderId;
       default:
@@ -151,6 +154,7 @@ class RecentFilesSweep {
         return t != null && (t.isDownloading || t.isComplete);
       },
       blocked: (peer) => blockedIds.contains(links.identityOf(peer)),
+      hiddenServer: _ref.read(ageGateProvider).hidden.contains,
     );
     unawaited(network_api
         .logFromDart(

@@ -1,3 +1,4 @@
+pub(crate) mod age_gate;
 pub(crate) mod assets;
 pub(crate) mod at_rest;
 pub(crate) mod at_rest_server;

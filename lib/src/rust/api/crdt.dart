@@ -6,7 +6,7 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `channels_from_state`, `live_server_state`
+// These functions are ignored because they are not marked as `pub`: `channels_from_state`, `joined_servers_in`, `live_server_state`
 
 /// Create a new server. Returns the server_id.
 Future<String> createServer({required String name}) =>
@@ -1011,11 +1011,15 @@ class ServerFfi {
   final int memberCount;
   final int channelCount;
 
+  /// Flagged for adults by its owner (the 18+ consent server).
+  final bool isNsfw;
+
   const ServerFfi({
     required this.serverId,
     required this.name,
     required this.memberCount,
     required this.channelCount,
+    required this.isNsfw,
   });
 
   @override
@@ -1023,7 +1027,8 @@ class ServerFfi {
       serverId.hashCode ^
       name.hashCode ^
       memberCount.hashCode ^
-      channelCount.hashCode;
+      channelCount.hashCode ^
+      isNsfw.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -1033,7 +1038,8 @@ class ServerFfi {
           serverId == other.serverId &&
           name == other.name &&
           memberCount == other.memberCount &&
-          channelCount == other.channelCount;
+          channelCount == other.channelCount &&
+          isNsfw == other.isNsfw;
 }
 
 /// Storage stats for a server, returned to Dart via FFI.

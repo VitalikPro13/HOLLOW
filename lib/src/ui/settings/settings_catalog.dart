@@ -71,7 +71,14 @@ class SettingsSearchEntry {
   final String keywords;
   final SettingsCategory category;
 
-  const SettingsSearchEntry(this.label, this.category, [this.keywords = '']);
+  /// The age-restricted setting, which an iPhone and a store Android do not have.
+  final bool ageGateSetting;
+
+  const SettingsSearchEntry(this.label, this.category, [this.keywords = ''])
+      : ageGateSetting = false;
+
+  const SettingsSearchEntry.ageGate(this.label, this.category, [this.keywords = ''])
+      : ageGateSetting = true;
 
   bool matches(String query) {
     final q = query.toLowerCase();
@@ -151,6 +158,7 @@ const List<SettingsSearchEntry> kSettingsSearchIndex = [
   SettingsSearchEntry('Relay health', SettingsCategory.network, 'load bandwidth ram status'),
   SettingsSearchEntry('Hold my messages', SettingsCategory.network, 'offline delivery inbox'),
   SettingsSearchEntry('GIF rating', SettingsCategory.network, 'nsfw klipy content'),
+  SettingsSearchEntry.ageGate('Age-restricted servers', SettingsCategory.network, 'nsfw adult 18 phone'),
   SettingsSearchEntry('Play GIFs automatically', SettingsCategory.network, 'animate data'),
   SettingsSearchEntry('Show link previews', SettingsCategory.network, 'link preview embed card hide'),
   SettingsSearchEntry('Previews for links I send', SettingsCategory.network, 'link preview embed card'),

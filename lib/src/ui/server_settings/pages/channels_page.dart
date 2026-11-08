@@ -77,6 +77,10 @@ String channelSummary(
   return parts.join(' · ');
 }
 
+/// Why the Public switch is off on an age-restricted server (Rust refuses the same).
+const kPublicOffForAdultServers =
+    'Public channels are off for age-restricted servers';
+
 /// The channel list as the sidebar shows it, to reorder and to open a channel
 /// in. Order, categories and dividers are staged for Save layout; everything
 /// about one channel writes at once, reverting if the write fails.
@@ -716,6 +720,9 @@ class _ChannelPanel extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
     final voice = channel.channelType == ChannelType.voice;
+    // Guests skip the 18+ consent, so an age-restricted server has no public channel.
+    final adult =
+        ref.watch(serverIsNsfwProvider(serverId)).valueOrNull ?? false;
     return Container(
       margin: const EdgeInsets.only(top: HollowSpacing.xxs, bottom: HollowSpacing.sm),
       padding: const EdgeInsets.fromLTRB(
@@ -801,11 +808,13 @@ class _ChannelPanel extends ConsumerWidget {
             ),
             SettingsSwitchRow(
               title: 'Public',
-              subtitle: channel.restricted
-                  ? 'Only a channel everyone can see can be public'
-                  : 'Anyone can read it without joining the server',
-              value: channel.isPublic,
-              onChanged: channel.restricted
+              subtitle: adult
+                  ? kPublicOffForAdultServers
+                  : channel.restricted
+                      ? 'Only a channel everyone can see can be public'
+                      : 'Anyone can read it without joining the server',
+              value: channel.isPublic && !adult,
+              onChanged: channel.restricted || adult
                   ? null
                   : (v) => _commit(
                         context,

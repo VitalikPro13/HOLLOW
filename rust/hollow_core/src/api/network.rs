@@ -272,6 +272,9 @@ pub enum NetworkEvent {
     FriendsBackfilled { count: u32 },
     /// Multi-device: another device of ours blocked or unblocked someone.
     BlockListChanged,
+    /// Which servers this device hides as age-restricted may have changed; reload
+    /// the server list, unread counts and push filters. `allowed` = shown here.
+    AgeGateChanged { allowed: bool },
     // -- Temporary nickname events --
     NicknameClaimed { nickname: String },
     NicknameReleased,
@@ -1103,6 +1106,7 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
             NetworkEvent::FriendsBackfilled { count }
         }
         node::NetworkEvent::BlockListChanged => NetworkEvent::BlockListChanged,
+        node::NetworkEvent::AgeGateChanged { allowed } => NetworkEvent::AgeGateChanged { allowed },
         node::NetworkEvent::NicknameClaimed { nickname } => {
             NetworkEvent::NicknameClaimed { nickname }
         }

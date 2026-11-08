@@ -7,6 +7,7 @@ import 'package:firebase_core/firebase_core.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:hollow/src/core/age_gate.dart';
 import 'package:hollow/src/core/hidden_notification.dart';
 import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:hollow/src/core/message_preview.dart';
@@ -1379,6 +1380,11 @@ Future<void> _showChannelNotification({
     await _showGenericNotification();
     return;
   }
+  // A server this phone hides as age-restricted gets no banner, in any isolate.
+  if (await serverAgeHiddenNow(server)) {
+    await _pushLog('channel banner dropped: the server is hidden on this device');
+    return;
+  }
   final plugin = FlutterLocalNotificationsPlugin();
   await _initNotificationPlugin(plugin);
 
@@ -1575,6 +1581,10 @@ class PushNotificationService {
       _pendingOpenChatPeer = payload;
     }
   }
+
+  @visibleForTesting
+  static void debugDeliverOpenChannel(String serverId, String channelId) =>
+      _deliverOpenChannel(serverId, channelId);
 
   static void _deliverOpenChannel(String serverId, String channelId) {
     if (serverId.isEmpty || channelId.isEmpty) return;

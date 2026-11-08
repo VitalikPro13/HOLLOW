@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/age_gate.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
@@ -11,11 +12,11 @@ import 'package:hollow/src/ui/settings/settings_kit.dart';
 
 /// Settings > network. Hosted by the desktop Settings place and pushed as a phone
 /// sub-page under `SettingsDensity(touch: true)`; the host owns the scroll.
-class NetworkSettingsPage extends StatelessWidget {
+class NetworkSettingsPage extends ConsumerWidget {
   const NetworkSettingsPage({super.key});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     return SettingsPage(
       title: 'Network',
       children: [
@@ -24,6 +25,9 @@ class NetworkSettingsPage extends StatelessWidget {
         if (Platform.isAndroid || Platform.isIOS) const _PeerIdSection(),
         const RelaySettingsSection(),
         const OfflineDeliverySection(),
+        // Left out, not empty: the page draws a divider between every child.
+        if (ref.watch(ageGateModeProvider) != AgeGateMode.phoneRemote)
+          const AgeRestrictedSection(),
         const GifsAndPreviewsSection(),
         const NetworkAdvancedSettings(),
       ],

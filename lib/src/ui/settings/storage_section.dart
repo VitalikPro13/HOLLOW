@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
+import 'package:hollow/src/core/age_gate.dart';
 import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
@@ -32,6 +33,7 @@ class StorageBreakdownView extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final async = ref.watch(storageBreakdownProvider);
+    final hidden = ref.watch(ageGateProvider.select((g) => g.hidden));
 
     return async.when(
       // The scan walks every file, often for seconds.
@@ -46,8 +48,13 @@ class StorageBreakdownView extends ConsumerWidget {
         ),
       ),
       data: (b) {
-        final contexts = [...b.contexts]
-          ..sort((a, c) => c.bytesDb.compareTo(a.bytesDb));
+        // A hidden server's row would show its icon and id.
+        final contexts = [
+          for (final c in b.contexts)
+            if (c.contextType == 'dm' ||
+                !hidden.contains(c.contextId.split(':').first))
+              c,
+        ]..sort((a, c) => c.bytesDb.compareTo(a.bytesDb));
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           mainAxisSize: MainAxisSize.min,

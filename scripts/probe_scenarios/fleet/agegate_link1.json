@@ -1,0 +1,43 @@
+{
+  "_": [
+    "t14-agegate linked journey, part 1 of 2: b (a computer holding an 18+ server, from agegate_mobile) links an EMPTY iPhone a.",
+    "Boot: b live with -ReuseData, a live with -Empty; then -Scenario agegate_link1 -Attach. The phone joins b's relay first. After it the phone stashes and exits:",
+    "relaunch it with -Live -ReuseData -KeepOthers -Peers ios:<x>, then run agegate_link2."
+  ],
+  "peers": ["a", "b"],
+  "steps": [
+    { "peer": "b", "op": "wait_for", "provider": "connection", "equals": "connected", "timeout_ms": 120000 },
+    { "peer": "b", "op": "tap", "target": "semantics:Settings", "index": 0 },
+    { "peer": "b", "op": "wait_for", "target": "type:SettingsPlace", "timeout_ms": 20000 },
+    { "peer": "b", "op": "tap", "target": "type:SettingsPlace > text:Devices", "index": 0 },
+    { "peer": "b", "op": "wait_for", "target": "type:SettingsPlace > text:Link a device", "timeout_ms": 20000 },
+
+    { "peer": "a", "op": "wait_for", "target": "text:Agree and continue", "timeout_ms": 90000 },
+    { "peer": "b", "op": "capture", "from": "provider", "key": "relayDomain", "as": "RELAY" },
+    { "peer": "a", "op": "tap", "target": "semantics:Change the relay", "index": 0 },
+    { "peer": "a", "op": "wait_for", "target": "hint:relay.anonlisten.com", "timeout_ms": 10000 },
+    { "peer": "a", "op": "enter_text", "target": "hint:relay.anonlisten.com", "value": "${RELAY}" },
+    { "peer": "a", "op": "wait_for", "target": "text:${RELAY}", "timeout_ms": 10000 },
+    { "peer": "a", "op": "tap", "target": "text:Agree and continue", "index": 0 },
+    { "peer": "a", "op": "wait_for", "target": "text:Create an identity", "timeout_ms": 20000 },
+    { "peer": "a", "op": "tap", "target": "text:Link a device", "index": 0 },
+    { "peer": "a", "op": "wait_for", "target": "hint:ABC123", "timeout_ms": 180000 },
+    { "peer": "a", "op": "wait_for", "provider": "connection", "equals": "connected", "timeout_ms": 120000 },
+
+    { "peer": "b", "op": "tap", "target": "type:SettingsPlace > text:Link a device", "index": 0 },
+    { "peer": "b", "op": "wait_for", "target": "type:_DeviceLinkContent", "timeout_ms": 20000 },
+    { "peer": "b", "op": "wait", "ms": 3000 },
+    { "peer": "b", "op": "capture", "target": "type:_DeviceLinkContent", "as": "LINKCODE", "regex": "([A-Z2-9](?: [A-Z2-9]){5} - [A-Z2-9](?: [A-Z2-9]){3})" },
+
+    { "peer": "a", "op": "enter_text", "target": "hint:ABC123", "value": "${LINKCODE}" },
+    { "peer": "a", "op": "wait", "ms": 500 },
+    { "peer": "a", "op": "tap", "target": "text:Link", "index": 0 },
+    { "peer": "a", "op": "wait_for", "target": "text:Linking this device", "timeout_ms": 45000 },
+
+    { "peer": "b", "op": "wait_for", "target": "text:Add this device?", "timeout_ms": 60000 },
+    { "peer": "b", "op": "tap", "target": "text:Add device", "index": 0 },
+    { "peer": "b", "op": "wait_for", "target": "text:Data sent", "timeout_ms": 180000 },
+    { "peer": "b", "op": "shot", "name": "agl-01-b-sent" },
+    { "peer": "b", "op": "tap", "target": "text:Done", "index": 0, "allowMiss": true }
+  ]
+}

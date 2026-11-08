@@ -1983,6 +1983,11 @@ sealed class NetworkEvent with _$NetworkEvent {
 
   /// Multi-device: another device of ours blocked or unblocked someone.
   const factory NetworkEvent.blockListChanged() = NetworkEvent_BlockListChanged;
+
+  /// Which servers this device hides as age-restricted may have changed; reload
+  /// the server list, unread counts and push filters. `allowed` = shown here.
+  const factory NetworkEvent.ageGateChanged({required bool allowed}) =
+      NetworkEvent_AgeGateChanged;
   const factory NetworkEvent.nicknameClaimed({required String nickname}) =
       NetworkEvent_NicknameClaimed;
   const factory NetworkEvent.nicknameReleased() = NetworkEvent_NicknameReleased;

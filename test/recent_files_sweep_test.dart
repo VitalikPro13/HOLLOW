@@ -101,6 +101,7 @@ List<String> _select(
       effectiveMb: (key) => mb[key] ?? 169,
       busy: busy.contains,
       blocked: (_) => false,
+      hiddenServer: (_) => false,
       limit: limit,
     ).map((a) => a.fileId).toList();
 
@@ -145,8 +146,24 @@ void main() {
       effectiveMb: (key) => key == 'server:srv2' ? 0 : 169,
       busy: (_) => false,
       blocked: (_) => false,
+      hiddenServer: (_) => false,
     );
     expect(asks.map((a) => (a.fileId, a.peerId)), [('ch', 'poster-master')]);
+  });
+
+  test('nothing of a server this device hides as age-restricted is asked', () {
+    final asks = selectRecentFilesToFetch(
+      [
+        _file('adult', context: 'channel', contextId: 'adult:general'),
+        _file('clean', context: 'channel', contextId: 'clean:general'),
+      ],
+      now: _now,
+      effectiveMb: (_) => 169,
+      busy: (_) => false,
+      blocked: (_) => false,
+      hiddenServer: (sid) => sid == 'adult',
+    );
+    expect(asks.map((a) => a.fileId), ['clean']);
   });
 
   test('a DM file is asked of the conversation', () {
@@ -156,6 +173,7 @@ void main() {
       effectiveMb: (_) => 169,
       busy: (_) => false,
       blocked: (_) => false,
+      hiddenServer: (_) => false,
     );
     expect(asks.single.peerId, 'friend-master');
   });

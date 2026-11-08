@@ -5234,6 +5234,7 @@ impl MessageStore {
                  DELETE FROM app_settings WHERE key = 'recovery_mnemonic';
                  DELETE FROM app_settings WHERE key >= 'retire_held:' AND key < 'retire_held;';
                  DELETE FROM app_settings WHERE key >= 'settle_owed:' AND key < 'settle_owed;';
+                 DELETE FROM app_settings WHERE key IN ('age_gate_phones', 'age_gate_local', 'age_gate_asked', 'age_gate_store_install');
                  DELETE FROM image_verdicts;
                  DELETE FROM channel_floors;
                  DELETE FROM channel_cleared_ids;
@@ -10273,6 +10274,20 @@ mod tests {
         assert!(store.image_verdict("h", 1).is_some());
         store.scrub_device_secrets().unwrap();
         assert_eq!(store.image_verdict("h", 1), None);
+    }
+
+    /// The age-restricted choice reaches a device only from our own devices, never
+    /// inside a link snapshot or a backup: both ends run this scrub.
+    #[test]
+    fn agegate_a_link_snapshot_or_backup_carries_no_gate() {
+        let store = mem_store();
+        for key in ["age_gate_phones", "age_gate_local", "age_gate_asked", "age_gate_store_install"] {
+            store.save_setting(key, "x").unwrap();
+        }
+        store.scrub_device_secrets().unwrap();
+        for key in ["age_gate_phones", "age_gate_local", "age_gate_asked", "age_gate_store_install"] {
+            assert_eq!(store.load_setting(key).unwrap(), None, "a copy carried {key}");
+        }
     }
 
     /// A removal this device held for its retire round is this device's own work: a

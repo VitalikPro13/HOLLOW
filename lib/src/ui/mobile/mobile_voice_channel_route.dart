@@ -19,6 +19,7 @@ import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
+import 'package:hollow/src/ui/mobile/leave_with_server.dart';
 import 'package:hollow/src/ui/mobile/mobile_call_chrome.dart';
 import 'package:hollow/src/ui/mobile/mobile_share_fullscreen.dart';
 import 'package:hollow/src/ui/mobile/mobile_sheet_drag.dart';
@@ -161,7 +162,7 @@ class _MobileVoiceChannelRouteState
     });
 
     final data = _source.watchData(context, ref);
-    if (data == null) return _joining(hollow);
+    if (data == null) return _withServer(_joining(hollow));
     if (!_joined) {
       _joined = true;
       _joinDeadline?.cancel();
@@ -188,7 +189,7 @@ class _MobileVoiceChannelRouteState
             serverListProvider.select((s) => s[widget.serverId]?.name));
     final joinedAt = vc.joinedAt;
 
-    return MobileSheetDragToMinimize(
+    return _withServer(MobileSheetDragToMinimize(
       child: Scaffold(
         backgroundColor: hollow.background,
         body: SafeArea(
@@ -235,8 +236,13 @@ class _MobileVoiceChannelRouteState
           ),
         ),
       ),
-    );
+    ));
   }
+
+  /// Closes with its server leaving the list (an age gate closing on it); a
+  /// meeting is no listed server.
+  Widget _withServer(Widget page) => LeaveWithServer(
+      serverId: _source.isConference ? null : widget.serverId, child: page);
 
   /// Before the join lands: the header, the wait (or why it is stuck), and
   /// Leave, so the screen is never blank or a dead end.

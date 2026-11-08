@@ -3571,6 +3571,20 @@ mod tests {
     use super::*;
     use crate::identity::native_identity::NativeKeypair;
 
+    /// A member keeps no plaintext post for a channel of an age-restricted server,
+    /// whatever the channel's own flag says.
+    #[test]
+    fn authz_a_member_keeps_no_public_post_of_an_age_restricted_server() {
+        use crate::crdt::admin_lww::AdminLwwReg;
+        use crate::crdt::hlc::HlcTimestamp;
+        let mut state = ServerState::new("s".into(), "s".into(), "o".into());
+        let cid = state.channels.keys().next().cloned().expect("a channel");
+        state.channels.get_mut(&cid).unwrap().is_public = true;
+        assert!(public_frame_accepted(Some(&state), false, "s", &cid), "control: a public channel");
+        state.settings.insert("is_nsfw".into(), AdminLwwReg::new("true".into(), HlcTimestamp::zero(""), 0));
+        assert!(!public_frame_accepted(Some(&state), false, "s", &cid));
+    }
+
     /// The offline 0x09 copy of an MLS post waits on the post's save, as the room
     /// frame does; a public post's plaintext copy waits on nothing.
     #[test]

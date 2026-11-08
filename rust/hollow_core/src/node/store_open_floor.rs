@@ -24,6 +24,7 @@ const KEPT: &[(&str, &str, usize)] = &[
     ("fetch.rs", "persist_inline_image", 1),
     ("fetch.rs", "run_fetch", 1),
     ("fetch.rs", "stored_server_state", 1),
+    ("fetch.rs", "wake_age_hidden", 1),
     ("fetch.rs", "try_decrypt_dm", 1),
     // A guest's in-memory store lives exactly as long as this one connection.
     ("guest_view.rs", "enter", 1),

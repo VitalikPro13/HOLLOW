@@ -397,6 +397,7 @@ pub(crate) fn start_reentry(
         reentry: true,
         ..Default::default()
     };
+    super::age_gate::unsettle_at(db_path, db_passphrase, &entry.server_id);
     super::sync_handler::request_join_lock(ws_cmd_tx, &entry.server_id, &mut pending);
     let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom { room_code: entry.server_id.clone() });
     pending_server_joins.insert(entry.server_id, pending);

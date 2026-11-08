@@ -2747,8 +2747,15 @@ impl ServerState {
 
     /// Effective public flag — voice channels are never public (#44), even if
     /// a stale CRDT still carries `is_public = true` for one.
+    /// An age-restricted server has none: guests skip the 18+ consent.
     pub fn is_channel_public(&self, channel_id: &str) -> bool {
-        self.channels.get(channel_id).map_or(false, |ch| ch.effective_public())
+        !self.is_nsfw() && self.channels.get(channel_id).is_some_and(ChannelInfo::effective_public)
+    }
+
+    /// Every channel guests may read: none on an age-restricted server.
+    pub fn public_channels(&self) -> impl Iterator<Item = &ChannelInfo> {
+        let open = !self.is_nsfw();
+        self.channels.values().filter(move |ch| open && ch.effective_public())
     }
 
     /// Check if a peer can post in a channel (at the current wall clock).
@@ -5605,6 +5612,26 @@ mod tests {
         let both = s.channels.get_mut(&ch).unwrap();
         both.visibility = ChannelVisibility::ModeratorPlus;
         assert!(!s.is_channel_public(&ch), "a state holding both flags reads as restricted");
+    }
+
+    /// An age-restricted server has no public channel, in either order of the flags,
+    /// and every public read (the list, the per-channel check) agrees.
+    #[test]
+    fn authz_an_age_restricted_servers_channels_are_never_public() {
+        let mut s = ranked_fixture();
+        let ch = "s1-general".to_string();
+        let public = |on: bool| CrdtPayload::ChannelPublicChanged { channel_id: ch.clone(), is_public: on };
+        let nsfw = |on: bool| CrdtPayload::ServerSettingChanged { key: "is_nsfw".into(), value: on.to_string() };
+
+        apply_as(&mut s, "admin", public(true));
+        assert!(s.is_channel_public(&ch) && s.public_channels().count() == 1);
+        apply_as(&mut s, "admin", nsfw(true));
+        assert!(!s.is_channel_public(&ch), "flagging the server 18+ closes its public channel");
+        assert_eq!(s.public_channels().count(), 0, "and the guest list is empty");
+        apply_as(&mut s, "admin", public(true));
+        assert!(!s.is_channel_public(&ch), "a channel flagged public on an 18+ server stays closed");
+        apply_as(&mut s, "admin", nsfw(false));
+        assert!(s.is_channel_public(&ch));
     }
 
     /// B-05: a channel id is 1 to 64 bytes of `[A-Za-z0-9_-]`, so none is the join

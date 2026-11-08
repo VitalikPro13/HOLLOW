@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/age_gate.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:hollow/src/core/providers/blocked_users_provider.dart';
@@ -139,6 +140,7 @@ class UnreadNotifier extends Notifier<UnreadState> {
 
     for (final entry in serverChannels.entries) {
       final serverId = entry.key;
+      if (ref.read(ageGateProvider).hidden.contains(serverId)) continue;
       final nicknames = ref.read(serverNicknamesProvider(serverId));
       final localNick = nicknames[localPeerId];
       final mentionPatterns = <String>['@everyone', '@$localName'];
@@ -200,6 +202,7 @@ class UnreadNotifier extends Notifier<UnreadState> {
   /// Respects notification settings (All/Mentions/Nothing).
   Future<void> recomputeServerUnread(
       String serverId, List<String> channelIds) async {
+    if (ref.read(ageGateProvider).hidden.contains(serverId)) return;
     final updatedCounts = Map<String, int>.from(state.channelUnreadCounts);
     final updatedMentions = Map<String, int>.from(state.channelMentionCounts);
     final notifSettings = ref.read(notificationSettingsProvider.notifier);
@@ -397,9 +400,27 @@ class UnreadNotifier extends Notifier<UnreadState> {
 
   /// Called when a new live channel message arrives.
   /// Increments unread count if the channel is not currently viewed.
+  /// Forget the counts of servers this device now hides, so no badge or total
+  /// carries them.
+  void dropServers(Set<String> serverIds) {
+    if (serverIds.isEmpty) return;
+    bool kept(String key) => !serverIds.contains(key.split(':').first);
+    state = state.copyWith(
+      channelUnreadCounts: {
+        for (final e in state.channelUnreadCounts.entries)
+          if (kept(e.key)) e.key: e.value,
+      },
+      channelMentionCounts: {
+        for (final e in state.channelMentionCounts.entries)
+          if (kept(e.key)) e.key: e.value,
+      },
+    );
+  }
+
   void onChannelMessage(String serverId, String channelId,
       String messageId, bool isCurrentlyViewing,
       {bool isMention = false}) {
+    if (ref.read(ageGateProvider).hidden.contains(serverId)) return;
     if (isCurrentlyViewing) {
       markChannelSeen(serverId, channelId, messageId);
       return;

@@ -273,6 +273,17 @@ class NotificationService: UNNotificationServiceExtension {
       return
     }
 
+    // A server this phone hides as age-restricted: a neutral banner, and nothing a
+    // tap could open it with.
+    let dataDirPath = container.appendingPathComponent("hollow_data").path
+    if identityPresent() && hollow_push_server_hidden(dataDirPath, server) != 0 {
+      log(container, "channel wake: server hidden on this device, neutral banner")
+      content.threadIdentifier = "hollow"
+      content.userInfo = [:]
+      deliverHidden(content, contentHandler)
+      return
+    }
+
     // App alive → its live node already shows in-app notifications; deliver
     // the generic banner without racing the canonical MLS state.
     if appIsActive(container) {

@@ -4,6 +4,8 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:hollow/src/core/age_gate.dart';
+import 'package:hollow/src/ui/dialogs/age_gate_dialogs.dart';
 import 'package:hollow/src/core/providers/relay_domain_provider.dart';
 import 'package:hollow/src/core/providers/conference_provider.dart';
 import 'package:hollow/src/core/providers/room_provider.dart';
@@ -213,6 +215,11 @@ class _ServerInviteCard extends ConsumerWidget {
   }
 
   Future<void> _handleJoin(BuildContext context, WidgetRef ref) async {
+    // A server this phone already holds but hides: say why, never join again.
+    if (ref.read(ageGateProvider.notifier).hides(link.id)) {
+      await showAgeRestrictedJoinDialog(context, ref.read(ageGateModeProvider));
+      return;
+    }
     if (!await ensureRelayForInvite(context, ref, link)) return;
     if (!context.mounted) return;
     crdt_api

@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/age_gate.dart';
 import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/app_relaunch.dart';
 import 'package:hollow/src/core/providers/connection_status_provider.dart';
@@ -22,6 +23,7 @@ import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
+import 'package:hollow/src/ui/dialogs/age_gate_dialogs.dart';
 import 'package:hollow/src/ui/settings/relay_health_card.dart';
 import 'package:hollow/src/ui/settings/settings_kit.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -498,9 +500,13 @@ class GifRatingRow extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final rating = ref.watch(gifRatingProvider);
-    final ratings =
-        ref.watch(gifRatingsProvider).valueOrNull ?? const [kDefaultGifRating];
+    final rating = ref.watch(gifRatingHereProvider);
+    final adult = ref.watch(gifAdultRatingHereProvider);
+    final ratings = [
+      for (final r
+          in ref.watch(gifRatingsProvider).valueOrNull ?? const [kDefaultGifRating])
+        if (adult || r != 'r') r,
+    ];
     return SettingsChoiceRow<String>(
       title: 'GIF rating',
       subtitle: 'Servers not marked NSFW stay at PG-13',
@@ -596,6 +602,48 @@ class _LinkPreviewsRowState extends ConsumerState<LinkPreviewsRow> {
       onChanged: (v) {
         if (!_busy) _setEnabled(v);
       },
+    );
+  }
+}
+
+/// Age-restricted servers: on a computer the identity's choice for its phones, on a
+/// sideloaded Android phone its own toggle. Absent on an iPhone and a store Android.
+class AgeRestrictedSection extends ConsumerWidget {
+  const AgeRestrictedSection({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final mode = ref.watch(ageGateModeProvider);
+    if (mode == AgeGateMode.phoneRemote) return const SizedBox.shrink();
+    final gate = ref.watch(ageGateProvider);
+    final notifier = ref.read(ageGateProvider.notifier);
+    final desktop = mode == AgeGateMode.desktop;
+    final value = desktop ? gate.phonesAllow : gate.localAllow;
+    Future<void> set(bool v) =>
+        desktop ? notifier.setForPhones(v) : notifier.setOnThisPhone(v);
+    return SettingsSection(
+      title: 'Age-restricted servers',
+      children: [
+        SettingsSwitchRow(
+          title: desktop
+              ? 'Allow age-restricted servers on my phones'
+              : 'Allow age-restricted servers',
+          subtitle: desktop
+              ? 'Your phones hide servers marked for adults until you allow '
+                  'them here.'
+              : 'Show and join servers marked for adults on this phone.',
+          value: value,
+          onChanged: (v) {
+            if (!v) {
+              _saveSetting(context, set(false));
+            } else if (desktop) {
+              confirmAllowOnPhones(context, () => set(true));
+            } else {
+              confirmAllowOnThisPhone(context, () => set(true));
+            }
+          },
+        ),
+      ],
     );
   }
 }

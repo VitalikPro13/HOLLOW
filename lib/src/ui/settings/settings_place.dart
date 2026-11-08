@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/age_gate.dart';
 import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/providers/profile_draft_provider.dart';
 import 'package:hollow/src/core/providers/settings_place_provider.dart';
@@ -153,22 +154,28 @@ class _Rail extends StatelessWidget {
   }
 }
 
-class _SearchResults extends StatelessWidget {
+/// What a settings search for `query` finds on a build in `mode`.
+List<SettingsSearchEntry> settingsSearchHits(String query, AgeGateMode mode) => [
+      for (final c in SettingsCategory.values)
+        if (c.label.toLowerCase().contains(query.toLowerCase()))
+          SettingsSearchEntry(c.label, c),
+      for (final e in kSettingsSearchIndex)
+        if (e.matches(query) &&
+            e.label != e.category.label &&
+            (!e.ageGateSetting || mode != AgeGateMode.phoneRemote))
+          e,
+    ];
+
+class _SearchResults extends ConsumerWidget {
   final String query;
   final ValueChanged<SettingsCategory> onOpen;
 
   const _SearchResults({required this.query, required this.onOpen});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
-    final hits = [
-      for (final c in SettingsCategory.values)
-        if (c.label.toLowerCase().contains(query.toLowerCase()))
-          SettingsSearchEntry(c.label, c),
-      for (final e in kSettingsSearchIndex)
-        if (e.matches(query) && e.label != e.category.label) e,
-    ];
+    final hits = settingsSearchHits(query, ref.watch(ageGateModeProvider));
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [

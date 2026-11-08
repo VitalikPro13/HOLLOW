@@ -24,6 +24,7 @@ import 'package:hollow/src/core/frame_schedule_probe.dart';
 import 'package:hollow/src/core/shared_tickers.dart';
 import 'package:hollow/src/core/reduce_motion.dart';
 import 'package:hollow/src/core/shop_availability.dart';
+import 'package:hollow/src/core/age_gate.dart';
 import 'package:hollow/src/ui/app.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/core/crash_log.dart';
@@ -227,6 +228,7 @@ Future<void> main(List<String> args) async {
   // Before runApp so no shop button can flash onto a store build while the
   // answer is still in flight (Apple 3.1.1 / Play policy).
   await ShopAvailability.prime();
+  await AgeGate.prime();
 
   // Older versions kept GIF search previews on disk; the cache is RAM-only now.
   unawaited(GifThumbCache.purgeLegacyDiskCache());

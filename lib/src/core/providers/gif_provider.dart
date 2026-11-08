@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../rust/api/gifs.dart' as gifs_api;
+import '../age_gate.dart';
 import '../../rust/api/storage.dart' as storage_api;
 import '../services/gif_thumb_cache.dart';
 
@@ -115,6 +116,20 @@ final gifRatingProvider =
 /// The ratings Rust accepts, mildest first — read, never mirrored.
 final gifRatingsProvider =
     FutureProvider<List<String>>((ref) => gifs_api.gifRatings());
+
+/// Whether this device may ask for `r` at all: not an iPhone (or a store Android)
+/// that hides age-restricted servers, in a DM either.
+final gifAdultRatingHereProvider = Provider<bool>((ref) =>
+    ref.watch(ageGateModeProvider) != AgeGateMode.phoneRemote ||
+    ref.watch(ageGateProvider).allowedHere);
+
+/// The user's rating as this device may use it.
+final gifRatingHereProvider = Provider<String>((ref) {
+  final rating = ref.watch(gifRatingProvider);
+  return ref.watch(gifAdultRatingHereProvider)
+      ? rating
+      : clampGifRating(rating, serverAllowsNsfw: false);
+});
 
 /// The rating a picker actually sends: the user's setting, capped at `pg-13`
 /// inside a server not flagged NSFW. A DM or conference passes through.

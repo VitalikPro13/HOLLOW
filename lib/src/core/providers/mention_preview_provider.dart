@@ -35,6 +35,15 @@ class MentionPreviewNotifier extends Notifier<Map<String, MentionPreview>> {
       '${preview.serverId}:${preview.channelId}': preview,
     };
   }
+
+  /// Forget the previews of servers this device now hides.
+  void dropServers(Set<String> serverIds) {
+    if (serverIds.isEmpty) return;
+    state = {
+      for (final e in state.entries)
+        if (!serverIds.contains(e.value.serverId)) e.key: e.value,
+    };
+  }
 }
 
 final mentionPreviewProvider =

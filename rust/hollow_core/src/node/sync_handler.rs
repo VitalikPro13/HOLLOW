@@ -322,7 +322,7 @@ pub(crate) async fn author_due_checkpoints(
             Vec::new()
         };
         let Some(state) = server_states.get_mut(&server_id) else { continue };
-        let public_before: Vec<String> = state.channels.iter().filter(|(_, c)| c.effective_public()).map(|(id, _)| id.clone()).collect();
+        let public_before: Vec<String> = state.public_channels().map(|c| c.channel_id.clone()).collect();
         let refolded_before = state.base.as_ref().map(|b| b.state.cp_refolded.clone()).unwrap_or_default();
         let Some((op, ingested)) = state.author_due_checkpoint(local_peer_str, &past_authors, now) else {
             hollow_log!("[HOLLOW-CRDT] Could not checkpoint {server_id}; next try in an hour");
@@ -1113,6 +1113,8 @@ pub(crate) async fn handle_create_server(
     hollow_log!("[HOLLOW-CRDT] Creating server {server_id}");
     crdt_store.insert_op(founding);
     crdt_store.save_state_snapshot(server_id.clone(), &state);
+    // Its founder holds all there is of it.
+    super::age_gate::note_settled_at(store_at.0, store_at.1, &server_id);
 
     server_states.insert(server_id.clone(), state);
 
@@ -1761,6 +1763,12 @@ pub(crate) async fn handle_update_server_setting(
     } else {
         "Permission denied: changing server settings needs the Manage Server permission"
     };
+    let adult = key == "is_nsfw" && value == "true";
+    let public_before: Vec<String> = server_states
+        .get(&server_id)
+        .filter(|_| adult)
+        .map(|s| s.public_channels().map(|c| c.channel_id.clone()).collect())
+        .unwrap_or_default();
     if author_broadcast_op(
         server_states, event_tx, ws_cmd_tx, ws_room_peers, gossip_overlays, local_peer_str,
         &server_id,
@@ -1773,6 +1781,32 @@ pub(crate) async fn handle_update_server_setting(
         crdt_store,
     ).await {
         return;
+    }
+
+    // An age-restricted server has no public channels: guests lose them at once, and
+    // an actor who may manage channels clears the flags too. The read-time rule keeps
+    // them closed whoever flips it; lifting it reopens any flag left on.
+    if adult {
+        let flagged: Vec<String> = server_states
+            .get(&server_id)
+            .map(|s| s.channels.values().filter(|c| c.is_public).map(|c| c.channel_id.clone()).collect())
+            .unwrap_or_default();
+        for channel_id in flagged {
+            author_broadcast_op(
+                server_states, event_tx, ws_cmd_tx, ws_room_peers, gossip_overlays, local_peer_str,
+                &server_id,
+                OpGate::Perm(Permission::MANAGE_CHANNELS),
+                None,
+                CrdtPayload::ChannelPublicChanged { channel_id: channel_id.clone(), is_public: false },
+                &format!("Closing public channel {channel_id} of an age-restricted server"),
+                NetworkEvent::ServerUpdated { server_id: server_id.clone() },
+                OpBroadcast::MlsFirst { mls: &mut *mls, crypto_store },
+                crdt_store,
+            ).await;
+        }
+        for channel_id in public_before {
+            tell_guests_if_closed(server_states, event_tx, ws_cmd_tx, &server_id, &channel_id, true).await;
+        }
     }
 
     // Relay offline catch-up toggle: (de)register the relay-side ring
@@ -2168,6 +2202,10 @@ pub(crate) async fn handle_join_server(
         return;
     }
     hollow_log!("[HOLLOW-CRDT] Joining server {server_id}");
+    // A phone that hides age-restricted servers never consents to one, and knows
+    // nothing yet of what this server is.
+    let nsfw_confirmed = super::age_gate::join_consent_at(db_path, db_passphrase, nsfw_confirmed);
+    super::age_gate::unsettle_at(db_path, db_passphrase, &server_id);
     // The request NONCE. Every answer names it, so an answer replayed out of a
     // three-day ring can never resolve the join the user made afterwards.
     let requested_at = ask_stamp(ask_floor.past_ms);
@@ -3986,6 +4024,9 @@ pub(crate) async fn handle_revoke_channel_access(
 
 // ── 10f-2. SetChannelPublic ──────────────────────────────────────
 
+/// Why an age-restricted server's channel cannot be made public.
+pub(crate) const PUBLIC_OFF_FOR_ADULT_SERVERS: &str = "Public channels are off for age-restricted servers";
+
 pub(crate) async fn handle_set_channel_public(
     server_states: &mut ServerStates,
     mls: &mut Option<MlsManager>,
@@ -4012,6 +4053,13 @@ pub(crate) async fn handle_set_channel_public(
         hollow_log!("[HOLLOW-CRDT] REFUSED set_channel_public on non-text channel {channel_id}");
         let _ = event_tx.send(NetworkEvent::Error {
             message: "Voice channels cannot be made public".to_string(),
+        }).await;
+        return true;
+    }
+    if is_public && server_states.get(&server_id).is_some_and(|s| s.is_nsfw()) {
+        hollow_log!("[HOLLOW-CRDT] REFUSED set_channel_public on age-restricted server {server_id}");
+        let _ = event_tx.send(NetworkEvent::Error {
+            message: PUBLIC_OFF_FOR_ADULT_SERVERS.to_string(),
         }).await;
         return true;
     }
@@ -4088,8 +4136,8 @@ async fn tell_guests_if_closed(
 ) {
     let closed = server_states
         .get(server_id)
-        .and_then(|s| s.channels.get(channel_id))
-        .filter(|ch| was_public && !ch.effective_public());
+        .filter(|s| was_public && !s.is_channel_public(channel_id))
+        .and_then(|s| s.channels.get(channel_id));
     if let Some(ch) = closed {
         tell_guests(event_tx, ws_cmd_tx, server_id, ch, false).await;
     }

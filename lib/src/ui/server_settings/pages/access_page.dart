@@ -241,7 +241,9 @@ class _AccessPageState extends ConsumerState<AccessPage> {
             ),
             SettingsSwitchRow(
               title: 'Adult content',
-              subtitle: "People confirm they're 18 or older before they join",
+              subtitle: "People confirm they're 18 or older before they join. "
+                  "It can't have public channels, and phones hide it until "
+                  'each person allows age-restricted servers.',
               value: _flag('is_nsfw'),
               onChanged: _loaded
                   ? (v) => _write({'is_nsfw': v ? 'true' : 'false'})

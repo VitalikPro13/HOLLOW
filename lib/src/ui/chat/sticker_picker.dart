@@ -334,7 +334,7 @@ class _StickerPickerBodyState extends ConsumerState<StickerPickerBody> {
   /// Rating for the next KLIPY request: the user's setting, clamped for a
   /// server not flagged NSFW.
   String get _rating {
-    final rating = ref.read(gifRatingProvider);
+    final rating = ref.read(gifRatingHereProvider);
     final sid = widget.serverId;
     if (sid == null) return rating;
     final nsfw = ref.read(serverIsNsfwProvider(sid)).valueOrNull ?? false;

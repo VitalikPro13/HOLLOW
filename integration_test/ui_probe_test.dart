@@ -9,6 +9,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:hollow/src/core/reduce_motion.dart';
+import 'package:hollow/src/core/age_gate.dart';
 import 'package:hollow/src/core/shop_availability.dart';
 import 'package:hollow/src/rust/api/identity.dart' as identity_api;
 import 'package:hollow/src/rust/frb_generated.dart';
@@ -111,6 +112,8 @@ void main() {
     // widget tree itself, so without this the Hollow Shop button never
     // exists here (a store build and an unprimed build look the same).
     await ShopAvailability.prime();
+    // Same for the age gate: unprimed, an iPhone peer reads as a desktop.
+    await AgeGate.prime();
     // The probe boots HollowApp directly and never runs main(), so anything
     // main() set up is missing unless it is set up here. Deliberately only
     // this call: setAsFrameless and the size/show dance belong to a real

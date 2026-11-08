@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/age_gate.dart';
 import 'package:hollow/src/core/providers/app_lock_provider.dart';
 import 'package:hollow/src/core/providers/archive_provider.dart';
 import 'package:hollow/src/core/providers/background_provider.dart';
@@ -30,6 +31,10 @@ import 'package:hollow/src/ui/mobile/tabs/mobile_settings_tab.dart';
 import 'package:hollow/src/ui/shell/mobile_nav.dart';
 import 'package:hollow/src/ui/shell/clock_skew_banner.dart';
 import 'package:hollow/src/ui/shell/system_status_banner.dart';
+
+/// Lets a widget test on a computer route push taps through the shell.
+@visibleForTesting
+bool debugPushTapsOnHost = false;
 
 class MobileShell extends ConsumerStatefulWidget {
   const MobileShell({super.key});
@@ -68,7 +73,7 @@ class _MobileShellState extends ConsumerState<MobileShell> {
     listenForRelayLoginDenial(ref, () => context, touch: true);
     // Push taps land here, including the buffered cold-start ones, which are
     // delivered on registration.
-    if (Platform.isAndroid || Platform.isIOS) {
+    if (Platform.isAndroid || Platform.isIOS || debugPushTapsOnHost) {
       ref.listenManual<bool>(appLockedProvider, (prev, locked) {
         if (!locked && prev == true) _replayHeldTap();
       });
@@ -147,6 +152,13 @@ class _MobileShellState extends ConsumerState<MobileShell> {
         ref.read(selectedChannelProvider) == channelId) {
       return;
     }
+    // A tap on a banner for a server this phone hides opens nothing: Rust's own
+    // verdict, so a banner from before the gate closed cannot reopen it.
+    if (ref.read(ageGateProvider.notifier).hides(serverId) ||
+        await serverAgeHiddenNow(serverId)) {
+      return;
+    }
+    if (!mounted || _holdWhileLocked(replay)) return;
     // The route header needs a name, which only the local DB has.
     var channelName = '';
     try {

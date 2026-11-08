@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/age_gate.dart';
 import 'package:hollow/src/core/message_preview.dart';
 import 'package:hollow/src/core/providers/app_lock_provider.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
@@ -309,6 +310,14 @@ class SystemNotificationNotifier
     String? channelName,
     String? messageId,
   }) async {
+    // A phone that hides age-restricted servers shows nothing for one, nor for a
+    // server it does not list yet.
+    final gate = ref.read(ageGateProvider);
+    if (gate.hidden.contains(serverId) ||
+        (!gate.allowedHere && !ref.read(serverListProvider).containsKey(serverId))) {
+      notifLog('channel suppressed: $serverId is hidden on this device');
+      return;
+    }
     final notifSettings = ref.read(notificationSettingsProvider.notifier);
     final level =
         notifSettings.effectiveChannelLevel(serverId, channelId);

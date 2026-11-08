@@ -3,6 +3,7 @@
 
 // ignore_for_file: unused_import, unused_element, unnecessary_import, duplicate_ignore, invalid_use_of_internal_member, annotate_overrides, non_constant_identifier_names, curly_braces_in_flow_control_structures, prefer_const_literals_to_create_immutables, unused_field
 
+import 'api/age_gate.dart';
 import 'api/archive.dart';
 import 'api/at_rest.dart';
 import 'api/catalog.dart';
@@ -62,6 +63,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   String dco_decode_String(dynamic raw);
+
+  @protected
+  AgeGateFfi dco_decode_age_gate_ffi(dynamic raw);
 
   @protected
   AppliedReadMarker dco_decode_applied_read_marker(dynamic raw);
@@ -842,6 +846,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   String sse_decode_String(SseDeserializer deserializer);
+
+  @protected
+  AgeGateFfi sse_decode_age_gate_ffi(SseDeserializer deserializer);
 
   @protected
   AppliedReadMarker sse_decode_applied_read_marker(
@@ -1826,6 +1833,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_String(String self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_age_gate_ffi(AgeGateFfi self, SseSerializer serializer);
 
   @protected
   void sse_encode_applied_read_marker(

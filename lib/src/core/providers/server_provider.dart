@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/age_gate.dart';
 import 'package:hollow/src/core/models/server_info.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
@@ -18,15 +19,24 @@ class ServerListNotifier extends Notifier<Map<String, ServerInfo>> {
   @override
   Map<String, ServerInfo> build() => {};
 
+  /// Whether a server may be listed on this device. Rust already leaves hidden
+  /// servers out; this is the second layer for anything that inserts on an event.
+  bool _shown(String serverId, {bool isNsfw = false}) {
+    final gate = ref.read(ageGateProvider);
+    return gate.allowedHere || (!isNsfw && !gate.hidden.contains(serverId));
+  }
+
   /// Load servers from the local DB (called on startup).
   Future<void> loadFromDb() async {
     final load = ref.read(serverListLoadStateProvider.notifier);
     // A retry reads as loading again, not as the failure it follows.
     if (load.state.error != null) load.state = (loaded: false, error: null);
     try {
+      await ref.read(ageGateProvider.notifier).load();
       final servers = await crdt_api.getJoinedServers();
       final map = <String, ServerInfo>{};
       for (final s in servers) {
+        if (!_shown(s.serverId, isNsfw: s.isNsfw)) continue;
         map[s.serverId] = ServerInfo(
           serverId: s.serverId,
           name: s.name,
@@ -49,6 +59,12 @@ class ServerListNotifier extends Notifier<Map<String, ServerInfo>> {
   /// path failed when a sibling re-synced). Optimistic 1/1 counts show at once so
   /// the icon appears; a background DB read then corrects them.
   void onServerCreated(String serverId, String name) {
+    // A phone that hides age-restricted servers lists one only once Rust does: it
+    // cannot know yet what a server it just joined is.
+    if (!ref.read(ageGateProvider).allowedHere) {
+      onServerUpdated(serverId);
+      return;
+    }
     final updated = Map.of(state);
     final existing = updated[serverId];
     updated[serverId] = ServerInfo(
@@ -87,7 +103,10 @@ class ServerListNotifier extends Notifier<Map<String, ServerInfo>> {
   Future<void> onServerUpdated(String serverId) async {
     try {
       final servers = await crdt_api.getJoinedServers();
-      final match = servers.where((s) => s.serverId == serverId).firstOrNull;
+      final match = servers
+          .where((s) => s.serverId == serverId)
+          .where((s) => _shown(s.serverId, isNsfw: s.isNsfw))
+          .firstOrNull;
       final updated = Map.of(state);
       if (match != null) {
         updated[serverId] = ServerInfo(

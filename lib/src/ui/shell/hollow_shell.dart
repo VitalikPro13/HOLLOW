@@ -1282,7 +1282,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
     // Warmed late so the GIF picker opens without a spinner.
     Future.delayed(const Duration(seconds: 5), () {
       if (mounted) {
-        ref.read(gifCatalogProvider).prefetchTrending(ref.read(gifRatingProvider));
+        ref.read(gifCatalogProvider).prefetchTrending(ref.read(gifRatingHereProvider));
       }
     });
 

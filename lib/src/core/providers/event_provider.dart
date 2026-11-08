@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/age_gate.dart';
 import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/providers/sibling_call_provider.dart';
 import 'package:hollow/src/core/providers/clock_skew_provider.dart';
@@ -93,6 +94,8 @@ import 'package:hollow/src/rust/api/share.dart' as share_api;
 import 'package:hollow/src/core/providers/relay_denial_provider.dart';
 import 'package:hollow/src/ui/dialogs/friends_manager_dialog.dart'
     show handleNicknameLookupFailed, handleNicknameResolved;
+import 'package:hollow/src/ui/dialogs/age_gate_dialogs.dart'
+    show offerAgeGateForPhones, showAgeRestrictedJoinDialog;
 import 'package:hollow/src/ui/dialogs/twitch_join_dialog.dart' show showTwitchJoinDialog, handleTwitchJoinResult, showJoinRejectedDialog, showNsfwConfirmDialog;
 
 /// The auto-download setting a share-backed file header is judged by, or null while
@@ -168,9 +171,35 @@ void applyServerJoined(ProviderRead read,
   read(serverStripLayoutProvider.notifier).onServerCreated(serverId);
   read(pendingJoinsProvider.notifier).remove(serverId);
   if (quiet) return;
+  // A phone that hides age-restricted servers names one only once Rust lists it:
+  // what a server a sibling joined is may not be known yet.
+  final gateClosed = !read(ageGateProvider).allowedHere;
+  if (gateClosed && !ours) return;
   showEventToast('Joined $name',
       kind: 'joined', id: serverId, type: HollowToastType.success);
   if (!ours) return;
+  if (gateClosed) {
+    _openOnceListed(read, serverId);
+    return;
+  }
+  _openJoinedServer(read, serverId);
+}
+
+/// Our own join on a phone that hides age-restricted servers: opened once Rust
+/// lists it (its catch-up says it is not one), never before.
+void _openOnceListed(ProviderRead read, String serverId) {
+  var tries = 0;
+  Timer.periodic(const Duration(milliseconds: 500), (timer) {
+    if (read(serverListProvider).containsKey(serverId)) {
+      timer.cancel();
+      _openJoinedServer(read, serverId);
+    } else if (++tries >= 60) {
+      timer.cancel();
+    }
+  });
+}
+
+void _openJoinedServer(ProviderRead read, String serverId) {
   // Close any centre tab first: joining out of Browse Public Channels is a
   // normal flow and the tab would sit on top of the server we just selected (#28).
   setShellTab(read, null);
@@ -342,6 +371,45 @@ class EventStreamNotifier extends Notifier<bool> {
     }
     _syncTimeouts.clear();
     state = false;
+  }
+
+  /// The 18+ server this computer just consented to join: once the join lands, it
+  /// offers the phones' setting once.
+  String? _offerPhonesAfterJoin;
+
+  /// A server this phone hides as age-restricted: nothing about it may notify,
+  /// toast or count.
+  bool _ageHidden(String serverId) =>
+      serverId.isNotEmpty && ref.read(ageGateProvider.notifier).hides(serverId);
+
+  /// The gate or the hidden set moved: reload what depends on it, and leave a
+  /// server that is hidden now.
+  Future<void> _onAgeGateChanged() async {
+    await ref.read(ageGateProvider.notifier).load();
+    await ref.read(serverListProvider.notifier).loadFromDb();
+    final hidden = ref.read(ageGateProvider).hidden;
+    ref.read(unreadProvider.notifier).dropServers(hidden);
+    ref.read(mentionPreviewProvider.notifier).dropServers(hidden);
+    final selected = ref.read(selectedServerProvider);
+    final openHere = selected != null && hidden.contains(selected);
+    if (openHere) {
+      ref.read(selectedServerProvider.notifier).state = null;
+      ref.read(selectedChannelProvider.notifier).state = null;
+      ref.read(serverSettingsOpenProvider.notifier).state = false;
+    }
+    // A room's audio and video would keep playing behind the minimised bar. A
+    // meeting is no listed server, so the gate never hides one.
+    final room = ref.read(voiceChannelProvider).currentServerId;
+    final inRoom =
+        room != null && !room.startsWith('conf:') && hidden.contains(room);
+    if (inRoom) {
+      await ref.read(voiceChannelProvider.notifier).leaveChannel();
+    }
+    if (openHere || inRoom) {
+      showEventToast(
+          'This server is now age-restricted and hidden on this device.',
+          kind: 'age_hidden');
+    }
   }
 
   void _refreshServerState(String serverId) {
@@ -556,6 +624,7 @@ class EventStreamNotifier extends Notifier<bool> {
               albumId: albumId,
             );
         ref.read(typingProvider.notifier).clearTyping('$serverId:$channelId', fromPeer);
+        if (_ageHidden(serverId)) break;
         // Our own post from another device (#80): being last to speak reads the
         // channel, so it must never count unread, notify, or feed the hint path.
         if (isOwn) {
@@ -689,6 +758,13 @@ class EventStreamNotifier extends Notifier<bool> {
 
       case NetworkEvent_ServerUpdated(:final serverId):
         debugPrint('[HOLLOW] Server updated: $serverId');
+        // A server flagged while open, or while we sit in its room, leaves at once;
+        // any other move in the hidden set reaches us as AgeGateChanged.
+        if (ref.read(ageGateModeProvider) != AgeGateMode.desktop &&
+            (ref.read(selectedServerProvider) == serverId ||
+                ref.read(voiceChannelProvider).currentServerId == serverId)) {
+          _onAgeGateChanged().catchError((_) {});
+        }
         ref.read(serverAvatarProvider.notifier).loadAvatar(serverId);
         ref.read(serverAvatarAnimProvider.notifier).loadAnim(serverId);
         ref.read(serverBannerProvider.notifier).loadBanner(serverId);
@@ -776,6 +852,7 @@ class EventStreamNotifier extends Notifier<bool> {
           ref.read(channelListProvider.notifier).loadForServer(serverId);
           ref.read(channelLayoutProvider.notifier).loadForServer(serverId);
         }
+        if (_ageHidden(serverId)) break;
         // Recompute server unread counts for ALL servers (including selected) to
         // pick up messages that arrived while offline.
         crdt_api.getServerChannels(serverId: serverId).then((channels) {
@@ -790,6 +867,10 @@ class EventStreamNotifier extends Notifier<bool> {
             '${quiet ? ' quietly' : fromSibling ? ' by our other device' : ''}');
         applyServerJoined(ref.read,
             serverId: serverId, name: name, quiet: quiet, fromSibling: fromSibling);
+        if (_offerPhonesAfterJoin == serverId && !quiet && !fromSibling) {
+          _offerPhonesAfterJoin = null;
+          offerAgeGateForPhones(ref).catchError((_) {});
+        }
 
       // Rust no longer emits this on the 15 second timeout (that path PARKS the
       // join). The arm stays for other emitters and older nodes.
@@ -871,7 +952,7 @@ class EventStreamNotifier extends Notifier<bool> {
         // Recompute unread counts from DB only when the sync actually inserted
         // something: every channel open fires a sync, and an unconditional recount
         // on a no-op completion resurrected stale counts for untouched channels.
-        if (newMessageCount > 0) {
+        if (newMessageCount > 0 && !_ageHidden(serverId)) {
           debugPrint('[HOLLOW] Triggering recomputeServerUnread for $serverId (newMsgCount=$newMessageCount)');
           crdt_api.getServerChannels(serverId: serverId).then((channels) {
             final channelIds = channels.map((c) => c.channelId).toList();
@@ -1096,6 +1177,9 @@ class EventStreamNotifier extends Notifier<bool> {
         debugPrint('[HOLLOW] Friends backfilled from sibling device: $count');
         ref.read(friendsProvider.notifier).loadAll();
 
+      case NetworkEvent_AgeGateChanged():
+        _onAgeGateChanged().catchError((_) {});
+
       case NetworkEvent_BlockListChanged():
         // Another device of ours blocked or unblocked someone; the node already
         // enforces it, the mirror and the push hints follow.
@@ -1212,6 +1296,7 @@ class EventStreamNotifier extends Notifier<bool> {
             :final serverId, :final channelId, :final fromPeer,
             :final messageId,
             :final hasEveryone, :final mentionedNames, :final isReplyToOwn):
+        if (_ageHidden(serverId)) break;
         final localPeerId = ref.read(identityProvider).peerId ?? '';
         // The hint carries the sender DEVICE id; one from any of our own devices
         // is our own post (#80).
@@ -1327,7 +1412,8 @@ class EventStreamNotifier extends Notifier<bool> {
         }
         _reloadChatForFile(fileId);
 
-        if (shareRootHash != null && shareKeyHex != null) {
+        // A hidden server's media is never pulled on its own.
+        if (shareRootHash != null && shareKeyHex != null && !_ageHidden(serverId)) {
           final scope = shareAutoDownloadScope(
             serverId: serverId,
             senderIdentity: ref.read(deviceLinkProvider).identityOf(senderId),
@@ -1924,6 +2010,12 @@ class EventStreamNotifier extends Notifier<bool> {
         } else if (reason.startsWith('nsfw_confirm:')) {
           // Format: "nsfw_confirm:{server_name}". A consent gate, not a rejection.
           final serverName = reason.substring('nsfw_confirm:'.length);
+          if (!ref.read(ageGateProvider).allowedHere) {
+            // A phone that hides age-restricted servers never consents to one.
+            Future.sync(() => discardPendingJoin(serverId)).catchError((_) {});
+            showAgeRestrictedJoinDialog(ctx, ref.read(ageGateModeProvider));
+            break;
+          }
           showNsfwConfirmDialog(
             ctx,
             serverName: serverName.isEmpty ? 'This server' : serverName,
@@ -1933,6 +2025,8 @@ class EventStreamNotifier extends Notifier<bool> {
             // The ask stays open under the question: declining ends it.
             if (!joined) {
               Future.sync(() => discardPendingJoin(serverId)).catchError((_) {});
+            } else if (ref.read(ageGateModeProvider) == AgeGateMode.desktop) {
+              _offerPhonesAfterJoin = serverId;
             }
           });
         } else {

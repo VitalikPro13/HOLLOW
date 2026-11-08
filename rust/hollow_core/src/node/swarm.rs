@@ -399,6 +399,7 @@ pub(super) fn on_verified_sibling(
         super::olm_lane::carry(ws_cmd_tx, peer_id, None, &HavenMessage::ProfileRequest, super::olm_lane::NoSession::Queue);
     }
 
+    super::age_gate::share_with_sibling(ws_cmd_tx, peer_id, local_peer_str, db_path, db_passphrase);
     // Both sides share on verification, so whichever device read more while the
     // other was away wins per conversation (#80).
     super::crypto_handler::share_state_with_sibling(ws_cmd_tx, peer_id, db_path, db_passphrase);
@@ -1053,6 +1054,9 @@ async fn run_event_loop(
         Err(_) => super::crdt_resync::CrdtResync::load_none(crdt_store.clone(), crate::api::updater::APP_VERSION),
     };
     crdt_resync.op_sync.set_store(&db_path, &db_passphrase, &local_peer_str);
+    if let Ok(store) = crate::storage::MessageStore::lease(&db_path, &db_passphrase) {
+        super::age_gate::init_settled(&store, server_states.keys().map(String::as_str));
+    }
 
     // -- MLS state --
     let mut mls: Option<MlsManager> = {
@@ -1404,6 +1408,10 @@ async fn run_event_loop(
     let mut push_token: Option<(String, String)> = None; // (token, platform)
     // Channel push prefs JSON — cached for re-registration on WS reconnect.
     let mut push_prefs: Option<String> = None;
+    // Hidden age-restricted servers as last told to the relay (muted) and to Dart.
+    let mut age_sent = super::age_gate::Sent::default();
+    let mut age_gate_timer = tokio::time::interval(Duration::from_secs(5));
+    age_gate_timer.tick().await; // consume immediate first tick
 
     let mut rebootstrap_timer = tokio::time::interval(Duration::from_secs(30));
     rebootstrap_timer.tick().await; // consume immediate first tick
@@ -2436,8 +2444,7 @@ async fn run_event_loop(
                         hollow_log!("[HOLLOW-GUEST] RequestPublicChannels for {server_id}, is_member={}", server_states.contains_key(&server_id));
                         if server_states.contains_key(&server_id) {
                             let state = &server_states[&server_id];
-                            let channels: Vec<PublicChannelEntryFfi> = state.channels.values()
-                                .filter(|ch| ch.effective_public())
+                            let channels: Vec<PublicChannelEntryFfi> = state.public_channels()
                                 .map(|ch| PublicChannelEntryFfi {
                                     channel_id: ch.channel_id.clone(),
                                     name: ch.name.clone(),
@@ -2775,8 +2782,19 @@ async fn run_event_loop(
                     }
 
                     NodeCommand::SetPushPrefs { prefs_json } => {
-                        push_prefs = Some(prefs_json.clone());
-                        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SetPushPrefs { prefs_json });
+                        push_prefs = Some(prefs_json);
+                        Box::pin(push_age_gate(
+                            &mut age_sent, &db_path, &db_passphrase, &server_states, push_prefs.as_deref(), true, false, &ws_cmd_tx, &event_tx,
+                        )).await;
+                    }
+
+                    NodeCommand::AgeGateChanged => {
+                        super::age_gate::share_with_own_devices(
+                            &ws_cmd_tx, &ws_room_peers, &local_peer_str, &device_peer_id, &db_path, &db_passphrase,
+                        );
+                        Box::pin(push_age_gate(
+                            &mut age_sent, &db_path, &db_passphrase, &server_states, push_prefs.as_deref(), true, true, &ws_cmd_tx, &event_tx,
+                        )).await;
                     }
 
                     NodeCommand::SetOfflineInbox { enabled, retention_secs } => {
@@ -4037,11 +4055,10 @@ async fn run_event_loop(
                                 platform: plat.clone(),
                             });
                         }
-                        if let Some(ref prefs) = push_prefs {
-                            let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SetPushPrefs {
-                                prefs_json: prefs.clone(),
-                            });
-                        }
+                        let force = push_prefs.is_some();
+                        Box::pin(push_age_gate(
+                            &mut age_sent, &db_path, &db_passphrase, &server_states, push_prefs.as_deref(), force, false, &ws_cmd_tx, &event_tx,
+                        )).await;
                     }
 
                     // The socket is gone, the relay holds our session: every room, peer, call,
@@ -5718,7 +5735,7 @@ async fn run_event_loop(
                                             || pending_server_joins.contains_key(&room)
                                             || server_states
                                                 .get(&room)
-                                                .is_some_and(|s| s.channels.values().any(|c| c.effective_public())))
+                                                .is_some_and(|s| s.public_channels().next().is_some()))
                                     {
                                         super::door_room::note_heard(&from, &room);
                                     }
@@ -6055,6 +6072,9 @@ async fn run_event_loop(
                                             super::mls_turns::VIA_FORWARD.scope((), request).await;
                                         } else {
                                             super::join_verdict::OLD_LINK.scope(old_link, request).await;
+                                        }
+                                        if let Some((sid, _)) = &synced {
+                                            Box::pin(settle_age_gate_and_tell(&event_tx, &db_path, &db_passphrase, sid)).await;
                                         }
                                         join_hold.synced(synced);
                                     }
@@ -7458,6 +7478,15 @@ async fn run_event_loop(
             // expired grant lazily, so this enacts the crypto and UI consequences. Only
             // (server, channel)s with an expiry inside the (last_tick, now] window fire,
             // so each expiry triggers exactly one reconcile and old rows never re-fire.
+            // A phone mutes at the relay every server it hides, from the moment it hides
+            // it (a flag, a gate change, a join not caught up yet), and tells Dart.
+            _ = age_gate_timer.tick(), if super::age_gate::Platform::current() != super::age_gate::Platform::Desktop => {
+                arm_started = Some(("timer", "age_gate", std::time::Instant::now()));
+                Box::pin(push_age_gate(
+                    &mut age_sent, &db_path, &db_passphrase, &server_states, push_prefs.as_deref(), false, true, &ws_cmd_tx, &event_tx,
+                )).await;
+            }
+
             _ = grant_sweep_timer.tick() => {
                 arm_started = Some(("timer", "grant_sweep", std::time::Instant::now()));
                 let now_ms = std::time::SystemTime::now()
@@ -9364,12 +9393,92 @@ async fn handle_sync_response(
                 super::op_sync::Step::Rosters(ask) => {
                     note_round_answered(crdt_resync, state, peer_str, master_peer_str, db_path, db_passphrase);
                     super::frame_budget::pace_carried(frame_budget, ws_cmd_tx, device_peer_id, peer_str, &ask);
+                    settle_age_gate(event_tx, state, peer_str, db_path, db_passphrase).await;
                 }
                 super::op_sync::Step::Done => {
                     note_round_answered(crdt_resync, state, peer_str, master_peer_str, db_path, db_passphrase);
+                    settle_age_gate(event_tx, state, peer_str, db_path, db_passphrase).await;
                 }
             }
         }
+}
+
+/// A member's digest catch-up of `state` ended: what the server is flagged as is known
+/// now, so a phone stops hiding it for being unsettled.
+pub(super) async fn settle_age_gate(
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    state: &ServerState,
+    member_device: &str,
+    db_path: &str,
+    db_passphrase: &str,
+) {
+    if state.is_member(&super::resolver::resolve(member_device)) {
+        Box::pin(settle_age_gate_and_tell(event_tx, db_path, db_passphrase, &state.server_id)).await;
+    }
+}
+
+/// Runs an age-gate store op on a blocking thread: its callers sit near the bottom of
+/// the worker stack, with no room left for SQLCipher's frames in a debug build.
+async fn off_worker_stack<T: Send + 'static>(
+    db_path: &str,
+    db_passphrase: &str,
+    server_id: &str,
+    op: fn(&str, &str, &str) -> T,
+) -> Option<T> {
+    let (path, pass, sid) = (db_path.to_owned(), db_passphrase.to_owned(), server_id.to_owned());
+    tokio::task::spawn_blocking(move || op(&path, &pass, &sid)).await.ok()
+}
+
+/// Marks `server_id` caught up and, when that shows it, tells Dart.
+async fn settle_age_gate_and_tell(event_tx: &mpsc::Sender<NetworkEvent>, db_path: &str, db_passphrase: &str, server_id: &str) {
+    if off_worker_stack(db_path, db_passphrase, server_id, super::age_gate::note_settled_at).await == Some(true) {
+        let _ = event_tx.send(NetworkEvent::ServerUpdated { server_id: server_id.to_string() }).await;
+    }
+}
+
+/// A sibling's [`HavenMessage::AgeGateSync`], off the worker stack like the rest.
+async fn take_sibling_age_gate(
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    sender: &str,
+    local_master: &str,
+    entry: super::age_gate::AgeGateEntry,
+    frame_ts_ms: i64,
+    db_path: &str,
+    db_passphrase: &str,
+) {
+    let (sender, master, path, pass) = (sender.to_owned(), local_master.to_owned(), db_path.to_owned(), db_passphrase.to_owned());
+    let moved = tokio::task::spawn_blocking(move || {
+        super::age_gate::take_sibling_at(&sender, &master, entry, frame_ts_ms, &path, &pass)
+    })
+    .await
+    .ok()
+    .flatten();
+    if let Some(allowed) = moved {
+        let _ = event_tx.send(NetworkEvent::AgeGateChanged { allowed }).await;
+    }
+}
+
+/// What the relay mutes and Dart hides, pushed when it moved (or `force`); awaited
+/// boxed so the event loop's poll frame does not grow by its locals.
+#[allow(clippy::too_many_arguments)]
+async fn push_age_gate(
+    age_sent: &mut super::age_gate::Sent,
+    db_path: &str,
+    db_passphrase: &str,
+    server_states: &super::types::ServerStates,
+    push_prefs: Option<&str>,
+    force: bool,
+    tell_dart: bool,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+) {
+    let (prefs, moved) = age_sent.due(db_path, db_passphrase, server_states, push_prefs, force, tell_dart);
+    if let Some(prefs_json) = prefs {
+        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SetPushPrefs { prefs_json });
+    }
+    if let Some(allowed) = moved {
+        let _ = event_tx.send(NetworkEvent::AgeGateChanged { allowed }).await;
+    }
 }
 
 /// A `SyncRequest`: out of line for the same reason as [`handle_sync_response`].
@@ -12769,9 +12878,14 @@ async fn handle_incoming_request_inner(
                 announced_at: frame_ts_ms,
                 ..Default::default()
             };
+            Box::pin(off_worker_stack(db_path, db_passphrase, &server_id, |p, k, s| super::age_gate::unsettle_at(p, k, s))).await;
             sync_handler::request_join_lock(ws_cmd_tx, &server_id, &mut pending);
             let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom { room_code: server_id.clone() });
             pending_server_joins.insert(server_id, pending);
+        }
+
+        HavenMessage::AgeGateSync { entry } => {
+            Box::pin(take_sibling_age_gate(event_tx, peer_str, local_peer_str, entry, frame_ts_ms, db_path, db_passphrase)).await;
         }
 
         // -- MLS message handlers --
@@ -14989,8 +15103,7 @@ async fn handle_incoming_request_inner(
         HavenMessage::PublicChannelListRequest { server_id } => {
             if peer_str == local_peer_str { return; }
             if let Some(state) = server_states.get(&server_id) {
-                let channels: Vec<PublicChannelEntry> = state.channels.values()
-                    .filter(|ch| ch.effective_public())
+                let channels: Vec<PublicChannelEntry> = state.public_channels()
                     .map(|ch| PublicChannelEntry {
                         channel_id: ch.channel_id.clone(),
                         name: ch.name.clone(),

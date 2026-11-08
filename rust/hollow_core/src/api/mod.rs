@@ -1,3 +1,4 @@
+pub mod age_gate;
 pub mod archive;
 pub mod at_rest;
 pub mod catalog;

@@ -417,6 +417,9 @@ pub(crate) enum NetworkEvent {
     FriendsBackfilled { count: u32 },
     /// One of our own devices blocked or unblocked someone: the block list changed.
     BlockListChanged,
+    /// Which servers this device hides as age-restricted may have changed: the
+    /// identity's choice arrived, or a server caught up. `allowed` = shown here.
+    AgeGateChanged { allowed: bool },
     // -- Conference events (see node/conference.rs + reports/shipped/voice-and-media/CONFERENCES_PLAN.md) --
     /// (Host) a stranger is at the door. Blocklist already applied at ingest;
     /// `avatar_hash` is a hash, never blob bytes.
@@ -1159,6 +1162,9 @@ pub(crate) enum NodeCommand {
     ReportUser { target: String, category: String },
     /// The FFI just stored a block (or its removal) of `master`; the node acts on it.
     BlockChanged { master: String, blocked: bool },
+    /// The FFI just stored the identity's age-restricted choice (or this phone's own):
+    /// share it with our devices and refresh what the relay may wake us for.
+    AgeGateChanged,
     // -- Temporary nicknames --
     ClaimNickname { nickname: String },
     ReleaseNickname,
@@ -1587,6 +1593,7 @@ impl NodeCommand {
             Self::RemoveFriend { .. } => "RemoveFriend",
             Self::ReportUser { .. } => "ReportUser",
             Self::BlockChanged { .. } => "BlockChanged",
+            Self::AgeGateChanged => "AgeGateChanged",
             Self::ClaimNickname { .. } => "ClaimNickname",
             Self::ReleaseNickname => "ReleaseNickname",
             Self::ClaimLinkCode { .. } => "ClaimLinkCode",
@@ -2099,6 +2106,15 @@ pub(crate) enum HavenMessage {
         /// leaves this false, and the join it starts here is quiet.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         fresh: bool,
+    },
+
+    /// Multi-device: the identity's age-restricted choice for its phones, from one of
+    /// our own devices. Deposited in our inbox too, so a phone away when a computer
+    /// turned it off still learns it.
+    #[serde(rename = "age_gate_sync")]
+    AgeGateSync {
+        #[serde(default)]
+        entry: super::age_gate::AgeGateEntry,
     },
 
     // -- MLS group encryption messages --
@@ -4514,6 +4530,9 @@ impl HavenMessage {
             // An absent sibling hears it from the relay's buffer hours later. Late, it only starts
             // a join members serve while our identity is a member; it carries no `JoinAsk`.
             | Self::SiblingServerAnnounce { .. }
+            // Late from our inbox is its point; the stamp orders it and the Olm ratchet
+            // refuses a replay.
+            | Self::AgeGateSync { .. }
             | Self::ShareManifestResponse { .. } => false,
             Self::KeyRequest { .. }
             | Self::KeyBundle { .. }
@@ -4651,6 +4670,7 @@ impl HavenMessage {
             | Self::DeviceKind { .. }
             | Self::PersonalEmoteSync { .. }
             | Self::SiblingServerAnnounce { .. }
+            | Self::AgeGateSync { .. }
             | Self::DmSiblingSyncRequest { .. }
             | Self::DmSyncRequest { .. }
             | Self::AutoDownloadPref { .. }
@@ -4842,6 +4862,7 @@ impl HavenMessage {
             | Self::FriendRemove { .. }
             | Self::IdentityDestroyed { .. }
             | Self::FriendListSync { .. }
+            | Self::AgeGateSync { .. }
             | Self::FriendListRequest
             | Self::SiblingStateSyncRequest
             | Self::ReadMarkers { .. }

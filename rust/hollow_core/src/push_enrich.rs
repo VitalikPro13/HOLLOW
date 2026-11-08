@@ -81,6 +81,37 @@ pub unsafe extern "C" fn hollow_push_fetch_and_decrypt(
     }
 }
 
+/// iOS NSE: whether a channel wake for `server_id` must show nothing that names it or
+/// leads to it, because this phone hides the server as age-restricted. 1 = hide,
+/// 0 = show; anything unreadable hides.
+///
+/// # Safety
+/// Both pointers must be valid NUL-terminated C strings for the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hollow_push_server_hidden(data_dir: *const c_char, server_id: *const c_char) -> i32 {
+    crate::crash_dumps::keep_secrets_out();
+    let (Some(dir), Some(sid)) = (unsafe { cstr(data_dir) }, unsafe { cstr(server_id) }) else {
+        return 1;
+    };
+    i32::from(server_hidden(&dir, &sid).unwrap_or(true))
+}
+
+fn server_hidden(data_dir: &str, server_id: &str) -> Result<bool, String> {
+    if data_dir.is_empty() || server_id.is_empty() {
+        return Ok(true);
+    }
+    crate::identity::set_data_dir(data_dir.to_string())?;
+    if !crate::log::holds_identity(std::path::Path::new(data_dir)) {
+        return Ok(true);
+    }
+    let Some(id) = crate::identity::load_existing_identity()? else { return Ok(true) };
+    let master_proto = id.keypair.to_protobuf_encoding().map_err(|e| format!("encode keypair: {e}"))?;
+    let passphrase = hex::encode(&master_proto[..32.min(master_proto.len())]);
+    let db_path = std::path::Path::new(data_dir).join("messages.db");
+    let store = crate::storage::MessageStore::open(db_path.to_str().ok_or("bad db path")?, &passphrase)?;
+    Ok(crate::node::age_gate::server_hidden_in(&store, crate::node::age_gate::Platform::current(), server_id))
+}
+
 /// The longest userInfo the extension hands over: FCM and APNs carry at most 4 KB.
 const MAX_FIELDS_JSON: usize = 16 * 1024;
 
@@ -354,6 +385,38 @@ mod tests {
         assert_eq!(open(r#"{"type":"wake","sender":"12D3KooWAbc"}"#), None);
         assert_eq!(open("not json"), None);
         assert_eq!(open(&format!(r#"{{"sealed":"{}"}}"#, "A".repeat(super::MAX_FIELDS_JSON))), None);
+    }
+
+    /// The extension asks Rust before it names a server: a closed iPhone hides an 18+
+    /// server's wake and shows a clean one's. Sets the process data folder, so it runs
+    /// only in a process of its own (nextest).
+    #[test]
+    fn agegate_the_nse_hides_only_an_age_restricted_servers_wake() {
+        if std::env::var_os("NEXTEST").is_none() {
+            return;
+        }
+        use crate::crdt::admin_lww::AdminLwwReg;
+        use crate::crdt::hlc::HlcTimestamp;
+        let dir = crate::test_tmp::tempdir().unwrap();
+        let kp = crate::identity::native_identity::NativeKeypair::from_secret_bytes(&[41u8; 32]);
+        let proto = kp.to_protobuf_encoding().unwrap();
+        std::fs::write(dir.path().join("identity.key"), &proto).unwrap();
+        let pass = hex::encode(&proto[..32]);
+        let db = dir.path().join("messages.db");
+        let store = crate::storage::MessageStore::open(db.to_str().unwrap(), &pass).unwrap();
+        crate::node::age_gate::init_settled(&store, ["clean"].into_iter());
+        for (sid, nsfw) in [("adult", "true"), ("clean", "false")] {
+            let mut state = crate::crdt::server_state::ServerState::new(sid.into(), sid.into(), kp.peer_id());
+            state.settings.insert("is_nsfw".into(), AdminLwwReg::new(nsfw.into(), HlcTimestamp::zero(""), 0));
+            store.save_server_state(sid, &serde_json::to_string(&state).unwrap()).unwrap();
+        }
+        drop(store);
+        let root = CString::new(dir.path().to_str().unwrap()).unwrap();
+        let hidden = |sid: &str| unsafe { super::hollow_push_server_hidden(root.as_ptr(), CString::new(sid).unwrap().as_ptr()) };
+        crate::node::age_gate::set_test_platform(Some(crate::node::age_gate::Platform::Ios));
+        let (adult, clean) = (hidden("adult"), hidden("clean"));
+        crate::node::age_gate::set_test_platform(None);
+        assert_eq!((adult, clean), (1, 0), "the NSE named an 18+ server or hid a clean one");
     }
 
     /// The extension's fetch as a process of its own, for a simulator, where a pushed

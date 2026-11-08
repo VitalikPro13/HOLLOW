@@ -1,0 +1,50 @@
+{
+  "_": [
+    "t14-agegate linked journey, part 2 of 2: a is now b's iPhone (same identity). The 18+ server b holds is hidden on a;",
+    "A freshly linked phone first asks for a lock (Not now). b allows age-restricted servers on its phones and a shows it within seconds; b turns it off and a hides it again.",
+    "The only server named nsfwsrv-* on b is the one agegate_mobile made (fresh identities). b first makes a clean",
+    "server, the positive control: a must show it before its absence of the 18+ one counts."
+  ],
+  "peers": ["a", "b"],
+  "steps": [
+    { "peer": "all", "op": "wait_for", "provider": "connection", "equals": "connected", "timeout_ms": 120000 },
+    { "peer": "a", "op": "wait_for", "target": "text:Set a lock on this device", "timeout_ms": 20000 },
+    { "peer": "a", "op": "tap", "target": "text:Not now", "index": 0 },
+    { "peer": "a", "op": "wait_for", "gone": "text:Set a lock on this device", "timeout_ms": 10000 },
+    { "peer": "b", "op": "key", "value": "escape", "allowMiss": true },
+    { "peer": "b", "op": "tap", "target": "semantics:Create a server" },
+    { "peer": "b", "op": "wait_for", "target": "dialog > text:Add a server", "timeout_ms": 10000 },
+    { "peer": "b", "op": "enter_text", "target": "hint:My Awesome Server", "value": "cleansrv-${RUN}" },
+    { "peer": "b", "op": "tap", "target": "dialog > text:Create", "index": 0 },
+    { "peer": "b", "op": "wait_for", "target": "server:cleansrv-${RUN}", "timeout_ms": 30000 },
+    { "peer": "a", "op": "tap", "target": "semantics:Chats", "index": 0, "soft": true },
+    { "peer": "a", "op": "wait_for", "target": "contains:cleansrv-${RUN}", "timeout_ms": 60000 },
+    { "peer": "a", "op": "wait", "ms": 5000 },
+    { "peer": "a", "op": "expect_no_text", "value": "nsfwsrv-" },
+    { "peer": "a", "op": "shot", "name": "agl-02-a-hidden" },
+
+    { "peer": "b", "op": "key", "value": "escape", "allowMiss": true },
+    { "peer": "b", "op": "wait", "ms": 500 },
+    { "peer": "b", "op": "tap", "target": "semantics:Settings", "index": 0 },
+    { "peer": "b", "op": "wait_for", "target": "type:SettingsPlace", "timeout_ms": 20000 },
+    { "peer": "b", "op": "tap", "target": "type:SettingsPlace > text:Network", "index": 0 },
+    { "peer": "b", "op": "wait_for", "target": "text:Allow age-restricted servers on my phones", "timeout_ms": 10000 },
+    { "peer": "b", "op": "reveal", "target": "text:Allow age-restricted servers on my phones", "allowMiss": true },
+    { "peer": "b", "op": "tap", "target": "semantics:Allow age-restricted servers on my phones", "index": 0 },
+    { "peer": "b", "op": "wait_for", "target": "text:Allow on your phones?", "timeout_ms": 10000 },
+    { "peer": "b", "op": "shot", "name": "agl-03-b-confirm" },
+    { "peer": "b", "op": "tap", "target": "dialog > text:Allow", "index": 0 },
+    { "peer": "b", "op": "wait_for", "gone": "text:Allow on your phones?", "timeout_ms": 10000 },
+    { "peer": "b", "op": "shot", "name": "agl-04-b-on" },
+
+    { "peer": "a", "op": "wait_for", "target": "contains:nsfwsrv-", "timeout_ms": 30000 },
+    { "peer": "a", "op": "shot", "name": "agl-05-a-shown" },
+
+    { "peer": "b", "op": "tap", "target": "semantics:Allow age-restricted servers on my phones", "index": 0 },
+    { "peer": "b", "op": "wait", "ms": 1000 },
+    { "peer": "b", "op": "shot", "name": "agl-06-b-off" },
+    { "peer": "a", "op": "wait_for", "gone": "contains:nsfwsrv-", "timeout_ms": 30000 },
+    { "peer": "a", "op": "expect_text", "value": "cleansrv-${RUN}" },
+    { "peer": "a", "op": "shot", "name": "agl-07-a-hidden-again" }
+  ]
+}

@@ -209,7 +209,7 @@ class _GifPickerBodyState extends ConsumerState<GifPickerBody> {
   /// Rating for the next request: the user's setting, clamped for a server not
   /// flagged NSFW. `build` listens for changes separately.
   String get _rating {
-    final rating = ref.read(gifRatingProvider);
+    final rating = ref.read(gifRatingHereProvider);
     final sid = widget.serverId;
     if (sid == null) return rating;
     final nsfw = ref.read(serverIsNsfwProvider(sid)).valueOrNull ?? false;
@@ -429,7 +429,7 @@ class _GifPickerBodyState extends ConsumerState<GifPickerBody> {
     void requery(_, __) => WidgetsBinding.instance.addPostFrameCallback((_) {
           if (mounted) _runQuery();
         });
-    ref.listen(gifRatingProvider, requery);
+    ref.listen(gifRatingHereProvider, requery);
     if (widget.serverId != null) {
       ref.listen(serverIsNsfwProvider(widget.serverId!), requery);
     }

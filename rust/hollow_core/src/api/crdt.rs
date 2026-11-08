@@ -9,6 +9,8 @@ pub struct ServerFfi {
     pub name: String,
     pub member_count: u32,
     pub channel_count: u32,
+    /// Flagged for adults by its owner (the 18+ consent server).
+    pub is_nsfw: bool,
 }
 
 /// A join that has not completed yet, for the pending tile.
@@ -193,20 +195,29 @@ pub fn remove_channel(server_id: String, channel_id: String) -> Result<(), Strin
 pub fn get_joined_servers() -> Result<Vec<ServerFfi>, String> {
     let store_guard = super::storage::get_store().lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let store = store_guard.as_ref().ok_or("Message store is not open")?;
-    let servers = store.load_all_servers()?;
-
     // Our MASTER id, since memberships are master-keyed. If the identity cannot load
     // (locked), skip the membership filter rather than hiding everything.
     let local_master = crate::identity::load_existing_identity()
         .ok()
         .flatten()
         .map(|id| id.keypair.peer_id());
+    joined_servers_in(store, local_master)
+}
 
+fn joined_servers_in(
+    store: &crate::storage::MessageStore,
+    local_master: Option<String>,
+) -> Result<Vec<ServerFfi>, String> {
+    let servers = store.load_all_servers()?;
+    let gate_open = crate::node::age_gate::allowed_here(store, crate::node::age_gate::Platform::current());
     let mut result = Vec::new();
     for (server_id, state_json) in servers {
         if let Ok(state) =
             serde_json::from_str::<crate::crdt::server_state::ServerState>(&state_json)
         {
+            // A phone keeps an age-restricted server (or one not caught up yet) off
+            // every list; it stays joined.
+            if !gate_open && crate::node::age_gate::hidden_when_closed(store, &server_id, &state) { continue; }
             // Hide tombstoned servers — the node retains the shell to serve the
             // deletion op to reconnecting peers, but the UI must not list it.
             if state.is_deleted() { continue; }
@@ -220,6 +231,7 @@ pub fn get_joined_servers() -> Result<Vec<ServerFfi>, String> {
                 name: state.name().to_string(),
                 member_count: state.members.len() as u32,
                 channel_count: state.channels.len() as u32,
+                is_nsfw: state.is_nsfw(),
             });
         }
     }
@@ -367,9 +379,9 @@ fn channels_from_state(state: &crate::crdt::server_state::ServerState) -> Vec<Ch
                     ChannelPosting::ModeratorPlus => "moderator".to_string(),
                     ChannelPosting::AdminPlus => "admin".to_string(),
                 },
-                // EFFECTIVE flag: voice channels are never public (#44), so a stale CRDT
-                // `is_public` on one never reaches Dart.
-                is_public: ch.effective_public(),
+                // EFFECTIVE flag: voice channels, restricted channels and every channel of
+                // an age-restricted server are never public.
+                is_public: state.is_channel_public(&ch.channel_id),
                 slow_mode: ch.slow_mode,
                 media_only: ch.media_only,
                 visibility_labels: ch.visibility_labels.clone(),
@@ -1933,6 +1945,41 @@ pub fn vault_download_file(server_id: String, content_id: String) -> Result<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A phone with the gate closed lists no age-restricted server and none it has not
+    /// caught up on; Archive and every other Dart reader see the same list.
+    #[test]
+    fn agegate_server_ffi_marks_hidden_only_where_closed() {
+        use crate::node::age_gate::{set_test_platform, Platform};
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let path = tmp.path().join("srv.db").to_string_lossy().into_owned();
+        let store = crate::storage::MessageStore::open(&path, &"ab".repeat(32)).unwrap();
+        store.save_setting("age_settled_init", "1").unwrap();
+        store.save_setting("age_settled:clean", "1").unwrap();
+        store.save_setting("age_settled:adult", "1").unwrap();
+        for (sid, nsfw) in [("clean", false), ("adult", true), ("unknown", false)] {
+            let mut st = crate::crdt::server_state::ServerState::new(sid.into(), sid.into(), "me".into());
+            if nsfw {
+                st.settings.insert(
+                    "is_nsfw".into(),
+                    crate::crdt::admin_lww::AdminLwwReg::new("true".into(), crate::crdt::hlc::HlcTimestamp::zero(""), 0),
+                );
+            }
+            store.save_server_state(sid, &serde_json::to_string(&st).unwrap()).unwrap();
+        }
+        let ids = |p: Platform| {
+            set_test_platform(Some(p));
+            let mut v: Vec<(String, bool)> =
+                joined_servers_in(&store, None).unwrap().into_iter().map(|s| (s.server_id, s.is_nsfw)).collect();
+            set_test_platform(None);
+            v.sort();
+            v
+        };
+        assert_eq!(ids(Platform::Ios), vec![("clean".to_string(), false)]);
+        assert_eq!(ids(Platform::Android), vec![("clean".to_string(), false)]);
+        assert_eq!(ids(Platform::Desktop).len(), 3);
+        assert!(ids(Platform::Desktop).contains(&("adult".to_string(), true)));
+    }
 
     /// A join or a guest browse refuses an id no server has before it reaches the node.
     #[test]

@@ -4,6 +4,8 @@ import 'dart:io';
 import 'package:app_links/app_links.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/age_gate.dart';
+import 'package:hollow/src/ui/dialogs/age_gate_dialogs.dart';
 import 'package:hollow/src/core/providers/app_lock_provider.dart';
 import 'package:hollow/src/core/providers/conference_provider.dart';
 import 'package:hollow/src/core/providers/room_provider.dart';
@@ -173,6 +175,13 @@ class DeepLinkService {
   }
 
   Future<void> _confirmJoinServer(BuildContext context, HollowLink link) async {
+    final container = _container;
+    if (container != null &&
+        container.read(ageGateProvider.notifier).hides(link.id)) {
+      await showAgeRestrictedJoinDialog(
+          context, container.read(ageGateModeProvider));
+      return;
+    }
     final servers = _container?.read(serverListProvider);
     if (servers != null && servers[link.id] != null) {
       _toast('Already a member of this server', HollowToastType.info);

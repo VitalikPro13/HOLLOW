@@ -54,6 +54,8 @@ char *hollow_push_fetch_and_decrypt(const char *data_dir,
 // above. Free the result with hollow_push_string_free.
 char *hollow_push_open_wake(const char *data_dir, const char *fields_json);
 
+int32_t hollow_push_server_hidden(const char *data_dir, const char *server_id);
+
 // Free a string returned by hollow_push_fetch_and_decrypt or hollow_push_open_wake.
 void hollow_push_string_free(char *ptr);
 
