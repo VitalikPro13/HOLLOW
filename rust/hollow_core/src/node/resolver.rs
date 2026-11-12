@@ -54,6 +54,9 @@ pub(crate) fn epoch() -> u64 {
 /// Resolve a device peer_id to its master identity; unknown peers resolve to
 /// themselves. A poisoned lock degrades to passthrough rather than panicking.
 pub(crate) fn resolve(peer_id: &str) -> String {
+    if blind(peer_id) {
+        return peer_id.to_string();
+    }
     match links().read() {
         Ok(map) => map.get(peer_id).cloned().unwrap_or_else(|| peer_id.to_string()),
         Err(_) => peer_id.to_string(),
@@ -73,6 +76,12 @@ pub(crate) fn is_known_master(peer_id: &str) -> bool {
     links().read().is_ok_and(|map| map.values().any(|m| m == peer_id))
 }
 
+/// Whether we hold `master`'s roster or link any device to it: [`disowns`] judges its
+/// devices.
+pub(crate) fn holds_roster_of(master: &str) -> bool {
+    rostered().read().is_ok_and(|set| set.contains(master)) || links().read().is_ok_and(|map| map.iter().any(|(d, m)| m == master && d != master))
+}
+
 /// True when we hold `master`'s roster and `device` is not one of its members: a
 /// certificate its master key signed for a device the roster never admitted (design
 /// ID-1). A master we hold no devices for is not judged here, so a group whose rosters
@@ -81,11 +90,7 @@ pub(crate) fn disowns(master: &str, device: &str) -> bool {
     if device == master {
         return is_bare_master(master);
     }
-    let held = rostered().read().is_ok_and(|set| set.contains(master));
-    links().read().is_ok_and(|map| {
-        let known = held || map.iter().any(|(d, m)| m == master && d != master);
-        known && map.get(device).map(String::as_str) != Some(master)
-    })
+    holds_roster_of(master) && links().read().is_ok_and(|map| map.get(device).map(String::as_str) != Some(master))
 }
 
 /// True when `peer_id` is the id of a master whose roster we hold and that roster
@@ -99,6 +104,9 @@ pub(crate) fn is_bare_master(peer_id: &str) -> bool {
 /// True when `device` links to `master`: a member of the roster we hold for it. Unlike
 /// [`resolve`], an id nobody links resolves to no one here, the master's own included.
 pub(crate) fn is_device_of(device: &str, master: &str) -> bool {
+    if blind(device) {
+        return false;
+    }
     links().read().is_ok_and(|map| map.get(device).map(String::as_str) == Some(master))
 }
 
@@ -199,6 +207,7 @@ pub(crate) fn devices_for(master_peer_id: &str) -> Vec<String> {
             .filter(|(device, master)| {
                 master.as_str() == master_peer_id && device.as_str() != master_peer_id
             })
+            .filter(|(device, _)| !blind(device))
             .map(|(device, _)| device.clone())
             .collect(),
         Err(_) => Vec::new(),
@@ -341,9 +350,43 @@ pub(crate) fn clear_for_test() {
     clear_all();
 }
 
+/// Harness only: (observer device, device) pairs the observer's node cannot place. Its
+/// nodes share this resolver, so one would place a co-member's device through that
+/// co-member's own seat, where in the field it holds only what reached it.
+#[cfg(test)]
+static BLIND: RwLock<Vec<(String, String)>> = RwLock::new(Vec::new());
+
+/// Make the node of `observer` unable to place `device`.
+#[cfg(test)]
+pub(crate) fn blind_for_test(observer: &str, device: &str) {
+    if let Ok(mut b) = BLIND.write() {
+        b.push((observer.to_string(), device.to_string()));
+    }
+    changed();
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+fn blind(_: &str) -> bool {
+    false
+}
+
+#[cfg(test)]
+fn blind(peer_id: &str) -> bool {
+    let Ok(b) = BLIND.read() else { return false };
+    if b.is_empty() || !b.iter().any(|(_, d)| d == peer_id) {
+        return false;
+    }
+    let Some(me) = super::lock_keeper::loop_device_id() else { return false };
+    b.iter().any(|(o, d)| *o == me && d == peer_id)
+}
+
 /// Clear the in-memory resolver between tests.
 #[cfg(test)]
 pub(crate) fn clear_all() {
+    if let Ok(mut b) = BLIND.write() {
+        b.clear();
+    }
     if let Ok(mut map) = links().write() {
         map.clear();
     }

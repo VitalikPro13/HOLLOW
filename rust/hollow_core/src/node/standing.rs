@@ -217,6 +217,17 @@ fn rule_from(server_records: &[LeafRecord], legacy: bool, subgroup: Option<Optio
 
 /// How long a leafless asker waits on a target that neither acked nor seated it.
 pub(crate) const WALK_STEP: Duration = Duration::from_secs(6);
+/// The longest gap between two passes of one walk: the ordinary re-ask.
+pub(crate) const PASS_EVERY: Duration = super::swarm::MLS_BOOTSTRAP_TIMEOUT;
+
+/// The least time a walk's pass `passes` (0 = the first) runs before the next may start:
+/// [`WALK_STEP`], doubling per pass up to [`PASS_EVERY`]. A target that said Cannot may
+/// soon learn of our admission, so the first retries come quickly; two leafless members
+/// that keep answering each other Cannot settle at one fresh package a minute.
+pub(crate) fn pass_gap(passes: u32) -> Duration {
+    WALK_STEP.saturating_mul(1u32 << passes.min(8)).min(PASS_EVERY)
+}
+
 /// A required probe unanswered this long counts as silence.
 pub(crate) const SILENCE_AFTER: Duration = Duration::from_secs(15);
 /// How long a silent responder is skipped, and the window holding at most one skip.
@@ -267,7 +278,12 @@ struct Walk {
     /// The devices of the current target and when they were asked.
     devices: Vec<String>,
     sent: Instant,
+    /// When this pass began and how many passes came before it ([`pass_gap`]).
+    pass_started: Instant,
+    passes: u32,
     ack: Option<KpOutcome>,
+    /// The membership it serves ([`membership_span`]).
+    span: usize,
 }
 
 #[derive(Default)]
@@ -316,18 +332,34 @@ impl LeadBook {
         self.with(|i| i.walks.get(group_key).and_then(|w| w.asked.last().cloned()))
     }
 
-    /// Record an ask of `target` (its `devices`) with `package`; a full pass restarts.
-    pub(crate) fn note_walk_ask(&self, group_key: &str, target: &str, devices: Vec<String>, package: Vec<u8>, restart: bool) {
+    /// Forget a walk of `group_key` that served another membership of ours than `span`.
+    pub(crate) fn settle_walk(&self, group_key: &str, span: usize) {
+        self.with(|i| {
+            if i.walks.get(group_key).is_some_and(|w| w.span != span) {
+                i.walks.remove(group_key);
+            }
+        })
+    }
+
+    /// Record an ask of `target` (its `devices`) with `package` for membership `span`;
+    /// a full pass restarts.
+    pub(crate) fn note_walk_ask(&self, group_key: &str, target: &str, devices: Vec<String>, package: Vec<u8>, restart: bool, span: usize) {
+        self.settle_walk(group_key, span);
         self.with(|i| {
             let walk = i.walks.entry(group_key.to_string()).or_insert_with(|| Walk {
                 asked: Vec::new(),
                 package: package.clone(),
                 devices: Vec::new(),
                 sent: Instant::now(),
+                pass_started: Instant::now(),
+                passes: 0,
                 ack: None,
+                span,
             });
             if restart {
                 walk.asked.clear();
+                walk.pass_started = Instant::now();
+                walk.passes = walk.passes.saturating_add(1);
             }
             walk.package = package;
             walk.asked.push(target.to_string());
@@ -351,6 +383,13 @@ impl LeadBook {
             }
             true
         })
+    }
+
+    /// Whether a walk that asked everyone may start a new pass ([`pass_gap`]). Two
+    /// leafless members answer each other Cannot at once, and a pass on every answer
+    /// mints a KeyPackage each tick.
+    pub(crate) fn walk_may_restart(&self, group_key: &str) -> bool {
+        self.with(|i| i.walks.get(group_key).is_none_or(|w| w.pass_started.elapsed() >= pass_gap(w.passes)))
     }
 
     /// Whether the walk should step on now: the target said it cannot, or nothing came
@@ -471,15 +510,87 @@ impl LeadBook {
     }
 }
 
-/// Online CRDT members a leafless asker of a non-Legacy server tries, in order: by
-/// standing, the owner first.
+/// The member master `state`'s view counts `device` for, when no roster we hold places
+/// it. A joiner meets co-members as strangers until its Welcome: the rosters the join
+/// answer carried reach only that view, never the resolver. None for a device the
+/// resolver places, a revoked device, any id the server or its view names as a master,
+/// a device any view entry removed, or one two identities' rosters count.
+pub(crate) fn view_master(state: &ServerState, device: &str) -> Option<String> {
+    if super::resolver::resolve(device) != device
+        || super::resolver::is_revoked(device)
+        || state.authority.entry(device).is_some()
+        || super::roster_book::server_names_master(state, device)
+    {
+        return None;
+    }
+    let mut counting = None;
+    for m in state.authority.masters() {
+        let Some(auth) = state.authority.entry(m).and_then(|e| e.auth.as_ref()) else { continue };
+        if auth.removed.contains_key(device) {
+            return None;
+        }
+        if auth.counts(device) {
+            if counting.is_some() {
+                return None;
+            }
+            counting = Some(m);
+        }
+    }
+    // Last: it reads every link the resolver holds.
+    counting.filter(|_| !super::resolver::is_known_master(device)).cloned()
+}
+
+/// The devices in a server's own room that only its view places ([`view_master`]), by
+/// master: what a leafless walk adds to the resolver, built once per decision.
+#[derive(Default)]
+pub(crate) struct WalkView(Vec<(String, String)>);
+
+impl WalkView {
+    pub(crate) fn of(state: &ServerState, peers: &Peers) -> Self {
+        let placed = peers
+            .get(&state.server_id)
+            .into_iter()
+            .flatten()
+            .filter_map(|d| view_master(state, d).map(|m| (d.clone(), m)))
+            .collect();
+        Self(placed)
+    }
+
+    /// Online CRDT members a leafless walk tries, in order: by standing, the owner first.
+    pub(crate) fn order(&self, state: &ServerState, local_master: &str, peers: &Peers) -> Vec<String> {
+        let online = state
+            .members
+            .keys()
+            .filter(|m| {
+                !super::resolver::same_identity(m, local_master)
+                    && (super::crypto_handler::peer_is_reachable(peers, m) || self.0.iter().any(|(_, p)| p == *m))
+            })
+            .cloned();
+        rank_masters(state, online)
+    }
+
+    /// The online devices of walk target `master`: those the resolver places, and those
+    /// only the view places.
+    pub(crate) fn devices(&self, master: &str, peers: &Peers) -> Vec<String> {
+        let mut devices = super::crypto_handler::online_devices_for(peers, master);
+        devices.extend(self.0.iter().filter(|(_, m)| m == master).map(|(d, _)| d.clone()));
+        devices.sort();
+        devices.dedup();
+        devices
+    }
+}
+
+/// Online CRDT members of a non-Legacy server by standing, the owner first, as the
+/// resolver places them: the order every leader search but the leafless walk reads,
+/// since their sends reach only devices the resolver places.
 pub(crate) fn walk_order(state: &ServerState, local_master: &str, peers: &Peers) -> Vec<String> {
-    let online = state
-        .members
-        .keys()
-        .filter(|m| !super::resolver::same_identity(m, local_master) && super::crypto_handler::peer_is_reachable(peers, m))
-        .cloned();
-    rank_masters(state, online)
+    WalkView::default().order(state, local_master, peers)
+}
+
+/// Which membership of ours a walk serves: a walk never outlives a leave, kick or
+/// rejoin, each of which opens or closes a span.
+pub(crate) fn membership_span(state: &ServerState, local_master: &str) -> usize {
+    state.member_record.get(local_master).map_or(0, Vec::len)
 }
 
 /// The next master a leafless walk asks, and whether that starts a new pass.
@@ -761,6 +872,79 @@ mod tests {
         assert!(!leafless_may_answer(&s, "000x", Some("mem")), "below our target: refused");
     }
 
+    /// t14-mlsjoin: a joiner holds co-members' rosters only in the server's view until its
+    /// Welcome, so a device only that view places still makes its master a walk target,
+    /// and the ask goes to that device. Never a device two rosters count, a revoked one,
+    /// one the resolver places elsewhere, or anything while the view is unset.
+    #[test]
+    fn a_device_only_the_servers_view_places_joins_the_walk() {
+        let _g = crate::node::resolver::test_lock();
+        let mut s = state(&[("t14own", 10, &[]), ("t14adm", 40, &[("t14own", 40)]), ("t14me", 60, &[("t14own", 60)])]);
+        set_role(&mut s, "t14adm", MemberRole::Admin);
+        let room = |devices: &[&str]| -> Peers { [(s.server_id.clone(), devices.iter().map(|d| d.to_string()).collect())].into() };
+        let peers = room(&["t14own-d", "t14adm-d", "t14twice-d", "t14me-d"]);
+        let walk = |s: &ServerState, peers: &Peers| WalkView::of(s, peers).order(s, "t14me", peers);
+        let devices = |s: &ServerState, m: &str, peers: &Peers| WalkView::of(s, peers).devices(m, peers);
+        assert!(walk(&s, &peers).is_empty(), "an unset view places nobody");
+        let counting = |devices: &[&str]| crate::crdt::authority::ViewEntry {
+            key: None,
+            auth: Some(crate::identity::roster::Authority { counted: devices.iter().map(|d| d.to_string()).collect(), ..Default::default() }),
+        };
+        let mut view = crate::crdt::authority::AuthorityView::judging();
+        view.insert("t14own".into(), counting(&["t14own-d", "t14twice-d"]));
+        view.insert("t14adm".into(), counting(&["t14adm-d", "t14twice-d"]));
+        s.authority = std::sync::Arc::new(view);
+        assert_eq!(walk(&s, &peers), vec!["t14own", "t14adm"]);
+        assert!(walk_order(&s, "t14me", &peers).is_empty(), "every other leader search reads the resolver alone");
+        assert_eq!(devices(&s, "t14own", &peers), vec!["t14own-d"], "a device two rosters count goes to neither");
+        assert_eq!(view_master(&s, "t14twice-d"), None);
+        let elsewhere: Peers = [("other-room".to_string(), ["t14own-d".to_string()].into())].into();
+        assert!(devices(&s, "t14own", &elsewhere).is_empty(), "only the server's own room counts");
+        crate::node::resolver::mark_revoked(&["t14own-d".to_string()]);
+        assert_eq!(walk(&s, &peers), vec!["t14adm"], "a revoked device places nobody");
+        crate::node::resolver::unmark_revoked(&["t14own-d".to_string()]);
+        crate::node::resolver::update_many("t14x", ["t14own-d"]);
+        assert_eq!(view_master(&s, "t14own-d"), None, "the resolver's word stands");
+        crate::node::resolver::forget("t14own-d");
+        // A master id is never a walk device, whatever a roster counts.
+        let mut view = (*s.authority).clone();
+        view.insert("t14own".into(), counting(&["t14own-d", "t14own", "t14m2"]));
+        s.authority = std::sync::Arc::new(view);
+        crate::node::resolver::update_many("t14m2", ["t14m2-d"]);
+        assert_eq!(view_master(&s, "t14own"), None, "its own master id");
+        assert_eq!(view_master(&s, "t14m2"), None, "another identity's master id");
+        assert_eq!(view_master(&s, "t14own-d").as_deref(), Some("t14own"));
+        crate::node::resolver::forget("t14m2-d");
+    }
+
+    /// t14-mlsjoin: a walk that asked everyone starts a new pass, with a fresh package,
+    /// after a gap that doubles per pass from [`WALK_STEP`] to [`PASS_EVERY`]; a first
+    /// ask never waits.
+    #[test]
+    fn a_walk_starts_a_new_pass_once_per_window() {
+        assert_eq!(
+            (0..6).map(pass_gap).map(|d| d.as_secs()).collect::<Vec<_>>(),
+            vec![6, 12, 24, 48, 60, 60],
+        );
+        assert_eq!(pass_gap(u32::MAX), PASS_EVERY);
+        let book = LeadBook::default();
+        let age = |by: Duration| book.with(|i| i.walks.get_mut("g").unwrap().pass_started -= by);
+        assert!(book.walk_may_restart("g"), "no walk yet");
+        book.note_walk_ask("g", "a", vec!["a-d".into()], b"pkg".to_vec(), false, 1);
+        assert!(!book.walk_may_restart("g"), "the pass just began");
+        age(WALK_STEP);
+        assert!(book.walk_may_restart("g"), "the first gap is one step");
+        age(PASS_EVERY);
+        book.note_walk_ask("g", "a", vec!["a-d".into()], b"pkg2".to_vec(), true, 1);
+        assert!(!book.walk_may_restart("g"), "a new pass starts the window again");
+        age(WALK_STEP);
+        assert!(!book.walk_may_restart("g"), "the second gap is twice as long");
+        book.note_walk_ask("g", "b", vec!["b-d".into()], b"pkg2".to_vec(), false, 1);
+        assert!(!book.walk_may_restart("g"), "a step within the pass does not");
+        age(WALK_STEP);
+        assert!(book.walk_may_restart("g"));
+    }
+
     /// Unit 7: an admission authored by a member who has since left buys its admittee
     /// nothing; unit 9: a duplicate admission never worsens a position.
     #[test]
@@ -845,7 +1029,7 @@ mod tests {
     #[test]
     fn an_ack_counts_only_from_a_device_we_asked_for_our_package() {
         let book = LeadBook::default();
-        book.note_walk_ask("g", "adm", vec!["adm-d".into()], b"pkg".to_vec(), false);
+        book.note_walk_ask("g", "adm", vec!["adm-d".into()], b"pkg".to_vec(), false, 1);
         let tag = package_tag(b"pkg");
         assert!(!book.note_ack("g", "x-d", &tag, KpOutcome::Cannot), "a device we did not ask");
         assert!(!book.note_ack("g", "adm-d", &package_tag(b"other"), KpOutcome::Cannot), "another package");
@@ -853,11 +1037,11 @@ mod tests {
         assert!(book.note_ack("g", "adm-d", &tag, KpOutcome::Forwarded));
         assert!(!book.walk_step_due("g"), "a forward waits for the ordinary re-ask");
         assert_eq!(book.walk_package("g"), Some(b"pkg".to_vec()), "the pass keeps its package");
-        book.note_walk_ask("g", "mem", vec!["mem-d".into()], b"pkg".to_vec(), false);
+        book.note_walk_ask("g", "mem", vec!["mem-d".into()], b"pkg".to_vec(), false, 1);
         assert!(book.note_ack("g", "mem-d", &tag, KpOutcome::Cannot));
         assert!(book.walk_step_due("g"), "Cannot steps at once");
         assert_eq!(book.walk_asked("g"), vec!["adm", "mem"]);
-        book.note_walk_ask("g", "own", vec!["own-d".into()], b"pkg".to_vec(), false);
+        book.note_walk_ask("g", "own", vec!["own-d".into()], b"pkg".to_vec(), false, 1);
         assert!(book.note_ack("g", "own-d", &tag, KpOutcome::Commit));
         assert!(book.walk_package("g").is_none(), "asked again after a Commit, the next ask mints afresh");
         book.end_walk("g");
@@ -957,5 +1141,115 @@ mod tests {
         assert_eq!(admitted(at("b-desk"), "b", &seen_by_b), vec!["a", "b"], "A's and B's replicas disagree on who may lead");
         // Our own declaring leaf counts the moment it is this device's.
         assert_eq!(admitted(at("b-phone"), "b", &seen_by_b), vec!["b"], "this device declares and is online");
+    }
+
+    /// REVIEW (t14-mlsjoin, finding 1): the stale-leaf repair picks its target from
+    /// `walk_order`, which now counts a master only the server's view places, but sends
+    /// through `carry_key_package_to_identity`, which places by the resolver alone. A
+    /// target the order offers must be one the send can reach, or the caller mints a
+    /// KeyPackage every tick and never stamps its throttle.
+    #[test]
+    fn review_every_master_the_walk_order_offers_is_one_the_repair_send_reaches() {
+        let _g = crate::node::resolver::test_lock();
+        crate::node::resolver::clear_for_test();
+        let mut s = state(&[("rvown", 10, &[]), ("rvadm", 40, &[("rvown", 40)]), ("rvme", 60, &[("rvown", 60)])]);
+        set_role(&mut s, "rvadm", MemberRole::Admin);
+        let counting = |devices: &[&str]| crate::crdt::authority::ViewEntry {
+            key: None,
+            auth: Some(crate::identity::roster::Authority { counted: devices.iter().map(|d| d.to_string()).collect(), ..Default::default() }),
+        };
+        let mut view = crate::crdt::authority::AuthorityView::judging();
+        view.insert("rvadm".into(), counting(&["rvadm-d"]));
+        s.authority = std::sync::Arc::new(view);
+        let peers: Peers = [(s.server_id.clone(), ["rvadm-d".to_string(), "rvme-d".to_string()].into())].into();
+        assert_eq!(WalkView::of(&s, &peers).order(&s, "rvme", &peers), vec!["rvadm".to_string()], "precondition: the view alone puts the admin in the leafless walk");
+        let order = walk_order(&s, "rvme", &peers);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let msg = super::super::types::HavenMessage::MlsKeyPackageRequest { server_id: s.server_id.clone(), channel_id: None };
+        for target in &order {
+            let reached = crate::node::crypto_handler::carry_key_package_to_identity(&tx, &peers, target, &msg);
+            assert!(
+                reached > 0,
+                "walk_order offers {target} but carry_key_package_to_identity reaches {reached} device(s): \
+                 ask_repair_of_stale_leaves mints, sends nothing, stamps nothing, and mints again next tick",
+            );
+        }
+    }
+
+    /// REVIEW (t14-mlsjoin, finding 2): `view_master` promises never a master id, but
+    /// checks only masters the RESOLVER knows. A joiner meets co-members as strangers, so
+    /// a co-member's master id (an identity in the view, a CRDT member) is unknown to its
+    /// resolver; a socket logged in as that master id (G1: anyone with the master key)
+    /// must not be placed as another identity's device.
+    #[test]
+    fn review_a_master_id_only_the_view_knows_is_never_a_walk_device() {
+        let _g = crate::node::resolver::test_lock();
+        crate::node::resolver::clear_for_test();
+        let mut s = state(&[("rvown2", 10, &[]), ("rvm2", 40, &[("rvown2", 40)]), ("rvme2", 60, &[("rvown2", 60)])]);
+        let counting = |devices: &[&str]| crate::crdt::authority::ViewEntry {
+            key: None,
+            auth: Some(crate::identity::roster::Authority { counted: devices.iter().map(|d| d.to_string()).collect(), ..Default::default() }),
+        };
+        let mut view = crate::crdt::authority::AuthorityView::judging();
+        view.insert("rvown2".into(), counting(&["rvown2-d", "rvm2"]));
+        view.insert("rvm2".into(), counting(&["rvm2-d"]));
+        s.authority = std::sync::Arc::new(view);
+        assert!(!crate::node::resolver::is_known_master("rvm2"), "precondition: the joiner's resolver never met rvm2");
+        assert_eq!(view_master(&s, "rvm2"), None, "a member's own master id (in the view and the CRDT) placed as rvown2's device");
+    }
+
+    /// t14-mlsjoin r3: a device a held roster removed, and any id the server or its view
+    /// names as a master, is never a walk device, even where another roster counts it.
+    #[test]
+    fn a_removed_device_or_a_named_master_id_is_never_a_walk_device() {
+        let _g = crate::node::resolver::test_lock();
+        crate::node::resolver::clear_for_test();
+        let mut s = state(&[("r3own", 10, &[]), ("r3mem", 40, &[("r3own", 40)]), ("r3me", 60, &[("r3own", 60)])]);
+        let entry = |counted: &[&str], removed: &[&str]| crate::crdt::authority::ViewEntry {
+            key: None,
+            auth: Some(crate::identity::roster::Authority {
+                counted: counted.iter().map(|d| d.to_string()).collect(),
+                removed: removed.iter().map(|d| (d.to_string(), "by".to_string())).collect(),
+                ..Default::default()
+            }),
+        };
+        let mut view = crate::crdt::authority::AuthorityView::judging();
+        view.insert("r3own".into(), entry(&["r3own-d", "r3gone-d", "r3mem", "r3author"], &[]));
+        view.insert("r3mem".into(), entry(&["r3mem-d"], &["r3gone-d"]));
+        view.insert("r3author".into(), entry(&[], &[]));
+        s.authority = std::sync::Arc::new(view);
+        assert_eq!(view_master(&s, "r3own-d").as_deref(), Some("r3own"), "control");
+        assert_eq!(view_master(&s, "r3gone-d"), None, "another identity's roster removed it");
+        s.members.remove("r3mem");
+        assert_eq!(view_master(&s, "r3mem"), None, "the key of a view entry");
+        let mut s = state(&[("r3own", 10, &[]), ("r3mem", 40, &[("r3own", 40)]), ("r3me", 60, &[("r3own", 60)])]);
+        let mut view = crate::crdt::authority::AuthorityView::judging();
+        view.insert("r3own".into(), entry(&["r3own-d", "r3mem"], &[]));
+        s.authority = std::sync::Arc::new(view);
+        assert_eq!(view_master(&s, "r3mem"), None, "a CRDT member with no view entry");
+    }
+
+    /// t14-mlsjoin r3: a walk serves one membership of ours; after a leave, kick or
+    /// rejoin it neither steps on a stale Cannot nor holds a new ask back.
+    #[test]
+    fn a_walk_never_outlives_the_membership_it_served() {
+        let book = LeadBook::default();
+        book.note_walk_ask("g", "a", vec!["a-d".into()], b"pkg".to_vec(), false, 1);
+        assert!(book.note_ack("g", "a-d", &package_tag(b"pkg"), KpOutcome::Cannot));
+        assert!(!book.walk_may_restart("g"));
+        book.settle_walk("g", 1);
+        assert!(book.walk_step_due("g"), "the same membership keeps its walk");
+        book.settle_walk("g", 2);
+        assert!(!book.walk_step_due("g"), "a stale Cannot stepped on");
+        assert!(book.walk_asked("g").is_empty() && book.walk_may_restart("g"));
+        book.note_walk_ask("g", "a", vec!["a-d".into()], b"pkg".to_vec(), false, 1);
+        book.note_walk_ask("g", "b", vec!["b-d".into()], b"pkg2".to_vec(), false, 2);
+        assert_eq!(book.walk_asked("g"), vec!["b"], "an ask for a new membership starts its own walk");
+        let mut s = state(&[("sp-own", 10, &[]), ("sp-me", 60, &[("sp-own", 60)])]);
+        assert_eq!(membership_span(&s, "sp-me"), 1);
+        let again = s.member_record["sp-me"][0].clone();
+        s.member_record.get_mut("sp-me").unwrap().push(again);
+        assert_eq!(membership_span(&s, "sp-me"), 2, "a rejoin opens a span");
+        assert_eq!(membership_span(&s, "sp-gone"), 0);
     }
 }

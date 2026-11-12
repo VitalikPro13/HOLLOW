@@ -27926,7 +27926,9 @@ fn harness_fixed_sleep_budget_does_not_grow() {
     // by members, a waiting joiner, a recovery pool and a relaunched leaver (20.3 s).
     // 2026-11-11: t14-relay added a lock move's quiet re-joins (settle before and after the
     // count, 3.5 s) and a silent socket drop under the batch window (1.5 s).
-    const BUDGET_MS: u64 = 1_179_800;
+    // 2026-11-12: t14-mlsjoin added one absence, KeyPackages two leafless joiners must
+    // not mint while they answer each other Cannot (14.0 s).
+    const BUDGET_MS: u64 = 1_193_800;
 
     let src = include_str!("test_harness.rs");
     // Built from pieces so this scan does not count its own source text.
@@ -67270,4 +67272,167 @@ async fn t14relay_h_a_dm_refresh_purges_a_silently_dropped_friend() {
     })
     .await;
     assert!(gone, "A's DM room still listed the friend the relay had dropped");
+}
+
+// t14-mlsjoin
+
+/// The distinct KeyPackages `from` put on the wire since the wiretap started.
+fn t14_key_packages_from(relay: &MockRelay, from: &str) -> std::collections::BTreeSet<String> {
+    relay
+        .wiretap()
+        .frames
+        .iter()
+        .filter(|f| f.from == from && f.label() == "mls_kp")
+        .filter_map(|f| match recorded_message(&f.body) {
+            Ok(super::types::HavenMessage::MlsKeyPackage { key_package, .. }) => Some(key_package),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Three strangers on devices of their own (never friends, so no roster crosses
+/// outside the server), the first owning a fresh server.
+async fn t14_strangers(relay: &MockRelay, tags: &[(u8, u8)], name: &str) -> (Vec<TestNode>, String) {
+    let now = super::roster_book::now_ms();
+    let mut nodes = Vec::new();
+    for (master, device) in tags {
+        nodes.push(spawn_node_seeded(relay, *master, *device, &[], Some(protected_roster(*master, &[*device], now - 60_000))).await);
+    }
+    let server_id = create_server_and_wait(&mut nodes[0], name).await;
+    (nodes, server_id)
+}
+
+/// Two joiners of different identities join at once. Neither has met the owner's device
+/// outside the server, so before its Welcome a joiner holds the owner's roster only in
+/// the server's view (the join answer's rosters never enter the resolver). The walk must
+/// still find the owner's device there, never loop between the two leafless joiners.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn t14_two_leafless_joiners_get_their_welcome_from_the_leaf_holder() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut nodes, sid) = t14_strangers(&relay, &[(211, 212), (213, 214), (215, 216)], "Two at once").await;
+    let ids: Vec<String> = nodes.iter().map(|n| n.device_id.clone()).collect();
+    // HARNESS HONESTY: the resolver is process-global, so a joiner would place the owner's
+    // device through the owner's own seat. In the field a joiner holds only what the join
+    // answer told its server view.
+    for joiner in &ids[1..] {
+        super::resolver::blind_for_test(joiner, &ids[0]);
+    }
+    relay.start_wiretap();
+    for n in nodes[1..].iter() {
+        n.cmd_tx.send(join_cmd(&sid)).await.unwrap();
+    }
+    for n in nodes[1..].iter_mut() {
+        assert!(expect_joined(n, &sid, 20).await, "{} joins", n.device_id);
+    }
+    expect_mls_leaf(&nodes[0], &sid, &ids[1], 40).await;
+    expect_mls_leaf(&nodes[0], &sid, &ids[2], 40).await;
+    for (i, joiner) in ids.iter().enumerate().skip(1) {
+        let minted = t14_key_packages_from(&relay, joiner);
+        assert!(minted.len() <= 2, "joiner {i} put {} KeyPackages on the wire", minted.len());
+    }
+    drop(nodes);
+}
+
+/// The same pair with the owner away: the admin holding the group seats both. Neither
+/// joiner places the admin's device outside the server's view.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn t14_two_leafless_joiners_are_seated_by_the_stand_in_while_the_owner_is_away() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut nodes, sid) = t14_strangers(&relay, &[(221, 222), (223, 224), (225, 226), (227, 228)], "Stand-in").await;
+    let ids: Vec<String> = nodes.iter().map(|n| n.device_id.clone()).collect();
+    let admin_master = nodes[1].master_id.clone();
+    join_and_wait(&mut nodes[1], &sid).await;
+    expect_mls_leaf(&nodes[0], &sid, &ids[1], 30).await;
+    nodes[0]
+        .cmd_tx
+        .send(NodeCommand::ChangeRole { server_id: sid.clone(), peer_id: admin_master.clone(), new_role: "admin".into() })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(15, async || nodes[1].live_role(&sid, &admin_master).await == crate::crdt::operations::MemberRole::Admin).await,
+        "the admin sees its role",
+    );
+    g13w3_owner_away(&relay, &nodes[0], &[&nodes[1]]).await;
+    // HARNESS HONESTY: as above, for the admin's device.
+    for joiner in &ids[2..] {
+        super::resolver::blind_for_test(joiner, &ids[1]);
+    }
+    relay.start_wiretap();
+    for n in nodes[2..].iter() {
+        n.cmd_tx.send(join_cmd(&sid)).await.unwrap();
+    }
+    for n in nodes[2..].iter_mut() {
+        assert!(expect_joined(n, &sid, 20).await, "{} joins", n.device_id);
+    }
+    expect_mls_leaf(&nodes[1], &sid, &ids[2], 40).await;
+    expect_mls_leaf(&nodes[1], &sid, &ids[3], 40).await;
+    for (i, joiner) in ids.iter().enumerate().skip(2) {
+        let minted = t14_key_packages_from(&relay, joiner);
+        assert!(minted.len() <= 2, "joiner {i} put {} KeyPackages on the wire", minted.len());
+    }
+    drop(nodes);
+}
+
+/// Two admitted joiners with no leaf holder in reach answer each other `Cannot`. A walk
+/// that has asked everyone starts a new pass, with a fresh KeyPackage, only after its
+/// growing gap, never on every tick; and the owner back in reach seats both.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn t14_leafless_joiners_with_nobody_to_seat_them_mint_no_key_package_storm() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut nodes, sid) = t14_strangers(&relay, &[(231, 232), (233, 234), (235, 236)], "Nobody seats").await;
+    let ids: Vec<String> = nodes.iter().map(|n| n.device_id.clone()).collect();
+    relay.swallow_direct(&ids[1], &ids[0]);
+    relay.swallow_direct(&ids[2], &ids[0]);
+    for n in nodes[1..].iter_mut() {
+        join_and_wait(n, &sid).await;
+    }
+    g13w3_owner_away(&relay, &nodes[0], &[&nodes[1], &nodes[2]]).await;
+    relay.start_wiretap();
+    // Absence: seven batch ticks of answers that say Cannot. A pass per answer mints about
+    // five here; the doubling gap (6 s, then 12 s) allows two in any 17 s.
+    sleep_ms(14_000).await;
+    for (i, joiner) in ids.iter().enumerate().skip(1) {
+        let minted = t14_key_packages_from(&relay, joiner);
+        assert!(minted.len() <= 2, "joiner {i} minted {} KeyPackages in 14 s with nobody to seat it", minted.len());
+    }
+    relay.release_direct(&ids[1], &ids[0]);
+    relay.release_direct(&ids[2], &ids[0]);
+    relay.set_online(&ids[0], true);
+    expect_mls_leaf(&nodes[0], &sid, &ids[1], 70).await;
+    expect_mls_leaf(&nodes[0], &sid, &ids[2], 70).await;
+    drop(nodes);
+}
+
+/// A lone stranger joins a server whose owner is its only member: the owner's roster
+/// reaches the joiner only in the join answer, from the owner's own device, and no
+/// second member can confirm it. The walk still finds that device through the view.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn t14_a_lone_stranger_joiner_is_seated_by_the_only_member() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut nodes, sid) = t14_strangers(&relay, &[(241, 242), (243, 244)], "Alone").await;
+    let ids: Vec<String> = nodes.iter().map(|n| n.device_id.clone()).collect();
+    // HARNESS HONESTY: as in the tests above.
+    super::resolver::blind_for_test(&ids[1], &ids[0]);
+    relay.start_wiretap();
+    nodes[1].cmd_tx.send(join_cmd(&sid)).await.unwrap();
+    assert!(expect_joined(&mut nodes[1], &sid, 20).await, "the stranger joins");
+    expect_mls_leaf(&nodes[0], &sid, &ids[1], 40).await;
+    assert!(t14_key_packages_from(&relay, &ids[1]).len() <= 2, "one walk, no storm");
+    drop(nodes);
 }

@@ -2248,11 +2248,35 @@ pub(crate) fn leaf_ask_target(
     local_master: &str,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
 ) -> Option<(String, bool)> {
+    let view = walk_view(server, ws_room_peers);
+    leaf_ask_target_in(mls, server, server_id, local_master, ws_room_peers, &view)
+}
+
+/// What the server's view adds to the resolver for a leafless walk; nothing for Legacy.
+fn walk_view(
+    server: &crate::crdt::server_state::ServerState,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+) -> super::standing::WalkView {
+    if server.anchor() == crate::crdt::server_state::Anchor::Legacy {
+        return super::standing::WalkView::default();
+    }
+    super::standing::WalkView::of(server, ws_room_peers)
+}
+
+fn leaf_ask_target_in(
+    mls: &MlsManager,
+    server: &crate::crdt::server_state::ServerState,
+    server_id: &str,
+    local_master: &str,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    view: &super::standing::WalkView,
+) -> Option<(String, bool)> {
     if server.anchor() == crate::crdt::server_state::Anchor::Legacy {
         let old = old_bootstrap_target(server, local_master, ws_room_peers).filter(|t| !super::resolver::same_identity(t, local_master));
         return old.map(|t| (t, true));
     }
-    let order = super::standing::walk_order(server, local_master, ws_room_peers);
+    mls.lead.settle_walk(server_id, super::standing::membership_span(server, local_master));
+    let order = view.order(server, local_master, ws_room_peers);
     super::standing::next_walk_target(&order, &mls.lead.walk_asked(server_id))
 }
 
@@ -2270,12 +2294,16 @@ pub(crate) fn walk_leaf_ask(
     local_master: &str,
     minted: Option<Vec<u8>>,
 ) -> bool {
-    let Some((target, restart)) = leaf_ask_target(mls, server, server_id, local_master, ws_room_peers) else { return false };
-    let devices = online_devices_for(ws_room_peers, &target);
+    let view = walk_view(server, ws_room_peers);
+    let Some((target, restart)) = leaf_ask_target_in(mls, server, server_id, local_master, ws_room_peers, &view) else { return false };
+    let legacy = server.anchor() == crate::crdt::server_state::Anchor::Legacy;
+    if restart && !legacy && !mls.lead.walk_may_restart(server_id) {
+        return false;
+    }
+    let devices = if legacy { online_devices_for(ws_room_peers, &target) } else { view.devices(&target, ws_room_peers) };
     if devices.is_empty() {
         return false;
     }
-    let legacy = server.anchor() == crate::crdt::server_state::Anchor::Legacy;
     let kept = if legacy || restart { None } else { mls.lead.walk_package(server_id) };
     let kp_bytes = match kept.or(minted) {
         Some(kp) => kp,
@@ -2294,7 +2322,7 @@ pub(crate) fn walk_leaf_ask(
         return false;
     }
     if !legacy {
-        mls.lead.note_walk_ask(server_id, &target, reached, kp_bytes, restart);
+        mls.lead.note_walk_ask(server_id, &target, reached, kp_bytes, restart, super::standing::membership_span(server, local_master));
     }
     hollow_log!("[HOLLOW-MLS] Asked {target} for a leaf in {server_id}");
     true
@@ -2331,6 +2359,9 @@ pub(crate) fn request_server_leaf(
         }
         return false;
     }
+    // Our siblings seat us now, on the ordinary re-ask: a walk left stepping (a Cannot
+    // heard while none was online) would bring us back here, and mint, every tick.
+    mls.lead.end_walk(server_id);
     let kp_bytes = match mint_group_key_package(mls, crypto_store, server_id, false) {
         Ok(kp) => kp,
         Err(e) => { hollow_log!("[HOLLOW-MLS] server-group KP gen failed: {e}"); return false; }
@@ -3095,11 +3126,21 @@ pub(crate) fn carry_key_package_to_identity(
     identity: &str,
     msg: &HavenMessage,
 ) -> usize {
+    key_package_devices(ws_room_peers, identity).iter().filter(|dev| carry_key_package(ws_cmd_tx, ws_room_peers, dev, msg)).count()
+}
+
+/// The devices [`carry_key_package_to_identity`] sends to: checked before a mint, since
+/// a package that reaches nobody is minted again on the next tick.
+pub(crate) fn key_package_devices(
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    identity: &str,
+) -> Vec<String> {
     let mut devices = online_devices_for(ws_room_peers, identity);
     if devices.is_empty() && ws_room_for_peer(ws_room_peers, identity).is_some() {
         devices.push(identity.to_string());
     }
-    devices.iter().filter(|dev| carry_key_package(ws_cmd_tx, ws_room_peers, dev, msg)).count()
+    devices.retain(|d| send_room_for_peer(ws_room_peers, d).is_some());
+    devices
 }
 
 /// Send pre-serialized bytes to a specific peer via the WS relay.
@@ -3492,6 +3533,9 @@ fn ask_repair_of_stale_leaves(
             .filter(|m| !lead.excludes(m) && holders.iter().any(|h| h == m))
             .collect();
         let Some(target) = next_stale_ask_target(authority, by_standing, &asked) else { continue };
+        if key_package_devices(ws_room_peers, &target).is_empty() {
+            continue;
+        }
         let Ok(kp_bytes) = mint_group_key_package(mls_mgr, crypto_store, &group_key, false) else { continue };
         let msg = HavenMessage::MlsKeyPackage {
             server_id: server_id.clone(),
@@ -3735,6 +3779,7 @@ pub(crate) fn leafless_may_answer_request(
     }
     match channel_id {
         None => {
+            mls.lead.settle_walk(server_id, super::standing::membership_span(state, local_peer));
             let target = mls
                 .lead
                 .walk_target(server_id)
@@ -6610,6 +6655,68 @@ mod tests {
         assert!(!asked && minted == 0 && rx.try_recv().is_err(),
             "a second repair was asked (minted {minted}, before {before}) while the first one's Welcome waits");
         super::super::resolver::clear_all();
+    }
+
+    /// t14-mlsjoin r3: an owner device whose walk heard Cannot while no sibling was
+    /// online asks its siblings once one is, and ends the walk: left stepping, the batch
+    /// tick would call it again, and mint, every two seconds.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::await_holding_lock)] // the resolver is process-global
+    async fn an_owner_device_that_asks_its_siblings_ends_its_walk() {
+        use crate::crdt::server_state::ServerState;
+        use crate::identity::native_identity::NativeKeypair;
+        let _lock = super::super::resolver::test_lock();
+        super::super::resolver::clear_all();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let db = tmp.path().join("sib.db").to_str().unwrap().to_string();
+        let pass = "cf".repeat(32);
+        crate::storage::MessageStore::open(&db, &pass).unwrap();
+        let store = crate::crypto::CryptoStore::open(db, pass).unwrap();
+        let (dev, master, sib) = (
+            NativeKeypair::from_secret_bytes(&[61; 32]),
+            NativeKeypair::from_secret_bytes(&[62; 32]),
+            NativeKeypair::from_secret_bytes(&[63; 32]),
+        );
+        let (me, my_dev, sib) = (master.peer_id(), dev.peer_id(), sib.peer_id());
+        super::super::resolver::update_many(&me, [my_dev.as_str(), sib.as_str()]);
+        let mls = MlsManager::new(&dev, &master).unwrap();
+        let sid = "0123456789abcdef0123456789abcdef01234567";
+        let state = ServerState::new(sid.into(), "s".into(), me.clone());
+        mls.lead.note_walk_ask(sid, "x", vec!["x-d".into()], b"pkg".to_vec(), false, super::super::standing::membership_span(&state, &me));
+        assert!(mls.lead.note_ack(sid, "x-d", &super::super::standing::package_tag(b"pkg"), super::super::standing::KpOutcome::Cannot));
+        assert!(mls.lead.walk_step_due(sid), "precondition: the walk steps on");
+        let rooms = make_room_peers(&[(sid, &[sib.as_str()])]);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        assert!(request_server_leaf(&mls, &store, &tx, &rooms, &state, sid, &me, &my_dev));
+        assert!(matches!(rx.try_recv(), Ok(super::super::ws_client::WsCommand::Carry { device, .. }) if device == sib), "carried to the sibling");
+        assert!(!mls.lead.walk_step_due(sid), "the walk still steps, so the next tick mints again");
+        assert_eq!(mls.discard_stale_key_packages(std::time::Duration::ZERO), 1);
+        super::super::resolver::clear_all();
+    }
+
+    /// t14-mlsjoin r3: the H1b gate judges a KeyPackage request against the walk of our
+    /// current membership, never a target left from one we since left or lost.
+    #[test]
+    fn a_leafless_device_judges_a_request_by_its_current_walk_only() {
+        use crate::crdt::server_state::{MemberInfo, ServerState};
+        let _lock = super::super::resolver::test_lock();
+        super::super::resolver::clear_all();
+        let kp = crate::identity::native_identity::NativeKeypair::from_secret_bytes(&[64; 32]);
+        let mls = MlsManager::new(&kp, &kp).unwrap();
+        let sid = "0123456789abcdef0123456789abcdef01234567";
+        let mut state = ServerState::new(sid.into(), "s".into(), "h1own".into());
+        for m in ["h1mem", "h1zz", "h1me"] {
+            state.members.insert(m.into(), MemberInfo { peer_id: m.into(), display_name: m.into() });
+        }
+        let rooms = make_room_peers(&[(sid, &["h1own"])]);
+        let span = super::super::standing::membership_span(&state, "h1me");
+        mls.lead.note_walk_ask(sid, "h1zz", vec!["h1zz".into()], b"pkg".to_vec(), false, span + 1);
+        assert!(
+            !leafless_may_answer_request(&mls, &state, sid, None, "h1me", &rooms, "h1mem"),
+            "a member below our current target was answered on an old walk's target",
+        );
+        mls.lead.note_walk_ask(sid, "h1zz", vec!["h1zz".into()], b"pkg".to_vec(), false, span);
+        assert!(leafless_may_answer_request(&mls, &state, sid, None, "h1me", &rooms, "h1mem"), "control: at or above our target");
     }
 }
 

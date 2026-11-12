@@ -57,6 +57,21 @@ pub(crate) fn refused(leaf: &LeafIdentity) -> bool {
     super::resolver::is_revoked(&leaf.device) || super::resolver::disowns(&leaf.master, &leaf.device)
 }
 
+/// What a server's view says of a leaf whose master no roster we hold places (a joiner
+/// meets co-members only there until its Welcome): `Some(true)` for a device it
+/// removed, `Some(false)` for one it does not count yet, `None` where it judges nothing.
+fn view_refusal(rules: &GroupRules, leaf: &LeafIdentity) -> Option<bool> {
+    let GroupRules::Server { state, .. } = rules else { return None };
+    if super::resolver::holds_roster_of(&leaf.master) {
+        return None;
+    }
+    let auth = state.authority.entry(&leaf.master)?.auth.as_ref()?;
+    if auth.counts(&leaf.device) {
+        return None;
+    }
+    Some(auth.removed.contains_key(&leaf.device))
+}
+
 /// A [`refused`] leaf that roster news may still seat: neither a removed device nor a
 /// master id, only one our copy of its master's roster does not list yet. A device
 /// just linked reaches a co-member's roster before ours (F1, wave md).
@@ -184,7 +199,8 @@ pub(crate) fn welcome_verdict(facts: &WelcomeFacts, rules: &GroupRules, asked: b
     }
     // As for a commit's add: a device only our roster does not place yet waits.
     let meeting = matches!(rules, GroupRules::Meeting { .. });
-    let refused_for_good = |l: &&LeafIdentity| refused(l) && (meeting || !may_be_placed_later(l));
+    let refused_for_good =
+        |l: &&LeafIdentity| (refused(l) && (meeting || !may_be_placed_later(l))) || view_refusal(rules, l) == Some(true);
     if let Some(leaf) = facts.leaves.iter().filter_map(LeafView::bound).find(refused_for_good) {
         return Verdict::Refuse(format!("holds revoked or disowned device {}", leaf.device));
     }
@@ -209,7 +225,7 @@ pub(crate) fn welcome_verdict(facts: &WelcomeFacts, rules: &GroupRules, asked: b
                     return hold;
                 }
             }
-            if let Some(leaf) = facts.leaves.iter().filter_map(LeafView::bound).find(|l| refused(l)) {
+            if let Some(leaf) = facts.leaves.iter().filter_map(LeafView::bound).find(|l| refused(l) || view_refusal(rules, l).is_some()) {
                 return Verdict::Hold(format!("holds device {} its master's roster here does not place yet", leaf.device));
             }
             Verdict::Accept
@@ -1229,6 +1245,40 @@ mod tests {
         assert!(!may_found_group(&mls, "g", &me, &rooms), "an ask from before we held the group says nothing now");
         crate::node::resolver::mark_revoked(std::slice::from_ref(&sibling));
         assert!(may_found_group(&mls, "g", &me, &rooms), "a removed device holds nothing for us");
+        crate::node::resolver::clear_all();
+    }
+
+    /// t14-mlsjoin r3: a joiner holds a stranger co-member's roster only in the server's
+    /// view, so a Welcome is judged there for a master no roster we hold places: a device
+    /// that view removed is refused, one it does not count yet waits.
+    #[test]
+    fn a_welcome_is_judged_by_the_servers_view_where_no_held_roster_places_its_leaves() {
+        let _g = crate::node::resolver::test_lock();
+        crate::node::resolver::clear_all();
+        let mut state = server(&["owner", "alice", "bob"]);
+        let us = leaf("alice-d", "alice");
+        let owner = leaf("owner-d", "owner");
+        let seats = |bob: &str| welcome(owner.clone(), vec![owner.clone(), us.clone(), leaf(bob, "bob")], false);
+        let judged = |state: &ServerState, bob: &str| welcome_verdict(&seats(bob), &GroupRules::Server { state, channel: None }, true);
+        assert_eq!(judged(&state, "bob-gone"), Verdict::Accept, "an unset view judges nothing");
+        let mut view = crate::crdt::authority::AuthorityView::judging();
+        view.insert(
+            "bob".into(),
+            crate::crdt::authority::ViewEntry {
+                key: None,
+                auth: Some(crate::identity::roster::Authority {
+                    counted: ["bob-d".to_string()].into(),
+                    removed: [("bob-gone".to_string(), "bob-d".to_string())].into(),
+                    ..Default::default()
+                }),
+            },
+        );
+        state.authority = std::sync::Arc::new(view);
+        assert_eq!(judged(&state, "bob-d"), Verdict::Accept, "a device the view counts");
+        assert!(matches!(judged(&state, "bob-gone"), Verdict::Refuse(_)), "a device the view removed");
+        assert!(matches!(judged(&state, "bob-new"), Verdict::Hold(_)), "a device the view does not count yet");
+        crate::node::resolver::update_many("bob", ["bob-gone"]);
+        assert_eq!(judged(&state, "bob-gone"), Verdict::Accept, "a roster we hold judges its own devices");
         crate::node::resolver::clear_all();
     }
 }

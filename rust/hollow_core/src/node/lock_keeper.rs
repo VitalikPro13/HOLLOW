@@ -118,6 +118,12 @@ fn take_noted() -> Vec<Noted> {
     LOOP_LOCAL.try_with(|l| std::mem::take(&mut *l.noted.borrow_mut())).unwrap_or_default()
 }
 
+/// The device id of the node whose loop runs this task. Tests only.
+#[cfg(test)]
+pub(crate) fn loop_device_id() -> Option<String> {
+    LOOP_LOCAL.try_with(|l| l.device.peer_id()).ok()
+}
+
 fn loop_device() -> Option<NativeKeypair> {
     LOOP_LOCAL.try_with(|l| l.device.clone()).ok()
 }
