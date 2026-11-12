@@ -4,7 +4,10 @@
 //! on the client side (every frame the relay wrote to any client); relay CPU and RSS
 //! come from `ps` on the relay's pid. Run it through bench/run_scale_probe.sh.
 //!
-//! Refuses any host but loopback: production is never a load target.
+//! Refuses any host but loopback (the reconnect scenario: a private LAN address too):
+//! production is never a load target.
+
+mod reconnect;
 
 use base64::Engine;
 use ed25519_dalek::{Signer, SigningKey};
@@ -48,6 +51,7 @@ struct Stats {
     members: Kind,
     peer_joined: Kind,
     peer_left: Kind,
+    presence: Kind,
     bin_room: Kind,
     bin_topic: Kind,
     hb_ack: Kind,
@@ -71,6 +75,7 @@ struct Snap {
     members: (u64, u64),
     peer_joined: (u64, u64),
     peer_left: (u64, u64),
+    presence: (u64, u64),
     bin_room: (u64, u64),
     bin_topic: (u64, u64),
     hb_ack: (u64, u64),
@@ -86,6 +91,7 @@ impl Stats {
             members: self.members.get(),
             peer_joined: self.peer_joined.get(),
             peer_left: self.peer_left.get(),
+            presence: self.presence.get(),
             bin_room: self.bin_room.get(),
             bin_topic: self.bin_topic.get(),
             hb_ack: self.hb_ack.get(),
@@ -222,7 +228,8 @@ fn end_phase(probe: &RelayProbe, p: Phase, n: usize, extra: serde_json::Value, o
         "egress_mbit_per_s": round3(all.1 as f64 * 8.0 / 1e6 / secs.max(1e-9)),
         "relay_cpu_us_per_frame": round3(if all.0 > 0 { cpu * 1e6 / all.0 as f64 } else { 0.0 }),
         "members": pair(s1.members, p.s0.members), "peer_joined": pair(s1.peer_joined, p.s0.peer_joined),
-        "peer_left": pair(s1.peer_left, p.s0.peer_left), "bin_0x05": pair(s1.bin_room, p.s0.bin_room),
+        "peer_left": pair(s1.peer_left, p.s0.peer_left), "presence": pair(s1.presence, p.s0.presence),
+        "short_members": SHORT_MEMBERS.load(Relaxed), "bin_0x05": pair(s1.bin_room, p.s0.bin_room),
         "bin_0x08": pair(s1.bin_topic, p.s0.bin_topic), "hb_ack": pair(s1.hb_ack, p.s0.hb_ack),
         "other_text": pair(s1.other_text, p.s0.other_text), "other_bin": pair(s1.other_bin, p.s0.other_bin),
         "client_sent": pair(s1.sent, p.s0.sent),
@@ -355,7 +362,13 @@ impl Client {
     }
     fn join(&self) {
         *self.join_sent.lock().unwrap() = Some(Instant::now());
-        self.send_text(json!({"type": "join", "room": ROOM}));
+        if PRESENCE_V2.load(Relaxed) {
+            // As a 0.14 client: batches, and the digest alone for a room it already holds a view of.
+            let have = self.joined.load(Relaxed);
+            self.send_text(json!({"type": "join", "room": ROOM, "pv": 2, "have": have}));
+        } else {
+            self.send_text(json!({"type": "join", "room": ROOM}));
+        }
     }
     fn leave(&self) {
         self.joined.store(false, Relaxed);
@@ -371,10 +384,15 @@ fn json_type(s: &str) -> &str {
     &rest[..rest.find('"').unwrap_or(0)]
 }
 
-const UNCOUNTED: [&str; 11] = [
+const UNCOUNTED: [&str; 12] = [
     "auth_challenge", "auth_ok", "auth_failed", "resumed", "hb_ack", "ack", "reconnect", "members", "peer_joined",
-    "peer_left", "kill_signal",
+    "peer_left", "presence", "kill_signal",
 ];
+
+/// `--presence v2`: joins as a 0.14 client does (`pv:2`, `have` on a re-join); v1 as 0.13.
+static PRESENCE_V2: AtomicBool = AtomicBool::new(false);
+/// Short `members` answers (a digest instead of the roster).
+static SHORT_MEMBERS: AtomicU64 = AtomicU64::new(0);
 
 async fn connect(ctx: &Ctx, hidden: bool) -> Result<Arc<Client>, String> {
     let id = ident();
@@ -494,6 +512,9 @@ async fn connect(ctx: &Ctx, hidden: bool) -> Result<Arc<Client>, String> {
                     match ty {
                         "members" => {
                             STATS.members.add(n);
+                            if t.contains("\"digest\"") {
+                                SHORT_MEMBERS.fetch_add(1, Relaxed);
+                            }
                             if t.contains(ROOM) && !c.joined.swap(true, Relaxed) {
                                 STATS.joined.fetch_add(1, Relaxed);
                                 if let Some(at) = c.join_sent.lock().unwrap().take() {
@@ -503,6 +524,7 @@ async fn connect(ctx: &Ctx, hidden: bool) -> Result<Arc<Client>, String> {
                         }
                         "peer_joined" => STATS.peer_joined.add(n),
                         "peer_left" => STATS.peer_left.add(n),
+                        "presence" => STATS.presence.add(n),
                         "hb_ack" | "ack" => STATS.hb_ack.add(n),
                         other => {
                             STATS.other_text.add(n);
@@ -675,6 +697,22 @@ async fn main() {
     let conc: usize = a.get("conc", 128);
     let out = a.0.get("out").cloned();
     let domain = a.s("domain", "relay.bench.test");
+    PRESENCE_V2.store(a.s("presence", "v1") == "v2", Relaxed);
+    if scenario == "reconnect" {
+        let host: std::net::IpAddr = a.s("host", "127.0.0.1").parse().unwrap_or(std::net::IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+        if port == 0 || !reconnect::allowed_host(host) {
+            eprintln!("usage: relay_scale_probe --scenario reconnect --host <loopback or private LAN> --port P --domain D --n N [--refill-secs S] [--restart-cmd CMD]");
+            std::process::exit(2);
+        }
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let tls = rustls::ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(AcceptAny))
+            .with_no_client_auth();
+        let target = reconnect::Target { host, port, domain, tls: tokio_rustls::TlsConnector::from(Arc::new(tls)) };
+        let ok = reconnect::run(target, n, a.get("refill-secs", 160), a.0.get("restart-cmd").cloned(), out).await;
+        std::process::exit(if ok { 0 } else { 1 });
+    }
     if port == 0 || pid == 0 {
         eprintln!("usage: relay_scale_probe --port P --relay-pid PID --scenario storm|joinone|churn|bcast|topic|discover --n N ...");
         std::process::exit(2);
@@ -697,7 +735,7 @@ async fn main() {
     let _ = *EPOCH;
     let fill = a.s("fill", "visible");
     let hidden_fill = fill == "hidden";
-    let tag = json!({"scenario": scenario, "fill": fill});
+    let tag = json!({"scenario": scenario, "fill": fill, "presence": a.s("presence", "v1")});
 
     // Everyone connects first (not the subject of any phase but its own).
     let total = n + a.get::<usize>("extra", 0) + 1;

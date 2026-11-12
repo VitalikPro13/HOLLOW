@@ -211,6 +211,9 @@ void setup_http_handlers(uWS::SSLApp& app, RelayState& state,
         res->end(deny_test_report(std::string(req->getQuery("peer")), std::string(req->getQuery("room")),
                                   std::string(req->getQuery("net"))));
     });
+    app.get("/presence-test", [](HttpResponse* res, HttpRequest* req) {
+        res->end(presence_test_report(std::string(req->getQuery("peer"))));
+    });
 #endif
     app.get("/health", [](HttpResponse* res, HttpRequest* /*req*/) {
         handle_health(res);

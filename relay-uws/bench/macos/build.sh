@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Build the relay on macOS for local load runs (bench only, never for deployment).
 # Same sources as CMakeLists.txt, -O2, plus the test knobs the live tests use: listen on
-# 127.0.0.1 only, accept loopback in HOLLOW_CONN_RATE_EXEMPT, and a per-address socket
-# cap high enough for one machine to stand in for many clients.
+# 127.0.0.1 only and accept loopback in HOLLOW_CONN_RATE_EXEMPT. The connection limits are
+# settings: run the relay under `env $(cat <out>/bench.env)` so one machine stands in for
+# many clients.
 #   [USOCKETS_DIR=..] [UWS_DIR=..] bash relay-uws/bench/macos/build.sh [out_dir]   (default: .team/relay/build)
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
@@ -32,8 +33,7 @@ ssl=$(brew --prefix openssl@3)
 inc="-I$ssl/include -I$brew_prefix/include"
 lib="-L$ssl/lib -L$brew_prefix/lib"
 flags="-O2 -DNDEBUG -DLIBUS_USE_OPENSSL"
-conns=${BENCH_CONNS_PER_IP:-1000000}
-relay_flags="$flags -DHOLLOW_RELAY_TEST_LOOPBACK=1 -DHOLLOW_RELAY_TEST_CONNS_PER_IP=$conns ${RELAY_EXTRA_FLAGS:-} -include $here/macos_shim.h"
+relay_flags="$flags -DHOLLOW_RELAY_TEST_LOOPBACK=1 ${RELAY_EXTRA_FLAGS:-} -include $here/macos_shim.h"
 objs=()
 pids=()
 for f in bsd context loop socket eventing/epoll_kqueue eventing/gcd eventing/libuv; do
@@ -59,4 +59,12 @@ if [ ! -f "$out/cert.pem" ]; then
     openssl req -x509 -newkey rsa:2048 -nodes -days 30 -subj /CN=relay.bench.test \
         -keyout "$out/key.pem" -out "$out/cert.pem" 2>/dev/null
 fi
-echo "built $out/hollow-relay"
+# Every socket of a bench comes from 127.0.0.1: the highest per-address cap, a burst as big,
+# and login windows no storm reaches.
+cat > "$out/bench.env" <<'ENV'
+CONN_LIMIT_IPV4=65536
+CONN_RATE_IPV4=6000
+LOGIN_WINDOW_PER_BLOCK=65536
+LOGIN_WINDOW_TOTAL=1000000
+ENV
+echo "built $out/hollow-relay (run it under: env \$(cat $out/bench.env) ...)"

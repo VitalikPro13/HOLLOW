@@ -280,6 +280,29 @@ OLD_CERT_TEXT="" OLD_CERT_FP="" OLD_CERT_END="" OLD_LINEAGE="" OLD_AUTH="" OLD_S
 OLD_ADDRESS=domain OLD_DUCKDNS_TOKEN="" OLD_DUCKDNS_IP="" OLD_DUCKDNS_CRON="" OLD_PUBLIC_IP="" OLD_PUBLIC_IPV6=""
 OLD_OWN_CERT_DIR="" OLD_FWD_LICENSE="" OLD_PUBLIC_STATS=on OLD_ENV_FILES=""
 
+# old_limits <reader> <where>: the connection limits the old setup sets, each checked against
+# its range (a value outside it is dropped with a note, so the relay's default applies).
+old_limits() {
+    local reader=$1 where=$2 k v
+    for k in $LIMIT_KEYS; do
+        v=$("$reader" "$where" "$k")
+        if ! limit_ok "$k" "$v"; then
+            adopt_note "$k, $v, is not a value the relay takes, so take over uses its default."
+            v=""
+        fi
+        printf -v "OLD_$k" '%s' "$v"
+    done
+}
+
+old_limits_summary() {
+    local k v out=""
+    for k in $LIMIT_KEYS; do
+        v=OLD_$k
+        [ -n "${!v:-}" ] && out+="${out:+, }$k=${!v}"
+    done
+    echo "${out:-the defaults}"
+}
+
 # keys_facts <keys.json>: how many keys, and how many of them the app cannot use.
 keys_facts() {
     OLD_KEYS_GOOD=0 OLD_KEYS_BAD=0 OLD_MEMBERS=no OLD_KEY_LIST=()
@@ -504,6 +527,7 @@ adopt_native_facts() {
     OLD_EXEMPT=$(adopt_unit_env "$u" HOLLOW_CONN_RATE_EXEMPT)
     OLD_PUSH_TOKEN=$(adopt_unit_env "$u" HOLLOW_PUSH_TOKEN)
     OLD_PUBLIC_STATS=$(public_stats_norm "$(adopt_unit_env "$u" PUBLIC_STATS)")
+    old_limits adopt_unit_env "$u"
     # The operator's own settings in them carry over (env_kept_block).
     OLD_ENV_FILES=""
     for v in $(adopt_prop "$u" EnvironmentFiles | grep -oE '/[^ ]+' || true); do
@@ -737,6 +761,7 @@ adopt_docker_facts() {
     OLD_EXEMPT=$(kv_get "$OLD_ENV" HOLLOW_CONN_RATE_EXEMPT)
     safe_exempt "$OLD_EXEMPT" || OLD_EXEMPT=""
     OLD_PUBLIC_STATS=$(public_stats_norm "$(kv_get "$OLD_ENV" PUBLIC_STATS)")
+    old_limits kv_get "$OLD_ENV"
     OLD_ENV_FILES=$OLD_ENV
     v=$(kv_get "$OLD_ENV" SESSION_GRACE_SECS)
     OLD_GRACE=120
@@ -843,6 +868,9 @@ Members-only: off"; fi
     t="$t
 Public stats page: $OLD_PUBLIC_STATS
 Reports: $OLD_REPORTS_TEXT"
+    # Only limits that differ from the defaults, so the screen keeps its height.
+    [ "$(old_limits_summary)" != "the defaults" ] && t="$t
+Connection limits: $(old_limits_summary)"
     [ -n "$OLD_DUCKDNS_CRON" ] && t="$t
 DuckDNS updates: a line in $OLD_DUCKDNS_CRON"
     printf '%s' "$t"
@@ -1070,6 +1098,7 @@ harden_offer_text() {
 
 # The CFG_* answers a takeover runs with, from what the old relay uses.
 adopt_cfg() {
+    local k v
     CFG_MODE=$ADOPT_KIND
     CFG_HOST=$OLD_HOST
     CFG_ADDRESS=$OLD_ADDRESS
@@ -1087,6 +1116,10 @@ adopt_cfg() {
     CFG_MEMBER_KEYS=$OLD_KEYS_GOOD
     CFG_GRACE_SECS=$OLD_GRACE
     CFG_PUBLIC_STATS=$OLD_PUBLIC_STATS
+    for k in $LIMIT_KEYS; do
+        v=OLD_$k
+        printf -v "CFG_$k" '%s' "${!v:-}"
+    done
     CFG_PUBLIC_IPV6=$OLD_PUBLIC_IPV6
     SEED_ENV_FILES=$OLD_ENV_FILES
     SEED_TURN_SECRET=$OLD_TURN_SECRET

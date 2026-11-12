@@ -15,6 +15,8 @@
 #include "auth_frame.h"
 #include "crypto.h"
 #include "door_room.h"
+#include "login_window.h"
+#include "presence_batch.h"
 #include "presence_view.h"
 #include "join_lock.h"
 #include "json.hpp"
@@ -3106,7 +3108,8 @@ static constexpr int PRESENCE_US_PER_PEER = 250;
 
 static void test_hidden_big_pass() {
     printf("presence: after a pass over many peers the next one waits longer\n");
-    const int rooms = 4000;
+    // Under the joins an enforcing breaker lets a fresh session make at once (2,500).
+    const int rooms = 2000;
     Ident ida;
     auto a = login3(ida, "new", 0);
     auto b = login(Ident());
@@ -3984,6 +3987,9 @@ static const char RESTART_REPORT_TARGET[] = "12D3KooWRestartReportTarget11111111
 static void deny_restart_before(const std::string& dir);
 static void deny_restart_first();
 static void deny_restart_after(const std::string& dir);
+// The 0.14 presence part of the restart case (live_t14_relay.inc).
+static void t14_restart_before();
+static void t14_restart_after();
 
 static void hs_restart(const std::string& dir) {
     printf("handshake review: a session restored from a snapshot proves its doors again\n");
@@ -4023,6 +4029,7 @@ static void hs_restart(const std::string& dir) {
     b->send_bin(frame(0x03, {locked}, "rs-locked-before"));
     settle({b.get()});
     deny_restart_before(dir);
+    t14_restart_before();
 
     if (FILE* f = fopen((dir + "/ready").c_str(), "w")) {
         fputs("1", f);
@@ -4035,6 +4042,7 @@ static void hs_restart(const std::string& dir) {
     }
     g_port = atoi(port.c_str());
     deny_restart_first();
+    t14_restart_after();
 
     auto b2 = login(idb);
     auto mb = join(*b2, locked, {{"door_proof", door_proof(*b2, locked, door)}});
@@ -4132,6 +4140,12 @@ struct Told {
             rooms[room].insert(j.value("peer_id", ""));
         } else if (t == "peer_left") {
             rooms[room].erase(j.value("peer_id", ""));
+        } else if (t == "presence") {
+            for (const auto& e : j.value("ev", json::array())) {
+                const std::string s = e.is_string() ? e.get<std::string>() : std::string();
+                if (s.size() > 1 && s[0] == '+') rooms[room].insert(s.substr(1));
+                if (s.size() > 1 && s[0] == '-') rooms[room].erase(s.substr(1));
+            }
         }
     }
 
@@ -4547,12 +4561,8 @@ static bool refused_at_login(const Ident& id) {
     return !p->ok && closed_by_relay(*p) && p->ws.close_code == 1008 && p->ws.close_reason == "ip_limit";
 }
 
-// A socket the relay closes at once: the address is full.
-static bool refused_at_open(const Ident& id) {
-    auto p = open_socket(id);
-    p->send({{"type", "auth_hello"}});
-    return closed_by_relay(*p) && p->ws.close_code == 1008 && p->ws.close_reason == "ip_limit";
-}
+// A socket the full address turns away: let in to settle past the cap, refused at its login.
+static bool refused_at_open(const Ident& id) { return refused_at_login(id); }
 
 static void test_bounds_full_address() {
     printf("bounds: a full address and the grace slots it holds\n");
@@ -4990,8 +5000,10 @@ static void test_public_stats() {
                                              j["online_users"].get<int64_t>() >= 1);
     check("and the activity fields", j.is_object() && j.contains("rx_mbps") && j.contains("tx_mbps") &&
                                          j.contains("fwd_delivered") && j.contains("send_dropped"));
-    check("and the breaker's trip counts, in shadow mode",
-          j.is_object() && j.contains("breaker") && j["breaker"].value("enforced", true) == false);
+    const char* mode = getenv("RELAY_LIVE_BREAKER_MODE");
+    const bool enforce = mode && std::string(mode) == "enforce";
+    check("and the breaker's trip counts and mode",
+          j.is_object() && j.contains("breaker") && j["breaker"].value("enforced", !enforce) == enforce);
 }
 
 // --- New-connection rate (MAX_NEW_CONNS_PER_MIN_PER_IP) and HOLLOW_CONN_RATE_EXEMPT ---
@@ -5025,24 +5037,26 @@ static std::unique_ptr<Peer> held_open() {
 }
 
 static void test_rate_limit() {
-    printf("rate: an address opens ten new sockets a minute\n");
+    printf("rate: an address opens its burst of new sockets at once, then ten a minute\n");
     PinnedSource pin(RATE_PLAIN_SOURCE);
     auto first = held_open();
     bool all_in = true;
-    for (int i = 0; i < 9; i++) all_in = let_in_and_closed() && all_in;
-    check("an address opens ten sockets in a minute", all_in);
-    check("the eleventh is refused with rate_limit", refused_for_rate());
+    for (int i = 0; i < 29; i++) all_in = let_in_and_closed() && all_in;
+    check("an address opens thirty sockets at once", all_in);
+    check("the next is refused with rate_limit", refused_for_rate());
+    sleep_ms(6'100);
+    check("six seconds later one more comes in", let_in_and_closed());
 }
 
-// An address that closes each socket before it opens the next is counted all the same,
-// at thirty a minute (MAX_NEW_CONNS_PER_MIN_PER_IDLE_IP): a phone opens one per push wake.
+// An address that closes each socket before it opens the next is counted all the same: one
+// rate per family, no bonus for an idle address (review Q6).
 static void test_rate_limit_idle_address() {
-    printf("rate: an address holding no socket keeps its window\n");
+    printf("rate: an address holding no socket keeps its bucket\n");
     PinnedSource pin(RATE_IDLE_SOURCE);
     bool all_in = true;
     for (int i = 0; i < 30; i++) all_in = let_in_and_closed() && all_in;
-    check("an address opens thirty sockets in a minute, closing each", all_in);
-    check("the thirty-first is refused with rate_limit while none is open", refused_for_rate());
+    check("an address opens thirty sockets at once, closing each", all_in);
+    check("the next is refused with rate_limit while none is open", refused_for_rate());
 }
 
 static void test_rate_exempt() {
@@ -5052,8 +5066,8 @@ static void test_rate_exempt() {
         std::vector<std::unique_ptr<Peer>> held;
         held.push_back(held_open());
         bool all_in = true;
-        for (int i = 0; i < 14; i++) all_in = let_in_and_closed() && all_in;
-        check("a listed address opens more than ten sockets in a minute", all_in);
+        for (int i = 0; i < 34; i++) all_in = let_in_and_closed() && all_in;
+        check("a listed address opens more than its burst at once", all_in);
         held.push_back(held_open());
         held.push_back(held_open());
         check("and still no more at once than any address", refused_at_open(Ident()));
@@ -7006,6 +7020,8 @@ static void test_denylist() {
     deny_license_wrong_types();
 }
 
+#include "live_t14_relay.inc"
+
 int main(int argc, char** argv) {
     if (argc != 3) {
         fprintf(stderr, "usage: test_relay_live <port> <auth domain>\n");
@@ -7086,6 +7102,8 @@ int main(int argc, char** argv) {
             test_breaker_pause_holds_no_slot();
             test_breaker_ladder_window();
             test_breaker_trips_are_no_budget_trips();
+            presence_batch_flush_charges_nobody_else();
+            breaker_lost_hint_waits_at_login();
         } else {
             test_breaker_shadow();
         }
@@ -7186,6 +7204,60 @@ int main(int argc, char** argv) {
         if (failures) printf("%d FAILED\n", failures);
         return failures ? 1 : 0;
     }
+    // =batch: the 0.14 presence cases; =window, =connected, =cgnat: relays of their own
+    // with the limits run_live.sh sets for them.
+    if (only && std::string(only) == "batch") {
+        presence_batch_coalesces();
+        presence_batch_subject_first();
+        presence_short_answer_after_midflight_batch();
+        presence_batch_fresh_session_survives_viewer_rejoin();
+        presence_short_answer();
+        presence_digest_after_batch();
+        presence_batch_inactive_withheld();
+        presence_batch_split_256();
+        presence_batch_leading_edge_latency();
+        presence_inbox_visibility_both_ways();
+        presence_batch_inbox_demotion_after_upgrade();
+        presence_rejoin_same_socket_is_quiet_after_lock_move();
+        presence_batch_join_mid_window();
+        presence_batch_fwd_room_legacy();
+        presence_subjects_go_with_their_room();
+        limits_refuse_1008();
+        breaker_mode_named();
+        SSL_CTX_free(g_ctx);
+        if (failures) printf("%d FAILED\n", failures);
+        return failures ? 1 : 0;
+    }
+    if (only && std::string(only) == "window") {
+        login_window_stalled_first();
+        login_window_slow_login_is_not_stalled();
+        login_window_total_heaviest_stalled();
+        login_window_repeated_hello_still_stalls();
+        SSL_CTX_free(g_ctx);
+        if (failures) printf("%d FAILED\n", failures);
+        return failures ? 1 : 0;
+    }
+    if (only && std::string(only) == "window_total") {
+        login_window_total_wave();
+        SSL_CTX_free(g_ctx);
+        if (failures) printf("%d FAILED\n", failures);
+        return failures ? 1 : 0;
+    }
+    if (only && std::string(only) == "connected") {
+        limits_connected_budget_sheds_heaviest();
+        SSL_CTX_free(g_ctx);
+        if (failures) printf("%d FAILED\n", failures);
+        return failures ? 1 : 0;
+    }
+    if (only && std::string(only) == "cgnat") {
+        cgnat_zombies_resume();
+        cgnat_fresh_logins();
+        cgnat_beside_silent_neighbours();
+        breaker_mode_named();
+        SSL_CTX_free(g_ctx);
+        if (failures) printf("%d FAILED\n", failures);
+        return failures ? 1 : 0;
+    }
     // =rate: the new-connection rate alone; =rate_exempt against the relay that lists one.
     if (only && (std::string(only) == "rate" || std::string(only) == "rate_exempt")) {
         if (std::string(only) == "rate") {
@@ -7193,6 +7265,7 @@ int main(int argc, char** argv) {
             test_rate_limit_idle_address();
         } else {
             test_rate_exempt();
+            start_floor_follows_the_operator_rate();
         }
         SSL_CTX_free(g_ctx);
         if (failures) printf("%d FAILED\n", failures);
@@ -7223,6 +7296,8 @@ int main(int argc, char** argv) {
         test_hidden_sender_reaches_away_provers();
         test_rate_limit();
         test_rate_limit_idle_address();
+        presence_inbox_visibility_both_ways();
+        presence_short_answer();
     }
     if (!bounds_only) {
         test_session_logins();

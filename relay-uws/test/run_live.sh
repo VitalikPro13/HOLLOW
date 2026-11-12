@@ -9,8 +9,11 @@
 #   RELAY_LIVE_PORTS=lo-hi    pick the relay's port in this range (a machine others share)
 #   RELAY_LIVE_JOBS=n         compile at most n objects at once
 #   RELAY_LIVE_VARIANTS="a b" run only these variants (main, deny, exempt, backpressure,
-#                             breaker_shadow, breaker_enforce, oom); "none" builds only
+#                             breaker_shadow, breaker_enforce, oom, batch, shadow_env, window,
+#                             window_total, connected, cgnat); "none" builds only
 cd "$(dirname "$0")" || exit 1
+# The carrier-NAT cases hold about 600 sockets on each side.
+ulimit -n 8192 2> /dev/null || ulimit -n 4096 2> /dev/null || true
 
 skip() {
     echo "skip test_relay_live ($1)"
@@ -68,9 +71,10 @@ wait_all() {
 }
 
 us_c="gcc -std=c11 $flags -DLIBUS_USE_OPENSSL -I../uSockets/src"
-# A session grace of seconds, so the tests watch one run out; three sockets fill an
-# address, so they fill one under its rate of ten new sockets a minute.
-relay_cxx="g++ -std=c++20 $flags -DLIBUS_USE_OPENSSL -DHOLLOW_RELAY_TEST_LOOPBACK=1 -DHOLLOW_RELAY_TEST_GRACE_SECS=5 -DHOLLOW_RELAY_TEST_CONNS_PER_IP=3 -I../uWebSockets/src -I../uSockets/src -I../src"
+# A session grace of seconds, so the tests watch one run out. The connection limits are
+# settings (conn_limits.h): run_variant gives each relay three sockets an address, so they
+# fill one inside its burst of thirty new sockets (ten a minute after it).
+relay_cxx="g++ -std=c++20 $flags -DLIBUS_USE_OPENSSL -DHOLLOW_RELAY_TEST_LOOPBACK=1 -DHOLLOW_RELAY_TEST_GRACE_SECS=5 -I../uWebSockets/src -I../uSockets/src -I../src"
 
 objects=()
 for f in bsd context loop socket eventing/epoll_kqueue eventing/gcd eventing/libuv; do
@@ -91,19 +95,20 @@ done
 # Whether a variant runs (RELAY_LIVE_VARIANTS, a mutation pass's subset; all by default).
 wanted() { [ -z "${RELAY_LIVE_VARIANTS:-}" ] || [[ " $RELAY_LIVE_VARIANTS " == *" $1 "* ]]; }
 compile ws_handler_main ../src/ws_handler.cpp "$obj/ws_handler_main.o" $relay_cxx
-# The circuit breaker enforced (breaker.h); the main build runs it in shadow mode.
-enforce_built=0
-if wanted breaker_enforce; then
-    compile ws_handler_enforce ../src/ws_handler.cpp "$obj/ws_handler_enforce.o" $relay_cxx -DHOLLOW_BREAKER_ENFORCE=1
-    enforce_built=1
+# The circuit breaker in shadow mode by default (breaker.h); the main build enforces, as
+# every relay does unless its operator sets BREAKER_MODE=shadow.
+shadow_built=0
+if wanted breaker_shadow; then
+    compile ws_handler_shadow ../src/ws_handler.cpp "$obj/ws_handler_shadow.o" $relay_cxx -DHOLLOW_BREAKER_ENFORCE=0
+    shadow_built=1
 fi
 g++ -std=c++17 $flags -I../src test_relay_live.cpp ../src/crypto.cpp \
     -o "$dir/client" -lssl -lcrypto -lsodium > "$dir/client.build" 2>&1 &
 pids+=($!)
 names+=(client)
 wait_all
-for v in main enforce; do
-    [ $v = enforce ] && [ $enforce_built = 0 ] && continue
+for v in main shadow; do
+    [ $v = shadow ] && [ $shadow_built = 0 ] && continue
     g++ $flags "${objects[@]}" "$obj/ws_handler_$v.o" -o "$dir/relay_$v" -lssl -lcrypto -lsodium -lz -pthread \
         > "$dir/link_$v.build" 2>&1 || build_fail "link $v" "$dir/link_$v.build"
 done
@@ -179,11 +184,34 @@ fi
 # relay's send-buffer memory budget in bytes, which runs only the OOM-budget case.
 run_variant() {
     local v=$1 name=${2:-$1} exempt=${3-} backpressure=${4-} breaker=${5-} budget=${6-} port tries=0 log=$dir/relay_${2:-$1}.log
-    local extra=() args=() only=${RELAY_LIVE_ONLY-} stall= denylist=$dir/denylist_${2:-$1}.json
+    local extra=() args=() only=${RELAY_LIVE_ONLY-} stall= denylist=$dir/denylist_${2:-$1}.json mode=enforce
+    # Three sockets an address, ten new ones a minute after a burst of thirty; a carrier-NAT
+    # relay keeps every default (512 an address, 120 a minute, the login windows).
+    local limits=(CONN_LIMIT_IPV4=3 CONN_LIMIT_IPV6=3 CONN_RATE_IPV4=10 CONN_RATE_IPV6=10 HOLLOW_RELAY_TEST_CONN_BURST=30)
+    [ "$v" = shadow ] && mode=shadow
     # Every relay starts with a valid empty denylist, the file the setup writes.
     printf '{"version":1,"servers":[],"identities":[],"networks":[]}\n' > "$denylist"
     if [ "$name" = deny ]; then
         only=deny
+    elif [ "$name" = batch ]; then
+        only=batch
+    elif [ "$name" = window ]; then
+        only=window
+        limits+=(CONN_LIMIT_IPV4=64 LOGIN_WINDOW_PER_BLOCK=8 LOGIN_WINDOW_TOTAL=24)
+    elif [ "$name" = window_total ]; then
+        only=window_total
+        limits=(CONN_LIMIT_IPV4=4096 CONN_RATE_IPV4=6000 LOGIN_WINDOW_PER_BLOCK=500 LOGIN_WINDOW_TOTAL=500)
+    elif [ "$name" = connected ]; then
+        only=connected
+        limits+=(CONN_LIMIT_IPV4=64 CONNECTED_LIMIT=12)
+    elif [ "$name" = cgnat ]; then
+        only=cgnat
+        limits=(CONN_RATE_IPV4=6000)
+    elif [ "$name" = shadow_env ]; then
+        # An operator's BREAKER_MODE=shadow on a relay built to enforce.
+        only=batch
+        limits+=(BREAKER_MODE=shadow)
+        mode=shadow
     elif [ -n "$breaker" ]; then
         # Budgets / 100 and times / 60: the numbers test_relay_live.cpp's BRK_W and BRK_T name.
         extra=(HOLLOW_RELAY_TEST_BREAKER_W=100 HOLLOW_RELAY_TEST_BREAKER_T=60)
@@ -211,7 +239,9 @@ run_variant() {
         env -u NOTIFY_SOCKET -u LISTEN_PID -u LISTEN_FDS -u LISTEN_FDNAMES -u HOLLOW_PUSH_TOKEN \
             -u HOLLOW_CONN_RATE_EXEMPT -u HOLLOW_RELAY_TEST_BACKPRESSURE -u HOLLOW_RELAY_TEST_BREAKER_W \
             -u HOLLOW_RELAY_TEST_BREAKER_T -u HOLLOW_RELAY_TEST_SEND_BUDGET -u HOLLOW_RELAY_TEST_STALL_MS \
-            "${extra[@]}" TURN_SECRET=live-test "$dir/relay_$v" "${args[@]}" --port "$port" --domain "$domain" \
+            -u CONN_LIMIT_IPV4 -u CONN_LIMIT_IPV6 -u CONN_RATE_IPV4 -u CONN_RATE_IPV6 -u LOGIN_WINDOW_PER_BLOCK \
+            -u LOGIN_WINDOW_TOTAL -u CONNECTED_LIMIT -u BREAKER_MODE -u HOLLOW_RELAY_TEST_CONN_BURST \
+            "${limits[@]}" "${extra[@]}" TURN_SECRET=live-test "$dir/relay_$v" "${args[@]}" --port "$port" --domain "$domain" \
             --cert-file "$dir/cert.pem" --key-file "$dir/key.pem" \
             --keys-file "$dir/no-keys.json" --reports-file "$dir/reports_$name.json" \
             --denylist-file "$denylist" > "$log" 2>&1 &
@@ -236,7 +266,7 @@ run_variant() {
 
     # The client's last case sends the relay SIGTERM itself (the drain hint); its pid
     # also lets a probe read the relay's memory. Under ASan the run takes about 96 s.
-    RELAY_LIVE_DENYLIST=$denylist RELAY_LIVE_KEYS=$dir/no-keys.json \
+    RELAY_LIVE_DENYLIST=$denylist RELAY_LIVE_KEYS=$dir/no-keys.json RELAY_LIVE_BREAKER_MODE=$mode \
     RELAY_LIVE_ONLY=$only RELAY_LIVE_BACKPRESSURE=$backpressure RELAY_LIVE_SEND_BUDGET=$budget RELAY_LIVE_STALL_MS=$stall RELAY_LIVE_SANITIZED=${SANITIZE:-0} RELAY_LIVE_PID=$relay_pid timeout 240 "$dir/client" "$port" "$domain" \
         > "$dir/client_$name.log" 2>&1
     local rc=$?
@@ -298,9 +328,17 @@ wanted deny && run_variant main deny
 wanted exempt && run_variant main exempt "::ffff:127.0.241.3, not-an-address,127.0.241, 0.0.0.0"
 # A 1 MiB send buffer: a test drains it and writes again inside one session tick.
 wanted backpressure && run_variant main backpressure "" 1048576
-# The circuit breaker scaled down: shadow mode (every build's default), then enforced.
-wanted breaker_shadow && run_variant main breaker_shadow "" "" shadow
-wanted breaker_enforce && run_variant enforce breaker_enforce "" "" enforce
+# The circuit breaker scaled down: enforced (every relay's default), then in shadow mode.
+wanted breaker_shadow && run_variant shadow breaker_shadow "" "" shadow
+wanted breaker_enforce && run_variant main breaker_enforce "" "" enforce
+# The 0.14 relay track: batched presence and the short answer, an operator's shadow switch,
+# the pre-login window, the connected budget, and 300 users behind one carrier NAT.
+wanted batch && run_variant main batch
+wanted shadow_env && run_variant main shadow_env
+wanted window && run_variant main window
+wanted window_total && run_variant main window_total
+wanted connected && run_variant main connected
+wanted cgnat && run_variant main cgnat
 # A 32 MiB send-buffer memory budget and a 5 s stall window: honest traffic passes, effects stay bounded.
 wanted oom && run_variant main oom "" "" "" 33554432
 exit $fail

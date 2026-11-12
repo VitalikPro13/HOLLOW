@@ -517,8 +517,9 @@ static void ip_slot_tests() {
         Session& live = mint(st, peer(7), 1);
         ip.open("10.0.0.9");
         live.ip_key = "10.0.0.9";
-        for (size_t i = ip.count("10.0.0.9"); i < MAX_CONNS_PER_IP; i++) ip.open("10.0.0.9");
-        check("grace slots fill an address up to the cap", ip.count("10.0.0.9") == MAX_CONNS_PER_IP);
+        constexpr size_t CAP = 34;
+        for (size_t i = ip.count("10.0.0.9"); i < CAP; i++) ip.open("10.0.0.9");
+        check("grace slots fill an address up to the cap", ip.count("10.0.0.9") == CAP);
         auto victim = session_bounds::grace_slot_victim(st, "10.0.0.9");
         check("a full address names the grace slot closest to its end", victim && *victim == peer(2));
         check("an address holding no grace slot names none", !session_bounds::grace_slot_victim(st, "10.0.0.8"));
@@ -529,7 +530,7 @@ static void ip_slot_tests() {
             session_bounds::release_ip_slot(st, st.sessions[*victim]);
             st.sessions.erase(*victim);
         }
-        check("ending it frees one slot for the device coming back", ip.count("10.0.0.9") == MAX_CONNS_PER_IP - 1);
+        check("ending it frees one slot for the device coming back", ip.count("10.0.0.9") == CAP - 1);
     }
 
     {
@@ -612,8 +613,8 @@ static void takeover_tests() {
         fill(st, {4, 5, 5});
         Ip{st}.open(ip_key);  // a second newcomer: over the cap even with the own slot back
         auto v = session_bounds::settle_login(st, ip_key, peer(0), true, grace, t0, 3);
-        check("a device's own session is never the one that gives way for it",
-              v.admit && v.victim && *v.victim == peer(1));
+        check("a device back beside its own session takes its own slot, ending no one",
+              v.admit && !v.victim);
     }
     {
         RelayState st;
@@ -639,98 +640,94 @@ static void takeover_tests() {
     printf("\n");
 }
 
-// The new-connection rate as .open and .close keep it (admit_socket, free_ip_slot).
+// The new-connection rate as .open and .close keep it (admit_socket, free_ip_slot): a token
+// bucket of the family's rate with a burst of its open cap (conn_limits.h, review Q1, Q6).
 static void test_rate_limit_idle_address() {
-    printf("the new-connection rate of an address holding no socket\n");
+    printf("the new-connection rate and the open cap\n");
     using session_bounds::Admission;
     using session_bounds::admit_socket;
     using session_bounds::free_ip_slot;
     const auto t0 = std::chrono::steady_clock::now();
     const auto at = [&](int secs) { return t0 + std::chrono::seconds(secs); };
+    const conn_limits::Limits lim;
+    const conn_limits::Family& v4 = lim.v4;
 
     {
         RelayState st;
         bool all_in = true;
-        for (size_t i = 0; i < MAX_NEW_CONNS_PER_MIN_PER_IDLE_IP; i++) {
-            all_in = admit_socket(st, "192.0.2.1", false, at(1), MAX_CONNS_PER_IP) == Admission::In && all_in;
+        for (size_t i = 0; i < v4.burst(); i++) {
+            all_in = admit_socket(st, "192.0.2.1", false, at(1), v4) == Admission::In && all_in;
             free_ip_slot(st, "192.0.2.1", at(1));
         }
-        check("an address opens thirty sockets in a minute, closing each", all_in);
-        check("the thirty-first is refused while none is open",
-              admit_socket(st, "192.0.2.1", false, at(2), MAX_CONNS_PER_IP) == Admission::RateLimit);
-        check("the refusal takes no slot and keeps the window",
-              st.ip_states.at("192.0.2.1").active_count == 0 && st.ip_states.at("192.0.2.1").recent_connects.full() &&
-                  st.ip_idle.contains("192.0.2.1"));
-        session_bounds::sweep_rate_windows(st, at(61));
-        check("a sweep inside the minute keeps the window", st.ip_idle.contains("192.0.2.1"));
-        check("past the minute the address comes in again",
-              admit_socket(st, "192.0.2.1", false, at(62), MAX_CONNS_PER_IP) == Admission::In &&
-                  !st.ip_idle.contains("192.0.2.1"));
-        free_ip_slot(st, "192.0.2.1", at(62));
-        session_bounds::sweep_rate_windows(st, at(123));
-        check("and once its window runs out the sweep forgets it", st.ip_states.empty() && st.ip_idle.size() == 0);
+        check("an address opens its burst at once, closing each", all_in);
+        check("the next is refused while none is open (no idle bonus)",
+              admit_socket(st, "192.0.2.1", false, at(1), v4) == Admission::RateLimit);
+        check("the refusal takes no slot and keeps the bucket",
+              st.ip_states.at("192.0.2.1").active_count == 0 && st.ip_idle.contains("192.0.2.1"));
+        check("half a second later one more comes in", admit_socket(st, "192.0.2.1", false, at(1) + std::chrono::milliseconds(500), v4) == Admission::In);
+        free_ip_slot(st, "192.0.2.1", at(2));
+        session_bounds::sweep_rate_windows(st, at(60));
+        check("a sweep before the bucket is full keeps it", st.ip_idle.contains("192.0.2.1"));
+        session_bounds::sweep_rate_windows(st, at(300));
+        check("once it is full again the sweep forgets it", st.ip_states.empty() && st.ip_idle.size() == 0);
     }
 
     {
-        // An address holding a socket keeps the tighter rate, and one that comes back
-        // with more than that behind it waits.
+        // Review Q7: 300 users behind one carrier NAT reconnect while the relay still holds
+        // their 300 old sockets; each new socket comes in pending past the cap of 512.
         RelayState st;
-        bool all_in = admit_socket(st, "192.0.2.5", false, at(1), MAX_CONNS_PER_IP) == Admission::In;
-        for (size_t i = 1; i < MAX_NEW_CONNS_PER_MIN_PER_IP; i++) {
-            all_in = admit_socket(st, "192.0.2.5", false, at(1), MAX_CONNS_PER_IP) == Admission::In && all_in;
-            free_ip_slot(st, "192.0.2.5", at(1));
-        }
-        check("an address holding a socket opens ten in a minute", all_in);
-        check("the eleventh is refused while it holds one",
-              admit_socket(st, "192.0.2.5", false, at(2), MAX_CONNS_PER_IP) == Admission::RateLimit);
-        free_ip_slot(st, "192.0.2.5", at(2));
-        check("once it holds none, it opens more",
-              admit_socket(st, "192.0.2.5", false, at(2), MAX_CONNS_PER_IP) == Admission::In);
-        check("and holding that one, no more",
-              admit_socket(st, "192.0.2.5", false, at(2), MAX_CONNS_PER_IP) == Admission::RateLimit);
+        bool all_in = true;
+        for (int i = 0; i < 300; i++) all_in = admit_socket(st, "100.64.0.1", false, at(1), v4) == Admission::In && all_in;
+        for (int i = 0; i < 300; i++) all_in = admit_socket(st, "100.64.0.1", false, at(200), v4) == Admission::In && all_in;
+        check("600 sockets of one address come in for their logins to settle", all_in);
+        check("past two caps' worth the address is full",
+              [&] {
+                  for (int i = 600; i < 1024; i++) admit_socket(st, "100.64.0.1", true, at(3), v4);
+                  return admit_socket(st, "100.64.0.1", true, at(3), v4) == Admission::IpLimit;
+              }());
+        check("a login over the cap that frees nothing of its own is refused",
+              !session_bounds::settle_login(st, "100.64.0.1", "dev", false, std::chrono::seconds(10), at(3), v4.cap).admit);
     }
 
     {
         RelayState st;
         for (int i = 0; i < 3; i++) {
-            admit_socket(st, "192.0.2.2", true, at(1), MAX_CONNS_PER_IP);
+            admit_socket(st, "192.0.2.2", true, at(1), v4);
             free_ip_slot(st, "192.0.2.2", at(1));
         }
-        check("a listed address keeps no window and no entry", st.ip_states.empty() && st.ip_idle.size() == 0);
+        check("a listed address keeps no bucket and no entry", st.ip_states.empty() && st.ip_idle.size() == 0);
     }
 
     {
         RelayState st;
         Session& s = mint(st, peer(1), 1);
-        admit_socket(st, "192.0.2.3", false, at(1), MAX_CONNS_PER_IP);
+        admit_socket(st, "192.0.2.3", false, at(1), v4);
         session_bounds::hold_ip_slot(st, s, "192.0.2.3");
         check("a grace slot keeps the address in use", !st.ip_idle.contains("192.0.2.3"));
         session_bounds::release_ip_slot(st, s);
-        check("its end leaves the window counted", st.ip_idle.contains("192.0.2.3") &&
-                                                       st.ip_states.at("192.0.2.3").recent_connects.size() == 1);
+        check("its end leaves the bucket counted", st.ip_idle.contains("192.0.2.3"));
     }
 
     {
         // A flood of /64s from two /48s forgets only its own: the bound holds and a lone
         // address idle before it is still counted.
         RelayState st;
-        for (size_t i = 0; i < MAX_NEW_CONNS_PER_MIN_PER_IDLE_IP; i++) {
-            admit_socket(st, "192.0.2.4", false, at(1), MAX_CONNS_PER_IP);
+        for (size_t i = 0; i < v4.burst(); i++) {
+            admit_socket(st, "192.0.2.4", false, at(1), v4);
             free_ip_slot(st, "192.0.2.4", at(1));
         }
         const size_t flood = conn_rate::MAX_IDLE + 1000;
         for (size_t i = 0; i < flood; i++) {
             char key[64];
             snprintf(key, sizeof(key), "2001:db8:%x:%x::/64", unsigned(7 + i / 65536), unsigned(i % 65536));
-            admit_socket(st, key, false, at(2), MAX_CONNS_PER_IP);
+            admit_socket(st, key, false, at(2), lim.v6);
             free_ip_slot(st, key, at(2));
         }
         check("idle addresses stay within the bound",
               st.ip_idle.size() == conn_rate::MAX_IDLE && st.ip_states.size() == conn_rate::MAX_IDLE);
-        check("the lone address is still refused",
-              admit_socket(st, "192.0.2.4", false, at(3), MAX_CONNS_PER_IP) == Admission::RateLimit);
-        session_bounds::sweep_rate_windows(st, at(63));
-        check("and the sweep empties the table once the minute is out", st.ip_states.empty() && st.ip_idle.size() == 0);
+        check("the lone address is still refused", admit_socket(st, "192.0.2.4", false, at(1), v4) == Admission::RateLimit);
+        session_bounds::sweep_rate_windows(st, at(400));
+        check("and the sweep empties the table once every bucket is full", st.ip_states.empty() && st.ip_idle.size() == 0);
     }
 
     printf("\n");

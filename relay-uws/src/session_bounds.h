@@ -149,7 +149,7 @@ inline std::vector<std::string> make_room(RelayState& st, uint64_t share, const 
 }
 
 // A socket of `ip_key`, or the grace session holding its slot, is gone. An address left
-// holding no socket keeps its entry while its window has connects in it (`ip_idle`).
+// holding no socket keeps its entry until its rate bucket is full again (`ip_idle`).
 inline void free_ip_slot(RelayState& st, const std::string& ip_key,
                          conn_rate::Clock::time_point now = conn_rate::Clock::now()) {
     auto it = st.ip_states.find(ip_key);
@@ -157,16 +157,15 @@ inline void free_ip_slot(RelayState& st, const std::string& ip_key,
     IpState& ip = it->second;
     if (ip.active_count > 0) ip.active_count--;
     if (ip.active_count > 0) return;
-    ip.recent_connects.prune(now);
-    if (ip.recent_connects.empty()) {
+    if (ip.rate.full_at() <= now) {
         st.ip_idle.remove(ip_key);
         st.ip_states.erase(it);
         return;
     }
-    for (const std::string& gone : st.ip_idle.put(ip_key, ip.recent_connects.ends())) detail::forget_idle(st, gone);
+    for (const std::string& gone : st.ip_idle.put(ip_key, ip.rate.full_at())) detail::forget_idle(st, gone);
 }
 
-// Forgets the addresses holding no socket whose windows have run out.
+// Forgets the addresses holding no socket whose buckets are full again.
 inline void sweep_rate_windows(RelayState& st, conn_rate::Clock::time_point now) {
     for (const std::string& key : st.ip_idle.expired(now)) detail::forget_idle(st, key);
 }
@@ -199,38 +198,35 @@ inline std::optional<std::string> grace_slot_victim(RelayState& st, const std::s
     return detail::book(st).grace_slot_victim(ip_key);
 }
 
-// Whether a new socket from `ip_key` may come in: under the cap, or over it by fewer
-// sockets than the address has grace slots for the logins to settle (settle_login).
-inline bool admits(RelayState& st, const std::string& ip_key, size_t cap = MAX_CONNS_PER_IP) {
+// Whether a new socket from `ip_key` may come in: under the cap, or over it while the
+// address holds fewer than another cap's worth (or its grace slots) for the logins to settle
+// (settle_login): a device whose older socket is a carrier NAT's zombie takes its slot back.
+inline bool admits(RelayState& st, const std::string& ip_key, size_t cap) {
     auto it = st.ip_states.find(ip_key);
     const size_t count = it == st.ip_states.end() ? 0 : it->second.active_count;
-    return count < cap || count < cap + grace_slots(st, ip_key);
+    return count < 2 * cap || count < cap + grace_slots(st, ip_key);
 }
 
 // Why a new socket was refused at .open, if it was.
 enum class Admission { In, RateLimit, IpLimit };
 
 // Whether a new socket from `ip_key` may come in now, taking its slot and counting it in
-// the address's window if so: ten connects a minute while the address holds a socket,
-// thirty while it holds none. The rate goes first, so a probe at the cap costs no look at
-// the session table. A listed address (`rate_exempt`) skips the rate alone and keeps no
-// window. A refusal takes nothing, so its close gives nothing back.
+// the address's rate bucket if so (`fam`: its family's cap and rate, conn_limits.h). The rate
+// goes first, so a probe at the cap costs no look at the session table. A listed address
+// (`rate_exempt`) skips the rate alone. A refusal takes nothing, so its close gives nothing
+// back.
 inline Admission admit_socket(RelayState& st, const std::string& ip_key, bool rate_exempt,
-                              conn_rate::Clock::time_point now, size_t cap = MAX_CONNS_PER_IP) {
+                              conn_rate::Clock::time_point now, const conn_limits::Family& fam) {
     auto it = st.ip_states.find(ip_key);
-    if (it != st.ip_states.end()) {
-        IpState& ip = it->second;
-        ip.recent_connects.prune(now);
-        const size_t per_min =
-            ip.active_count > 0 ? MAX_NEW_CONNS_PER_MIN_PER_IP : MAX_NEW_CONNS_PER_MIN_PER_IDLE_IP;
-        if (!rate_exempt && ip.recent_connects.size() >= per_min) return Admission::RateLimit;
+    if (it != st.ip_states.end() && !rate_exempt && !it->second.rate.conforms(now, fam.rate_per_min, fam.burst())) {
+        return Admission::RateLimit;
     }
-    if (!admits(st, ip_key, cap)) return Admission::IpLimit;
+    if (!admits(st, ip_key, fam.cap)) return Admission::IpLimit;
     if (it == st.ip_states.end()) it = st.ip_states.try_emplace(ip_key).first;
     IpState& ip = it->second;
     if (ip.active_count == 0) st.ip_idle.remove(ip_key);
     ip.active_count++;
-    if (!rate_exempt) ip.recent_connects.push(now);
+    if (!rate_exempt) ip.rate.admit(now, fam.rate_per_min, fam.burst());
     return Admission::In;
 }
 
@@ -249,14 +245,17 @@ struct LoginVerdict {
 
 inline LoginVerdict settle_login(RelayState& st, const std::string& ip_key, const std::string& device,
                                  bool frees_own, std::chrono::seconds grace, conn_rate::Clock::time_point now,
-                                 size_t cap = MAX_CONNS_PER_IP) {
+                                 size_t cap) {
     auto it = st.ip_states.find(ip_key);
     if (it == st.ip_states.end()) return {};
     IpState& ip = it->second;
-    const size_t count = ip.active_count - (frees_own && ip.active_count != 0 ? 1 : 0);
-    if (count <= cap) return {};
+    // Its older socket or session here hands its slot over one for one, however many other
+    // logins are still settling past the cap (a carrier NAT's users reconnecting at once).
+    if (frees_own || ip.active_count <= cap) return {};
     auto victim = detail::book(st).grace_slot_victim(ip_key, device);
-    if (!victim) return {};
+    // Past the cap with no one else's grace slot: only beside the device's own session in
+    // grace (its fetch socket); anything else came in on the cap's second half and waits.
+    if (!victim) return {grace_slots(st, ip_key) > 0, std::nullopt};
     auto vit = st.sessions.find(*victim);
     if (vit == st.sessions.end() || vit->second.grace_until - now > grace / 2) return {false, std::nullopt};
     ip.takeovers.prune(now);

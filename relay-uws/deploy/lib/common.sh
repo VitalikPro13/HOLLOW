@@ -188,6 +188,10 @@ env_operator_lines() {
     done <"$file"
 }
 
+# The connection limits (relay-uws/src/conn_limits.h), settings the setup writes; empty
+# means the relay's default. Here because native.sh and docker.sh read it as they load.
+LIMIT_KEYS="CONN_LIMIT_IPV4 CONN_LIMIT_IPV6 CONN_RATE_IPV4 CONN_RATE_IPV6 LOGIN_WINDOW_PER_BLOCK LOGIN_WINDOW_TOTAL CONNECTED_LIMIT BREAKER_MODE"
+
 # env_kept_block <the file being rewritten> <files another setup wrote, or "">
 # <key the setup writes...>: the kept lines with their header, or nothing. A
 # setting from the other files counts only where the first has none.

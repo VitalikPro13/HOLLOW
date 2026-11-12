@@ -11,6 +11,7 @@
 #include <string>
 
 using conn_rate::Clock;
+using conn_rate::Gcra;
 using conn_rate::IdleBook;
 using conn_rate::share_of_key;
 using conn_rate::Window;
@@ -47,6 +48,30 @@ static void window_tests() {
     check("a push past the size forgets the oldest", w.size() == 3 && w.ends() == at(122));
     w.prune(at(123));
     check("and all are forgotten past the newest's minute", w.empty());
+}
+
+// The new-connection rate (review Q1): a burst of the open cap at once, then the rate.
+static void gcra_tests() {
+    printf("gcra\n");
+    Gcra g;
+    bool all = true;
+    for (int i = 0; i < 512; i++) all = g.admit(at(0), 120, 512) && all;
+    check("a burst of the open cap comes in at once (300 carrier-NAT users reconnect)", all);
+    check("the next is refused", !g.admit(at(0), 120, 512));
+    check("half a second later one more comes in (120 a minute)", g.admit(at(0) + std::chrono::milliseconds(500), 120, 512));
+    check("but not two", !g.admit(at(0) + std::chrono::milliseconds(500), 120, 512));
+    Gcra h;
+    for (int i = 0; i < 512; i++) h.admit(at(0), 120, 512);
+    check("the bucket is full again once its arrivals are spent", h.full_at() == at(256));
+    all = true;
+    for (int i = 0; i < 512; i++) all = h.admit(at(256), 120, 512) && all;
+    check("and then takes a whole burst again", all);
+    Gcra slow;
+    all = true;
+    for (int i = 0; i < 30; i++) all = slow.admit(at(i * 2), 30, 1) && all;
+    check("a burst of one admits exactly the rate", all && !slow.admit(at(59), 30, 1));
+    Gcra none;
+    check("a zero rate admits nothing", !none.admit(at(0), 0, 5));
 }
 
 static void share_tests() {
@@ -112,6 +137,7 @@ static void book_tests() {
 }
 
 int main() {
+    gcra_tests();
     window_tests();
     share_tests();
     book_tests();

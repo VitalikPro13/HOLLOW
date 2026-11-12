@@ -403,12 +403,21 @@ static void test_start_pools() {
     check("three times", pools.take(7, 7, false, 1, l) == 400'000 && pools.take(7, 7, false, 2, l) == 400'000);
     int64_t t = pools.take(7, 7, false, 3, l);
     check("then the floor once the pool is empty", t == 100'000);
-    for (int i = 4; i < 10; i++) pools.take(7, 7, false, i, l);
-    check("ten starts a minute fall to the low tier", pools.take(7, 7, false, 11, l) == 24'000);
-    check("but a device seen clean keeps the floor", pools.take(7, 7, true, 12, l) == 100'000);
-    check("another block is untouched", pools.take(8, 8, false, 13, l) == 400'000);
-    check("a minute later the floor is back", pools.take(7, 7, false, 12 + 60'000 + 1, l) == 100'000);
-    check("the pool refills at 2,000 W/s", pools.take(7, 7, false, 12 + 60'000 + 1 + 200'000, l) == 400'000);
+    // The floor follows the address's connection allowance (review F3): 300 users of one
+    // carrier NAT starting fresh together all keep it at the default 120 a minute, burst 512.
+    bool all_floor = true;
+    for (int i = 4; i < 304; i++) all_floor = pools.take(7, 7, false, i, l) >= 100'000 && all_floor;
+    check("300 fresh starts behind one address all keep the floor", all_floor);
+    const breaker::FloorRate ten{10, 10};
+    StartPools small;
+    for (int i = 0; i < 3; i++) small.take(9, 9, false, i, l, ten);
+    for (int i = 3; i < 10; i++) small.take(9, 9, false, i, l, ten);
+    check("past the allowance's burst they fall to the low tier", small.take(9, 9, false, 11, l, ten) == 24'000);
+    check("but a device seen clean keeps the floor", small.take(9, 9, true, 12, l, ten) == 100'000);
+    check("another block is untouched", small.take(8, 8, false, 13, l, ten) == 400'000);
+    check("one allowance step later the floor is back", small.take(9, 9, false, 11 + 6'000 + 1, l, ten) == 100'000);
+    check("but only one step's worth", small.take(9, 9, false, 11 + 6'000 + 2, l, ten) == 24'000);
+    check("the pool refills at 2,000 W/s", small.take(9, 9, false, 12 + 60'000 + 1 + 200'000, l, ten) == 400'000);
     pools.sweep(10'000'000, l);
     check("a full idle pool is forgotten", pools.size() == 0);
     CleanSeen seen;

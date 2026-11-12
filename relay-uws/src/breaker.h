@@ -21,20 +21,23 @@
 // numbers and never trip.
 //
 // Compile-time numbers, not config: a self-hosted relay cannot lower them below what an
-// honest member of ten 1,536-device servers needs. Shadow mode (the default) books every
-// trip exactly as enforcement would and closes nothing; HOLLOW_BREAKER_ENFORCE=1 enforces.
+// honest member of ten 1,536-device servers needs. Enforced by default; an operator's
+// BREAKER_MODE=shadow (conn_limits.h) books every trip exactly as enforcement would and
+// closes nothing. HOLLOW_BREAKER_ENFORCE=0 makes shadow a live-test build's default.
 //
 // Header-only and free of uWebSockets and libsodium, so test/test_breaker.cpp drives it.
 // Keys are 64-bit hashes the relay makes under a process-lifetime key: nothing here names
 // a device, an address or a room, and nothing is logged or snapshotted.
 
 #ifndef HOLLOW_BREAKER_ENFORCE
-#define HOLLOW_BREAKER_ENFORCE 0
+#define HOLLOW_BREAKER_ENFORCE 1
 #endif
 
 namespace breaker {
 
-inline constexpr bool ENFORCE = HOLLOW_BREAKER_ENFORCE;
+// Set once at start, before the relay listens (setup_ws_handler).
+inline bool g_enforce = true;
+inline bool enforced() { return g_enforce; }
 
 // One fan-out delivery costs a receiving address group (ip_limit_key: a v4 address or a
 // v6 /64) at most this much per frame, so sockets a stranger piles into a room add 8 W to
@@ -83,9 +86,9 @@ struct Limits {
     // The mirror margin a pacing client keeps (relay_pace RESERVE): no frame is judged
     // above cap minus this.
     int64_t pace_reserve = 16'000;
-    // Fresh full starts a block may make in FRESH_WINDOW_MS before it falls to w_low.
-    int64_t fresh_window_ms = 60'000;
-    size_t fresh_floor_starts = 10;
+    // Fresh full starts keep the floor at the block's new-connection rate (StartPools); the
+    // minute that rate is counted over.
+    int64_t floor_minute_ms = 60'000;
     // A device that held a clean session this recently keeps the floor tier (N6).
     int64_t clean_seen_ms = 86'400'000;
     std::array<int64_t, 5> ladder_ms = LADDER_MS;
@@ -127,7 +130,7 @@ inline Limits scaled(const Limits& l, int64_t wdiv, int64_t tdiv) {
         o.ladder_forget_ms = std::max<int64_t>(o.ladder_forget_ms / tdiv, 1);
         o.ladder_window_ms = std::max<int64_t>(o.ladder_window_ms / tdiv, LADDER_SLOTS);
         o.socket_pause_ms = std::max<int64_t>(o.socket_pause_ms / tdiv, 1);
-        o.fresh_window_ms = std::max<int64_t>(o.fresh_window_ms / tdiv, 1);
+        o.floor_minute_ms = std::max<int64_t>(o.floor_minute_ms / tdiv, 1);
         o.clean_seen_ms = std::max<int64_t>(o.clean_seen_ms / tdiv, 1);
         o.pause_slack_ms = std::max<int64_t>(o.pause_slack_ms / tdiv, 1);
     }
@@ -664,27 +667,37 @@ private:
     FairShare<uint64_t> table_;
 };
 
+// The connection allowance a start pool keeps the floor for: the block's family's new
+// connections a minute and their burst (conn_limits.h), so an address never falls below
+// what it may connect (design_G2_breaker.md section 4; a carrier NAT's users included).
+struct FloorRate {
+    size_t per_min = 120;
+    size_t burst = 512;
+};
+
 // The fresh-start credit of each address block (section 4): degrade, never refuse.
 class StartPools {
 public:
     // The W start a fresh full session from `block` gets now; `share` is its socket_share.
-    int64_t take(uint64_t block, uint64_t share, bool clean_device, int64_t now_ms, const Limits& l) {
+    int64_t take(uint64_t block, uint64_t share, bool clean_device, int64_t now_ms, const Limits& l,
+                 FloorRate rate = FloorRate()) {
         auto [it, fresh] = pools_.try_emplace(block);
         Pool& p = it->second;
         if (fresh) p.credit.start(l.pool.start, now_ms);
         p.credit.refill(now_ms, l.pool);
-        while (!p.starts.empty() && now_ms - p.starts.front() >= l.fresh_window_ms) p.starts.pop_front();
+        const int64_t step = std::max<int64_t>(l.floor_minute_ms / static_cast<int64_t>(std::max<size_t>(rate.per_min, 1)), 1);
+        const int64_t tat = std::max(p.floor_tat_ms, now_ms);
+        const bool within = rate.burst > 0 && tat - now_ms <= step * static_cast<int64_t>(rate.burst - 1);
         int64_t tier;
         if (p.credit.level() >= l.w_full.start) {
             p.credit.spend(l.w_full.start, 0);
             tier = l.w_full.start;
-        } else if (p.starts.size() < l.fresh_floor_starts || clean_device) {
+        } else if (within || clean_device) {
             tier = l.w_floor;
         } else {
             tier = l.w_low;
         }
-        p.starts.push_back(now_ms);
-        if (p.starts.size() > l.fresh_floor_starts) p.starts.pop_front();
+        if (within) p.floor_tat_ms = tat + step;
         table_.put(block, share, 1);
         while (table_.size() > TABLE_MAX) {
             auto victim = table_.victim_except(block);
@@ -694,13 +707,12 @@ public:
         }
         return tier;
     }
-    // Forgets a block whose pool is full again and whose window is empty.
+    // Forgets a block whose pool and floor allowance are both full again.
     void sweep(int64_t now_ms, const Limits& l) {
         for (auto it = pools_.begin(); it != pools_.end();) {
             Pool& p = it->second;
             p.credit.refill(now_ms, l.pool);
-            while (!p.starts.empty() && now_ms - p.starts.front() >= l.fresh_window_ms) p.starts.pop_front();
-            if (p.starts.empty() && p.credit.level() >= l.pool.cap) {
+            if (p.floor_tat_ms <= now_ms && p.credit.level() >= l.pool.cap) {
                 table_.remove(it->first);
                 it = pools_.erase(it);
             } else {
@@ -713,7 +725,8 @@ public:
 private:
     struct Pool {
         Bucket credit;
-        std::deque<int64_t> starts;
+        // The floor allowance as one theoretical arrival time (GCRA), ms.
+        int64_t floor_tat_ms = 0;
     };
     std::unordered_map<uint64_t, Pool> pools_;
     FairShare<uint64_t> table_;

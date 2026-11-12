@@ -132,9 +132,9 @@ fn typed(text: &str) -> Option<(String, Option<u64>)> {
     Some((t.kind?, t.n))
 }
 
-const RELAY_UNCOUNTED: [&str; 11] = [
+const RELAY_UNCOUNTED: [&str; 12] = [
     "auth_challenge", "auth_ok", "auth_failed", "resumed", "hb_ack", "ack",
-    "reconnect", "members", "peer_joined", "peer_left", "kill_signal",
+    "reconnect", "members", "peer_joined", "peer_left", "presence", "kill_signal",
 ];
 
 const CLIENT_UNCOUNTED: [&str; 7] = ["auth_hello", "auth", "hb", "ack", "inactive", "active", "end"];

@@ -18,7 +18,11 @@
 #include "kill_list.h"
 #include "link_guess.h"
 #include "license.h"
+#include "conn_book.h"
+#include "conn_limits.h"
 #include "conn_rate.h"
+#include "login_window.h"
+#include "presence_batch.h"
 #include "fair_share.h"
 #include "session.h"
 #include "offline_index.h"
@@ -31,12 +35,7 @@
 // No soft backpressure — let uWebSockets buffer handle delivery.
 // Hard limit (.maxBackpressure = 64MB) catches truly dead connections.
 
-static constexpr size_t MAX_CONNS_PER_IP = 34;
-static constexpr size_t MAX_NEW_CONNS_PER_MIN_PER_IP = 10;
-// For an address holding no socket: a phone killed in the background opens a fetch socket
-// per push wake, and a busy minute passes ten of those.
-static constexpr size_t MAX_NEW_CONNS_PER_MIN_PER_IDLE_IP = 30;
-static_assert(MAX_NEW_CONNS_PER_MIN_PER_IDLE_IP >= MAX_NEW_CONNS_PER_MIN_PER_IP, "the window holds both");
+// Open sockets and new ones a minute per address are operator settings (conn_limits.h).
 // Logins a minute at one full address that may end a neighbour's session in grace for its
 // slot (session_bounds::settle_login); past them the newcomer waits, as before sessions.
 static constexpr size_t MAX_GRACE_TAKEOVERS_PER_MIN_PER_IP = 3;
@@ -223,6 +222,9 @@ struct PerSocketData {
 
     // This socket's share of a presence digest (presence_view.h), cached on first use.
     uint64_t presence_tag = 0;
+    // How presence reaches this socket, fixed by its first join (or the session it resumes):
+    // 0 undecided, 1 a frame per change, 2 batched `presence` frames (presence_batch.h).
+    uint8_t presence_v = 0;
     // A write to this session's socket was dropped past maxBackpressure: it writes
     // nothing more and closes on the next session tick (RelayState::dropped_writes).
     bool write_dead = false;
@@ -263,13 +265,15 @@ struct WsRoom {
     std::unordered_set<std::string> held;
     // What public frames reaching sockets outside its audience draw on (breaker.h).
     breaker::Allowance allowance;
+    // Presence changes not yet told to its batching viewers.
+    presence_batch::Log log;
 };
 
 // An address holding a socket, or holding none with connects in the last minute
 // (`RelayState::ip_idle`). Changed only through session_bounds.h.
 struct IpState {
     uint32_t active_count = 0;
-    conn_rate::Window<MAX_NEW_CONNS_PER_MIN_PER_IDLE_IP> recent_connects;
+    conn_rate::Gcra rate;
     conn_rate::Window<MAX_GRACE_TAKEOVERS_PER_MIN_PER_IP> takeovers;
 };
 
@@ -345,6 +349,16 @@ struct RelayState {
     // The entries above holding no socket, bounded and fair: an address that closes each
     // socket before it opens the next is still counted.
     conn_rate::IdleBook ip_idle;
+    // The connection limits in force (conn_limits.h), read once at start.
+    conn_limits::Limits limits;
+    // Sockets that have not logged in yet, and every open socket (login_window.h, conn_book.h).
+    login_window::Window login_window;
+    conn_book::Book conns{conn_limits::Limits{}.connected};
+    // Rooms whose presence log holds events, and for each peer the rooms holding events about
+    // it (the subject flush, keyed by peer so a session's move keeps it). Bytes all logs hold.
+    std::unordered_set<std::string> presence_pending;
+    std::unordered_map<std::string, std::unordered_set<std::string>> presence_subjects;
+    size_t presence_bytes = 0;
     std::unordered_set<SSLWebSocket*> guest_sockets;
     size_t guest_count = 0;
 

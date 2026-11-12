@@ -74,7 +74,7 @@ inline bool auth_session_ok(std::string_view mode, std::string_view session) {
 inline bool relay_type_counts(std::string_view type) {
     static constexpr std::string_view uncounted[] = {
         "auth_challenge", "auth_ok", "auth_failed", "resumed", "hb_ack", "ack",
-        "reconnect", "members", "peer_joined", "peer_left", "kill_signal",
+        "reconnect", "members", "peer_joined", "peer_left", "presence", "kill_signal",
     };
     for (auto u : uncounted) {
         if (type == u) return false;
@@ -447,6 +447,8 @@ struct Session {
     // As PerSocketData::subscriptions: room -> topics; a room with no entry gets every topic.
     std::unordered_map<std::string, std::unordered_set<std::string>> subscriptions;
     bool inactive = false;
+    // The presence version its socket fixed (PerSocketData::presence_v), 0 back from a snapshot.
+    uint8_t presence_v = 0;
     uint64_t in_h = 0;  // stream frames received from the device
     Ring ring;          // stream frames sent to it and not acked
     // PerSocketData::mailbox_mark of its socket, kept across grace. Never in the snapshot:

@@ -1112,7 +1112,7 @@ plan_member_keys() {
 # ---------------------------------------------------------------- services
 
 # The relay.env lines the setup writes; every other line is the operator's.
-RELAY_ENV_KEYS="TURN_SECRET HOLLOW_PUSH_TOKEN HOLLOW_CONN_RATE_EXEMPT PUBLIC_STATS"
+RELAY_ENV_KEYS="TURN_SECRET HOLLOW_PUSH_TOKEN HOLLOW_CONN_RATE_EXEMPT PUBLIC_STATS $LIMIT_KEYS"
 
 relay_settings() {
     step "Relay settings"
@@ -1131,6 +1131,11 @@ relay_settings() {
         printf 'HOLLOW_PUSH_TOKEN=%s\n' "$push_token"
         if [ -n "$exempt" ]; then printf 'HOLLOW_CONN_RATE_EXEMPT=%s\n' "$exempt"; fi
         printf 'PUBLIC_STATS=%s\n' "$(public_stats_norm "${CFG_PUBLIC_STATS:-on}")"
+        local k v
+        for k in $LIMIT_KEYS; do
+            v=CFG_$k
+            if [ -n "${!v:-}" ]; then printf '%s=%s\n' "$k" "${!v}"; fi
+        done
         if [ -n "$kept" ]; then printf '\n%s\n' "$kept"; fi
     } | put_file "$RELAY_ETC/relay.env" 0600 root root
     if [ "$PUT_CHANGED" = 1 ]; then mark_restart hollow-relay; fi

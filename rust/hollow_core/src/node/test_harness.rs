@@ -41,38 +41,102 @@ struct Conn {
     online: bool,
     /// The node's ws_client, which the broker stands in for.
     client: ClientWire,
-    /// ws_client's record of the presence its socket was told (presence_audit.rs).
-    told: std::cell::RefCell<super::presence_audit::Audit>,
+    /// ws_client's own reading of presence frames, with its record of what its socket was told.
+    wire: std::cell::RefCell<super::ws_client::PresenceWire>,
+    /// The joins ws_client sends by itself (a wrong record asks for the full list).
+    rejoin_tx: mpsc::UnboundedSender<WsCommand>,
     /// room -> `PeerJoined` frames to lose on the way there, as writes the relay drops.
     lose_joined: std::cell::RefCell<HashMap<String, u32>>,
 }
 
 impl Conn {
-    fn new(event_tx: mpsc::UnboundedSender<WsEvent>) -> Self {
-        Conn { event_tx, online: true, client: ClientWire::default(), told: Default::default(), lose_joined: Default::default() }
+    fn new(dev: &str, event_tx: mpsc::UnboundedSender<WsEvent>, rejoin_tx: mpsc::UnboundedSender<WsCommand>) -> Self {
+        Conn {
+            event_tx,
+            online: true,
+            client: ClientWire::default(),
+            wire: std::cell::RefCell::new(super::ws_client::PresenceWire::new(dev)),
+            rejoin_tx,
+            lose_joined: Default::default(),
+        }
     }
 
-    /// An event reaching the node through ws_client, which records presence first.
-    fn deliver(&self, dev: &str, ev: WsEvent) {
-        {
-            let mut told = self.told.borrow_mut();
-            match &ev {
-                WsEvent::PeerJoined { room, peer_id } => {
-                    if let Some(n) = self.lose_joined.borrow_mut().get_mut(room).filter(|n| **n > 0) {
-                        *n -= 1;
-                        return;
-                    }
-                    told.on_joined(room, peer_id);
+    fn lose(&self, room: &str) -> bool {
+        match self.lose_joined.borrow_mut().get_mut(room).filter(|n| **n > 0) {
+            Some(n) => {
+                *n -= 1;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// An event reaching the node through ws_client: presence and rosters as the relay
+    /// writes them, read by ws_client's own code.
+    fn deliver(&self, _dev: &str, ev: WsEvent) {
+        let frame = match &ev {
+            WsEvent::PeerJoined { room, peer_id } => {
+                if self.lose(room) {
+                    return;
                 }
-                WsEvent::PeerLeft { room, peer_id } => told.on_left(room, peer_id),
-                WsEvent::RoomMembers { room, peers } => told.on_members(room, peers, dev, std::time::Instant::now()),
-                WsEvent::LeftRoom { room } => told.forget(room),
-                WsEvent::SessionLost => told.clear(),
-                _ => {}
+                serde_json::json!({ "type": "peer_joined", "room": room, "peer_id": peer_id })
+            }
+            WsEvent::PeerLeft { room, peer_id } => serde_json::json!({ "type": "peer_left", "room": room, "peer_id": peer_id }),
+            WsEvent::RoomMembers { room, peers } => serde_json::json!({ "type": "members", "room": room, "peers": peers }),
+            WsEvent::LeftRoom { room } => {
+                self.wire.borrow_mut().forget(room);
+                let _ = self.event_tx.send(ev);
+                return;
+            }
+            WsEvent::SessionLost => {
+                self.wire.borrow_mut().clear();
+                let _ = self.event_tx.send(ev);
+                return;
+            }
+            _ => {
+                let _ = self.event_tx.send(ev);
+                return;
+            }
+        };
+        self.read(&frame);
+    }
+
+    /// One relay frame through ws_client. The mock writes its own `DoorStatus` before every
+    /// `members`, so the one ws_client raises from a roster is not repeated.
+    fn read(&self, frame: &serde_json::Value) {
+        let (events, rejoins) = self.wire.borrow_mut().read(frame);
+        for ev in events {
+            if !matches!(ev, WsEvent::DoorStatus { .. }) {
+                let _ = self.event_tx.send(ev);
             }
         }
-        let _ = self.event_tx.send(ev);
+        for room in rejoins {
+            if let Some(cmd) = self.client.joins.get(&room) {
+                let _ = self.rejoin_tx.send(cmd.clone());
+            }
+        }
     }
+
+    /// A `presence` batch: `(joined, peer)` in order, less the arrivals the test loses.
+    fn deliver_batch(&self, room: &str, changes: &[(bool, String)]) {
+        let ev: Vec<String> = changes
+            .iter()
+            .filter(|(joined, _)| !(*joined && self.lose(room)))
+            .map(|(joined, peer)| format!("{}{peer}", if *joined { '+' } else { '-' }))
+            .collect();
+        if !ev.is_empty() {
+            self.read(&serde_json::json!({ "type": "presence", "room": room, "ev": ev }));
+        }
+    }
+}
+
+/// One presence frame the mock's batch window still holds for `dev`.
+struct LaggedPresence {
+    dev: String,
+    room: String,
+    subject: String,
+    due: std::time::Instant,
+    ev: WsEvent,
 }
 
 /// ws_client's half of a resumable session (RESUMABLE_SESSIONS_PLAN.md section 9).
@@ -314,8 +378,8 @@ struct RelayInner {
     /// returns DROPPED with no error to the sender), the loss mode behind the
     /// join-order MLS epoch race: the victim looks perfectly healthy to everyone.
     broadcast_deaf: HashSet<String>,
-    /// Opt-in: a join by a socket already in the room announces nothing to the others,
-    /// as the relay does (`already_present` in `ws_handler.cpp`).
+    /// A join by a socket the room already saw announces nothing to the others, as the relay
+    /// does; on by default (`MockRelay::new`), off only to model a relay before 0.14.
     quiet_rejoins: bool,
     /// Every (device, room) audit whose digest differed from what the device was told.
     drifts_told: Vec<(String, String)>,
@@ -383,6 +447,12 @@ struct RelayInner {
     /// a room whose lock the relay does not hold (a legacy server, an evicted record).
     kept_in_view: HashSet<(String, String)>,
     door_sweeper: bool,
+    /// The relay's presence batch window (DESIGN_RELAY_014 2.2) at its worst: every
+    /// `PeerJoined`/`PeerLeft` waits this long, unless a frame from its subject, a `members`
+    /// to its viewer or the viewer's audit releases its room first.
+    presence_lag: Option<std::time::Duration>,
+    lagged: std::cell::RefCell<Vec<LaggedPresence>>,
+    lag_ticker: bool,
     /// Devices whose app said `inactive` (plan decision 6): in no member list and
     /// announced to nobody, and told no presence they did not ask for.
     hidden: HashSet<String>,
@@ -657,6 +727,7 @@ impl MockRelay {
                 keys,
                 ring_cap: 4096,
                 relay_idle: std::time::Duration::from_secs(45),
+                quiet_rejoins: true,
                 ..RelayInner::default()
             })),
         }
@@ -672,9 +743,10 @@ impl MockRelay {
         mut cmd_rx: mpsc::UnboundedReceiver<WsCommand>,
         event_tx: mpsc::UnboundedSender<WsEvent>,
     ) {
+        let (rejoin_tx, mut rejoin_rx) = mpsc::unbounded_channel();
         {
             let mut inner = self.inner.lock().unwrap();
-            inner.conns.insert(peer_id.clone(), Conn::new(event_tx.clone()));
+            inner.conns.insert(peer_id.clone(), Conn::new(&peer_id, event_tx.clone(), rejoin_tx));
             let session = MockSession::fresh(inner.ring_cap);
             inner.sessions.insert(peer_id.clone(), session);
             // The relay's door grace sweep, as its 5 s timer.
@@ -694,8 +766,14 @@ impl MockRelay {
         let relay = self.clone();
         let pid = peer_id.clone();
         tokio::spawn(async move {
-            while let Some(cmd) = cmd_rx.recv().await {
-                relay.inner.lock().unwrap().client_send(&pid, cmd);
+            loop {
+                tokio::select! {
+                    cmd = cmd_rx.recv() => match cmd {
+                        Some(cmd) => relay.inner.lock().unwrap().client_send(&pid, cmd),
+                        None => break,
+                    },
+                    Some(cmd) = rejoin_rx.recv() => relay.inner.lock().unwrap().client_rejoin(&pid, cmd),
+                }
             }
         });
         // Tell the node it's connected (mirrors WsEvent::Connected on real auth).
@@ -1067,6 +1145,7 @@ impl MockRelay {
             inner.sessions.insert(peer_id.to_string(), session);
         } else {
             inner.sessions.remove(peer_id);
+            inner.drop_lagged_for(peer_id);
         }
         if !online {
             let rooms: Vec<String> = inner.rooms.keys().cloned().collect();
@@ -1437,6 +1516,26 @@ impl MockRelay {
         self.inner.lock().unwrap().quiet_rejoins = on;
     }
 
+    /// Hold every presence frame up to `ms`, as the relay's batch window can (see `presence_lag`).
+    pub(crate) fn set_presence_lag(&self, ms: u64) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.presence_lag = (ms > 0).then(|| std::time::Duration::from_millis(ms));
+        if inner.lag_ticker {
+            return;
+        }
+        inner.lag_ticker = true;
+        let weak = Arc::downgrade(&self.inner);
+        tokio::spawn(async move {
+            let mut every = tokio::time::interval(std::time::Duration::from_millis(10));
+            loop {
+                every.tick().await;
+                let Some(inner) = weak.upgrade() else { break };
+                let now = std::time::Instant::now();
+                inner.lock().unwrap().release_lagged(|l| l.due <= now);
+            }
+        });
+    }
+
     /// Lose the next `n` `PeerJoined` frames to `dev` in `room`, as writes the relay drops.
     pub(crate) fn lose_peer_joined(&self, dev: &str, room: &str, n: u32) {
         if let Some(conn) = self.inner.lock().unwrap().conns.get(dev) {
@@ -1453,7 +1552,7 @@ impl MockRelay {
 
     /// What `dev`'s ws_client was told of `room`.
     pub(crate) fn told(&self, dev: &str, room: &str) -> Option<HashSet<String>> {
-        self.inner.lock().unwrap().conns.get(dev).and_then(|c| c.told.borrow().told(room).cloned())
+        self.inner.lock().unwrap().conns.get(dev).and_then(|c| c.wire.borrow().audit().told(room).cloned())
     }
 
     /// The audits that found a difference, in order.
@@ -1720,13 +1819,13 @@ impl RelayInner {
                 }
                 let joined = inner.rooms.get(&room_code).is_some_and(|s| s.contains(from));
                 let Some(conn) = inner.conns.get(from) else { return };
-                let told = conn.told.borrow();
-                let differs = match told.told(&room_code) {
+                let wire = conn.wire.borrow();
+                let differs = match wire.audit().told(&room_code) {
                     None => false,
                     Some(_) if !joined => true,
                     Some(record) => super::presence_audit::digest(record) != super::presence_audit::digest(peers.iter()),
                 };
-                drop(told);
+                drop(wire);
                 if differs {
                     inner.drifts_told.push((from.to_string(), room_code.clone()));
                     inner.local(from, WsEvent::PresenceDrift { room: room_code });
@@ -2119,8 +2218,11 @@ impl RelayInner {
             return;
         }
         let inbox = room.starts_with("inbox:");
-        // A re-join is quiet only for a socket the room already saw (`already_present`).
-        let saw_before = self.peer_in_room(room, from) && (self.room_door(room).is_none() || self.sees_door(room, from));
+        // A re-join is quiet only for a socket the room already saw: in an inbox, as an owner.
+        let was_owner = self.inbox_owners.get(room).is_some_and(|o| o.contains(from));
+        let saw_before = self.peer_in_room(room, from)
+            && (self.room_door(room).is_none() || self.sees_door(room, from))
+            && (!inbox || was_owner);
         // A connection that proved it once stays an owner through a plain re-join.
         let owner = owner || (inbox && self.peer_in_room(room, from) && self.receives(room, from));
         if inbox {
@@ -2158,21 +2260,39 @@ impl RelayInner {
         };
         let rejoin = self.quiet_rejoins && saw_before;
         self.rooms.entry(room.to_string()).or_default().insert(from.to_string());
+        // A re-join of a socket that holds a told view and was visible before and after gets
+        // the short answer (the relay's `pv:2` + `have`): only its digest and count.
+        let short = rejoin
+            && visible
+            && !self.hidden.contains(from)
+            && self.conns.get(from).is_some_and(|c| c.wire.borrow().asks_short(room));
 
-        // members snapshot to the joiner (includes self, like the relay).
-        let mut members = existing.clone();
-        members.push(from.to_string());
         self.tell(from, WsEvent::DoorStatus { room: room.to_string(), proved: door_ok });
-        self.tell(from, WsEvent::RoomMembers {
-            room: room.to_string(),
-            peers: members,
-        });
+        if short {
+            self.tell_short(from, room, &existing);
+        } else {
+            // members snapshot to the joiner (includes self, like the relay).
+            let mut members = existing.clone();
+            members.push(from.to_string());
+            self.tell(from, WsEvent::RoomMembers { room: room.to_string(), peers: members });
+        }
         if !self.hidden.contains(from) && !rejoin {
             for m in &existing {
                 self.tell(m, WsEvent::PeerJoined {
                     room: room.to_string(),
                     peer_id: from.to_string(),
                 });
+            }
+        }
+        // A socket the room saw that this join hides (an inbox owner whose roster no longer counts).
+        if self.quiet_rejoins && saw_before && !visible && !self.hidden.contains(from) {
+            let others: Vec<String> = self
+                .rooms
+                .get(room)
+                .map(|s| s.iter().filter(|p| *p != from && self.receives(room, p)).cloned().collect())
+                .unwrap_or_default();
+            for m in others {
+                self.tell(&m, WsEvent::PeerLeft { room: room.to_string(), peer_id: from.to_string() });
             }
         }
         self.replay_offline(from, room);
@@ -2670,8 +2790,32 @@ impl RelayInner {
     /// Presence and kill signals: state the relay re-reads on resume, so only a live
     /// socket gets them and no ring keeps them.
     fn tell(&self, dev: &str, ev: WsEvent) -> bool {
+        if !self.socket_live(dev) {
+            return false;
+        }
+        match &ev {
+            WsEvent::PeerJoined { room, peer_id } | WsEvent::PeerLeft { room, peer_id } if self.presence_lag.is_some() => {
+                let due = std::time::Instant::now() + self.presence_lag.unwrap_or_default();
+                let held = LaggedPresence { dev: dev.to_string(), room: room.clone(), subject: peer_id.clone(), due, ev };
+                self.lagged.borrow_mut().push(held);
+                return true;
+            }
+            // A `members` never covers an event its viewer was not sent first.
+            WsEvent::RoomMembers { room, .. } | WsEvent::DoorStatus { room, .. } => {
+                self.release_lagged(|l| l.dev == dev && l.room == *room);
+            }
+            _ => {}
+        }
+        self.tell_now(dev, ev)
+    }
+
+    fn socket_live(&self, dev: &str) -> bool {
         let live = self.sessions.get(dev).is_none_or(|s| s.socket == Socket::Live);
-        match self.conns.get(dev).filter(|c| c.online && live) {
+        self.conns.get(dev).is_some_and(|c| c.online && live)
+    }
+
+    fn tell_now(&self, dev: &str, ev: WsEvent) -> bool {
+        match self.conns.get(dev).filter(|_| self.socket_live(dev)) {
             Some(conn) => {
                 g1_probe::note_delivery(&ev);
                 conn.deliver(dev, ev);
@@ -2679,6 +2823,70 @@ impl RelayInner {
             }
             None => false,
         }
+    }
+
+    /// The short `members`: what `dev` would be listed in `room` (`others`, itself left out) as
+    /// a digest and a count, flushed after what the window still holds for it.
+    fn tell_short(&self, dev: &str, room: &str, others: &[String]) {
+        self.release_lagged(|l| l.dev == dev && l.room == room);
+        let Some(conn) = self.conns.get(dev).filter(|_| self.socket_live(dev)) else { return };
+        g1_probe::note_delivery(&WsEvent::RoomMembers { room: room.to_string(), peers: Vec::new() });
+        let (sum, count) = super::presence_audit::digest(others.iter());
+        conn.read(&serde_json::json!({ "type": "members", "room": room, "digest": sum, "count": count }));
+    }
+
+    /// Write the held presence frames `pick` names, in the order they were logged, as one
+    /// `presence` batch per viewer and room; a frame whose viewer's socket died meanwhile is
+    /// lost with it.
+    fn release_lagged(&self, pick: impl Fn(&LaggedPresence) -> bool) {
+        let due: Vec<LaggedPresence> = {
+            let mut held = self.lagged.borrow_mut();
+            if held.is_empty() {
+                return;
+            }
+            let (out, keep) = std::mem::take(&mut *held).into_iter().partition(|l| pick(l));
+            *held = keep;
+            out
+        };
+        let mut batches: Vec<((String, String), Vec<(bool, String)>)> = Vec::new();
+        for l in due {
+            if !self.socket_live(&l.dev) {
+                continue;
+            }
+            g1_probe::note_delivery(&l.ev);
+            let change = match l.ev {
+                WsEvent::PeerJoined { peer_id, .. } => (true, peer_id),
+                WsEvent::PeerLeft { peer_id, .. } => (false, peer_id),
+                _ => continue,
+            };
+            let key = (l.dev, l.room);
+            match batches.iter_mut().find(|(k, _)| *k == key) {
+                Some((_, changes)) => changes.push(change),
+                None => batches.push((key, vec![change])),
+            }
+        }
+        for ((dev, room), changes) in batches {
+            if let Some(conn) = self.conns.get(&dev) {
+                for chunk in changes.chunks(super::ws_client::PRESENCE_BATCH_MAX) {
+                    conn.deliver_batch(&room, chunk);
+                }
+            }
+        }
+    }
+
+    /// The relay's subject flush: a frame from `from` first releases every room whose
+    /// held presence names it, so nobody hears from a peer before hearing it arrive.
+    fn release_subject(&self, from: &str) {
+        let rooms: HashSet<String> =
+            self.lagged.borrow().iter().filter(|l| l.subject == from).map(|l| l.room.clone()).collect();
+        if !rooms.is_empty() {
+            self.release_lagged(|l| rooms.contains(&l.room));
+        }
+    }
+
+    /// What a dead socket was still owed is lost with it; its resume answers `members`.
+    fn drop_lagged_for(&self, dev: &str) {
+        self.lagged.borrow_mut().retain(|l| l.dev != dev);
     }
 
     /// An event ws_client raises itself, whatever its socket is doing.
@@ -2731,8 +2939,21 @@ impl RelayInner {
     /// A command from the node, as ws_client puts it on the wire: written on a live
     /// socket, kept in flight on a zombie one, held unwritten while suspended.
     fn client_send(&mut self, from: &str, cmd: WsCommand) {
+        self.client_write(from, cmd, CmdSource::Node);
+    }
+
+    /// A join ws_client writes by itself for a room's full list: never taken for a replay's echo.
+    fn client_rejoin(&mut self, from: &str, cmd: WsCommand) {
+        if let Some(conn) = self.conns.get_mut(from) {
+            conn.client.replayed.remove(&format!("{cmd:?}"));
+        }
+        self.client_write(from, cmd, CmdSource::Client);
+    }
+
+    fn client_write(&mut self, from: &str, cmd: WsCommand, source: CmdSource) {
         let Some(conn) = self.conns.get_mut(from) else { return };
         conn.client.track(&cmd);
+        conn.wire.borrow_mut().track(&cmd);
         if matches!(cmd, WsCommand::SetDoor { .. }) {
             self.handle(from, cmd);
             return;
@@ -2770,13 +2991,18 @@ impl RelayInner {
             return;
         }
         client.written += 1;
-        self.receive(from, cmd, CmdSource::Node);
+        self.receive(from, cmd, source);
     }
 
     /// A frame the relay reads off a live socket: counted on arrival, then handled.
     fn receive(&mut self, from: &str, cmd: WsCommand, source: CmdSource) {
         if let Some(s) = self.sessions.get_mut(from) {
             s.in_h += 1;
+        }
+        self.release_subject(from);
+        // An audit's digest never runs ahead of what its socket was sent.
+        if let WsCommand::DiscoverPeers { room_code } = &cmd {
+            self.release_lagged(|l| l.dev == from && l.room == *room_code);
         }
         self.cmd_log.push((from.to_string(), cmd_kind(&cmd), cmd_room(&cmd).map(str::to_string), source));
         if let Some(log) = self.scope_log.as_mut() {
@@ -2807,6 +3033,7 @@ impl RelayInner {
         if let Some(conn) = self.conns.get_mut(dev) {
             conn.online = false;
         }
+        self.drop_lagged_for(dev);
         if let Some(s) = self.sessions.get_mut(dev) {
             s.socket = Socket::Gone;
             s.held_rooms = held;
@@ -27697,7 +27924,9 @@ fn harness_fixed_sleep_budget_does_not_grow() {
     // closed phone's join (1.5 s).
     // 2026-11-08: t14-deny-client added four absences, nothing sent for a refused server
     // by members, a waiting joiner, a recovery pool and a relaunched leaver (20.3 s).
-    const BUDGET_MS: u64 = 1_174_800;
+    // 2026-11-11: t14-relay added a lock move's quiet re-joins (settle before and after the
+    // count, 3.5 s) and a silent socket drop under the batch window (1.5 s).
+    const BUDGET_MS: u64 = 1_179_800;
 
     let src = include_str!("test_harness.rs");
     // Built from pieces so this scan does not count its own source text.
@@ -66779,4 +67008,266 @@ async fn agegate_a_non_members_catch_up_settles_nothing() {
     super::swarm::settle_age_gate(&event_tx, &state, "member-m", &path, &pass).await;
     assert!(settled(), "control: a member's catch-up settles it");
     assert!(matches!(event_rx.try_recv(), Ok(NetworkEvent::ServerUpdated { .. })));
+}
+
+// t14-relay
+
+/// A server of five whose join lock is on the relay, so a kick moves the door and every
+/// remaining device re-joins the room on the socket that holds its slot.
+async fn t14r_locked_server(relay: &MockRelay, tags: [u8; 5]) -> (Vec<TestNode>, String) {
+    let mut o = spawn_node_with_friends(relay, tags[0], tags[0], &[]).await;
+    let sid = create_server_and_wait(&mut o, "Locked Server").await;
+    assert!(expect_sees_room(relay, &sid, &o.device_id).await, "the owner proves its door");
+    let mut nodes = vec![o];
+    for &tag in &tags[1..] {
+        let mut n = spawn_node_with_friends(relay, tag, tag, &[]).await;
+        join_as_members(relay, &sid, &mut [&mut n]).await;
+        expect_mls_leaf(&nodes[0], &sid, &n.device_id, 15).await;
+        nodes.push(n);
+    }
+    assert!(wait_until(20, async || relay.room_devices(&sid).len() == tags.len()).await, "every device is in the room");
+    (nodes, sid)
+}
+
+/// A kick moves the server's lock and every member re-joins with the new door on the socket
+/// that already holds its slot: the relay announces none of those re-joins, and the
+/// MockRelay mirrors it by default, so the harness measures the relay we run (G1 step 1
+/// counted 9,702 `peer_joined` at 100 members from the noisy mock).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn t14relay_a_kick_announces_no_rejoin() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (nodes, sid) = t14r_locked_server(&relay, [151, 152, 153, 154, 155]).await;
+    sleep_ms(1_500).await; // the setup's own presence settles before the count starts
+    let tip = relay_tip(&relay, &sid).n;
+    g1_probe::start();
+    nodes[0].cmd_tx.send(NodeCommand::KickMember { server_id: sid.clone(), peer_id: nodes[1].master_id.clone() }).await.unwrap();
+    assert!(wait_until(15, async || g13_dropped(&nodes[1], &sid).await).await, "the kicked device kept the server");
+    assert!(wait_until(15, async || relay_tip(&relay, &sid).n > tip).await, "the kick moved the lock");
+    sleep_ms(2_000).await; // a late arrival announced after the re-joins would count
+    let book = g1_probe::take();
+    g1_probe::stop();
+    // Each remaining device's re-join with the new door is answered with `members`.
+    let answered = book.kinds.get("presence:room_members").map_or(0, |t| t.deliveries);
+    assert!(answered >= 3, "the re-joins were answered ({answered} members frames)");
+    let joined = book.kinds.get("presence:peer_joined").map_or(0, |t| t.deliveries);
+    assert_eq!(joined, 0, "a lock move's re-joins announced {joined} arrivals");
+    drop(nodes);
+}
+
+/// `from` posts `mid` in the server's #general and `to` stores it.
+async fn t14r_talks(from: &TestNode, to: &TestNode, sid: &str, mid: &str) -> bool {
+    from.cmd_tx.send(g1_send_cmd(sid, &general_channel_of(sid), mid.to_string())).await.unwrap();
+    wait_until(15, async || to.store().channel_message_exists(mid)).await
+}
+
+/// The relay's batch window at its worst (150 ms on every presence frame) under fresh joins
+/// in both directions and a lock move: members still meet, re-join and talk both ways.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn t14relay_b_lagged_joins_and_lock_move_talk_both_ways() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    relay.set_presence_lag(std::env::var("T14R_LAG").ok().and_then(|v| v.parse().ok()).unwrap_or(150));
+    let (nodes, sid) = t14r_locked_server(&relay, [156, 157, 158, 159, 160]).await;
+    assert!(t14r_talks(&nodes[0], &nodes[4], &sid, "t14r-b-1").await, "owner to the last joiner");
+    assert!(t14r_talks(&nodes[4], &nodes[0], &sid, "t14r-b-2").await, "the last joiner to the owner");
+    assert!(t14r_talks(&nodes[2], &nodes[3], &sid, "t14r-b-3").await, "member to member");
+    let tip = relay_tip(&relay, &sid).n;
+    nodes[0].cmd_tx.send(NodeCommand::KickMember { server_id: sid.clone(), peer_id: nodes[1].master_id.clone() }).await.unwrap();
+    assert!(wait_until(15, async || g13_dropped(&nodes[1], &sid).await).await, "the kicked device kept the server");
+    assert!(wait_until(15, async || relay_tip(&relay, &sid).n > tip).await, "the kick moved the lock");
+    assert!(t14r_talks(&nodes[0], &nodes[4], &sid, "t14r-b-4").await, "owner to member after the move");
+    assert!(t14r_talks(&nodes[3], &nodes[2], &sid, "t14r-b-5").await, "member to member after the move");
+    assert!(t14r_talks(&nodes[4], &nodes[0], &sid, "t14r-b-6").await, "member to owner after the move");
+    assert!(!nodes[1].store().channel_message_exists("t14r-b-6"), "the kicked device reads nothing after the move");
+}
+
+/// A member that goes inactive and comes back under the batch window: the room hears it
+/// leave and return, and it talks both ways after.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn t14relay_c_lagged_hidden_member_returns_and_talks() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    relay.set_presence_lag(std::env::var("T14R_LAG").ok().and_then(|v| v.parse().ok()).unwrap_or(150));
+    let mut o = spawn_node_with_friends(&relay, 161, 161, &[]).await;
+    let sid = create_server_and_wait(&mut o, "Hidden Server").await;
+    let mut j = spawn_node_with_friends(&relay, 162, 162, &[]).await;
+    join_as_members(&relay, &sid, &mut [&mut j]).await;
+    expect_mls_leaf(&o, &sid, &j.device_id, 15).await;
+    assert!(t14r_talks(&o, &j, &sid, "t14r-c-1").await, "owner to joiner");
+    relay.set_background(&j, true);
+    assert!(
+        wait_until(10, async || !relay.told(&o.device_id, &sid).is_some_and(|t| t.contains(&j.device_id))).await,
+        "the owner hears the member go"
+    );
+    relay.set_background(&j, false);
+    assert!(
+        wait_until(10, async || relay.told(&o.device_id, &sid).is_some_and(|t| t.contains(&j.device_id))).await,
+        "the owner hears the member come back"
+    );
+    assert!(t14r_talks(&o, &j, &sid, "t14r-c-2").await, "owner to the returned member");
+    assert!(t14r_talks(&j, &o, &sid, "t14r-c-3").await, "the returned member to the owner");
+}
+
+/// An audit asked while the batch window still holds an arrival reads no drift: the relay
+/// sends the asker its slice before the digest (F5).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn t14relay_d_lagged_audit_reads_no_drift() {
+    let _g = test_guard();
+    let relay = MockRelay::new();
+    let id = |tag: u8| NativeKeypair::from_secret_bytes(&seed_bytes(tag)).peer_id();
+    let (a, b, c) = (id(163), id(164), id(165));
+    let room = "t14r-plain-room".to_string();
+    let (a_tx, _a_rx) = relay.attach_raw(&a);
+    let (b_tx, _b_rx) = relay.attach_raw(&b);
+    a_tx.send(WsCommand::JoinRoom { room_code: room.clone() }).unwrap();
+    b_tx.send(WsCommand::JoinRoom { room_code: room.clone() }).unwrap();
+    assert!(wait_until(5, async || relay.told(&a, &room).is_some_and(|t| t.contains(&b))).await, "a is told b");
+    relay.set_presence_lag(5_000);
+    let (c_tx, _c_rx) = relay.attach_raw(&c);
+    c_tx.send(WsCommand::JoinRoom { room_code: room.clone() }).unwrap();
+    assert!(wait_until(5, async || relay.room_devices(&room).contains(&c)).await, "c joins");
+    assert!(!relay.told(&a, &room).is_some_and(|t| t.contains(&c)), "the window still holds c's arrival");
+    relay.audit_now(&a, &room);
+    assert!(relay.told(&a, &room).is_some_and(|t| t.contains(&c)), "the audit sent a its slice first");
+    assert!(!relay.drifts_told().contains(&(a.clone(), room.clone())), "an audit inside the window read drift");
+}
+
+/// Two devices of one identity meet in their inbox and the second onboards a server the first
+/// creates, with every presence frame held by the batch window.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn t14relay_e_lagged_siblings_meet_and_onboard() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    relay.set_presence_lag(std::env::var("T14R_LAG").ok().and_then(|v| v.parse().ok()).unwrap_or(150));
+    let id = |tag: u8| NativeKeypair::from_secret_bytes(&seed_bytes(tag)).peer_id();
+    super::resolver::seed_self(&id(166), &[id(167), id(168)]);
+    let mut b = spawn_node_with_friends(&relay, 166, 167, &[]).await;
+    let mut c = spawn_node_with_friends(&relay, 166, 168, &[]).await;
+    expect_siblings_ready(&relay, &b, &c, 15).await;
+    drain_events(&mut c);
+    let sid = create_server_and_wait(&mut b, "Sibling Server").await;
+    let onboarded = wait_event(&mut c, std::time::Duration::from_secs(15), |ev| {
+        matches!(ev, NetworkEvent::ServerJoined { server_id, .. } if *server_id == sid)
+    })
+    .await;
+    assert!(onboarded, "the sibling onboards the new server");
+    expect_mls_leaf(&b, &sid, &c.device_id, 15).await;
+    assert!(t14r_talks(&b, &c, &sid, "t14r-e-1").await, "creator to sibling");
+    assert!(t14r_talks(&c, &b, &sid, "t14r-e-2").await, "sibling to creator");
+}
+
+/// A member's socket dies with nobody told and comes back under the batch window: the room
+/// re-learns it and both directions work again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn t14relay_f_lagged_silent_drop_talks_after_return() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    relay.set_presence_lag(std::env::var("T14R_LAG").ok().and_then(|v| v.parse().ok()).unwrap_or(150));
+    let mut o = spawn_node_with_friends(&relay, 169, 169, &[]).await;
+    let sid = create_server_and_wait(&mut o, "Drop Server").await;
+    let mut j = spawn_node_with_friends(&relay, 170, 170, &[]).await;
+    join_as_members(&relay, &sid, &mut [&mut j]).await;
+    expect_mls_leaf(&o, &sid, &j.device_id, 15).await;
+    assert!(t14r_talks(&j, &o, &sid, "t14r-f-1").await, "joiner to owner before the drop");
+    relay.drop_socket_silently(&j.device_id);
+    sleep_ms(1500).await;
+    relay.set_online(&j.device_id, true);
+    assert!(expect_sees_room(&relay, &sid, &j.device_id).await, "the member proves its door again");
+    assert!(t14r_talks(&o, &j, &sid, "t14r-f-2").await, "owner to the returned member");
+    assert!(t14r_talks(&j, &o, &sid, "t14r-f-3").await, "the returned member to the owner");
+}
+
+// t14-relay-r3
+
+/// A re-join answered short by a relay that dropped a peer without a word: ws_client joins
+/// again for the full list by itself, in a room the node never audits (review C1, C8).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn t14relay_g_a_short_answer_that_differs_purges_the_dropped_peer() {
+    let _g = test_guard();
+    let relay = MockRelay::new();
+    let id = |tag: u8| NativeKeypair::from_secret_bytes(&seed_bytes(tag)).peer_id();
+    let (a, b) = (id(171), id(172));
+    let room = super::types::dm_room_code(&id(173), &id(174));
+    let (a_tx, mut a_rx) = relay.attach_raw(&a);
+    let (b_tx, _b_rx) = relay.attach_raw(&b);
+    a_tx.send(WsCommand::JoinRoom { room_code: room.clone() }).unwrap();
+    b_tx.send(WsCommand::JoinRoom { room_code: room.clone() }).unwrap();
+    assert!(wait_until(5, async || relay.told(&a, &room).is_some_and(|t| t.contains(&b))).await, "a is told b");
+    relay.forget_silently(&room, &b);
+    while a_rx.try_recv().is_ok() {}
+    // The node's refresh of a room whose peer it still lists.
+    a_tx.send(WsCommand::JoinRoom { room_code: room.clone() }).unwrap();
+    let purged = wait_until(5, async || {
+        while let Ok(ev) = a_rx.try_recv() {
+            if let WsEvent::RoomMembers { room: r, peers } = ev
+                && r == room
+            {
+                return peers == vec![a.clone()];
+            }
+        }
+        false
+    })
+    .await;
+    assert!(purged, "the full list after the short answer purges b");
+    assert!(!relay.told(&a, &room).is_some_and(|t| t.contains(&b)), "a's record no longer holds b");
+}
+
+/// Two friends who share a server: the relay drops B from their DM room without a word, then
+/// B leaves the server room cleanly. A's node refreshes the DM room, the relay answers short,
+/// and the full list ws_client asks for by itself purges B, so A sees B go (review C1).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn t14relay_h_a_dm_refresh_purges_a_silently_dropped_friend() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let id = |tag: u8| NativeKeypair::from_secret_bytes(&seed_bytes(tag)).peer_id();
+    let (a_master, b_master) = (id(175), id(176));
+    let mut a = spawn_node_with_friends(&relay, 175, 175, &[&b_master]).await;
+    sleep_ms(1500).await;
+    let mut b = spawn_node_with_friends(&relay, 176, 176, &[&a_master]).await;
+    let dm = super::types::dm_room_code(&a_master, &b_master);
+    assert!(
+        wait_until(15, async || {
+            let devs = relay.room_devices(&dm);
+            devs.contains(&a.device_id) && devs.contains(&b.device_id)
+        })
+        .await,
+        "both friends are in their DM room"
+    );
+    let sid = create_server_and_wait(&mut a, "Shared Server").await;
+    join_as_members(&relay, &sid, &mut [&mut b]).await;
+    expect_mls_leaf(&a, &sid, &b.device_id, 15).await;
+    assert!(
+        wait_until(10, async || relay.told(&a.device_id, &dm).is_some_and(|t| t.contains(&b.device_id))).await,
+        "A lists B in the DM room"
+    );
+    relay.forget_silently(&dm, &b.device_id);
+    drain_events(&mut a);
+    relay.set_online(&b.device_id, false);
+    let b_device = b.device_id.clone();
+    let gone = wait_event(&mut a, std::time::Duration::from_secs(10), |ev| {
+        matches!(ev, NetworkEvent::PeerDisconnected { peer_id } if *peer_id == b_device)
+    })
+    .await;
+    assert!(gone, "A's DM room still listed the friend the relay had dropped");
 }

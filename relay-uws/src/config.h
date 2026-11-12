@@ -5,6 +5,10 @@
 #include <cstdlib>
 #include <string>
 
+#include <unistd.h>
+
+#include "breaker.h"
+#include "conn_limits.h"
 #include "conn_rate_exempt.h"
 #include "deny_list.h"
 #include "server_stats.h"
@@ -32,6 +36,8 @@ struct Config {
     // HOLLOW_CONN_RATE_EXEMPT, read from the environment only: it names the operator's
     // own addresses, so it belongs in the root-only environment file, never a flag.
     conn_rate_exempt::List conn_rate_exempt;
+    // Connection limits and the breaker's mode, from the environment (conn_limits.h).
+    conn_limits::Limits limits;
     // PUBLIC_STATS=off: /server-stats leaves out the online count and the activity
     // counters (server_stats.h). On by default.
     bool public_stats = true;
@@ -82,6 +88,7 @@ inline void print_help() {
         "  --keys-file <path>    License keys JSON file (default: keys.json)\n"
         "  --denylist-file <path>  Servers, identities and addresses this relay refuses (default: denylist.json)\n"
         "  --check-denylist <path> Read a denylist file the way the relay would, print its counts or its first error, and exit\n"
+        "  --check-limits        Print the connection limits and breaker mode the environment sets, and exit (non-zero if any value was not taken as written)\n"
         "  --reports-file <path> User reports JSON file (default: reports.json)\n"
         "  --cert-file <path>    TLS certificate file\n"
         "  --key-file <path>     TLS private key file\n"
@@ -114,8 +121,40 @@ inline int check_denylist(const char* path) {
     return 0;
 }
 
+// The box's memory, which sizes the connected-socket budget.
+inline uint64_t ram_bytes() {
+    const long pages = sysconf(_SC_PHYS_PAGES);
+    const long size = sysconf(_SC_PAGESIZE);
+    return pages > 0 && size > 0 ? static_cast<uint64_t>(pages) * static_cast<uint64_t>(size) : (2ull << 30);
+}
+
+// The limits the environment sets, each value not taken as written said once.
+inline conn_limits::Parsed limits_from_env() {
+#ifdef HOLLOW_RELAY_TEST_LOOPBACK
+    const bool test_build = true;
+#else
+    const bool test_build = false;
+#endif
+    return conn_limits::parse([](const char* k) { return getenv(k); }, ram_bytes(), test_build);
+}
+
+// --check-limits: what check-host.sh and manage.sh show the operator. Exit 0 only when
+// every value was taken as written.
+inline int check_limits() {
+    const conn_limits::Parsed p = limits_from_env();
+    for (const auto& note : p.notes) printf("warning: %s\n", note.c_str());
+    printf("ok: %s\n", conn_limits::describe(p.limits).c_str());
+    const char* exempt = getenv("HOLLOW_CONN_RATE_EXEMPT");
+    printf("rate exemption: %zu address block(s)\n",
+           exempt && *exempt ? conn_rate_exempt::parse(exempt).keys.size() : size_t{0});
+    return p.notes.empty() ? 0 : 1;
+}
+
 inline Config parse_args(int argc, char** argv) {
     Config config;
+    for (int i = 1; i < argc; i++) {
+        if (std::string(argv[i]) == "--check-limits") exit(check_limits());
+    }
     for (int i = 1; i < argc; i++) {
         if (std::string(argv[i]) != "--check-denylist") continue;
         if (i + 1 >= argc) {
@@ -130,6 +169,12 @@ inline Config parse_args(int argc, char** argv) {
     config.public_stats = server_stats::parse_public_stats(getenv("PUBLIC_STATS"));
     config.public_deny_counts = server_stats::parse_opt_in(getenv("PUBLIC_DENY_COUNTS"));
     if (!config.public_stats) fprintf(stderr, "[config] Public stats off: /server-stats shows memory only\n");
+    {
+        const conn_limits::Parsed p = limits_from_env();
+        for (const auto& note : p.notes) fprintf(stderr, "[config] %s\n", note.c_str());
+        config.limits = p.limits;
+        fprintf(stderr, "[config] Limits: %s\n", conn_limits::describe(config.limits).c_str());
+    }
     const char* exempt = getenv("HOLLOW_CONN_RATE_EXEMPT");
     if (exempt && *exempt) {
 #ifdef HOLLOW_RELAY_TEST_LOOPBACK

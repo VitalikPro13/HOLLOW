@@ -2075,6 +2075,61 @@ t_restore_wiring() {
 }
 in_sub t_restore_wiring
 
+echo "connection limits"
+t_conn_limits() {
+    yes_ limit_ok CONN_LIMIT_IPV4 ""
+    yes_ limit_ok CONN_LIMIT_IPV4 8
+    yes_ limit_ok CONN_LIMIT_IPV4 65536
+    no_ limit_ok CONN_LIMIT_IPV4 7
+    no_ limit_ok CONN_LIMIT_IPV4 65537
+    no_ limit_ok CONN_RATE_IPV6 5
+    yes_ limit_ok LOGIN_WINDOW_TOTAL 1000000
+    no_ limit_ok CONNECTED_LIMIT 1023
+    no_ limit_ok CONN_LIMIT_IPV6 "12; rm"
+    yes_ limit_ok BREAKER_MODE shadow
+    no_ limit_ok BREAKER_MODE off
+    eq "every key has a range or is the mode" "$(for k in $LIMIT_KEYS; do [ "$k" = BREAKER_MODE ] || limit_range "$k" | grep -q ' ' || echo "$k"; done)" ""
+    CFG_BREAKER_MODE=shadow
+    eq "count only is shown only for shadow" "$(limit_value_text BREAKER_MODE)" "count only"
+    CFG_BREAKER_MODE=enforce
+    eq "an enforce carried from relay.env shows on" "$(limit_value_text BREAKER_MODE)" "on"
+    CFG_BREAKER_MODE=""
+    eq "no mode shows the default" "$(limit_value_text BREAKER_MODE)" "default"
+    ensure_account() { :; }
+    ensure_dir() { :; }
+    put_file() { cat >"$TMP/put.$(basename "$1")"; PUT_CHANGED=0; }
+    put_unit() { cat >/dev/null; }
+    restore_state() { return 1; }
+    plan_member_keys() { MEMBER_KEYS=(); }
+    CFG_TURN=no CFG_PUSH=no CFG_MEMBERS_ONLY=no CFG_FORWARDER=no CFG_MEMBER_KEYS=0 DRY_RUN=1
+    RELAY_ETC=$TMP/lim_re TURN_ETC=$TMP/te PUSH_ETC=$TMP/pe FWD_ETC=$TMP/fe REMOVE_KEY=""
+    mkdir -p "$RELAY_ETC"
+    printf 'CONN_LIMIT_IPV4=64\nHOLLOW_SOMETHING=1\n' >"$RELAY_ETC/relay.env"
+    CFG_CONN_LIMIT_IPV4=1024 CFG_BREAKER_MODE=shadow CFG_CONN_RATE_IPV4=""
+    relay_settings >/dev/null 2>&1
+    local env
+    env=$(cat "$TMP/put.relay.env")
+    has "a limit set here is written" "$env" "CONN_LIMIT_IPV4=1024"
+    has "so is the mode" "$env" "BREAKER_MODE=shadow"
+    lacks "a default is not" "$env" "CONN_RATE_IPV4="
+    eq "the setup owns the line it replaced" "$(grep -c '^CONN_LIMIT_IPV4=' <<<"$env")" 1
+    has "the operator's other lines stay" "$env" "HOLLOW_SOMETHING=1"
+    # A setup from before the setting: the menu shows what the relay reads, a bad value as the default.
+    CFG_MODE=native CONF_FILE=$TMP/lim_conf
+    : >"$CONF_FILE"
+    printf 'CONN_LIMIT_IPV6=256\nCONN_RATE_IPV4=999999\n' >"$RELAY_ETC/relay.env"
+    conf_load
+    eq "an old relay.env value is read" "$CFG_CONN_LIMIT_IPV6" 256
+    eq "one outside its range reads as the default" "$CFG_CONN_RATE_IPV4" ""
+    has "the menu line names it" "$(limits_summary)" "CONN_LIMIT_IPV6=256"
+    UI_MODE=answers
+    ANS=()
+    ask_conn_limits
+    eq "an answer file keeps the limits" "$CFG_CONN_LIMIT_IPV6" 256
+    UI_MODE=plain
+}
+in_sub t_conn_limits
+
 echo "progress"
 t_progress() {
     DRY_RUN=0 UI_MODE=plain WORK_DIR=$TMP

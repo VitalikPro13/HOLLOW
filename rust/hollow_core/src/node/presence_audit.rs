@@ -118,6 +118,26 @@ impl Audit {
         self.told.get(room).map(HashSet::len)
     }
 
+    /// Whether a join of `room` may ask for the short answer: the socket holds a record of it
+    /// and no drift's re-join is waiting for the full list.
+    pub(crate) fn asks_short(&self, room: &str) -> bool {
+        self.told.contains_key(room) && !self.rooms.get(room).is_some_and(|r| r.rejoining)
+    }
+
+    /// The roster a short `members` stands for: what this socket was told of `room` and
+    /// ourselves last, when its digest and count are `sum` and `count`. Read when the answer
+    /// is read, after every frame the relay wrote before it.
+    pub(crate) fn told_matching(&self, room: &str, sum: u64, count: u64, me: &str) -> Option<Vec<String>> {
+        let told = self.told.get(room)?;
+        if digest(told.iter()) != (sum, count) {
+            return None;
+        }
+        let mut peers: Vec<String> = told.iter().cloned().collect();
+        peers.sort();
+        peers.push(me.to_string());
+        Some(peers)
+    }
+
     /// A `members` snapshot: the room's record is replaced, without ourselves.
     pub(crate) fn on_members(&mut self, room: &str, peers: &[String], me: &str, now: Instant) {
         self.told.insert(room.to_string(), peers.iter().filter(|p| p.as_str() != me).cloned().collect());
@@ -130,8 +150,12 @@ impl Audit {
         }
     }
 
+    /// Changes land only on a room a `members` gave a record: a partial one would make the
+    /// next join ask for a short answer it cannot match.
     pub(crate) fn on_joined(&mut self, room: &str, peer: &str) {
-        self.told.entry(room.to_string()).or_default().insert(peer.to_string());
+        if let Some(peers) = self.told.get_mut(room) {
+            peers.insert(peer.to_string());
+        }
     }
 
     pub(crate) fn on_left(&mut self, room: &str, peer: &str) {
@@ -399,6 +423,41 @@ mod tests {
         a.rejoin_dropped("r");
         a.on_members("r", &ids(&["me", "x"]), "me", at);
         assert!(a.next_due().is_none(), "a later members is no answer to a join that never went out");
+    }
+
+    /// After a short answer did not match, the record is gone until a full `members`: a change
+    /// read before the re-join is rendered must not bring back `have` (review C2).
+    #[test]
+    fn a_change_after_forget_brings_back_no_record() {
+        let now = Instant::now();
+        let mut a = Audit::default();
+        a.on_members("r", &ids(&["a", "b", "me"]), "me", now);
+        assert!(a.asks_short("r"));
+        a.forget("r");
+        a.on_joined("r", "d");
+        a.on_left("r", "a");
+        assert!(a.told_count("r").is_none(), "a single change recreated a partial record");
+        assert!(!a.asks_short("r"), "so the re-join asks for the list");
+        a.on_members("r", &ids(&["d", "me"]), "me", now);
+        assert!(a.asks_short("r"), "a full members gives the record back");
+    }
+
+    /// A drift's re-join asks for the full list, so the verify its `members` arms still runs.
+    #[test]
+    fn a_drifts_rejoin_asks_for_the_list() {
+        let now = Instant::now();
+        let mut a = Audit::default();
+        a.on_members("r", &ids(&["me", "x"]), "me", now);
+        a.start("r", now);
+        a.on_answer("r", answer_for(&["x", "y"]), true, now);
+        let at = a.next_due().unwrap();
+        a.due(at);
+        assert!(a.asks_short("r"), "a recheck alone changes nothing");
+        assert_eq!(a.on_answer("r", answer_for(&["x", "y"]), true, at), Verdict::Drift);
+        assert!(!a.asks_short("r"), "the drift's re-join gets the full list");
+        a.on_members("r", &ids(&["me", "x", "y"]), "me", at);
+        assert!(a.asks_short("r"));
+        assert!(a.next_due().is_some(), "and its members arms the verify");
     }
 
     #[test]

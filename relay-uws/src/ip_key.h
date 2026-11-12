@@ -40,3 +40,12 @@ inline std::string ip_limit_key(const std::string& ip) {
 inline std::string share_block(const std::string& ip) {
     return address_block(ip, 6, "/48");
 }
+
+// The block the pre-login window is kept by (login_window.h): a v4 /24, or a v6 /48. A
+// v4-mapped address is its v4 one.
+inline std::string login_block(const std::string& ip) {
+    std::string a = address_block(ip, 6, "/48");
+    if (a.find(':') != std::string::npos) return a;
+    const size_t dot = a.rfind('.');
+    return dot == std::string::npos ? a : a.substr(0, dot) + ".0/24";
+}

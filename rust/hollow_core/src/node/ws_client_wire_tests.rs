@@ -2579,3 +2579,116 @@ async fn a_refused_network_is_a_denial_at_the_challenge() {
     assert_eq!(relay.with(|r| r.tcp_accepts), 1, "one socket, then nothing");
     assert_eq!(relay.with(|r| r.auths_seen), 0, "refused before any sign-in");
 }
+
+/// A join says `pv:2`, and `have` only while the socket holds a told view of the room; a
+/// replay's echo is still recognised once its answer gave the room a record.
+#[tokio::test]
+async fn a_join_says_have_only_with_a_record_and_its_echo_is_still_dropped() {
+    let kp = keypair();
+    let dial = Dial {
+        url: "wss://127.0.0.1:9/ws".into(),
+        peer_id: kp.peer_id(),
+        keypair_proto: kp.to_protobuf_encoding().unwrap(),
+        pub_key_b64: base64::engine::general_purpose::STANDARD.encode(kp.public_key_protobuf()),
+        license_key: None,
+        fetch: false,
+    };
+    let (event_tx, _events) = mpsc::unbounded_channel();
+    let mut client = super::Client::new(dial, quick(), event_tx, false);
+    let me = kp.peer_id();
+    let read = |text: Option<String>| text.map(|t| serde_json::from_str::<Value>(&t).unwrap());
+    let replayed = read(client.render_join("r", None, true)).expect("a replay is written");
+    assert_eq!(replayed["pv"], 2, "every join asks for batches");
+    assert!(replayed.get("have").is_none(), "no record, no have");
+    let other = keypair().peer_id();
+    client.rooms.audit.on_members("r", &[other, me.clone()], &me, std::time::Instant::now());
+    assert!(client.render_join("r", None, false).is_none(), "the node's own join right after the replay is its echo");
+    let again = read(client.render_join("r", None, false)).expect("a later join is written");
+    assert_eq!(again["have"], true, "a socket holding a told view says so");
+    assert_eq!(again["pv"], 2);
+}
+
+/// A client with no socket, for tests that drive its join rendering directly.
+fn offline_client() -> (super::Client, String) {
+    let kp = keypair();
+    let dial = Dial {
+        url: "wss://127.0.0.1:9/ws".into(),
+        peer_id: kp.peer_id(),
+        keypair_proto: kp.to_protobuf_encoding().unwrap(),
+        pub_key_b64: base64::engine::general_purpose::STANDARD.encode(kp.public_key_protobuf()),
+        license_key: None,
+        fetch: false,
+    };
+    let (event_tx, _events) = mpsc::unbounded_channel();
+    (super::Client::new(dial, quick(), event_tx, false), kp.peer_id())
+}
+
+/// Review C1: the join a wrong record owes is written even right after a replay of the same
+/// room; it is never taken for that replay's echo.
+#[tokio::test]
+async fn a_join_for_the_list_right_after_a_replay_is_not_its_echo() {
+    let (mut client, me) = offline_client();
+    let read = |text: Option<String>| text.map(|t| serde_json::from_str::<Value>(&t).unwrap());
+    let other = keypair().peer_id();
+    client.rooms.joined.insert("r".to_string());
+    client.rooms.audit.on_members("r", &[other, me.clone()], &me, std::time::Instant::now());
+    assert!(client.render_join("r", None, true).is_some(), "the replay is written");
+    client.rooms.ask_full("r");
+    client.rejoin_for_full_lists();
+    let full = read(client.render_join("r", None, false)).expect("the join for the list is written");
+    assert!(full.get("have").is_none(), "and asks for the full list");
+}
+
+/// Review C2: after a drift the record stays, but the swarm's re-join still asks for the
+/// full list, so the verify its answer arms runs.
+#[tokio::test]
+async fn a_drifts_rejoin_is_rendered_without_have() {
+    use crate::node::presence_audit::{digest, Answer, Verdict};
+    let (mut client, me) = offline_client();
+    let read = |text: Option<String>| text.map(|t| serde_json::from_str::<Value>(&t).unwrap());
+    let (x, y) = (keypair().peer_id(), keypair().peer_id());
+    let now = std::time::Instant::now();
+    let audit = &mut client.rooms.audit;
+    audit.on_members("r", &[x.clone(), me.clone()], &me, now);
+    audit.start("r", now);
+    let (sum, count) = digest([x.clone(), y.clone()].iter());
+    audit.on_answer("r", Answer::Digest { sum, count }, true, now);
+    let at = audit.next_due().expect("a recheck is owed");
+    audit.due(at);
+    assert_eq!(audit.on_answer("r", Answer::Digest { sum, count }, true, at), Verdict::Drift);
+    assert!(audit.told_count("r").is_some(), "(a drift keeps the record)");
+    let join = read(client.render_join("r", None, false)).expect("the re-join is written");
+    assert!(join.get("have").is_none(), "the drift's re-join gets the full list");
+}
+
+/// Review C1: a re-join of a room the node never audits (a DM room) that gets a short answer
+/// differing from the socket's record is joined again by ws_client itself, without `have`,
+/// and the full list purges the peer the relay dropped without a word.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_short_answer_that_differs_is_joined_again_for_the_list() {
+    let relay = FakeRelay::start(false).await;
+    let mut c = spawn_client(&relay.url(), quick());
+    c.wait_kind("Connected", T).await;
+    let me = keypair().peer_id();
+    let x = NativeKeypair::from_secret_bytes(&[11; 32]).peer_id();
+    let y = NativeKeypair::from_secret_bytes(&[12; 32]).peer_id();
+    let room = "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90";
+    let joins = |r: &mut Relay| r.joins().into_iter().filter(|(_, v)| v["room"] == room).map(|(_, v)| v).collect::<Vec<_>>();
+    c.send(WsCommand::JoinRoom { room_code: room.into() });
+    relay.wait("the first join", T, |r| joins(r).len() == 1).await;
+    relay.tell(json!({ "type": "members", "room": room, "peers": [x, y, me] }));
+    c.wait_kind("RoomMembers", T).await;
+    // The node refreshes the room, as it does when a peer it still lists left elsewhere.
+    c.send(WsCommand::JoinRoom { room_code: room.into() });
+    relay.wait("the refresh", T, |r| joins(r).len() == 2).await;
+    assert_eq!(relay.with(|r| joins(r)[1]["have"].clone()), json!(true), "a socket holding a record asks short");
+    let (sum, count) = crate::node::presence_audit::digest([x.clone()].iter());
+    relay.tell(json!({ "type": "members", "room": room, "digest": sum, "count": count }));
+    relay.wait("ws_client's own join for the list", T, |r| joins(r).len() == 3).await;
+    assert!(relay.with(|r| joins(r)[2].get("have").is_none()), "the list, not another short answer");
+    relay.tell(json!({ "type": "members", "room": room, "peers": [x, me] }));
+    match c.wait_kind("RoomMembers", T).await {
+        WsEvent::RoomMembers { peers, .. } => assert_eq!(peers, vec![x, me], "the silently dropped peer is purged"),
+        other => panic!("{other:?}"),
+    }
+}

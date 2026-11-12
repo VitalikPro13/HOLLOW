@@ -135,6 +135,21 @@ if [[ " ${units[*]} " == *" hollow-relay "* ]]; then
         fi
     fi
 fi
+# The connection limits and breaker mode the relay's environment sets (SELF_HOSTING.md
+# "Connection limits"): read the way the relay reads them, numbers only.
+if [[ " ${units[*]} " == *" hollow-relay "* ]] && [ -n "$relay_bin" ] && [ -x "$relay_bin" ]; then
+    limit_env=()
+    for k in CONN_LIMIT_IPV4 CONN_LIMIT_IPV6 CONN_RATE_IPV4 CONN_RATE_IPV6 LOGIN_WINDOW_PER_BLOCK \
+        LOGIN_WINDOW_TOTAL CONNECTED_LIMIT BREAKER_MODE; do
+        v=$(env_file_value hollow-relay "$k")
+        [ -n "$v" ] && limit_env+=("$k=$v")
+    done
+    if out=$(env -i "${limit_env[@]}" "$relay_bin" --check-limits 2>&1); then
+        ok "connection limits: $(grep -m1 '^ok: ' <<<"$out" | sed 's/^ok: //')"
+    else
+        bad "a connection limit in the relay's environment was not taken as written: $(grep -m1 '^warning: ' <<<"$out" | sed 's/^warning: //')"
+    fi
+fi
 
 echo "Private keys"
 open_keys=$(find /etc/letsencrypt/archive /etc/hollow-relay /etc/hollow-push /etc/hollow-forwarder \

@@ -447,7 +447,8 @@ nano .env
 | `HOLLOW_MEM_LIMIT` | Optional. The machine's memory, like `2048m`. No container may use more, and none may swap. |
 | `OWN_CERT_DIR` | Advanced. A directory holding a `fullchain.pem` and `privkey.pem` you obtain and renew yourself. Then certbot is not used at all. |
 | `SESSION_GRACE_SECS` | Optional, 30 to 600. Empty means 120. See [Dropped connections](#dropped-connections). |
-| `HOLLOW_CONN_RATE_EXEMPT` | Optional, best left empty. See [Connection limit](#connection-limit). |
+| `HOLLOW_CONN_RATE_EXEMPT` | Optional, best left empty. See [Connection limits](#connection-limits). |
+| `CONN_LIMIT_IPV4` and the other limits | Optional, best left empty. See [Connection limits](#connection-limits). |
 | `PUBLIC_STATS` | Optional. `off` hides the online count and the traffic figures. See [Public stats](#public-stats). |
 | `HOLLOW_CAKE`, `HOLLOW_CAKE_MBIT` | `on` and the bandwidth of the host's CAKE queue, which the stats page shows. See [Fair share of the upload](#fair-share-of-the-upload). |
 | `HOLLOW_SEND_BUDGET_BYTES` | Optional, best left empty. See [Send budget](#send-budget). |
@@ -565,8 +566,8 @@ HOLLOW_PUSH_TOKEN=the-second-value
 ```
 
 Leave a value empty for a part you don't run. The optional settings
-`PUBLIC_STATS`, `HOLLOW_CONN_RATE_EXEMPT` and `HOLLOW_SEND_BUDGET_BYTES` go in
-this file too. systemd reads it as root when it starts the relay. Never move these values to an `Environment=` line,
+`PUBLIC_STATS`, `HOLLOW_CONN_RATE_EXEMPT`, `HOLLOW_SEND_BUDGET_BYTES` and the
+[connection limits](#connection-limits) go in this file too. systemd reads it as root when it starts the relay. Never move these values to an `Environment=` line,
 because every account on the machine can read those with `systemctl show`.
 
 **4. DuckDNS, for a DuckDNS name only.** The token goes in a file only root
@@ -1205,12 +1206,43 @@ own firewall in front of the server, open them there too.
 Every file that holds a secret can be read by root alone, or by root and the one
 service that needs it.
 
-### Connection limit
+### Connection limits
 
-The relay lets each address open 10 new connections a minute, or 30 while it
-has none open. To lift that one limit for your own machines, for example while you
-test with many copies of the app at once, list their public addresses, separated
-by commas, as `HOLLOW_CONN_RATE_EXEMPT` in `.env` (Docker) or in
+The relay limits how many connections each address may hold and open, so a flood
+from a few machines cannot fill it. The defaults suit almost every relay. That
+includes one that many people reach through a single shared address, like a
+mobile network or a school, where hundreds of phones can reconnect at the same
+moment. To change a limit, run the setup again and choose **Change a setting**,
+then **Advanced: connection limits**. You can also set it in `.env` (Docker) or
+in `/etc/hollow-relay/relay.env` (systemd) and restart the relay. An empty
+setting means the default.
+
+| Setting | Default | Range | What it limits |
+|---|---|---|---|
+| `CONN_LIMIT_IPV4` | 512 | 8 to 65,536 | Open connections from one IPv4 address |
+| `CONN_LIMIT_IPV6` | 128 | 8 to 65,536 | Open connections from one IPv6 /64 |
+| `CONN_RATE_IPV4` | 120 | 6 to 6,000 | New connections a minute from one IPv4 address, after a first burst as large as its open limit |
+| `CONN_RATE_IPV6` | 30 | 6 to 6,000 | New connections a minute from one IPv6 /64, after a first burst as large as its open limit |
+| `LOGIN_WINDOW_PER_BLOCK` | 256 | 16 to 65,536 | Logins in progress from one IPv4 /24 or IPv6 /48 |
+| `LOGIN_WINDOW_TOTAL` | 10,000 | 256 to 1,000,000 | Logins in progress on the whole relay |
+| `CONNECTED_LIMIT` | Set from memory | 1,024 to 4,194,304 | Connections on the whole relay |
+| `BREAKER_MODE` | `enforce` | `enforce` or `shadow` | See [Circuit breaker](#circuit-breaker) |
+
+When too many logins are in progress, the relay first closes the ones that have
+not moved for five seconds, from the address with the most of them. A burst of
+real logins keeps moving, so it gets through. Past `CONNECTED_LIMIT`, the relay
+closes connections from the address that holds the most. That default is a
+quarter of the machine's memory at 32 KB a connection, about 65,000 on an 8 GB
+machine. An app the relay turns away waits before it tries again.
+
+A value that is not a number counts as the default, and one outside its range
+counts as the nearer end. The relay names each such value in its log when it
+starts. `hollow-relay --check-limits` prints the limits in force and fails when a
+value was out of range. The host checks run it for you.
+
+To lift the new-connection limit alone for your own machines, for example while
+you test with many copies of the app at once, list their public addresses,
+separated by commas, as `HOLLOW_CONN_RATE_EXEMPT` in `.env` (Docker) or in
 `/etc/hollow-relay/relay.env` (systemd). An IPv6 address covers its whole /64.
 Every other limit still applies to them. The relay skips local, broadcast and
 multicast addresses on the list, such as 127.0.0.1 or ::1, since no outside
@@ -1232,11 +1264,15 @@ floor. Most relays never need it.
 ### Circuit breaker
 
 The relay also counts how much work each session causes it: messages, the
-deliveries they lead to, and signature checks. In this version it only counts.
-It closes nothing, and apps do not slow down for it. Its limits are built in,
-not settings, so an operator cannot lower them. While `PUBLIC_STATS` is on,
-`/server-stats` shows anonymous totals, under `breaker`, of how often a session
-would have been paused.
+deliveries they lead to, and signature checks. When a device causes far more
+work than anyone normally does, the relay pauses it, for longer each time it
+keeps it up, and then lets it back in. The app waits and picks up where it left off. The limits
+are built in, not settings, so an operator cannot lower them. With
+`BREAKER_MODE=shadow` the relay only counts and pauses nobody, which helps when
+you look into a problem. The setup offers it as **Overload protection** under
+**Advanced: connection limits**. While `PUBLIC_STATS` is on, `/server-stats`
+shows anonymous totals, under `breaker`, of how often a session was paused, and
+whether the relay pauses at all.
 
 ### What the relay holds and never writes
 
@@ -1284,6 +1320,14 @@ Notes for people who already run a relay, newest first.
 
 ### 0.14
 
+- The connection limits are settings now, with new defaults. Each IPv4 address
+  may hold 512 connections and open 120 new ones a minute, up from 34 and 10, so
+  everyone behind one mobile network or school address can reconnect at once.
+  Logins in progress and connections in total have limits of their own. A limit
+  you already set by hand stays. See [Connection limits](#connection-limits).
+- The circuit breaker now pauses a device that causes far more work than anyone
+  normally does. In 0.13 it only counted. `BREAKER_MODE=shadow` makes it count
+  only again. See [Circuit breaker](#circuit-breaker).
 - The relay reads a denylist, `/etc/hollow-relay/denylist.json` (Docker:
   `keys/denylist.json`), to refuse a server, an identity or an address. The setup
   writes an empty one and the `--denylist-file` flag when you update; a relay you

@@ -73,6 +73,15 @@ services:
       - HOLLOW_CAKE=${HOLLOW_CAKE:-}
       - HOLLOW_CAKE_MBIT=${HOLLOW_CAKE_MBIT:-}
       - HOLLOW_SEND_BUDGET_BYTES=${HOLLOW_SEND_BUDGET_BYTES:-}
+      # Connection limits and the breaker's mode (SELF_HOSTING.md "Connection limits"); empty = default.
+      - CONN_LIMIT_IPV4=${CONN_LIMIT_IPV4:-}
+      - CONN_LIMIT_IPV6=${CONN_LIMIT_IPV6:-}
+      - CONN_RATE_IPV4=${CONN_RATE_IPV4:-}
+      - CONN_RATE_IPV6=${CONN_RATE_IPV6:-}
+      - LOGIN_WINDOW_PER_BLOCK=${LOGIN_WINDOW_PER_BLOCK:-}
+      - LOGIN_WINDOW_TOTAL=${LOGIN_WINDOW_TOTAL:-}
+      - CONNECTED_LIMIT=${CONNECTED_LIMIT:-}
+      - BREAKER_MODE=${BREAKER_MODE:-}
     command:
       - --port
       - "443"

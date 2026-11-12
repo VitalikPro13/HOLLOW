@@ -280,6 +280,127 @@ On a relay for a small group, the online count can tell an outsider when its peo
     CFG_PUBLIC_STATS=$UI_REPLY
 }
 
+limit_range() {
+    case $1 in
+    CONN_LIMIT_IPV4 | CONN_LIMIT_IPV6) echo "8 65536" ;;
+    CONN_RATE_IPV4 | CONN_RATE_IPV6) echo "6 6000" ;;
+    LOGIN_WINDOW_PER_BLOCK) echo "16 65536" ;;
+    LOGIN_WINDOW_TOTAL) echo "256 1000000" ;;
+    CONNECTED_LIMIT) echo "1024 4194304" ;;
+    esac
+}
+
+# limit_ok <key> <value>: empty, or a whole number in the key's range (BREAKER_MODE: enforce or shadow).
+limit_ok() {
+    local lo hi
+    [ -n "$2" ] || return 0
+    if [ "$1" = BREAKER_MODE ]; then
+        [ "$2" = enforce ] || [ "$2" = shadow ]
+        return
+    fi
+    read -r lo hi <<<"$(limit_range "$1")"
+    [ -n "$lo" ] && [[ "$2" =~ ^[0-9]{1,7}$ ]] && [ "$((10#$2))" -ge "$lo" ] && [ "$((10#$2))" -le "$hi" ]
+}
+
+limit_label() {
+    case $1 in
+    CONN_LIMIT_IPV4) echo "Open connections per IPv4 address" ;;
+    CONN_LIMIT_IPV6) echo "Open connections per IPv6 network" ;;
+    CONN_RATE_IPV4) echo "New connections a minute per IPv4 address" ;;
+    CONN_RATE_IPV6) echo "New connections a minute per IPv6 network" ;;
+    LOGIN_WINDOW_PER_BLOCK) echo "Logins in progress per address block" ;;
+    LOGIN_WINDOW_TOTAL) echo "Logins in progress on the whole relay" ;;
+    CONNECTED_LIMIT) echo "Connections on the whole relay" ;;
+    BREAKER_MODE) echo "Overload protection" ;;
+    esac
+}
+
+limit_default() {
+    case $1 in
+    CONN_LIMIT_IPV4) echo 512 ;;
+    CONN_LIMIT_IPV6) echo 128 ;;
+    CONN_RATE_IPV4) echo 120 ;;
+    CONN_RATE_IPV6) echo 30 ;;
+    LOGIN_WINDOW_PER_BLOCK) echo 256 ;;
+    LOGIN_WINDOW_TOTAL) echo 10000 ;;
+    CONNECTED_LIMIT) echo "one set from this machine's memory" ;;
+    BREAKER_MODE) echo "on" ;;
+    esac
+}
+
+limit_help() {
+    case $1 in
+    CONN_LIMIT_IPV4) echo "How many connections one IPv4 address may hold open. Many people can share one address on a mobile network or at a school, so keep this high." ;;
+    CONN_LIMIT_IPV6) echo "How many connections one IPv6 network (a /64) may hold open." ;;
+    CONN_RATE_IPV4) echo "How many new connections one IPv4 address may open each minute, after a first burst as large as its open limit." ;;
+    CONN_RATE_IPV6) echo "How many new connections one IPv6 network may open each minute, after a first burst as large as its open limit." ;;
+    LOGIN_WINDOW_PER_BLOCK) echo "How many logins may be in progress at once from one block of addresses (a /24 for IPv4, a /48 for IPv6). Past it, the relay first closes logins that stopped moving." ;;
+    LOGIN_WINDOW_TOTAL) echo "How many logins may be in progress at once on the whole relay. Past it, the relay first closes logins that stopped moving." ;;
+    CONNECTED_LIMIT) echo "How many connections the relay holds in total. Past it, the relay closes connections from the busiest addresses first." ;;
+    esac
+}
+
+limit_value_text() {
+    local v=CFG_$1
+    if [ -n "${!v:-}" ]; then
+        if [ "$1" != BREAKER_MODE ]; then
+            echo "${!v}"
+        elif [ "${!v}" = shadow ]; then
+            echo "count only"
+        else
+            echo "on"
+        fi
+    else
+        echo "default"
+    fi
+}
+
+limits_summary() {
+    local k v out=""
+    for k in $LIMIT_KEYS; do
+        v=CFG_$k
+        [ -n "${!v:-}" ] && out+="${out:+, }$k=${!v}"
+    done
+    echo "${out:-the defaults}"
+}
+
+# ask_valid's check takes one argument: the key it asks about lives here.
+LIMIT_ASKED=""
+limit_ok_asked() { limit_ok "$LIMIT_ASKED" "$1"; }
+
+ask_conn_limits() {
+    local items k v lo hi
+    while :; do
+        items=()
+        for k in $LIMIT_KEYS; do items+=("$k" "$(limit_label "$k"): $(limit_value_text "$k")"); done
+        items+=(keep "Done")
+        ui_menu conn_limit "Connection limits" \
+"These limits keep floods from filling the relay. The defaults suit almost every relay, including one that many people reach through a single shared address, like a mobile network or a school.
+
+Change one only if you know why. Pick Done to keep what is shown." keep "${items[@]}"
+        [ "$UI_REPLY" = keep ] && return 0
+        k=$UI_REPLY
+        v=CFG_$k
+        if [ "$k" = BREAKER_MODE ]; then
+            ui_menu breaker_mode "Overload protection" \
+"The relay pauses a device that sends far more than anyone normally does, then lets it back in. Count only pauses nobody and just counts on the stats page what it would have paused.
+
+We recommend on. Use count only for a short while to look into a problem." \
+                "${CFG_BREAKER_MODE:-enforce}" enforce "On (recommended)" shadow "Count only"
+            if [ "$UI_REPLY" = shadow ]; then CFG_BREAKER_MODE=shadow; else CFG_BREAKER_MODE=""; fi
+            continue
+        fi
+        read -r lo hi <<<"$(limit_range "$k")"
+        LIMIT_ASKED=$k
+        ask_valid "$(tr '[:upper:]' '[:lower:]' <<<"$k")" "$(limit_label "$k")" \
+"$(limit_help "$k")
+
+Leave it empty for the default, $(limit_default "$k"). Anything from $lo to $hi works." \
+            "${!v:-}" limit_ok_asked "Type a whole number from $lo to $hi, or leave it empty."
+        if [ -n "$UI_REPLY" ]; then printf -v "$v" '%s' "$((10#$UI_REPLY))"; else printf -v "$v" '%s' ""; fi
+    done
+}
+
 ask_grace() {
     ask_valid grace_secs "Waiting for dropped connections" \
 "When someone's connection drops, the relay keeps their place for a while: the rooms they were in and everything sent to them since. If their app comes back in time, it picks up where it left off and misses nothing.

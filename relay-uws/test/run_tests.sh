@@ -37,6 +37,8 @@ run test_auth_frame
 run test_binary_frame
 run test_breaker
 run test_client_json
+run test_conn_book
+run test_conn_limits
 run test_conn_rate
 run test_conn_rate_exempt
 run test_deny_list
@@ -49,6 +51,7 @@ run test_kill_list
 run test_kill_order ../src/crypto.cpp $LIBS
 run test_license_pool
 run test_link_guess
+run test_login_window
 run test_push_queue -pthread
 run test_relay_validators ../src/crypto.cpp $LIBS
 run test_reports ../src/reports.cpp ../src/crypto.cpp $LIBS
@@ -66,6 +69,7 @@ else
     echo "skip test_session_bounds (no uWebSockets/uSockets sources; git submodule update --init)"
     echo "skip test_session_hostile (no uWebSockets/uSockets sources)"
 fi
+run test_presence_batch
 run test_presence_view $LIBS
 run test_snapshot_codec
 run test_turn_uris

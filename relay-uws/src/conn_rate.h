@@ -1,11 +1,12 @@
 #pragma once
-// The per-address new-connection rate (MAX_NEW_CONNS_PER_MIN_PER_IP, or _PER_IDLE_IP for an
-// address holding no socket): each address's window of recent admitted connects, and the bounded book of addresses that hold no
-// socket but still have a window. RAM only, never persisted, never logged. Header-only
-// so test/test_conn_rate.cpp drives it without a relay.
+// The per-address new-connection rate (conn_limits.h: a rate a minute with a burst of the
+// address's open cap), the takeover window, and the bounded book of addresses that hold no
+// socket but whose bucket is not full yet. RAM only, never persisted, never logged.
+// Header-only so test/test_conn_rate.cpp drives it without a relay.
 #include <arpa/inet.h>
 #include <netinet/in.h>
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstddef>
@@ -25,10 +26,36 @@ namespace conn_rate {
 using Clock = std::chrono::steady_clock;
 constexpr auto WINDOW = std::chrono::seconds(60);
 
-// Addresses holding no socket whose windows the book keeps. Real clients hold their
-// sockets, so an idle window is a brief or failed connect within the last minute; past
-// this many, one is forgotten, which only lets that address in sooner.
+// Addresses holding no socket whose buckets the book keeps until they are full again. Real
+// clients hold their sockets, so an idle entry is a brief or failed connect; past this many,
+// one is forgotten, which only lets that address in sooner.
 constexpr size_t MAX_IDLE = 65536;
+
+// One address's connects as a token bucket held in one theoretical arrival time (GCRA):
+// `rate` a minute once `burst` connects at once are spent. A strict "rate in any minute"
+// would refuse most of a carrier NAT's users reconnecting together.
+class Gcra {
+public:
+    // Whether a connect at `now` would conform, counting nothing.
+    bool conforms(Clock::time_point now, size_t rate_per_min, size_t burst) const {
+        if (rate_per_min == 0 || burst == 0) return false;
+        return std::max(tat_, now) - now <= interval(rate_per_min) * static_cast<int64_t>(burst - 1);
+    }
+    // Whether a connect at `now` conforms; one that does is counted.
+    bool admit(Clock::time_point now, size_t rate_per_min, size_t burst) {
+        if (!conforms(now, rate_per_min, burst)) return false;
+        tat_ = std::max(tat_, now) + interval(rate_per_min);
+        return true;
+    }
+    // When the bucket is full again unless another connect comes.
+    Clock::time_point full_at() const { return tat_; }
+
+private:
+    static Clock::duration interval(size_t rate_per_min) {
+        return std::chrono::duration_cast<Clock::duration>(WINDOW) / static_cast<int64_t>(rate_per_min);
+    }
+    Clock::time_point tat_{};
+};
 
 // The last N admitted connects of one address, oldest first.
 template <size_t N>

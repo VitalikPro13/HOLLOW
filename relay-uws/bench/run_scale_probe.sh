@@ -40,7 +40,7 @@ port=$((20000 + RANDOM % 9000))
 log=$build/run/relay_$port.log
 cd "$build/run"
 env -u NOTIFY_SOCKET -u LISTEN_PID -u LISTEN_FDS -u LISTEN_FDNAMES -u HOLLOW_PUSH_TOKEN \
-    HOLLOW_CONN_RATE_EXEMPT=127.0.0.1 TURN_SECRET=bench \
+    HOLLOW_CONN_RATE_EXEMPT=127.0.0.1 TURN_SECRET=bench $(cat "$build/bench.env" 2>/dev/null) \
     "$build/hollow-relay" --port "$port" --domain relay.bench.test \
     --cert-file "$build/cert.pem" --key-file "$build/key.pem" \
     --keys-file "$build/run/keys.json" --reports-file "$build/run/reports.json" > "$log" 2>&1 &

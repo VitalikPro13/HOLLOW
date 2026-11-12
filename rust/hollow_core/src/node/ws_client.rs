@@ -420,6 +420,12 @@ enum ClientMsg {
         /// For a server room: that we hold its newest door ([`door_proof`]).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         door_proof: Option<String>,
+        /// 2: presence comes in batches ([`expand_presence`]); a socket's first join fixes it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pv: Option<u8>,
+        /// We hold what this socket was told of the room, so the answer may be its digest alone.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        have: Option<bool>,
     },
     Leave { room: String },
 }
@@ -430,8 +436,17 @@ enum ClientMsg {
 enum ServerMsg {
     PeerJoined { room: String, peer_id: String },
     PeerLeft { room: String, peer_id: String },
-    /// `proved` only in a door-locked server room.
-    Members { room: String, peers: Vec<String>, #[serde(default)] proved: Option<bool> },
+    /// `proved` only in a door-locked server room. A re-join with `have` may get `digest` and
+    /// `count` of the roster instead of `peers`.
+    Members {
+        room: String,
+        #[serde(default)] peers: Vec<String>,
+        #[serde(default)] proved: Option<bool>,
+        #[serde(default)] digest: Option<u64>,
+        #[serde(default)] count: Option<u64>,
+    },
+    /// Presence changes in order, "+id" or "-id", at most [`PRESENCE_BATCH_MAX`].
+    Presence { room: String, #[serde(default)] ev: Vec<String> },
     TopicCatchupDone { room: String, channel: String },
     // `active_rooms` is always empty now: the relay's room-activity probe was
     // removed (it let anyone holding two peer_ids ask whether their deterministic
@@ -792,12 +807,23 @@ struct Rooms {
     denied: HashSet<String>,
     /// Servers whose join lock we read or wrote (lowercase): a refusal may answer those too.
     lock_asked: HashSet<String>,
+    /// Rooms whose presence record a short answer or a bad batch proved wrong: this socket
+    /// joins each again for the full list, whatever kind of room it is (review C1).
+    rejoin_full: Vec<String>,
 }
 
 /// The most servers [`Rooms::lock_asked`] remembers; past it the set starts over.
 const LOCK_ASKED_MAX: usize = 4096;
 
 impl Rooms {
+    /// The record of `room` is wrong: it goes, and a room we hold is joined again for the list.
+    fn ask_full(&mut self, room: &str) {
+        self.audit.forget(room);
+        if self.joined.contains(room) && !self.rejoin_full.iter().any(|r| r == room) {
+            self.rejoin_full.push(room.to_string());
+        }
+    }
+
     fn note_lock_asked(&mut self, server: &str) {
         if self.lock_asked.len() >= LOCK_ASKED_MAX {
             self.lock_asked.clear();
@@ -1517,12 +1543,19 @@ impl Client {
             .doors
             .get(room)
             .and_then(|d| self.proof_door().and_then(|session| door_proof(session, room, &d.0)));
-        let text = serde_json::to_string(&ClientMsg::Join { room: room.to_string(), inbox_roster, door_proof }).ok()?;
+        let have = self.rooms.audit.asks_short(room).then_some(true);
+        let mut join = ClientMsg::Join { room: room.to_string(), inbox_roster, door_proof, pv: Some(2), have };
+        let text = serde_json::to_string(&join).ok()?;
+        // A replay's echo is the same join whether or not its answer arrived in between.
+        if let ClientMsg::Join { have, .. } = &mut join {
+            *have = None;
+        }
+        let key = serde_json::to_string(&join).ok()?;
         let now = Instant::now();
         if replay {
-            self.replayed_joins.insert(room.to_string(), (text.clone(), now));
+            self.replayed_joins.insert(room.to_string(), (key, now));
         } else if let Some((replayed, at)) = self.replayed_joins.remove(room)
-            && replayed == text
+            && replayed == key
             && now.saturating_duration_since(at) <= self.timing.replay_echo
         {
             self.rooms.audit.rejoin_dropped(room);
@@ -1649,10 +1682,13 @@ impl Client {
     fn on_text(&mut self, text: &str) {
         let Ok(msg) = serde_json::from_str::<ServerMsg>(text) else { return };
         let session = self.socket.as_ref().is_some_and(|s| s.session);
-        if let ServerMsg::Members { room, peers, .. } = &msg {
+        if let ServerMsg::Members { room, peers, digest, count, .. } = &msg {
             // Itself last; a list lifts the room's price for a while, and a join's answer
             // says what the join cost.
-            let listed = peers.len().saturating_sub(1) as u32;
+            let listed = match (digest, count) {
+                (Some(_), Some(n)) if peers.is_empty() => u32::try_from(*n).unwrap_or(u32::MAX),
+                _ => peers.len().saturating_sub(1) as u32,
+            };
             let now = Instant::now();
             let kept = self.rooms.listed.get(room).filter(|(_, at)| at.elapsed() < LISTED_FOR).map_or(0, |(n, _)| *n);
             self.rooms.listed.insert(room.clone(), (listed.max(kept), now));
@@ -1690,15 +1726,31 @@ impl Client {
                 hollow_log!("[HOLLOW-WS] The relay is restarting: resuming in {}ms", wait.as_millis());
                 self.drain_at = Some(Instant::now() + wait);
             }
-            other => handle_server_message(
-                &self.event_tx,
-                other,
-                &mut self.rooms,
-                &mut self.replayed_joins,
-                &self.relay_host,
-                &self.dial.peer_id,
-                self.background,
-            ),
+            other => {
+                handle_server_message(
+                    &self.event_tx,
+                    other,
+                    &mut self.rooms,
+                    &mut self.replayed_joins,
+                    &self.relay_host,
+                    &self.dial.peer_id,
+                    self.background,
+                );
+                self.rejoin_for_full_lists();
+            }
+        }
+    }
+
+    /// The joins a wrong record owes: no `have`, so the relay answers with the full list.
+    fn rejoin_for_full_lists(&mut self) {
+        for room in std::mem::take(&mut self.rooms.rejoin_full) {
+            // Never taken for the echo of a replay: this join must reach the relay.
+            self.replayed_joins.remove(&room);
+            let cmd = match self.rooms.inbox_rosters.get(&room) {
+                Some(roster) => WsCommand::JoinInbox { room_code: room, roster: roster.clone() },
+                None => WsCommand::JoinRoom { room_code: room },
+            };
+            self.push(cmd);
         }
     }
 
@@ -3149,6 +3201,65 @@ pub(crate) mod presence_hooks {
     }
 }
 
+/// ws_client's reading of presence for the harness MockRelay: its journeys run the real
+/// `presence` batches, short `members` answers and the joins a wrong record causes.
+#[cfg(test)]
+pub(crate) struct PresenceWire {
+    rooms: Rooms,
+    me: String,
+}
+
+#[cfg(test)]
+impl PresenceWire {
+    pub(crate) fn new(me: &str) -> Self {
+        Self { rooms: Rooms::default(), me: me.to_string() }
+    }
+
+    /// The events reading `frame` raises, and the rooms this socket then joins again for the list.
+    pub(crate) fn read(&mut self, frame: &serde_json::Value) -> (Vec<WsEvent>, Vec<String>) {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        if let Ok(msg) = serde_json::from_value::<ServerMsg>(frame.clone()) {
+            handle_server_message(&tx, msg, &mut self.rooms, &mut HashMap::new(), "", &self.me, false);
+        }
+        let mut events = Vec::new();
+        while let Ok(e) = rx.try_recv() {
+            events.push(e);
+        }
+        (events, std::mem::take(&mut self.rooms.rejoin_full))
+    }
+
+    /// A command the node gave its ws_client.
+    pub(crate) fn track(&mut self, cmd: &WsCommand) {
+        match cmd {
+            WsCommand::JoinRoom { room_code } | WsCommand::JoinInbox { room_code, .. } => {
+                self.rooms.joined.insert(room_code.clone());
+            }
+            WsCommand::LeaveRoom { room_code } => {
+                self.rooms.joined.remove(room_code);
+                self.rooms.audit.forget(room_code);
+            }
+            _ => {}
+        }
+    }
+
+    /// Whether the next join of `room` says `have`.
+    pub(crate) fn asks_short(&self, room: &str) -> bool {
+        self.rooms.audit.asks_short(room)
+    }
+
+    pub(crate) fn audit(&self) -> &super::presence_audit::Audit {
+        &self.rooms.audit
+    }
+
+    pub(crate) fn forget(&mut self, room: &str) {
+        self.rooms.audit.forget(room);
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.rooms.audit.clear();
+    }
+}
+
 /// The room a `room_denied` may refuse, spelled as we joined it: only a server's or a
 /// meeting's room we are in or whose lock we asked for (review D12).
 fn deniable_ask(rooms: &Rooms, room: &str) -> Option<String> {
@@ -3162,6 +3273,33 @@ fn deniable_ask(rooms: &Rooms, room: &str) -> Option<String> {
         .find(|joined| super::relay_denial::room_key(joined) == key)
         .cloned()
         .or_else(|| (rooms.lock_asked.contains(&key) || rooms.denied.contains(&key)).then_some(key))
+}
+
+/// The most changes one `presence` frame carries (relay `presence_batch.h` MAX_EVENTS).
+pub(crate) const PRESENCE_BATCH_MAX: usize = 256;
+
+/// The joins (true) and leaves of a `presence` frame in order, our own id dropped; None when
+/// any entry is not "+id"/"-id" with a peer id's shape or the frame is past its bound.
+fn expand_presence(ev: &[String], me: &str) -> Option<Vec<(bool, String)>> {
+    if ev.len() > PRESENCE_BATCH_MAX {
+        return None;
+    }
+    let mut out = Vec::with_capacity(ev.len());
+    for e in ev {
+        let joined = match e.as_bytes().first() {
+            Some(b'+') => true,
+            Some(b'-') => false,
+            _ => return None,
+        };
+        let peer = &e[1..];
+        if !super::witness::peer_id_shape(peer) {
+            return None;
+        }
+        if peer != me {
+            out.push((joined, peer.to_string()));
+        }
+    }
+    Some(out)
 }
 
 fn handle_server_message(
@@ -3188,7 +3326,43 @@ fn handle_server_message(
             rooms.audit.on_left(&room, &peer_id);
             WsEvent::PeerLeft { room, peer_id }
         }
-        ServerMsg::Members { room, peers, proved } => {
+        ServerMsg::Presence { room, ev } => {
+            // Exactly the single frames it stands for, in order; one bad entry voids it all.
+            let Some(changes) = expand_presence(&ev, me) else {
+                hollow_log!("[HOLLOW-WS] A presence batch for {room} does not read: re-joining it");
+                rooms.ask_full(&room);
+                return;
+            };
+            hollow_log!("[HOLLOW-WS] Presence of {room}: {} changes", changes.len());
+            for (joined, peer_id) in changes {
+                #[cfg(test)]
+                if joined && presence_hooks::lose(me) {
+                    continue;
+                }
+                let ev = if joined {
+                    rooms.audit.on_joined(&room, &peer_id);
+                    WsEvent::PeerJoined { room: room.clone(), peer_id }
+                } else {
+                    rooms.audit.on_left(&room, &peer_id);
+                    WsEvent::PeerLeft { room: room.clone(), peer_id }
+                };
+                let _ = event_tx.send(ev);
+            }
+            return;
+        }
+        ServerMsg::Members { room, peers, proved, digest, count } => {
+            let peers = match (digest, count) {
+                (Some(sum), Some(n)) if peers.is_empty() => match rooms.audit.told_matching(&room, sum, n, me) {
+                    Some(told) => told,
+                    None => {
+                        // A frame was lost on the way, or this relay is wrong: ask for the list.
+                        hollow_log!("[HOLLOW-WS] Short roster of {room} differs from what we were told: re-joining it");
+                        rooms.ask_full(&room);
+                        return;
+                    }
+                },
+                _ => peers,
+            };
             hollow_log!("[HOLLOW-WS] Room {room} members: {} peers", peers.len());
             rooms.audit.on_members(&room, &peers, me, Instant::now());
             // An open room hides nobody: every roster says where we stand.
@@ -3516,6 +3690,168 @@ mod tests {
     /// g13: the record comes from the presence frames as read; an answer that matches it
     /// raises nothing, one that differs twice raises a drift, and a `members` between an
     /// ask and its answer voids the answer.
+    /// Peer ids with the relay's shape (`witness::peer_id_shape`).
+    fn pid(n: u8) -> String {
+        format!("12D3KooWPresenceTest{}", char::from(b'a' + n).to_string().repeat(25))
+    }
+
+    fn changes(rx: &mut mpsc::UnboundedReceiver<WsEvent>) -> Vec<String> {
+        let mut out = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            out.push(match ev {
+                WsEvent::PeerJoined { peer_id, .. } => format!("+{peer_id}"),
+                WsEvent::PeerLeft { peer_id, .. } => format!("-{peer_id}"),
+                WsEvent::RoomMembers { peers, .. } => format!("M{}", peers.join(",")),
+                WsEvent::PresenceDrift { room } => format!("D{room}"),
+                WsEvent::DoorStatus { .. } => continue,
+                other => format!("?{}", other.kind()),
+            });
+        }
+        out
+    }
+
+    /// A batch gives the node exactly the events the single frames it stands for give, in
+    /// order, and the same record of what the socket was told.
+    #[tokio::test]
+    async fn presence_batch_expands_like_single_frames() {
+        let (a, b, c) = (pid(1), pid(2), pid(3));
+        let singles = [
+            format!(r#"{{"type":"peer_joined","room":"r","peer_id":"{a}"}}"#),
+            format!(r#"{{"type":"peer_joined","room":"r","peer_id":"{b}"}}"#),
+            format!(r#"{{"type":"peer_left","room":"r","peer_id":"{a}"}}"#),
+            format!(r#"{{"type":"peer_joined","room":"r","peer_id":"{a}"}}"#),
+            format!(r#"{{"type":"peer_joined","room":"r","peer_id":"{c}"}}"#),
+        ];
+        let (tx1, mut rx1) = mpsc::unbounded_channel();
+        let mut one = Rooms::default();
+        for f in &singles {
+            feed(&tx1, &mut one, false, f);
+        }
+        let (tx2, mut rx2) = mpsc::unbounded_channel();
+        let mut batched = Rooms::default();
+        feed(&tx2, &mut batched, false, &format!(r#"{{"type":"presence","room":"r","ev":["+{a}","+{b}","-{a}","+{a}","+{c}"]}}"#));
+        let (e1, e2) = (changes(&mut rx1), changes(&mut rx2));
+        assert_eq!(e1, e2, "a flap stays a flap, in order");
+        assert_eq!(e2.len(), 5);
+        assert_eq!(one.audit.told("r"), batched.audit.told("r"));
+    }
+
+    #[tokio::test]
+    async fn presence_batch_drops_own_id_and_a_bad_entry_drifts() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut rooms = Rooms::default();
+        rooms.joined.insert("r".into());
+        let a = pid(1);
+        feed(&tx, &mut rooms, false, &format!(r#"{{"type":"presence","room":"r","ev":["+{a}"]}}"#));
+        assert_eq!(changes(&mut rx), vec![format!("+{a}")]);
+        for bad in [
+            format!(r#"["+{a}","x{a}"]"#),
+            r#"["+short"]"#.to_string(),
+            format!(r#"["+{a}",""]"#),
+            format!(r#"[{}]"#, (0..=PRESENCE_BATCH_MAX).map(|_| format!(r#""+{a}""#)).collect::<Vec<_>>().join(",")),
+        ] {
+            feed(&tx, &mut rooms, false, &format!(r#"{{"type":"presence","room":"r","ev":{bad}}}"#));
+            assert!(changes(&mut rx).is_empty(), "{bad} voids the whole batch");
+            assert!(rooms.audit.told("r").is_none(), "and forgets the record, so the re-join asks for the list");
+            assert_eq!(std::mem::take(&mut rooms.rejoin_full), vec!["r".to_string()], "which this socket sends itself");
+        }
+        let own = pid(9);
+        assert_eq!(expand_presence(&[format!("+{own}"), format!("-{a}")], &own), Some(vec![(false, a.clone())]));
+    }
+
+    /// A short `members` stands for exactly what the socket was told when it is read; any
+    /// difference (a lost frame) forgets the record and re-joins for the list (review F1).
+    #[tokio::test]
+    async fn members_short_replays_the_told_view_or_drifts() {
+        let (a, b) = (pid(1), pid(2));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut rooms = Rooms::default();
+        rooms.joined.insert("r".into());
+        feed(&tx, &mut rooms, false, &format!(r#"{{"type":"members","room":"r","peers":["{a}","me"]}}"#));
+        feed(&tx, &mut rooms, false, &format!(r#"{{"type":"presence","room":"r","ev":["+{b}"]}}"#));
+        let _ = changes(&mut rx);
+        let short = |ids: &[&String]| {
+            let ids: Vec<String> = ids.iter().map(|s| s.to_string()).collect();
+            let (sum, count) = super::super::presence_audit::digest(ids.iter());
+            format!(r#"{{"type":"members","room":"r","digest":{sum},"count":{count}}}"#)
+        };
+        feed(&tx, &mut rooms, false, &short(&[&a, &b]));
+        let mut want = vec![a.clone(), b.clone()];
+        want.sort();
+        want.push("me".into());
+        assert_eq!(changes(&mut rx), vec![format!("M{}", want.join(","))], "the record, ourselves last");
+        let c = pid(3);
+        feed(&tx, &mut rooms, false, &short(&[&a, &c]));
+        assert!(changes(&mut rx).is_empty(), "the right count of a wrong roster is a difference");
+        assert!(rooms.audit.told("r").is_none());
+        assert_eq!(std::mem::take(&mut rooms.rejoin_full), vec!["r".to_string()]);
+        feed(&tx, &mut rooms, false, &short(&[&a]));
+        assert!(changes(&mut rx).is_empty());
+        assert_eq!(std::mem::take(&mut rooms.rejoin_full), vec!["r".to_string()], "no record: the list is asked for");
+    }
+
+    /// A short answer that does not match is joined again for the full list by this socket
+    /// itself in EVERY kind of room, not only the ones the node audits: a re-join that
+    /// refreshes a peer the relay dropped silently must still purge it (review C1). A change
+    /// read before that join is written brings no record back (C2), and a room we left is
+    /// not joined again.
+    #[tokio::test]
+    async fn a_short_mismatch_rejoins_every_room_kind_for_the_list() {
+        let (x, y, z) = (pid(1), pid(2), pid(3));
+        let rooms_of_every_kind = [
+            "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90".to_string(),
+            format!("inbox:{}", pid(7)),
+            format!("fwd:{}", pid(8)),
+            "0123456789abcdef0123456789abcdef01234567".to_string(),
+        ];
+        for room in &rooms_of_every_kind {
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let mut rooms = Rooms::default();
+            rooms.joined.insert(room.clone());
+            feed(&tx, &mut rooms, false, &format!(r#"{{"type":"members","room":"{room}","peers":["{x}","{y}","me"]}}"#));
+            let _ = changes(&mut rx);
+            assert!(rooms.audit.asks_short(room), "{room}: a record makes the next join ask short");
+            // The relay dropped y without a word; its short answer counts only x.
+            let (sum, count) = super::super::presence_audit::digest([x.clone()].iter());
+            feed(&tx, &mut rooms, false, &format!(r#"{{"type":"members","room":"{room}","digest":{sum},"count":{count}}}"#));
+            assert!(changes(&mut rx).is_empty(), "{room}: nothing stale reaches the node");
+            assert_eq!(rooms.rejoin_full, vec![room.clone()], "{room}: joined again for the list");
+            feed(&tx, &mut rooms, false, &format!(r#"{{"type":"presence","room":"{room}","ev":["+{z}"]}}"#));
+            assert!(!rooms.audit.asks_short(room), "{room}: a change read meanwhile brings back no have");
+            feed(&tx, &mut rooms, false, &format!(r#"{{"type":"members","room":"{room}","peers":["{x}","{z}","me"]}}"#));
+            let got = changes(&mut rx);
+            assert_eq!(got.last().cloned(), Some(format!("M{x},{z},me")), "{room}: the full list purges y");
+        }
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut rooms = Rooms::default();
+        let (sum, count) = super::super::presence_audit::digest([x.clone()].iter());
+        feed(&tx, &mut rooms, false, &format!(r#"{{"type":"members","room":"gone","digest":{sum},"count":{count}}}"#));
+        assert!(rooms.rejoin_full.is_empty(), "a room we do not hold is never joined again");
+    }
+
+    #[tokio::test]
+    async fn join_carries_pv_and_have() {
+        let plain = serde_json::to_value(ClientMsg::Join {
+            room: "r".into(),
+            inbox_roster: None,
+            door_proof: None,
+            pv: Some(2),
+            have: None,
+        })
+        .unwrap();
+        assert_eq!(plain["pv"], 2);
+        assert!(plain.get("have").is_none());
+        let have = serde_json::to_value(ClientMsg::Join {
+            room: "r".into(),
+            inbox_roster: None,
+            door_proof: None,
+            pv: Some(2),
+            have: Some(true),
+        })
+        .unwrap();
+        assert_eq!(have["have"], true);
+    }
+
     #[tokio::test]
     async fn presence_frames_feed_the_audit_and_a_difference_drifts() {
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -3628,6 +3964,12 @@ mod tests {
         let close = |code: u16| Message::Close(Some(CloseFrame { code: CloseCode::from(code), reason: "rate_limit".into() }));
         let refused = read_auth_reply(&mut auth_frames(close(1008)), Duration::from_secs(1)).await;
         assert!(matches!(refused, Err(ConnectError::Refused(_))), "{refused:?}");
+        // Every limit refuses with 1008, so 0.13 and 0.14 clients back off to the long cap (review F8).
+        for reason in ["ip_limit", "login_busy", "relay_full", "auth_timeout"] {
+            let frame = Message::Close(Some(CloseFrame { code: CloseCode::from(1008), reason: reason.into() }));
+            let r = read_auth_reply(&mut auth_frames(frame), Duration::from_secs(1)).await;
+            assert!(matches!(r, Err(ConnectError::Refused(_))), "{reason}: {r:?}");
+        }
         let gone = read_auth_reply(&mut auth_frames(close(1001)), Duration::from_secs(1)).await;
         assert!(matches!(gone, Err(ConnectError::Other(_))), "{gone:?}");
     }
@@ -3787,7 +4129,7 @@ mod tests {
 
     #[test]
     fn test_join_message_format() {
-        let msg = ClientMsg::Join { room: "server123".into(), inbox_roster: None, door_proof: None };
+        let msg = ClientMsg::Join { room: "server123".into(), inbox_roster: None, door_proof: None, pv: None, have: None };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"join\""));
         assert!(json.contains("\"room\":\"server123\""));
@@ -3825,7 +4167,7 @@ mod tests {
         let k = |t: u8| crate::identity::native_identity::NativeKeypair::from_secret_bytes(&[t; 32]);
         let roster = crate::identity::roster::Roster::genesis(&k(0x7a), &k(0x7b), &k(0x7c), 1_000);
         let room = format!("inbox:{}", roster.master);
-        let msg = ClientMsg::Join { room: room.clone(), inbox_roster: Some(roster), door_proof: None };
+        let msg = ClientMsg::Join { room: room.clone(), inbox_roster: Some(roster), door_proof: None, pv: None, have: None };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"join\""));
         assert!(json.contains(&format!("\"room\":\"{room}\"")));
@@ -3869,7 +4211,7 @@ mod tests {
         let json = r#"{"type":"members","room":"server1","peers":["peer_a","peer_b"]}"#;
         let msg: ServerMsg = serde_json::from_str(json).unwrap();
         match msg {
-            ServerMsg::Members { room, peers, proved } => {
+            ServerMsg::Members { room, peers, proved, .. } => {
                 assert_eq!(room, "server1");
                 assert_eq!(peers.len(), 2);
                 assert_eq!(proved, None, "an open room says nothing of doors");

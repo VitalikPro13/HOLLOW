@@ -888,6 +888,19 @@ t_adopt_stage_copies_only_the_old_accounts_own_plain_file() {
 }
 in_sub t_adopt_stage_copies_only_the_old_accounts_own_plain_file
 
+echo "adopt: the connection limits carry over"
+t_adopt_carries_limits() {
+    ADOPT_NOTES=()
+    printf 'CONN_LIMIT_IPV4=1024\nCONN_RATE_IPV4=99999\nBREAKER_MODE=shadow\n' >"$TMP/old_lim.env"
+    old_limits kv_get "$TMP/old_lim.env"
+    eq "a value in range carries" "$OLD_CONN_LIMIT_IPV4" 1024
+    eq "so does the mode" "$OLD_BREAKER_MODE" shadow
+    eq "one outside its range does not" "$OLD_CONN_RATE_IPV4" ""
+    has "and that is said" "${ADOPT_NOTES[*]}" "CONN_RATE_IPV4, 99999, is not a value the relay takes"
+    has "the found screen names them" "$(old_limits_summary)" "CONN_LIMIT_IPV4=1024, BREAKER_MODE=shadow"
+}
+in_sub t_adopt_carries_limits
+
 echo "uninstall: the take-over backup"
 t_uninstall_names_or_removes_the_take_over_backup() {
     local R=$TMP/un_bk d out

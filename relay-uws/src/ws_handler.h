@@ -50,4 +50,6 @@ nlohmann::json breaker_stats();
 std::string breaker_test_report(const std::string& peer);
 // What the relay still holds of a peer and a room after a denial (test builds only).
 std::string deny_test_report(const std::string& peer, const std::string& room, const std::string& net);
+// The presence tables a stranger fills, in all and for one subject (test builds only).
+std::string presence_test_report(const std::string& peer);
 #endif

@@ -91,7 +91,7 @@ compose_turn_user() {
 # The .env lines the setup writes; every other line is the operator's.
 DOCKER_ENV_KEYS="RELAY_HOST DUCKDNS_TOKEN DUCKDNS_IP TURN_SECRET COMPOSE_PROFILES PUBLIC_IP PUBLIC_IPV6 LOCAL_IP
 HOLLOW_MEM_LIMIT OWN_CERT_DIR SESSION_GRACE_SECS HOLLOW_CONN_RATE_EXEMPT CERTBOT_STAGING FORWARDER_PEER_ID
-FWD_LICENSE_KEY PUBLIC_STATS HOLLOW_CAKE HOLLOW_CAKE_MBIT"
+FWD_LICENSE_KEY PUBLIC_STATS HOLLOW_CAKE HOLLOW_CAKE_MBIT $LIMIT_KEYS"
 
 docker_env() {
     local env=$STACK_DIR/.env turn_secret="" profiles=() exempt fwd_id own kept
@@ -136,6 +136,12 @@ docker_env() {
         # The host's shaper (cake_apply), whose cap the relay names on /server-stats.
         printf 'HOLLOW_CAKE=%s\n' "${CFG_CAKE:-}"
         if [ "${CFG_CAKE:-}" = on ]; then printf 'HOLLOW_CAKE_MBIT=%s\n' "$CFG_CAKE_MBIT"; else echo "HOLLOW_CAKE_MBIT="; fi
+        local k v keys
+        IFS=' ' read -r -a keys <<<"$LIMIT_KEYS"
+        for k in "${keys[@]}"; do
+            v=CFG_$k
+            printf '%s=%s\n' "$k" "${!v:-}"
+        done
         if [ -n "$kept" ]; then printf '\n%s\n' "$kept"; fi
     } | put_file "$env" 0600 root root
 }

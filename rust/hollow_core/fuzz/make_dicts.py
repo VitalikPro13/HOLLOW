@@ -78,7 +78,8 @@ def main():
                                             '"\\"kill_signal\\""', '"\\"lock_chain\\""', '"\\"links\\""',
                                             '"\\"auth_ok\\""', '"\\"auth_failed\\""', '"\\"hb_ack\\""',
                                             '"\\"resumed\\""', '"\\"reconnect\\""', '"\\"peer_joined\\""',
-                                            '"\\"peer_left\\""', '"\\"blob\\""'})
+                                            '"\\"peer_left\\""', '"\\"blob\\""', '"\\"presence\\""', '"\\"ev\\""',
+                                            '"\\"digest\\""', '"\\"count\\""', '"\\"+12D3KooW"', '"\\"-12D3KooW"'})
     for t in ("roster", "kill_order", "join_lock", "profile_card", "push_wake", "crdt_digest", "link_preview"):
         write(out_dir, t, set())
 

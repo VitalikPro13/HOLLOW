@@ -5,7 +5,9 @@
 
 CONF_FILE=/etc/hollow-relay/install.conf
 CONF_KEYS="mode binaries address host duckdns_name public_ip public_ip_fixed public_ipv6 staging
-turn push forwarder members_only member_keys grace_secs public_stats cake cake_mbit cake_dev"
+turn push forwarder members_only member_keys grace_secs public_stats cake cake_mbit cake_dev
+conn_limit_ipv4 conn_limit_ipv6 conn_rate_ipv4 conn_rate_ipv6 login_window_per_block login_window_total
+connected_limit breaker_mode"
 
 conf_save() {
     local k v
@@ -40,6 +42,14 @@ conf_load() {
         else CFG_PUBLIC_STATS=$(kv_get "$RELAY_ETC/relay.env" PUBLIC_STATS); fi
     fi
     CFG_PUBLIC_STATS=$(public_stats_norm "$CFG_PUBLIC_STATS")
+    # A setup from before the limits were a setting: what the relay reads now, if it is valid.
+    local env_file=${RELAY_ETC:-/etc/hollow-relay}/relay.env
+    [ "$CFG_MODE" = docker ] && env_file=${STACK_DIR:-}/.env
+    for k in $LIMIT_KEYS; do
+        v=CFG_$k
+        [ -n "${!v:-}" ] || printf -v "$v" '%s' "$(kv_get "$env_file" "$k")"
+        limit_ok "$k" "${!v}" || printf -v "$v" '%s' ""
+    done
 }
 
 svc_state() {
@@ -425,6 +435,7 @@ manage_change() {
     items+=(public_stats "Public stats page: $(public_stats_norm "${CFG_PUBLIC_STATS:-on}")"
         grace "Wait for dropped connections: ${CFG_GRACE_SECS:-120} seconds"
         cake "Fair share of the upload: $(cake_text)"
+        limits "Advanced: connection limits ($(limits_summary))"
         address "The relay's address: $CFG_HOST")
     [ "${CFG_STAGING:-no}" = yes ] && items+=(certificate "Certificate: Let's Encrypt staging, which the app does not trust")
     [ "$CFG_MODE" = native ] && [ "${CFG_BINARIES:-}" = source ] && feed_lib_present &&
@@ -454,6 +465,7 @@ manage_change() {
     public_stats) ask_public_stats ;;
     grace) ask_grace ;;
     cake) ask_cake ;;
+    limits) ask_conn_limits ;;
     address) preflight_run; ask_address; address_prepare ;;
     certificate)
         ui_yesno confirm "Get a trusted certificate" \
