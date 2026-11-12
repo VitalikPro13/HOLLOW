@@ -72,7 +72,8 @@ AFTER_UPDATE=0
 DENY_ARGS=()
 while [ $# -gt 0 ]; do
     case "$1" in
-    --deny) shift; DENY_ARGS=("$@"); [ ${#DENY_ARGS[@]} -gt 0 ] || DENY_ARGS=(usage); break ;;
+    # Asks nothing, so a script or cron runs it without a terminal.
+    --deny) shift; DENY_ARGS=("$@"); [ ${#DENY_ARGS[@]} -gt 0 ] || DENY_ARGS=(usage); UI_MODE=${UI_MODE:-plain}; break ;;
     --dry-run) DRY_RUN=1 ;;
     --after-update) AFTER_UPDATE=1 UI_MODE=plain ;;
     --answers) ANSWERS_FILE=${2:-}; [ -n "$ANSWERS_FILE" ] || die "--answers needs a file."; shift ;;

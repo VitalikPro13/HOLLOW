@@ -93,7 +93,7 @@ class UserBar extends ConsumerWidget {
       };
     }
 
-    final refusal = !amInvisible && overall == OverallConnection.refused
+    final refusal = overall == OverallConnection.refused
         ? ref.watch(relayLoginDenialProvider)
         : null;
     final statusText = visual.label;

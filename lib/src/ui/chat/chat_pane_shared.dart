@@ -9,6 +9,7 @@ import 'package:hollow/src/core/message_tokens.dart'
 import 'package:hollow/src/core/models/call_record.dart';
 import 'package:hollow/src/core/models/channel_chat_message.dart';
 import 'package:hollow/src/core/providers/connection_status_provider.dart';
+import 'package:hollow/src/core/providers/relay_denial_provider.dart';
 import 'package:hollow/src/core/providers/blocked_users_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/time_labels.dart';
@@ -350,12 +351,22 @@ List<storage_api.StoredChannelMessage> searchLoadedChannelMessages(
   return hits;
 }
 
-/// The "Offline" header status when OUR link is down, else null: read only
-/// from [overallConnectionProvider], never from who else is online.
-Widget? ownLinkOfflineStatus(WidgetRef ref) =>
-    ref.watch(overallConnectionProvider).isOnline
-        ? null
-        : const ConnectionProgress(stage: ConnectionStage.offline);
+/// The header status while OUR link is down ("Offline", or refused by this
+/// relay with the reason on hover), else null: read only from
+/// [overallConnectionProvider], never from who else is online.
+Widget? ownLinkOfflineStatus(WidgetRef ref, {Key? key}) {
+  final link = ref.watch(overallConnectionProvider);
+  if (link.isOnline) return null;
+  if (link != OverallConnection.refused) {
+    return ConnectionProgress(key: key, stage: ConnectionStage.offline);
+  }
+  final kind = ref.watch(relayLoginDenialProvider);
+  return ConnectionProgress(
+    key: key,
+    stage: ConnectionStage.refused,
+    tooltip: kind == null ? null : relayLoginDenialText(kind),
+  );
+}
 
 /// Whether a date separator should be shown between two timestamps.
 bool shouldShowDateSeparator(DateTime current, DateTime? previous) {

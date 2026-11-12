@@ -3,8 +3,10 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/core/providers/favourite_friends_provider.dart';
 import 'package:hollow/src/core/providers/friends_provider.dart';
+import 'package:hollow/src/core/providers/relay_denial_provider.dart';
 import 'package:hollow/src/core/providers/temporary_nickname_provider.dart';
 import 'package:hollow/src/rust/frb_generated.dart';
 import 'package:hollow/src/theme/hollow_theme_data.dart';
@@ -87,7 +89,7 @@ class _Favourites extends FavouriteFriendsNotifier {
 final _api = _Api();
 
 Future<ProviderContainer> _open(WidgetTester tester, FriendsManagerTab tab,
-    {List<String> favourites = const []}) async {
+    {List<String> favourites = const [], List<Override> extra = const []}) async {
   tester.view.physicalSize = const Size(1280, 800);
   tester.view.devicePixelRatio = 1;
   addTearDown(tester.view.reset);
@@ -96,6 +98,7 @@ Future<ProviderContainer> _open(WidgetTester tester, FriendsManagerTab tab,
       temporaryNicknameProvider.overrideWith(_Nickname.new),
       friendsProvider.overrideWith(_Friends.new),
       favouriteFriendsProvider.overrideWith(() => _Favourites(favourites)),
+      ...extra,
     ]),
   );
   addTearDown(container.dispose);
@@ -145,6 +148,21 @@ void main() {
     await tester.pump();
     expect(_field(tester, 'Choose a nickname').controller!.text, 'mira_k');
     expect(find.text('That nickname is already taken'), findsOneWidget);
+  });
+
+  testWidgets('a refused account cannot claim a nickname and is told why',
+      (tester) async {
+    await _open(tester, FriendsManagerTab.add, extra: [
+      overallConnectionProvider.overrideWithValue(OverallConnection.refused),
+      relayLoginDenialProvider.overrideWith((_) => 'account_denied'),
+    ]);
+    expect(find.text('This relay refused your account'), findsOneWidget);
+    expect(find.text('Claim a nickname once it lets you in.'), findsOneWidget);
+    expect(
+        tester
+            .widget<HollowButton>(find.widgetWithText(HollowButton, 'Claim'))
+            .onPressed,
+        isNull);
   });
 
   testWidgets('a nickname is confirmed by whom it names before anything is sent',

@@ -378,6 +378,9 @@ class _ConferenceInviteCard extends ConsumerWidget {
           HollowButton.outline(
             compact: true,
             onPressed: () => _handleJoin(context, ref),
+            // Asking a relay that refused this meeting takes a few seconds.
+            loading: ref.watch(conferenceProvider
+                .select((c) => c.askingRelayFor == link.id)),
             child: const Text('Join'),
           ),
         ],

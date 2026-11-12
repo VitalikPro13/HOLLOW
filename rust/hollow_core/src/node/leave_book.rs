@@ -496,6 +496,11 @@ impl LeaveBook {
         let mut done = Vec::new();
         let mut changed = false;
         for (sid, pending) in self.stored.pending.iter_mut() {
+            // Nothing for a server the relay refuses leaves at all: handing it now would
+            // count devices as reached that never got it.
+            if super::relay_denial::denied(sid) {
+                continue;
+            }
             if now.saturating_sub(pending.since_ms) > PATIENCE_MS {
                 hollow_log!("[HOLLOW-CRDT] Gave up handing on our leave of {sid}");
                 done.push(sid.clone());

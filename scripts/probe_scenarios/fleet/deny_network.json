@@ -1,0 +1,37 @@
+{
+  "_": [
+    "The relay operator's denylist refusing a NETWORK address (t14-deny + t14-deny-client), on a THROWAWAY test relay.",
+    "The address the relay sees for b and x (two Windows peers on one machine, DENY_NET) goes on the list: both",
+    "show the refused-network dialog within seconds while a, on another machine, stays connected. Try again is",
+    "refused again while listed; once lifted, Try again connects.",
+    "Needs: DENY_NET = the LAN address of b's and x's machine as the relay sees it, FLEET_RELAY_SSH (+ _OPTS).",
+    "run: DENY_NET=192.168.18.25 FLEET_BACKEND=macos pwsh -NoProfile -File scripts/fleet.ps1 -Scenario deny_network -Attach -Peers a=q,b=windows:e,x=windows:f"
+  ],
+  "peers": ["a", "b", "x"],
+  "steps": [
+    { "peer": "all", "op": "wait_for", "provider": "connection", "equals": "connected", "timeout_ms": 120000 },
+    { "peer": "a", "op": "log", "message": "the network ${DENY_NET} goes on the list" },
+    { "peer": "a", "op": "relay_deny", "value": "add network ${DENY_NET}" },
+    { "peer": "b", "op": "wait_for", "target": "contains:This relay does not accept connections from your network", "timeout_ms": 20000 },
+    { "peer": "x", "op": "wait_for", "target": "contains:This relay does not accept connections from your network", "timeout_ms": 20000 },
+    { "peer": "a", "op": "wait_for", "provider": "connection", "equals": "connected", "timeout_ms": 5000 },
+    { "peer": "all", "op": "wait", "ms": 1000 },
+    { "peer": "all", "op": "shot", "name": "dw-01-refused" },
+    { "peer": "b", "op": "tap", "target": "dialog > text:Try again", "index": 0 },
+    { "peer": "b", "op": "wait_for", "target": "contains:This relay does not accept connections from your network", "timeout_ms": 30000 },
+    { "peer": "b", "op": "wait", "ms": 3000 },
+    { "peer": "b", "op": "wait_for", "provider": "connection", "matches": "^(?!connected$)", "timeout_ms": 2000 },
+    { "peer": "b", "op": "shot", "name": "dw-02-retry-refused" },
+    { "peer": "a", "op": "relay_deny", "value": "remove network ${DENY_NET}" },
+    { "peer": "a", "op": "wait", "ms": 2500 },
+    { "peer": "b", "op": "tap", "target": "text:Try again", "index": 0, "allowMiss": true },
+    { "peer": "b", "op": "wait_for", "provider": "connection", "equals": "connected", "timeout_ms": 30000 },
+    { "peer": "x", "op": "tap", "target": "text:Try again", "index": 0, "allowMiss": true },
+    { "peer": "x", "op": "wait_for", "provider": "connection", "equals": "connected", "timeout_ms": 30000 },
+    { "peer": "all", "op": "wait", "ms": 1000 },
+    { "peer": "all", "op": "shot", "name": "dw-03-lifted" }
+  ],
+  "cleanup": [
+    { "peer": "a", "op": "relay_deny", "value": "remove network ${DENY_NET}", "soft": true, "allowMiss": true }
+  ]
+}

@@ -1054,6 +1054,8 @@ async fn run_event_loop(
         Err(_) => super::crdt_resync::CrdtResync::load_none(crdt_store.clone(), crate::api::updater::APP_VERSION),
     };
     crdt_resync.op_sync.set_store(&db_path, &db_passphrase, &local_peer_str);
+    crdt_resync.unsent = super::unsent_ops::UnsentOps::load(&db_path, &db_passphrase);
+    crdt_resync.unsent.retain(|sid| server_states.contains_key(sid));
     if let Ok(store) = crate::storage::MessageStore::lease(&db_path, &db_passphrase) {
         super::age_gate::init_settled(&store, server_states.keys().map(String::as_str));
     }
@@ -2058,8 +2060,25 @@ async fn run_event_loop(
 
                     NodeCommand::RetryRelayDenials => {
                         let _ = ws_cmd_tx.send(super::ws_client::WsCommand::RetryDenied { room: None });
+                        denials.forget_unless(|key| {
+                            refusal_still_ours(key, &server_states, &pending_server_joins, &guest_rooms, &leave_book, &conference_host, &mls)
+                        });
                         let rooms = denials.probe_all();
                         super::relay_denial::send_probes(&ws_cmd_tx, &rooms, &mut pending_server_joins);
+                    }
+                    NodeCommand::RetryRelayDenial { room } => {
+                        let key = super::relay_denial::room_key(&room);
+                        if refusal_still_ours(&key, &server_states, &pending_server_joins, &guest_rooms, &leave_book, &conference_host, &mls) {
+                            if denials.probe_one(&key) {
+                                super::relay_denial::send_probes(&ws_cmd_tx, &[key], &mut pending_server_joins);
+                            }
+                        } else if denials.probe_meeting_to_hold(&key) {
+                            // A meeting left while refused, which this start or knock is about to
+                            // hold again: its answer (a lift or a refusal) is what Dart waits on.
+                            super::relay_denial::send_probes(&ws_cmd_tx, &[key], &mut pending_server_joins);
+                        } else {
+                            denials.forget(&key);
+                        }
                     }
                     NodeCommand::RequestStateSync { source_device_id } => {
                         // Manual sync: ask a chosen SOURCE sibling to push us its
@@ -2104,6 +2123,11 @@ async fn run_event_loop(
                         if let Some((n, secret)) = kept.filter(|_| leave_book.holds_room(&server_id)) {
                             door_rooms.keep_for_leave(&server_id, n, secret);
                         }
+                        // A leave still to hand on keeps the room, and with it any refusal.
+                        if !leave_book.holds_room(&server_id) {
+                            super::relay_denial::forget(&server_id);
+                        }
+                        crdt_resync.unsent.forget(&server_id);
                         let landed = leave_book.drive(&olm, &ws_room_peers, &ws_cmd_tx);
                         release_leave_rooms(landed, leave_book.rooms(), &mut door_rooms, &server_states, &pending_server_joins, &ws_cmd_tx);
                     }
@@ -3865,6 +3889,9 @@ async fn run_event_loop(
                         snap.ws_transfers = pending_ws_transfers.keys().cloned().collect();
                         snap.rate_dropped = frame_budget.limiter.dropped_totals();
                         (snap.resync_marks, snap.resync_asks) = crdt_resync.debug();
+                        snap.digest_busy = crdt_resync.op_sync.busy();
+                        snap.denied_rooms = denials.rooms();
+                        snap.unsent_marks = server_states.keys().filter(|s| crdt_resync.unsent.marked(s)).cloned().collect();
                         if let Ok(store) = crate::storage::MessageStore::lease(&db_path, &db_passphrase) {
                             snap.device_links = store.get_all_device_links().unwrap_or_default();
                         }
@@ -4203,6 +4230,10 @@ async fn run_event_loop(
                             file_senders_back.insert(peer_id.clone(), std::time::Instant::now());
                         }
                         carry_unseen_ops(&mut crdt_resync, &server_states, &ws_cmd_tx, &ws_room_peers, &local_peer_str, &room);
+                        hand_unsent_ops(
+                            &mut crdt_resync.unsent, &server_states, &denials, &mut frame_budget, &ws_cmd_tx, &ws_room_peers,
+                            &local_peer_str, &device_peer_id, &room,
+                        );
                         if arrived_here && peer_id != device_peer_id {
                             super::shared_servers::ask_if_recovering(
                                 &ws_cmd_tx, &mut crdt_resync.shared_asks, Some(&room), &peer_id, &local_peer_str, &db_path, &db_passphrase,
@@ -4795,7 +4826,8 @@ async fn run_event_loop(
                         // The relay let us in again: whatever it refused, it carries now.
                         if denials.lift(&room) {
                             relay_carries_again(
-                                &room, &denials, &mut relay_catchup_done, &mut mls, &server_states, &mut lock_keeper, &ws_cmd_tx, &event_tx,
+                                &room, &denials, &mut relay_catchup_done, &mut crdt_resync.op_sync,
+                                &mut mls, &server_states, &mut lock_keeper, &ws_cmd_tx, &event_tx,
                             )
                             .await;
                         }
@@ -4857,6 +4889,10 @@ async fn run_event_loop(
                         }
                         ws_room_peers.insert(room.clone(), room_set);
                         carry_unseen_ops(&mut crdt_resync, &server_states, &ws_cmd_tx, &ws_room_peers, &local_peer_str, &room);
+                        hand_unsent_ops(
+                            &mut crdt_resync.unsent, &server_states, &denials, &mut frame_budget, &ws_cmd_tx, &ws_room_peers,
+                            &local_peer_str, &device_peer_id, &room,
+                        );
                         super::roster_reach::on_room_listed(
                             &ws_cmd_tx, &cmd_tx, &ws_room_peers, &device_peer_id, &room, &db_path, &db_passphrase,
                         );
@@ -5521,6 +5557,9 @@ async fn run_event_loop(
                             hollow_log!("[HOLLOW-WS] Ignored a refusal of a room that is none of our servers");
                             continue;
                         };
+                        if let Some(state) = server_states.get(&key).filter(|s| s.held_as_member(&local_peer_str)) {
+                            crdt_resync.unsent.refused(state);
+                        }
                         if let Some(step) = relay_refuses(room, key, &denials, &mut mls, &ws_cmd_tx, &event_tx) {
                             step.await;
                         }
@@ -6658,6 +6697,11 @@ async fn run_event_loop(
 
             _ = rebootstrap_timer.tick() => {
                 arm_started = Some(("timer", "rebootstrap", std::time::Instant::now()));
+                for gone in denials.forget_unless(|key| {
+                    refusal_still_ours(key, &server_states, &pending_server_joins, &guest_rooms, &leave_book, &conference_host, &mls)
+                }) {
+                    let _ = ws_cmd_tx.send(super::ws_client::WsCommand::RetryDenied { room: Some(gone) });
+                }
                 let due = denials.probe_due(std::time::Instant::now());
                 super::relay_denial::send_probes(&ws_cmd_tx, &due, &mut pending_server_joins);
                 frame_replays.prune(super::frame_auth::now_ms());
@@ -8135,6 +8179,7 @@ async fn leave_evicted_server(
         return;
     }
     hollow_log!("[HOLLOW-CRDT] Our state no longer lists us in {server_id}: durable teardown");
+    super::relay_denial::forget(server_id);
     let sub_cids: Vec<String> = server_states.get(server_id)
         .map(|s| s.subgroup_channel_ids())
         .unwrap_or_default();
@@ -8184,6 +8229,83 @@ fn carry_unseen_ops(
             );
         }
     }
+}
+
+/// Hand out our ops the relay refused to carry for `room` (`unsent_ops`) once it carries
+/// the server again: to every device of ours, and paced to the member devices the room
+/// lists. The mark ends with a member device, or at once when no other identity is a member.
+#[allow(clippy::too_many_arguments)]
+fn hand_unsent_ops(
+    unsent: &mut super::unsent_ops::UnsentOps,
+    server_states: &HashMap<String, ServerState>,
+    denials: &super::relay_denial::Denials,
+    frame_budget: &mut super::frame_budget::FrameBudget,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    local_peer_str: &str,
+    device_peer_id: &str,
+    room: &str,
+) {
+    let Some(state) = server_states.get(room) else { return };
+    if !unsent.marked(&state.server_id) || denials.is_denied(room) {
+        return;
+    }
+    let ops = unsent.ours(state, local_peer_str);
+    if !unsent.own_told(&state.server_id) {
+        for msg in &ops {
+            super::olm_lane::carry_to_every_own_device(ws_cmd_tx, ws_room_peers, local_peer_str, device_peer_id, msg);
+        }
+    }
+    let mut members: Vec<String> = if state.is_deleted() {
+        // A deleted server lists no members: its tombstone goes to the online devices of
+        // every identity still a member when it was deleted.
+        state
+            .member_record
+            .iter()
+            .filter(|(m, spans)| !super::resolver::same_identity(m, local_peer_str) && spans.last().is_some_and(|s| s.until_ms == u64::MAX))
+            .flat_map(|(m, _)| super::crypto_handler::online_devices_for(ws_room_peers, m))
+            .collect()
+    } else {
+        ws_room_peers
+            .get(room)
+            .into_iter()
+            .flatten()
+            .filter(|d| !super::resolver::same_identity(d, local_peer_str) && state.is_member(d))
+            .cloned()
+            .collect()
+    };
+    members.sort();
+    members.dedup();
+    for device in &members {
+        for msg in &ops {
+            super::frame_budget::pace_carried(frame_budget, ws_cmd_tx, device_peer_id, device, msg);
+        }
+    }
+    let alone = !state.is_deleted() && state.members.keys().all(|m| super::resolver::same_identity(m, local_peer_str));
+    unsent.handed(&state.server_id, !members.is_empty() || alone);
+}
+
+/// Whether a refused room is still ours to ask the relay about: a server we hold, join
+/// or still hand a leave of ours to, a guest view, or a meeting we host, knock on or sit
+/// in. Any other was left while refused, and a probe would put this socket back in it.
+fn refusal_still_ours(
+    key: &str,
+    server_states: &HashMap<String, ServerState>,
+    pending_server_joins: &HashMap<String, PendingJoin>,
+    guest_rooms: &super::guest_view::GuestView,
+    leave_book: &super::leave_book::LeaveBook,
+    conference_host: &HashMap<String, super::conference::ConferenceHostState>,
+    mls: &Option<MlsManager>,
+) -> bool {
+    if let Some(conf_id) = super::conference::conf_id_from_sid(key) {
+        return conference_host.contains_key(conf_id)
+            || super::conference::has_pending_knock(conf_id)
+            || mls.as_ref().is_some_and(|m| m.has_group(key));
+    }
+    server_states.contains_key(key)
+        || pending_server_joins.contains_key(key)
+        || guest_rooms.rooms().any(|g| g == key)
+        || leave_book.holds_room(key)
 }
 
 /// What a non-member asking to sync `state` is told: a deleted server's tombstone, else
@@ -9495,6 +9617,7 @@ fn relay_carries_again<'a>(
     room: &'a str,
     denials: &'a super::relay_denial::Denials,
     relay_catchup_done: &'a mut std::collections::HashSet<(String, String)>,
+    op_sync: &'a mut super::op_sync::OpSync,
     mls: &'a mut Option<MlsManager>,
     server_states: &'a ServerStates,
     lock_keeper: &'a mut super::lock_keeper::LockKeeper,
@@ -9505,6 +9628,9 @@ fn relay_carries_again<'a>(
         hollow_log!("[HOLLOW-WS] The relay carries {room} again");
         // What was refused was never caught up: ask again on this socket.
         relay_catchup_done.retain(|(r, _)| !r.eq_ignore_ascii_case(room));
+        // Ops authored while it was refused went to nobody and sit in no ring: ask the
+        // members what they made then (ours go by `hand_unsent_ops`).
+        op_sync.joined(room);
         if let Some(m) = mls.as_mut() {
             m.set_frozen(denials.rooms());
         }

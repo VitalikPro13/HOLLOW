@@ -1904,6 +1904,13 @@ pub fn retry_relay_denials() -> Result<(), String> {
     send_node_command(node::NodeCommand::RetryRelayDenials)
 }
 
+/// Ask the relay again about one refused meeting or server room (`conf:{id}` or a
+/// server id), leaving every other refusal as it is.
+#[frb]
+pub fn retry_relay_denial(room: String) -> Result<(), String> {
+    send_node_command(node::NodeCommand::RetryRelayDenial { room })
+}
+
 /// A local human label for a device (Step 8 Devices panel).
 pub struct DeviceLabel {
     pub device_peer_id: String,

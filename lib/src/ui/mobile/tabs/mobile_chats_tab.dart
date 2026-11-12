@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/event_provider.dart' show showEventToast;
 import 'package:hollow/src/core/providers/relay_denial_provider.dart';
 import 'package:hollow/src/ui/components/hollow_divider.dart';
 import 'package:hollow/src/core/friendly_error.dart';
@@ -316,6 +317,13 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
   }
 
   Future<void> _openVoiceChannel(String serverId, ChannelInfo channel) async {
+    // Nothing opens: a room pushed here would bury the refusal's toast and sit
+    // on "Joining the room" until its deadline.
+    if (ref.read(serverRelayDeniedProvider(serverId))) {
+      showEventToast(kServerDeniedText,
+          kind: 'relay_denied_voice', id: serverId.toLowerCase());
+      return;
+    }
     final vcState = ref.read(voiceChannelProvider);
     final callState = ref.read(callProvider);
 

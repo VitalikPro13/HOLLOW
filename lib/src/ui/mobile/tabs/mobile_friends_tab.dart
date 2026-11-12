@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/link_down_provider.dart';
 import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/connection_status_provider.dart';
@@ -114,9 +115,7 @@ class _MobileFriendsTabState extends ConsumerState<MobileFriendsTab> {
     // Presence rides OUR relay link: while it is down every friend would read
     // "Offline", blaming them, so one note says it is us instead.
     final link = ref.watch(overallConnectionProvider);
-    final linkDown = link == OverallConnection.offline ||
-        link == OverallConnection.reconnecting ||
-        link == OverallConnection.error;
+    final linkDown = link.isDown;
 
     return CustomScrollView(
       slivers: [
@@ -147,14 +146,15 @@ class _MobileFriendsTabState extends ConsumerState<MobileFriendsTab> {
         ),
 
         if (linkDown && accepted.isNotEmpty)
-          const SliverToBoxAdapter(
+          SliverToBoxAdapter(
             child: Padding(
-              padding: EdgeInsets.symmetric(
+              padding: const EdgeInsets.symmetric(
                   horizontal: HollowSpacing.lg, vertical: HollowSpacing.sm),
               child: HollowEmptyState(
                 dense: true,
-                title: "You're offline",
-                description: "Who's online shows up once you're back.",
+                title: linkDownNote(ref.watch(linkDownProvider), LinkNote.title),
+                description: linkDownNote(
+                    ref.watch(linkDownProvider), LinkNote.friendsOnline),
               ),
             ),
           ),

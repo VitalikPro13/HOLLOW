@@ -101,6 +101,19 @@ pub(crate) fn denied(id: &str) -> bool {
     DENIALS.try_with(|d| d.is_denied(id)).unwrap_or(false)
 }
 
+/// We left `room` (a server or meeting): this node loop forgets the relay refused it.
+pub(crate) fn forget(room: &str) {
+    #[cfg(test)]
+    if LEAVES_FORGET_NOTHING.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let _ = DENIALS.try_with(|d| d.forget(room));
+}
+
+/// TEST-ONLY: leaves forget no refusal, so a test reaches the probe's own check.
+#[cfg(test)]
+pub(crate) static LEAVES_FORGET_NOTHING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 impl Denials {
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<String, Mark>> {
         self.rooms.lock().unwrap_or_else(|e| e.into_inner())
@@ -143,6 +156,47 @@ impl Denials {
             return false;
         }
         rooms.remove(&key).is_some()
+    }
+
+    /// We left `room`: its refusal and every room named after it go, so no probe puts
+    /// this socket back into it (review M2).
+    pub(crate) fn forget(&self, room: &str) {
+        let key = scope_key(room);
+        self.lock().remove(&key);
+        self.aliases.lock().unwrap_or_else(|e| e.into_inner()).retain(|alias, server| *alias != key && *server != key);
+    }
+
+    /// Forget every refused room `ours` no longer names, returning them: a probe asks
+    /// only about rooms we still hold.
+    pub(crate) fn forget_unless(&self, ours: impl Fn(&str) -> bool) -> Vec<String> {
+        let gone: Vec<String> = self.lock().keys().filter(|key| !ours(key)).cloned().collect();
+        for key in &gone {
+            self.forget(key);
+        }
+        gone
+    }
+
+    /// A meeting's room we no longer hold, now probing as if refused: a start or knock
+    /// asks about it before it holds the meeting again. Only a meeting room.
+    pub(crate) fn probe_meeting_to_hold(&self, room: &str) -> bool {
+        let key = room_key(room);
+        if !super::conference::is_conference_sid(&key) || !deniable_room(&key) {
+            return false;
+        }
+        self.lock().insert(key, Mark::Probing);
+        true
+    }
+
+    /// `room` alone, now probing, if it is refused: a meeting's start or knock asks
+    /// about its own room only.
+    pub(crate) fn probe_one(&self, room: &str) -> bool {
+        match self.lock().get_mut(&room_key(room)) {
+            Some(mark @ Mark::Denied { .. }) => {
+                *mark = Mark::Probing;
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Every refused room, sorted.
@@ -427,6 +481,39 @@ mod tests {
         assert_eq!(d.probe_all(), vec![S.to_string()]);
         assert!(d.lift(S));
         assert!(d.pass(WsCommand::SendToRoom { room_code: S.into(), data: vec![] }).is_some());
+    }
+
+    /// A room we left is forgotten with every room named after it, and a probe asks
+    /// only about the rooms still ours.
+    #[test]
+    fn a_left_room_is_forgotten_and_never_probed() {
+        let d = Denials::default();
+        let other = "f".repeat(40);
+        d.deny(S, Instant::now());
+        d.deny(&other, Instant::now());
+        d.alias("recovery:pool", S);
+        assert!(d.is_denied("recovery:pool"));
+        assert_eq!(d.forget_unless(|key| key == other), vec![S.to_string()]);
+        assert!(!d.is_denied(S) && !d.is_denied("recovery:pool"), "a left room and its aliases go");
+        assert_eq!(d.probe_all(), vec![other.clone()], "only a room still ours is asked about");
+        d.forget(&other.to_ascii_uppercase());
+        assert!(d.rooms().is_empty());
+        d.deny(S, Instant::now());
+        assert!(!d.is_denied("recovery:pool"), "a room named after a server we left is not refused with it again");
+    }
+
+    /// One room is probed alone; one not refused is not probed at all.
+    #[test]
+    fn one_room_is_probed_alone() {
+        let d = Denials::default();
+        let other = "f".repeat(40);
+        d.deny(S, Instant::now());
+        d.deny(&other, Instant::now());
+        assert!(d.probe_one(&S.to_ascii_uppercase()));
+        assert!(!d.probe_one(S), "a room already probing is not asked twice");
+        assert!(!d.probe_one("e".repeat(40).as_str()), "a room not refused is not asked about");
+        assert_eq!(d.probe_all(), vec![other], "the other refusal was not asked about");
+        assert!(d.lift(S));
     }
 
     #[test]

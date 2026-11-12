@@ -112,19 +112,24 @@ String? shareAutoDownloadScope({
 }
 
 /// A voice channel or meeting of a server the relay now refuses cannot go on
-/// through it: leave it (a meeting through its own path, so it is not stranded)
-/// and say why.
+/// through it: leave it and say why. A meeting is left through its own path at
+/// any stage (seated, stepped out, waiting or joining), so it is not stranded.
 @visibleForTesting
 void leaveRefusedVoice(Ref ref, String serverId) {
   final key = serverId.toLowerCase();
-  final voice = ref.read(voiceChannelProvider);
   final meeting = key.startsWith('conf:');
-  if (!voice.isInVoiceChannel || voice.currentServerId?.toLowerCase() != key) {
-    return;
-  }
-  if (meeting) {
-    ref.read(conferenceProvider.notifier).leaveMeeting().catchError((_) {});
+  final conf = ref.read(conferenceProvider);
+  final confId = conf.activeConfId;
+  if (meeting && confId != null && conf.activeServerId.toLowerCase() == key) {
+    ref
+        .read(conferenceProvider.notifier)
+        .leaveRefusedMeeting(confId)
+        .catchError((_) {});
   } else {
+    final voice = ref.read(voiceChannelProvider);
+    if (!voice.isInVoiceChannel || voice.currentServerId?.toLowerCase() != key) {
+      return;
+    }
     ref.read(voiceChannelProvider.notifier).leaveChannel().catchError((_) {});
   }
   showEventToast(meeting ? kMeetingDeniedText : kServerDeniedText,

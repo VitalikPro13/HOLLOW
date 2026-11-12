@@ -1224,6 +1224,9 @@ pub(crate) enum NodeCommand {
     RequestStateSync { source_device_id: String },
     /// Ask the relay again about every refusal it gave us (the person's "Try again").
     RetryRelayDenials,
+    /// Ask the relay again about one refused server or meeting room only (a meeting's
+    /// start or knock), never the others or our login.
+    RetryRelayDenial { room: String },
     /// Fan a personal emote change (one row after an add/remove, or the full set)
     /// to our OWN other devices. Bytes never ride it; they pull over the asset rail.
     SyncPersonalEmotes { emotes: Vec<PersonalEmoteEntry> },
@@ -1613,6 +1616,7 @@ impl NodeCommand {
             Self::DepositKillSignal { .. } => "DepositKillSignal",
             Self::RequestStateSync { .. } => "RequestStateSync",
             Self::RetryRelayDenials => "RetryRelayDenials",
+            Self::RetryRelayDenial { .. } => "RetryRelayDenial",
             Self::SyncPersonalEmotes { .. } => "SyncPersonalEmotes",
             Self::RegisterPushToken { .. } => "RegisterPushToken",
             Self::SetPushPrefs { .. } => "SetPushPrefs",
@@ -1759,6 +1763,12 @@ pub(crate) struct DebugSnapshotReply {
     pub resync_marks: std::collections::HashMap<String, super::crdt_resync::Mark>,
     /// server_id -> the device asked for its whole log now.
     pub resync_asks: std::collections::HashMap<String, String>,
+    /// Servers a digest ask or follow-up of ours may still bring ops for (`OpSync::busy`).
+    pub digest_busy: Vec<String>,
+    /// Servers holding a mark of our ops a relay refusal kept from everyone.
+    pub unsent_marks: Vec<String>,
+    /// Rooms this node takes as refused by the relay (`Denials::rooms`).
+    pub denied_rooms: Vec<String>,
     /// Every (device, master) link in this node's own store, read over its pooled
     /// connection so a poll never opens a second one.
     pub device_links: Vec<(String, String)>,

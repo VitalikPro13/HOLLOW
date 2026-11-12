@@ -22,6 +22,11 @@ const String kServerDeniedText =
 const String kMeetingDeniedText =
     "This meeting is not available on this relay because it broke the relay's Terms of use.";
 
+/// Why a blocked server's voice room does not open, while its notice is on
+/// screen saying the rest.
+const String kVoiceDeniedShortText =
+    'Voice is off while this relay refuses the server.';
+
 /// What stays true for the person while a server is blocked.
 const String kDeniedKeepsText = 'Your messages and files stay on this device.';
 
@@ -34,6 +39,9 @@ const String kRelayLoginDeniedTitle = 'Refused by this relay';
 /// What stops while the relay refuses our login.
 const String kLoginDeniedStopsText =
     'Nothing is sent or received through this relay until it lets you in again.';
+
+/// What still works while the relay refuses our login.
+const String kLoginDeniedWorksText = 'Archive, export and Settings keep working.';
 
 /// The connection status while the relay refuses our login.
 const String kRelayRefusedStatus = 'Refused by this relay';

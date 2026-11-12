@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/link_down_provider.dart';
 import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/providers/conference_provider.dart';
 import 'package:hollow/src/core/providers/connection_status_provider.dart';
@@ -62,18 +63,17 @@ String conferenceDenyMessage(String? reason) {
 bool conferenceLinkDown(OverallConnection link) => link.isDown;
 
 /// The lobby's title and note. LobbyInfo is the host's reply to our knock, so
-/// until it arrives the meeting has not started. Shared with mobile.
+/// until it arrives the meeting has not started. [down] says why our link is
+/// down, null while it is up. Shared with mobile.
 (String, String) conferenceLobbyCopy(
-    {String? hostName, required bool joining, required bool offline}) {
+    {String? hostName, required bool joining, LinkDown? down}) {
   if (joining) {
     return ('Joining the meeting', 'This takes a moment.');
   }
   final title = hostName != null
       ? "You're in the waiting room for $hostName's meeting"
       : 'Waiting for the host to start the meeting';
-  if (offline) {
-    return (title, "You're offline. You'll knock again when you're back.");
-  }
+  if (down != null) return (title, linkDownNote(down, LinkNote.lobby));
   return (
     title,
     hostName != null
@@ -153,6 +153,8 @@ class _ConferenceDashboardState extends ConsumerState<ConferenceDashboard> {
           break;
       }
     }
+    final asking = conf.askingRelayFor;
+    if (asking != null) return 'asking-$asking';
     return 'rooms';
   }
 
@@ -173,6 +175,7 @@ class _ConferenceDashboardState extends ConsumerState<ConferenceDashboard> {
           break; // Inconsistent transient: fall through to the room list.
       }
     }
+    if (conf.askingRelayFor != null) return const _AskingView();
 
     return ColoredBox(
       color: hollow.background,
@@ -639,7 +642,7 @@ class _LobbyView extends ConsumerWidget {
     final (title, note) = conferenceLobbyCopy(
         hostName: hostKnown ? hostName : null,
         joining: joining,
-        offline: offline);
+        down: offline ? ref.watch(linkDownProvider) : null);
 
     return ColoredBox(
       color: hollow.background,
@@ -685,6 +688,52 @@ class _LobbyView extends ConsumerWidget {
                     ? endOrLeaveConferenceMeeting(context, ref)
                     : leaveConferenceMeeting(context, ref),
                 child: Text(joining ? 'Leave' : 'Cancel'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// A start or knock asking a relay that refused the meeting about it again:
+/// joining, as far as the person can tell, until the relay answers.
+class _AskingView extends ConsumerWidget {
+  const _AskingView();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final hollow = HollowTheme.of(context);
+    final (title, note) = conferenceLobbyCopy(joining: true);
+    return ColoredBox(
+      color: hollow.background,
+      child: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(HollowSpacing.xl),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                title,
+                style: HollowTypography.subheading
+                    .copyWith(color: hollow.textPrimary),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: HollowSpacing.xs),
+              Text(
+                note,
+                style: HollowTypography.bodySmall
+                    .copyWith(color: hollow.textSecondary),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: HollowSpacing.lg),
+              const HollowSpinner.medium(),
+              const SizedBox(height: HollowSpacing.lg),
+              HollowButton.ghost(
+                onPressed: () =>
+                    ref.read(conferenceProvider.notifier).dropRelayAsk(),
+                child: const Text('Cancel'),
               ),
             ],
           ),

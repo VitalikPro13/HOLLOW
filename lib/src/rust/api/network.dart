@@ -158,6 +158,11 @@ Future<void> requestStateSync({required String sourceDeviceId}) => RustLib
 Future<void> retryRelayDenials() =>
     RustLib.instance.api.crateApiNetworkRetryRelayDenials();
 
+/// Ask the relay again about one refused meeting or server room (`conf:{id}` or a
+/// server id), leaving every other refusal as it is.
+Future<void> retryRelayDenial({required String room}) =>
+    RustLib.instance.api.crateApiNetworkRetryRelayDenial(room: room);
+
 /// Set (or clear, when `label` is empty) the local human label for a device.
 /// Local-only, so a person's two devices may show different labels for a third.
 Future<void> setDeviceLabel({

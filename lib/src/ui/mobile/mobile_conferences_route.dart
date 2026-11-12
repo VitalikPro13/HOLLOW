@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/link_down_provider.dart';
 import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/providers/conference_provider.dart';
 import 'package:hollow/src/core/providers/connection_status_provider.dart';
@@ -164,7 +165,44 @@ class _MobileConferencesRouteState
           break;
       }
     }
+    if (conf.askingRelayFor != null) return _buildAsking(hollow);
     return _buildRoomList(hollow, conf);
+  }
+
+  /// A start or knock asking a relay that refused the meeting about it again.
+  Widget _buildAsking(HollowTheme hollow) {
+    final (title, note) = conferenceLobbyCopy(joining: true);
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(HollowSpacing.xl),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              title,
+              style: HollowTypography.subheading
+                  .copyWith(color: hollow.textPrimary),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: HollowSpacing.xs),
+            Text(
+              note,
+              style: HollowTypography.body.copyWith(color: hollow.textSecondary),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: HollowSpacing.lg),
+            const HollowSpinner.medium(),
+            const SizedBox(height: HollowSpacing.lg),
+            HollowButton.ghost(
+              touch: true,
+              onPressed: () =>
+                  ref.read(conferenceProvider.notifier).dropRelayAsk(),
+              child: const Text('Cancel'),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   Widget _buildRoomList(HollowTheme hollow, ConferenceState conf) {
@@ -209,7 +247,7 @@ class _MobileConferencesRouteState
     final (title, note) = conferenceLobbyCopy(
         hostName: hostKnown ? hostName : null,
         joining: joining,
-        offline: offline);
+        down: offline ? ref.watch(linkDownProvider) : null);
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(HollowSpacing.xl),

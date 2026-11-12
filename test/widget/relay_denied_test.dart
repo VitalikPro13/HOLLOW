@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_local_notifications_platform_interface/flutter_local_notifications_platform_interface.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hollow/src/core/models/server_info.dart';
 import 'package:hollow/src/core/providers/app_lock_provider.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/conference_provider.dart';
@@ -15,8 +16,10 @@ import 'package:hollow/src/core/providers/relay_denial_provider.dart';
 import 'package:hollow/src/core/providers/relay_domain_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
+import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/rust/frb_generated.dart';
 import 'package:hollow/src/theme/hollow_theme_data.dart';
+import 'package:hollow/src/ui/app.dart' show hollowNavigatorKey;
 import 'package:hollow/src/ui/chat/channel_chat_pane.dart';
 import 'package:hollow/src/ui/chat/relay_denied_notice.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
@@ -24,13 +27,42 @@ import 'package:hollow/src/ui/components/pending_join_ui.dart';
 import 'package:hollow/src/ui/dialogs/relay_denied_dialog.dart';
 import 'package:hollow/src/ui/mobile/mobile_chat_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_connection_indicator.dart';
+import 'package:hollow/src/ui/mobile/mobile_voice_channel_route.dart';
+import 'package:hollow/src/ui/mobile/tabs/mobile_chats_tab.dart';
 import 'package:hollow/src/ui/shell/user_bar.dart';
 
 import '../helpers/test_app.dart';
 import '../helpers/test_data.dart';
 
-/// Every FFI call stays pending, so the pane sits in its loading state.
+/// Every FFI call stays pending, so the pane sits in its loading state; a
+/// server's channel list answers, so the phone's server row can open a room.
 class _PendingApi implements RustLibApi {
+  @override
+  Future<List<crdt_api.ChannelFfi>> crateApiCrdtGetServerChannels(
+          {required String serverId}) async =>
+      const [
+        crdt_api.ChannelFfi(
+          channelId: kVoiceChannelId,
+          name: 'Voice',
+          channelType: 'voice',
+          visibility: 'everyone',
+          posting: 'everyone',
+          isPublic: false,
+          slowMode: 0,
+          mediaOnly: false,
+          visibilityLabels: [],
+          postingLabels: [],
+          meCanSee: true,
+          meCanPost: true,
+          chatOpen: true,
+          voiceChat: 'server',
+        ),
+      ];
+
+  @override
+  Future<String> crateApiCrdtGetChannelLayout({required String serverId}) async =>
+      '';
+
   @override
   dynamic noSuchMethod(Invocation invocation) => Completer<Never>().future;
 }
@@ -227,9 +259,12 @@ void main() {
       ('abc', 'ABC', true),
       ('conf:abc', 'conf:abc', true),
       ('abc', 'def', false),
+      ('conf:abc', 'conf:def', false),
     ]) {
+      final meeting = inside.startsWith('conf:');
       final voice = _FakeVoice(inside);
-      final meetings = _FakeConference();
+      final meetings =
+          _FakeConference(meeting ? inside.substring('conf:'.length) : null);
       final c = ProviderContainer(overrides: [
         voiceChannelProvider.overrideWith(() => voice),
         conferenceProvider.overrideWith(() => meetings),
@@ -240,7 +275,6 @@ void main() {
         return 0;
       });
       c.read(probe);
-      final meeting = inside.startsWith('conf:');
       expect(voice.left, leaves && !meeting, reason: '$inside / $refused voice');
       expect(meetings.left, leaves && meeting, reason: '$inside / $refused meeting');
     }
@@ -273,6 +307,8 @@ void main() {
       kLoginDeniedStopsText,
       kRelayRefusedStatus,
       kForeignRelayTermsTail,
+      kVoiceDeniedShortText,
+      kLoginDeniedWorksText,
     ]) {
       expect(s.contains('—'), isFalse, reason: s);
       expect(s.contains(':'), isFalse, reason: s);
@@ -331,6 +367,52 @@ void main() {
           refused ? findsOneWidget : findsNothing);
     });
   }
+
+  // t14-denyproof: the phone pushed the room and its chat before the refusal
+  // came back, so a "Joining the room" page sat over the hidden toast for 8 s.
+  for (final denied in [true, false]) {
+    testWidgets(
+        denied
+            ? 'phone: a refused server\'s voice room opens nothing and says why'
+            : 'phone: a carried server\'s voice room opens',
+        (tester) async {
+      tester.view.physicalSize = const Size(400, 1600);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(ProviderScope(
+        overrides: hollowTestOverrides(extra: [
+          serverListProvider.overrideWith(_TestServers.new),
+          relayDeniedServersProvider.overrideWith(
+              (_) => denied ? {kServerId1.toLowerCase()} : <String>{}),
+        ]),
+        child: MaterialApp(
+          // The toast rides the root overlay, as event toasts do in the app.
+          navigatorKey: hollowNavigatorKey,
+          theme: HollowThemeData.dark(),
+          home: const Scaffold(body: MobileChatsTab()),
+        ),
+      ));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 400));
+      await tester.tap(find.text('Test Server').first);
+      for (var i = 0; i < 10; i++) {
+        await tester.pump(const Duration(milliseconds: 100));
+      }
+      await tester.tap(find.text('Voice').first);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 600));
+      expect(find.byType(MobileVoiceChannelRoute),
+          denied ? findsNothing : findsOneWidget);
+      if (denied) {
+        expect(find.byType(MobileChatRoute), findsNothing);
+        expect(find.text(kServerDeniedText), findsOneWidget,
+            reason: 'the toast, on top');
+      }
+      // The room's join deadline, then its toast, run out.
+      await tester.pump(const Duration(seconds: 30));
+      await tester.pump(const Duration(seconds: 10));
+    });
+  }
 }
 
 List<Override> _refused(bool refused) => hollowTestOverrides(extra: [
@@ -374,13 +456,20 @@ class _FakeVoice extends VoiceChannelNotifier {
 }
 
 class _FakeConference extends ConferenceNotifier {
+  final String? confId;
   bool left = false;
 
-  @override
-  ConferenceState build() => const ConferenceState();
+  _FakeConference(this.confId);
 
   @override
-  Future<void> leaveMeeting() async => left = true;
+  ConferenceState build() => ConferenceState(
+      activeConfId: confId,
+      lobbyStatus: confId == null
+          ? ConferenceLobbyStatus.none
+          : ConferenceLobbyStatus.inCall);
+
+  @override
+  Future<void> leaveRefusedMeeting(String confId) async => left = true;
 }
 
 class _Domain extends RelayDomainNotifier {
@@ -390,4 +479,9 @@ class _Domain extends RelayDomainNotifier {
 
   @override
   String build() => domain;
+}
+
+class _TestServers extends ServerListNotifier {
+  @override
+  Map<String, ServerInfo> build() => {kServerId1: testServers[kServerId1]!};
 }

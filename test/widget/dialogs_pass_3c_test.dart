@@ -19,6 +19,7 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge.dart'
     show AnyhowException;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hollow/src/core/providers/connection_status_provider.dart';
+import 'package:hollow/src/core/providers/relay_denial_provider.dart';
 import 'package:hollow/src/core/providers/owned_art_provider.dart';
 import 'package:hollow/src/core/providers/share_tab_provider.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
@@ -172,11 +173,15 @@ void main() {
 
   group('Open a share link', () {
     Future<void> openWith(WidgetTester tester, String link,
-        {bool online = true}) async {
+        {bool online = true, bool refused = false}) async {
       await _pumpHost(tester, extra: [
         overallConnectionProvider.overrideWithValue(online
             ? OverallConnection.connected
-            : OverallConnection.offline),
+            : refused
+                ? OverallConnection.refused
+                : OverallConnection.offline),
+        if (refused)
+          relayLoginDenialProvider.overrideWith((_) => 'account_denied'),
       ]);
       unawaited(showHollowDialog<void>(
           context: _host, builder: (_) => const PasteLinkDialog()));
@@ -207,6 +212,14 @@ void main() {
       expect(find.text('Open'), findsOneWidget);
       expect(_fieldError(tester),
           "You're offline. Reconnect to fetch this file.");
+    });
+
+    testWidgets('refused, the dialog says the relay refused us, not offline',
+        (tester) async {
+      await openWith(tester, 'hollow://share/abc',
+          online: false, refused: true);
+      expect(_fieldError(tester),
+          'This relay refused your account. Switch relays to fetch this file.');
     });
 
     testWidgets('text that is not a link says so', (tester) async {

@@ -1,4 +1,5 @@
 ﻿import 'package:flutter/material.dart';
+import 'package:hollow/src/core/providers/relay_denial_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -9,6 +10,10 @@ enum ConnectionStage {
   /// OUR link is down: no relay, or in a DM header no session with that
   /// person. Never used just because nobody else is around.
   offline,
+
+  /// The relay refuses our account or network: down, and not for a reason
+  /// reconnecting fixes.
+  refused,
 
   alone,
 
@@ -57,6 +62,12 @@ class ConnectionProgress extends StatelessWidget {
           'Offline',
           hollow.textSecondary,
           'Not connected',
+        ),
+      ConnectionStage.refused => (
+          LucideIcons.ban,
+          kRelayRefusedStatus,
+          hollow.warning,
+          relayLoginDenialText('account_denied'),
         ),
     };
 

@@ -629,6 +629,7 @@ pub(crate) fn handle_conference_end(
         let _ = ws_cmd_tx.send(WsCommand::SendToRoom { room_code: sid.clone(), data });
     }
     let _ = ws_cmd_tx.send(WsCommand::LeaveRoom { room_code: sid.clone() });
+    super::relay_denial::forget(&sid);
     if let Some(mls_mgr) = mls.as_mut() {
         if mls_mgr.has_group(&sid) {
             mls_mgr.remove_group(&sid);
@@ -710,6 +711,7 @@ pub(crate) fn handle_conference_leave(
     clear_card_audience(conf_id);
     clear_conf_voice_state(voice_channel_participants, voice_channel_gossip_mode, conf_id);
     let _ = ws_cmd_tx.send(WsCommand::LeaveRoom { room_code: conf_server_id(conf_id) });
+    super::relay_denial::forget(&conf_server_id(conf_id));
     hollow_log!("[HOLLOW-CONF] Left conference {conf_id}");
 }
 

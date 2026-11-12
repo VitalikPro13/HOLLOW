@@ -260,9 +260,9 @@ class _ActiveRelayRow extends ConsumerWidget {
         TextSpan(
           text: connection.label,
           style: TextStyle(
+            // A refusal reads as the dock says it, a warning.
             color: connection == OverallConnection.error ||
-                    connection == OverallConnection.offline ||
-                    connection == OverallConnection.refused
+                    connection == OverallConnection.offline
                 ? hollow.error
                 : hollow.warning,
           ),

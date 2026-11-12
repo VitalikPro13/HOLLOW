@@ -1,0 +1,494 @@
+{
+  "_": [
+    "Refused-account surfaces (t14-denyproof round 3, UI review U1-U6) on a THROWAWAY test relay: a (desktop, not listed)",
+    "makes a server, b (desktop) joins; b and c (phone) go on the denylist by identity. Shots: the refused dialog with what keeps",
+    "working, b's channel header + member note, c's status card and Friends note, Settings open on the phone, b's Settings > Network",
+    "and the Danger zone destroy warning (CANCELLED, never confirmed). Lift; Try again is soft (a restart reconnects). Nav steps are soft.",
+    "Needs: identities onboarded onto the test relay, FLEET_RELAY_SSH naming it.",
+    "run: FLEET_BACKEND=macos pwsh -NoProfile -File scripts/fleet.ps1 -Scenario deny_account_ui -Attach -Peers a=windows:p,b=windows:q,c=ios:p"
+  ],
+  "peers": [
+    "a",
+    "b",
+    "c"
+  ],
+  "steps": [
+    {
+      "peer": "all",
+      "op": "wait_for",
+      "provider": "connection",
+      "equals": "connected",
+      "timeout_ms": 120000
+    },
+    {
+      "peer": "a",
+      "op": "relay_deny",
+      "value": "check"
+    },
+    {
+      "peer": "a",
+      "op": "log",
+      "message": "PART 1: a makes a server, b joins"
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "semantics:Create a server"
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "dialog > text:Add a server",
+      "timeout_ms": 10000
+    },
+    {
+      "peer": "a",
+      "op": "enter_text",
+      "target": "hint:My Awesome Server",
+      "value": "acct-${RUN}"
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "dialog > text:Create",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "server:acct-${RUN}",
+      "timeout_ms": 30000
+    },
+    {
+      "peer": "a",
+      "op": "open_server",
+      "name": "acct-${RUN}"
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "channel:general",
+      "timeout_ms": 30000
+    },
+    {
+      "peer": "a",
+      "op": "right_click",
+      "target": "server:acct-${RUN}"
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "menu > text:Invite people"
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "type:HollowCopyField",
+      "timeout_ms": 20000
+    },
+    {
+      "peer": "a",
+      "op": "capture",
+      "target": "type:HollowCopyField",
+      "as": "INVITE"
+    },
+    {
+      "peer": "a",
+      "op": "capture",
+      "target": "type:HollowCopyField",
+      "regex": "server=([0-9a-f]{40})",
+      "as": "SID"
+    },
+    {
+      "peer": "a",
+      "op": "log",
+      "message": "server id ${SID}"
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "dialog > semantics:Close",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "gone": "dialog",
+      "timeout_ms": 10000
+    },
+    {
+      "peer": "a",
+      "op": "open_channel",
+      "name": "general"
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "semantics:Create a server"
+    },
+    {
+      "peer": "b",
+      "op": "enter_text",
+      "target": "hint:Invite link",
+      "value": "${INVITE}"
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "text:Join",
+      "index": 0
+    },
+    {
+      "peer": "b",
+      "op": "wait_for",
+      "target": "server:acct-${RUN}",
+      "timeout_ms": 120000
+    },
+    {
+      "peer": "b",
+      "op": "open_server",
+      "name": "acct-${RUN}"
+    },
+    {
+      "peer": "b",
+      "op": "wait_for",
+      "target": "channel:general",
+      "timeout_ms": 60000
+    },
+    {
+      "peer": "b",
+      "op": "open_channel",
+      "name": "general"
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "text:probe-b",
+      "timeout_ms": 90000
+    },
+    {
+      "peer": "b",
+      "op": "enter_text",
+      "target": "field",
+      "value": "seated b ${RUN}"
+    },
+    {
+      "peer": "b",
+      "op": "key",
+      "value": "enter"
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "text:seated b ${RUN}",
+      "timeout_ms": 60000
+    },
+    {
+      "peer": "b",
+      "op": "capture",
+      "from": "provider",
+      "key": "peerId",
+      "as": "ID_B"
+    },
+    {
+      "peer": "c",
+      "op": "capture",
+      "from": "provider",
+      "key": "peerId",
+      "as": "ID_C"
+    },
+    {
+      "peer": "c",
+      "op": "tap",
+      "target": "semantics:Chats",
+      "index": 0,
+      "soft": true
+    },
+    {
+      "peer": "all",
+      "op": "wait",
+      "ms": 1000
+    },
+    {
+      "peer": "all",
+      "op": "shot",
+      "name": "ac-01-before"
+    },
+    {
+      "peer": "a",
+      "op": "log",
+      "message": "PART 2: b (desktop) and c (phone) go on the list by identity"
+    },
+    {
+      "peer": "a",
+      "op": "relay_deny",
+      "value": "add identity ${ID_B}"
+    },
+    {
+      "peer": "a",
+      "op": "relay_deny",
+      "value": "add identity ${ID_C}"
+    },
+    {
+      "peer": "b",
+      "op": "wait_for",
+      "target": "contains:This relay does not accept this account",
+      "timeout_ms": 20000
+    },
+    {
+      "peer": "c",
+      "op": "wait_for",
+      "target": "contains:This relay does not accept this account",
+      "timeout_ms": 20000
+    },
+    {
+      "peer": "b",
+      "op": "wait_for",
+      "target": "contains:Archive, export and Settings keep working",
+      "timeout_ms": 5000,
+      "soft": true
+    },
+    {
+      "peer": "c",
+      "op": "wait_for",
+      "target": "contains:Archive, export and Settings keep working",
+      "timeout_ms": 5000,
+      "soft": true
+    },
+    {
+      "peer": "b",
+      "op": "shot",
+      "name": "ac-02-dialog"
+    },
+    {
+      "peer": "c",
+      "op": "shot",
+      "name": "ac-02-dialog"
+    },
+    {
+      "peer": "b",
+      "op": "key",
+      "value": "escape"
+    },
+    {
+      "peer": "c",
+      "op": "tap_at",
+      "x": 200,
+      "y": 60,
+      "soft": true
+    },
+    {
+      "peer": "all",
+      "op": "wait",
+      "ms": 1000
+    },
+    {
+      "peer": "b",
+      "op": "wait_for",
+      "target": "contains:Refused by this relay",
+      "timeout_ms": 10000,
+      "soft": true
+    },
+    {
+      "peer": "b",
+      "op": "wait_for",
+      "target": "contains:This relay refused your account, so who's online may be out of date",
+      "timeout_ms": 10000,
+      "soft": true
+    },
+    {
+      "peer": "b",
+      "op": "shot",
+      "name": "ac-03-channel-refused"
+    },
+    {
+      "peer": "c",
+      "op": "shot",
+      "name": "ac-03-home-refused"
+    },
+    {
+      "peer": "c",
+      "op": "tap",
+      "target": "semantics:Friends",
+      "index": 0,
+      "soft": true
+    },
+    {
+      "peer": "c",
+      "op": "wait_for",
+      "target": "contains:This relay refused your account",
+      "timeout_ms": 10000,
+      "soft": true
+    },
+    {
+      "peer": "c",
+      "op": "shot",
+      "name": "ac-04-friends-refused"
+    },
+    {
+      "peer": "c",
+      "op": "tap",
+      "target": "semantics:Settings",
+      "index": 0,
+      "soft": true
+    },
+    {
+      "peer": "c",
+      "op": "wait",
+      "ms": 1500
+    },
+    {
+      "peer": "c",
+      "op": "shot",
+      "name": "ac-05-settings-open"
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "semantics:Settings",
+      "index": 0,
+      "soft": true
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "type:SettingsPlace > text:Network",
+      "index": 0,
+      "soft": true
+    },
+    {
+      "peer": "b",
+      "op": "wait",
+      "ms": 1000
+    },
+    {
+      "peer": "b",
+      "op": "shot",
+      "name": "ac-05-network-refused"
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "type:SettingsPlace > text:Security",
+      "index": 0,
+      "soft": true
+    },
+    {
+      "peer": "b",
+      "op": "reveal",
+      "target": "type:SettingsPlace > text:Destroy identity",
+      "allowMiss": true
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "type:SettingsPlace > text:Destroy identity",
+      "index": 0,
+      "soft": true
+    },
+    {
+      "peer": "b",
+      "op": "wait_for",
+      "target": "contains:so the order can't reach your other devices from here",
+      "timeout_ms": 10000,
+      "soft": true
+    },
+    {
+      "peer": "b",
+      "op": "shot",
+      "name": "ac-06-destroy-warning"
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "dialog > text:Cancel",
+      "index": 0,
+      "soft": true
+    },
+    {
+      "peer": "b",
+      "op": "key",
+      "value": "escape"
+    },
+    {
+      "peer": "a",
+      "op": "log",
+      "message": "PART 3: lifted, Try again connects both"
+    },
+    {
+      "peer": "a",
+      "op": "relay_deny",
+      "value": "remove identity ${ID_B}"
+    },
+    {
+      "peer": "a",
+      "op": "relay_deny",
+      "value": "remove identity ${ID_C}"
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 2500
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "contains:Refused by this relay",
+      "index": 0,
+      "soft": true
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "dialog > text:Try again",
+      "index": 0,
+      "soft": true
+    },
+    {
+      "peer": "b",
+      "op": "wait_for",
+      "provider": "connection",
+      "equals": "connected",
+      "timeout_ms": 30000,
+      "soft": true
+    },
+    {
+      "peer": "c",
+      "op": "tap",
+      "target": "contains:Refused by this relay",
+      "index": 0,
+      "soft": true
+    },
+    {
+      "peer": "c",
+      "op": "tap",
+      "target": "dialog > text:Try again",
+      "index": 0,
+      "soft": true
+    },
+    {
+      "peer": "c",
+      "op": "wait_for",
+      "provider": "connection",
+      "equals": "connected",
+      "timeout_ms": 30000,
+      "soft": true
+    }
+  ],
+  "cleanup": [
+    {
+      "peer": "a",
+      "op": "relay_deny",
+      "value": "remove identity ${ID_B}",
+      "soft": true,
+      "allowMiss": true
+    },
+    {
+      "peer": "a",
+      "op": "relay_deny",
+      "value": "remove identity ${ID_C}",
+      "soft": true,
+      "allowMiss": true
+    }
+  ]
+}

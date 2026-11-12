@@ -225,6 +225,8 @@ pub(crate) struct CrdtResync {
     next_tick: Option<Instant>,
     /// Digest asks and what each peer device reads (`op_sync`).
     pub(crate) op_sync: super::op_sync::OpSync,
+    /// Our ops a relay refusal kept from everyone (`unsent_ops`).
+    pub(crate) unsent: super::unsent_ops::UnsentOps,
     /// Rebuilds a roster trade waits on (H4) and roster asks for uncounted authors.
     pub(crate) roster_round: super::roster_round::RosterRound,
     /// Asks sent again with our roster or base (`sync_rosters`).
@@ -351,6 +353,7 @@ impl CrdtResync {
             serving: ServeBudget::default(),
             next_tick: None,
             op_sync: Default::default(),
+            unsent: Default::default(),
             roster_round: Default::default(),
             roster_again: Default::default(),
             roster_serve: Default::default(),

@@ -185,7 +185,7 @@ function Invoke-FleetPeerCommand($request) {
             if ($request.clear -and (Test-AndroidBackend $peer)) { Invoke-Adb $peer 'logcat' '-c' 2>$null | Out-Null; return @{ lines = @() } }
             return @{ lines = @(Get-PeerLogcat $peer | Where-Object { "$_".Contains("$($request.pattern)") }) }
         }
-        'proxy' { Start-FleetProxy @($request.peers | ForEach-Object { "$_" }); return @{ done = $true } }
+        'proxy' { $null = Start-FleetProxy @($request.peers | ForEach-Object { "$_" }); return @{ done = $true } }
         'proxy_stop' { Stop-FleetProxy; return @{ done = $true } }
         default { throw "unknown fleet peer command '$($request.cmd)'" }
     }

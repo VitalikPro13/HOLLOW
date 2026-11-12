@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/core/providers/duress_provider.dart';
 import 'package:hollow/src/core/providers/roster_provider.dart';
 import 'package:hollow/src/rust/api/roster.dart' as roster_api;
@@ -117,6 +118,9 @@ void main() {
             duressStatusProvider.overrideWith((ref) async => status),
           identityProtectionProvider
               .overrideWith((ref) async => protectionStatus ?? protection()),
+          // Linked up: a down link warns that the order cannot leave.
+          overallConnectionProvider
+              .overrideWithValue(OverallConnection.connected),
           rosterStatusProvider.overrideWith((ref) async => roster_api.RosterStatus(
                 member: true,
                 protected: phraseIsRoot,

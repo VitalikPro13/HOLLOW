@@ -418,6 +418,17 @@ impl OpSync {
         (silent, due.into_iter().map(|(s, _)| s).collect())
     }
 
+    /// TEST-ONLY: servers with an ask still sending copies or a follow-up not yet
+    /// asked, which a later copy could still answer.
+    #[cfg(test)]
+    pub(crate) fn busy(&self) -> Vec<String> {
+        let mut out: Vec<String> = self.asks.iter().filter(|(_, ask)| !ask.judged).map(|((s, _), _)| s.clone()).collect();
+        out.extend(self.follow_ups.iter().map(|(s, _)| s.clone()));
+        out.sort();
+        out.dedup();
+        out
+    }
+
     /// The socket went away: no open ask can be answered any more.
     pub(crate) fn went_away(&mut self) {
         self.asks.clear();

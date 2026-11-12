@@ -25,7 +25,6 @@ import 'package:hollow/src/core/models/chat_message.dart';
 import 'package:hollow/src/core/models/file_attachment.dart';
 import 'package:hollow/src/core/moderation_format.dart';
 import 'package:hollow/src/core/providers/chat_provider.dart';
-import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/core/providers/channel_chat_provider.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/local_nickname_provider.dart';
@@ -33,6 +32,7 @@ import 'package:hollow/src/core/providers/relay_domain_provider.dart';
 import 'package:hollow/src/core/providers/event_provider.dart';
 import 'package:hollow/src/core/providers/file_transfer_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
+import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/ui/chat/relay_denied_notice.dart';
 import 'package:hollow/src/ui/dialogs/report_user_dialog.dart';
@@ -3217,7 +3217,8 @@ class _MobileChatHeader extends ConsumerWidget {
         ? ref.watch(shownPinCountProvider('$serverId:$channelId'))
         : 0;
     return [
-      if (serverId != null) _MobileChannelStatus(serverId: serverId!),
+      if (serverId != null)
+        _MobileChannelStatus(serverId: serverId!, narrow: narrow),
       if (pinCount > 0)
         HollowIconButton(
           icon: LucideIcons.pin,
@@ -3273,7 +3274,11 @@ class _MobileChatHeader extends ConsumerWidget {
 class _MobileChannelStatus extends ConsumerWidget {
   final String serverId;
 
-  const _MobileChannelStatus({required this.serverId});
+  /// A narrow phone sheds the long refused status before a control: the
+  /// connection indicator over every route already says it.
+  final bool narrow;
+
+  const _MobileChannelStatus({required this.serverId, required this.narrow});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -3281,7 +3286,12 @@ class _MobileChannelStatus extends ConsumerWidget {
     final membersAsync = ref.watch(serverMembersProvider(serverId));
     final localPeerId = ref.watch(identityProvider).peerId;
     // "Offline" describes OUR link, never an empty room.
-    final amOnline = ref.watch(overallConnectionProvider).isOnline;
+    if (narrow &&
+        ref.watch(overallConnectionProvider) == OverallConnection.refused) {
+      return const SizedBox.shrink();
+    }
+    final linkDown = _offlineOnly(ref);
+    if (linkDown != null) return linkDown;
 
     return membersAsync.when(
       data: (members) {
@@ -3290,9 +3300,7 @@ class _MobileChannelStatus extends ConsumerWidget {
         final isCustomRelay =
             ref.watch(relayDomainProvider) != kDefaultRelayDomain;
         final ConnectionStage stage;
-        if (!amOnline) {
-          stage = ConnectionStage.offline;
-        } else if (anyOnline) {
+        if (anyOnline) {
           stage = ConnectionStage.encrypted;
         } else if (isCustomRelay) {
           stage = ConnectionStage.customNetwork;
@@ -3309,15 +3317,15 @@ class _MobileChannelStatus extends ConsumerWidget {
           ),
         );
       },
-      // Without the member list only our own link is known.
-      loading: () => _offlineOnly(ref),
-      error: (_, _) => _offlineOnly(ref),
+      // Without the member list only our own link is known, and it is up.
+      loading: () => const SizedBox.shrink(),
+      error: (_, _) => const SizedBox.shrink(),
     );
   }
 
-  Widget _offlineOnly(WidgetRef ref) {
+  Widget? _offlineOnly(WidgetRef ref) {
     final offline = ownLinkOfflineStatus(ref);
-    if (offline == null) return const SizedBox.shrink();
+    if (offline == null) return null;
     return Padding(
       padding: const EdgeInsets.only(right: HollowSpacing.xs),
       child: offline,

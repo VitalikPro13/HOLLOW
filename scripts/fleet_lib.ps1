@@ -738,6 +738,8 @@ function Get-LivePeers {
 # mixes peers only means anything if each step lands before the next one is
 # sent, and "A sends, THEN B looks" is most of what a fleet scenario is.
 function Send-FleetStep($peer, $step, $timeoutSeconds = 180) {
+    # The test relay's denylist is the driver's to change, whichever peer the step names.
+    if ($step.op -eq 'relay_deny') { return (Invoke-FleetRelayDeny $step) }
     # A peer of another machine (`ios:b`) is driven by that machine's agent.
     if (Test-RemotePeer $peer) { return (Send-RemoteFleetStep $peer $step $timeoutSeconds) }
     # Lifecycle ops act on the peer from out here (fleet_lifecycle.ps1).

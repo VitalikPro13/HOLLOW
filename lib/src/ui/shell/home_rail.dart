@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/link_down_provider.dart';
 import 'package:hollow/src/core/changelog.dart';
 import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/models/node_status.dart';
@@ -398,6 +399,7 @@ class _ActiveNow extends ConsumerWidget {
     // around, which is our doing, not theirs.
     final link = ref.watch(overallConnectionProvider);
     final linkDown = link.isDown;
+    final down = ref.watch(linkDownProvider);
     final nobody = rooms.isEmpty && onlineFriends.isEmpty;
 
     return Column(
@@ -405,12 +407,11 @@ class _ActiveNow extends ConsumerWidget {
       children: [
         const _Inset(child: HollowSectionHeader('Active Now')),
         if (linkDown && nobody)
-          const _Inset(
+          _Inset(
             child: HollowEmptyState(
               dense: true,
-              title: "You're offline",
-              description: "Friends who are online show up here once you're "
-                  'back.',
+              title: linkDownNote(down, LinkNote.title),
+              description: linkDownNote(down, LinkNote.friendsAround),
             ),
           )
         else if (linkDown)
@@ -418,7 +419,7 @@ class _ActiveNow extends ConsumerWidget {
             child: Padding(
               padding: const EdgeInsets.only(bottom: HollowSpacing.sm),
               child: Text(
-                "You're offline, so who's around may be out of date.",
+                linkDownNote(down, LinkNote.around),
                 style: HollowTypography.caption
                     .copyWith(color: hollow.textSecondary),
               ),

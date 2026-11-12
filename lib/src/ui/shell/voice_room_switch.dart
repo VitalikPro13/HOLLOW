@@ -1,7 +1,10 @@
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
+import 'package:hollow/src/core/providers/event_provider.dart' show showEventToast;
 import 'package:hollow/src/core/providers/identity_provider.dart';
+import 'package:hollow/src/core/providers/relay_denial_provider.dart';
+import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
@@ -31,6 +34,7 @@ bool voiceSwitchLeavesPeople(
 /// join should go ahead. Every surface that joins a voice room calls this
 /// first, desktop and phone, so switching asks in exactly one situation, and
 /// "Don't ask again" (#106) silences it everywhere until Settings turns it on.
+/// A server this relay refuses asks nothing and keeps the room we are in.
 Future<bool> confirmVoiceRoomSwitch(
   BuildContext context,
   WidgetRef ref, {
@@ -38,6 +42,13 @@ Future<bool> confirmVoiceRoomSwitch(
   required String channelId,
   required String channelName,
 }) async {
+  if (ref.read(serverRelayDeniedProvider(serverId))) {
+    // The server's own notice already says why when it is the one on screen.
+    final noticeShown = ref.read(selectedServerProvider) == serverId;
+    showEventToast(noticeShown ? kVoiceDeniedShortText : kServerDeniedText,
+        kind: 'relay_denied_voice', id: serverId.toLowerCase());
+    return false;
+  }
   final vc = ref.read(voiceChannelProvider);
   final leaves = voiceSwitchLeavesPeople(
     vc,

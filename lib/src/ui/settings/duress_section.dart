@@ -2,7 +2,9 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/core/providers/duress_provider.dart';
+import 'package:hollow/src/core/providers/link_down_provider.dart';
 import 'package:hollow/src/core/providers/roster_provider.dart';
 import 'package:hollow/src/core/services/app_lock_service.dart';
 import 'package:hollow/src/core/services/destroy_flow.dart';
@@ -707,12 +709,20 @@ class _DestroyDialogState extends State<_DestroyDialog>
             'restarts.',
           ),
           const SizedBox(height: HollowSpacing.lg),
-          _ScopePicker(
-            choices: _dangerZoneScopes,
-            scope: _scope,
-            notifyFriends: _notifyFriends,
-            onScope: (value) => setState(() => _scope = value),
-            onNotifyFriends: (value) => setState(() => _notifyFriends = value),
+          // The order leaves only through a relay that lets us in; this
+          // device is wiped either way, so say so before the confirm.
+          Consumer(
+            builder: (context, ref, _) => _ScopePicker(
+              choices: _dangerZoneScopes,
+              scope: _scope,
+              notifyFriends: _notifyFriends,
+              onScope: (value) => setState(() => _scope = value),
+              onNotifyFriends: (value) =>
+                  setState(() => _notifyFriends = value),
+              linkDown: ref.watch(overallConnectionProvider).isOnline
+                  ? null
+                  : ref.watch(linkDownProvider),
+            ),
           ),
           if (_asksPhrase) ...[
             const SizedBox(height: HollowSpacing.lg),
@@ -763,6 +773,9 @@ class _ScopePicker extends StatelessWidget {
   /// When a wider scope can reach anything; said only once one is chosen.
   final String? note;
 
+  /// Why the order cannot leave this device right now, null when it can.
+  final LinkDown? linkDown;
+
   const _ScopePicker({
     required this.choices,
     required this.scope,
@@ -770,14 +783,25 @@ class _ScopePicker extends StatelessWidget {
     required this.onScope,
     required this.onNotifyFriends,
     this.note,
+    this.linkDown,
   });
 
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
+    final down = linkDown;
+    final stuck = down == null
+        ? null
+        : switch (scope) {
+            kDuressScopeIdentity =>
+              linkDownNote(down, LinkNote.destroyEverywhere),
+            kDuressScopeDeviceRevoke =>
+              linkDownNote(down, LinkNote.destroyUnlink),
+            _ => null,
+          };
     final effect = [
       _scopeEffect(scope),
-      if (scope == kDuressScopeIdentity) _identityDelivery,
+      if (scope == kDuressScopeIdentity && stuck == null) _identityDelivery,
       if (note != null && scope != kDuressScopeDevice) note!,
     ].join(' ');
 
@@ -809,6 +833,13 @@ class _ScopePicker extends StatelessWidget {
           style:
               HollowTypography.bodySmall.copyWith(color: hollow.textSecondary),
         ),
+        if (stuck != null) ...[
+          const SizedBox(height: HollowSpacing.sm),
+          Text(
+            stuck,
+            style: HollowTypography.bodySmall.copyWith(color: hollow.warning),
+          ),
+        ],
         if (scope == kDuressScopeIdentity) ...[
           const SizedBox(height: HollowSpacing.sm),
           SettingsSwitchRow(

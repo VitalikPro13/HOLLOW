@@ -1,0 +1,52 @@
+{
+  "_": [
+    "The relay operator's denylist refusing an IDENTITY (t14-deny + t14-deny-client), on a THROWAWAY test relay.",
+    "b (desktop) and c (iPhone) go on the list by their identity ids: each shows the refused-account dialog",
+    "within seconds while a, not listed, stays connected. Try again is refused again while listed. Once lifted,",
+    "Try again connects. The app never switches relays on its own.",
+    "Needs: identities onboarded onto the test relay, FLEET_RELAY_SSH (+ FLEET_RELAY_SSH_OPTS) naming it.",
+    "run: FLEET_BACKEND=macos pwsh -NoProfile -File scripts/fleet.ps1 -Scenario deny_identity -Attach -Peers a=q,b=windows:e,c=ios:p"
+  ],
+  "peers": ["a", "b", "c"],
+  "steps": [
+    { "peer": "all", "op": "wait_for", "provider": "connection", "equals": "connected", "timeout_ms": 120000 },
+    { "peer": "b", "op": "capture", "from": "provider", "key": "peerId", "as": "ID_B" },
+    { "peer": "c", "op": "capture", "from": "provider", "key": "peerId", "as": "ID_C" },
+    { "peer": "c", "op": "tap", "target": "semantics:Chats", "index": 0, "soft": true },
+    { "peer": "all", "op": "shot", "name": "di-01-before" },
+    { "peer": "a", "op": "log", "message": "b and c go on the list by identity" },
+    { "peer": "a", "op": "relay_deny", "value": "add identity ${ID_B}" },
+    { "peer": "a", "op": "relay_deny", "value": "add identity ${ID_C}" },
+    { "peer": "b", "op": "wait_for", "target": "contains:This relay does not accept this account", "timeout_ms": 20000 },
+    { "peer": "c", "op": "wait_for", "target": "contains:This relay does not accept this account", "timeout_ms": 20000 },
+    { "peer": "a", "op": "log", "message": "a, not listed, stays connected" },
+    { "peer": "a", "op": "wait_for", "provider": "connection", "equals": "connected", "timeout_ms": 5000 },
+    { "peer": "all", "op": "wait", "ms": 1000 },
+    { "peer": "all", "op": "shot", "name": "di-02-refused" },
+    { "peer": "b", "op": "log", "message": "Try again is refused again while listed" },
+    { "peer": "b", "op": "tap", "target": "dialog > text:Try again", "index": 0 },
+    { "peer": "b", "op": "wait_for", "target": "contains:This relay does not accept this account", "timeout_ms": 30000 },
+    { "peer": "c", "op": "tap", "target": "dialog > text:Try again", "index": 0 },
+    { "peer": "c", "op": "wait_for", "target": "contains:This relay does not accept this account", "timeout_ms": 30000 },
+    { "peer": "b", "op": "wait", "ms": 4000 },
+    { "peer": "b", "op": "wait_for", "provider": "connection", "matches": "^(?!connected$)", "timeout_ms": 2000 },
+    { "peer": "b", "op": "shot", "name": "di-03-retry-refused" },
+    { "peer": "c", "op": "shot", "name": "di-03-retry-refused" },
+    { "peer": "a", "op": "log", "message": "lifted: Try again connects" },
+    { "peer": "a", "op": "relay_deny", "value": "remove identity ${ID_B}" },
+    { "peer": "a", "op": "relay_deny", "value": "remove identity ${ID_C}" },
+    { "peer": "a", "op": "wait", "ms": 2500 },
+    { "peer": "b", "op": "tap", "target": "dialog > text:Try again", "index": 0 },
+    { "peer": "b", "op": "wait_for", "provider": "connection", "equals": "connected", "timeout_ms": 30000 },
+    { "peer": "c", "op": "tap", "target": "dialog > text:Try again", "index": 0 },
+    { "peer": "c", "op": "wait_for", "provider": "connection", "equals": "connected", "timeout_ms": 30000 },
+    { "peer": "b", "op": "wait_for", "gone": "contains:This relay does not accept this account", "timeout_ms": 10000 },
+    { "peer": "c", "op": "wait_for", "gone": "contains:This relay does not accept this account", "timeout_ms": 10000 },
+    { "peer": "all", "op": "wait", "ms": 1000 },
+    { "peer": "all", "op": "shot", "name": "di-04-lifted" }
+  ],
+  "cleanup": [
+    { "peer": "a", "op": "relay_deny", "value": "remove identity ${ID_B}", "soft": true, "allowMiss": true },
+    { "peer": "a", "op": "relay_deny", "value": "remove identity ${ID_C}", "soft": true, "allowMiss": true }
+  ]
+}

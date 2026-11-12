@@ -1093,6 +1093,11 @@ out=$(cd "$TMP" && bash "$RELAY/install.sh" --after-update 2>&1); rc=$?
 has "install.sh --after-update alone refuses" "$out" "is the last step of a menu update and runs only from one"
 eq "and fails" "$rc" 1
 
+# The denylist commands ask nothing, so an operator's script or cron runs them without a terminal.
+out=$(cd "$TMP" && bash "$RELAY/install.sh" --dry-run --deny check </dev/null 2>&1)
+lacks "--deny needs no terminal" "$out" "no terminal to ask questions on"
+has "and goes on to the denylist" "$out" "there is no denylist it manages"
+
 echo "the settings an update keeps for its rollback"
 t_update_settings() {
     local root=$TMP/snap log=$TMP/snap.log

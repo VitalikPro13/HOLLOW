@@ -1225,8 +1225,11 @@ if (-not $Attach -and $peerList.Count -gt 0) {
     if ($NetProxy) {
         $proxied = @($peerList | Where-Object { -not (Test-AndroidBackend $_) })
         if ($proxied.Count -gt 0) {
-            Start-FleetProxy $proxied
-            foreach ($peer in $proxied) { Set-PeerRelayConnect $peer (Get-PeerDataDir $peer) }
+            $routed = @(Start-FleetProxy $proxied)
+            foreach ($peer in $proxied) {
+                if ($routed -contains $peer) { Set-PeerRelayConnect $peer (Get-PeerDataDir $peer) }
+                else { Clear-PeerRelayConnect (Get-PeerDataDir $peer) }
+            }
         }
     }
     foreach ($peer in $peerList) { Start-Peer $peer }

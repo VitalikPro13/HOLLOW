@@ -4624,6 +4624,7 @@ pub(crate) async fn handle_discard_pending_join(
     crdt_store: &CrdtStore,
 ) {
     hollow_log!("[HOLLOW-CRDT] Discarding pending join for {server_id}");
+    super::relay_denial::forget(&server_id);
     let spent = pending_server_joins.remove(&server_id).and_then(|p| p.key_package);
     crdt_store.delete_pending_join(server_id.clone());
     let _ = ws_cmd_tx.send(super::ws_client::WsCommand::LeaveRoom {

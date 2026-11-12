@@ -159,7 +159,7 @@ class _MobileConnectionIndicatorState
   bool _visible = false;
 
   /// Kept for the exit, when the link that ended it reads connected.
-  ({String label, bool busy, Color ink})? _said;
+  ({String label, bool busy, Color ink, IconData icon})? _said;
 
   @override
   void initState() {
@@ -264,6 +264,10 @@ class _MobileConnectionIndicatorState
         label: content.label,
         busy: content.busy,
         ink: connectionVisual(hollow, connection).color,
+        // A refusal is no network fault: the notice's own mark.
+        icon: connection == OverallConnection.refused
+            ? LucideIcons.ban
+            : LucideIcons.wifiOff,
       );
     }
     _animate(visible);
@@ -321,7 +325,7 @@ class _MobileConnectionIndicatorState
 }
 
 class _Card extends StatelessWidget {
-  final ({String label, bool busy, Color ink}) said;
+  final ({String label, bool busy, Color ink, IconData icon}) said;
 
   const _Card({required this.said});
 
@@ -350,7 +354,7 @@ class _Card extends StatelessWidget {
             children: [
               said.busy
                   ? HollowSpinner(color: said.ink)
-                  : Icon(LucideIcons.wifiOff, size: 14, color: said.ink),
+                  : Icon(said.icon, size: 14, color: said.ink),
               const SizedBox(width: HollowSpacing.xs),
               Flexible(child: Text(said.label)),
             ],

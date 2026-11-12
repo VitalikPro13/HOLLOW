@@ -344,8 +344,18 @@ function Test-FleetProxyUp {
 # dialled instead of the relay's address while TLS and the auth domain stay the
 # relay's. No client honours it yet (a wave 1 request); Set-PeerRelayConnect
 # writes it so a peer is ready the day one does.
+# Returns the peers it routes; a peer outside them must dial the relay itself.
 function Start-FleetProxy($peers, $relayHost = 'relay.anonlisten.com') {
-    if (Test-FleetProxyUp) { return }
+    if (Test-FleetProxyUp) {
+        # Another run's proxy (the desktop side's, beside a phone agent's run) routes only
+        # the peers it started with: a peer sent to a route it lacks never connects.
+        $routed = @((Invoke-FleetProxy 'stats').routes.PSObject.Properties.Name)
+        $missing = @(@($peers) | Where-Object { $routed -notcontains "$_" })
+        if ($missing.Count -gt 0) {
+            Write-Host "[fleet] the running proxy has no route for $($missing -join ','): they dial the relay directly" -ForegroundColor Yellow
+        }
+        return @(@($peers) | Where-Object { $routed -contains "$_" })
+    }
     $proxy = Join-Path (Join-Path (Join-Path $script:FleetRepo 'tools') 'zombie_proxy') 'zombie_proxy.py'
     $ready = Join-Path $script:FleetOutRoot '_proxy_ready.json'
     New-Item -ItemType Directory -Path $script:FleetOutRoot -Force | Out-Null
@@ -372,6 +382,7 @@ function Start-FleetProxy($peers, $relayHost = 'relay.anonlisten.com') {
     [System.IO.File]::WriteAllText((Get-FleetProxyFile),
         (@{ pid = $process.Id; relay = $relayHost; peers = @($peers) } | ConvertTo-Json -Compress))
     Write-Host "[fleet] zombie proxy up (pid $($process.Id)), routes $(@($peers) -join ',') -> $upstream" -ForegroundColor Cyan
+    return @($peers)
 }
 
 function Stop-FleetProxy {
@@ -382,6 +393,10 @@ function Stop-FleetProxy {
     $gone = Wait-Condition { -not (Get-Process -Id $info.pid -ErrorAction SilentlyContinue) } 5 200
     if (-not $gone) { Stop-Process -Id $info.pid -Force -ErrorAction SilentlyContinue }
     Remove-Item $file -ErrorAction SilentlyContinue
+}
+
+function Clear-PeerRelayConnect($dataDir) {
+    Remove-Item -LiteralPath (Join-Path $dataDir 'relay_connect') -ErrorAction SilentlyContinue
 }
 
 function Set-PeerRelayConnect($peer, $dataDir) {
@@ -473,4 +488,112 @@ function Restore-FleetPeer($peer) {
     }
     $script:FleetPeerAway.Remove($peer)
     return $notes
+}
+
+# relay_deny: the operator's denylist on the fleet's own test relay, through the setup's
+# `--deny` command (it checks the result with the relay's own reader and keeps the file's
+# owner and mode). Runs on the driver whichever peer the step names; the relay rereads the
+# file within about 2 s, so time the effect with a wait_for right after it.
+#   {"peer":"a","op":"relay_deny","value":"add server ${SID}"}   (add|remove server|identity|network <entry>, or check)
+# ${NAME} takes captured values, then the driver's environment; allowMiss passes a
+# remove of an entry that is not listed (a cleanup).
+# FLEET_RELAY_SSH = user@host (or an ssh config name) of the THROWAWAY test relay;
+# FLEET_RELAY_SSH_OPTS = extra ssh options, only `-o Port=`, `-o ConnectTimeout=` or
+# `-o HostKeyAlias=` (ignored: the key is pinned below).
+# It runs sudo on that box, so it never reaches production: the endpoint ssh resolves
+# must be a private address that is none of the official relay's, with no proxy, and
+# the host must present the pinned test-relay key (an address moves with DHCP, the key
+# does not). FLEET_TEST_RELAY_HOSTKEY replaces the pin for another test VM.
+$script:FleetTestRelayHostKey = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBX3OriExIfsblnOZ28pcgv3h8yppm2QYFPXLxm2f+5W'
+$script:FleetProdRelayNames = @('relay.anonlisten.com', 'anonlisten.com')
+$script:FleetProdRelayAddrs = @('141.227.186.209')
+
+function Test-FleetPrivateAddress([System.Net.IPAddress]$ip) {
+    if ($ip.IsIPv4MappedToIPv6) { $ip = $ip.MapToIPv4() }
+    $b = $ip.GetAddressBytes()
+    if ($ip.AddressFamily -eq [System.Net.Sockets.AddressFamily]::InterNetwork) {
+        return ($b[0] -eq 10) -or ($b[0] -eq 172 -and $b[1] -ge 16 -and $b[1] -le 31) -or ($b[0] -eq 192 -and $b[1] -eq 168)
+    }
+    return (($b[0] -band 0xfe) -eq 0xfc) -or ($b[0] -eq 0xfe -and ($b[1] -band 0xc0) -eq 0x80)
+}
+
+function Get-FleetAddresses([string]$name) {
+    $ip = $null
+    if ([System.Net.IPAddress]::TryParse($name, [ref]$ip)) { return @($ip) }
+    try { return @([System.Net.Dns]::GetHostAddresses($name)) } catch { return @() }
+}
+
+# The ssh arguments that reach the test relay and only it, or why not.
+function Resolve-FleetRelayDenyTarget([string]$target, [string]$optsText) {
+    $fail = { param($why) [pscustomobject]@{ ok = $false; why = $why; args = @() } }
+    if ($target -notmatch '^([A-Za-z0-9._-]+@)?[A-Za-z0-9._-]+$') { return (& $fail "FLEET_RELAY_SSH '$target' is not user@host") }
+    $tokens = @($optsText -split '\s+' | Where-Object { $_ })
+    $opts = @()
+    for ($n = 0; $n -lt $tokens.Count; $n += 2) {
+        if ($tokens[$n] -ne '-o' -or $n + 1 -ge $tokens.Count -or $tokens[$n + 1] -notmatch '^(HostKeyAlias|Port|ConnectTimeout)=[A-Za-z0-9._:-]+$') {
+            return (& $fail "FLEET_RELAY_SSH_OPTS may only hold -o Port=, -o ConnectTimeout= or -o HostKeyAlias= (got '$optsText')")
+        }
+        if ($tokens[$n + 1] -notmatch '^HostKeyAlias=') { $opts += @('-o', $tokens[$n + 1]) }
+    }
+    $cfg = @{}
+    foreach ($line in @(& ssh -G @opts $target 2>$null)) {
+        $kv = "$line" -split ' ', 2
+        if ($kv.Count -eq 2) { $cfg[$kv[0].ToLowerInvariant()] = $kv[1] }
+    }
+    $hostName = "$($cfg['hostname'])".ToLowerInvariant()
+    if (-not $hostName) { return (& $fail "ssh -G resolved no host for '$target'") }
+    foreach ($key in @('proxyjump', 'proxycommand')) {
+        if ($cfg[$key] -and $cfg[$key] -ne 'none') { return (& $fail "'$target' goes through $key $($cfg[$key]); the test relay is dialled directly") }
+    }
+    if ($hostName -match 'anonlisten' -or $script:FleetProdRelayAddrs -contains $hostName) {
+        return (& $fail "'$target' is the official relay ($hostName)")
+    }
+    $prod = @($script:FleetProdRelayAddrs)
+    foreach ($name in $script:FleetProdRelayNames) { $prod += @(Get-FleetAddresses $name | ForEach-Object { $_.ToString() }) }
+    $addrs = @(Get-FleetAddresses $hostName)
+    if ($addrs.Count -eq 0) { return (& $fail "'$hostName' does not resolve") }
+    foreach ($ip in $addrs) {
+        $plain = if ($ip.IsIPv4MappedToIPv6) { $ip.MapToIPv4().ToString() } else { $ip.ToString() }
+        if ($prod -contains $plain) { return (& $fail "'$hostName' resolves to the official relay ($plain)") }
+        if (-not (Test-FleetPrivateAddress $ip)) { return (& $fail "'$hostName' resolves to $plain, not a private test-relay address") }
+    }
+    $pin = if ($env:FLEET_TEST_RELAY_HOSTKEY) { "$env:FLEET_TEST_RELAY_HOSTKEY" } else { $script:FleetTestRelayHostKey }
+    if ($pin -notmatch '^ssh-ed25519 [A-Za-z0-9+/=]+$') { return (& $fail 'the pinned test-relay host key is not an ssh-ed25519 key') }
+    $known = [System.IO.Path]::GetTempFileName()
+    $empty = [System.IO.Path]::GetTempFileName()
+    Set-Content -LiteralPath $known -Value "fleet-test-relay $pin" -NoNewline
+    # ssh keeps the first value of an option, so the pin goes before anything else.
+    $sshArgs = @('-o', 'HostKeyAlias=fleet-test-relay', '-o', "UserKnownHostsFile=$known", '-o', "GlobalKnownHostsFile=$empty",
+        '-o', 'StrictHostKeyChecking=yes', '-o', 'UpdateHostKeys=no', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10') + $opts
+    return [pscustomobject]@{ ok = $true; why = $hostName; args = $sshArgs; files = @($known, $empty) }
+}
+
+function Invoke-FleetRelayDeny($step) {
+    $started = Get-Date
+    $target = "$env:FLEET_RELAY_SSH"
+    if (-not $target) { return (New-HostAnswer 'relay_deny' $false 'relay_deny needs FLEET_RELAY_SSH (user@host of the test relay)' $started) }
+    # Captured values first, then the driver's environment (DENY_NET and the like).
+    $value = [regex]::Replace("$(Expand-FleetVars $step.value)", '\$\{(\w+)\}', {
+        param($m)
+        $fromEnv = [Environment]::GetEnvironmentVariable($m.Groups[1].Value)
+        if ($fromEnv) { return $fromEnv }
+        return $m.Value
+    }).Trim()
+    if ($value -notmatch '^(check|(add|remove) (server|identity|network) [A-Za-z0-9:./]+)$') {
+        return (New-HostAnswer 'relay_deny' $false "relay_deny value '$value' is not 'check' or 'add|remove server|identity|network <entry>'" $started)
+    }
+    $reach = Resolve-FleetRelayDenyTarget $target "$env:FLEET_RELAY_SSH_OPTS"
+    if (-not $reach.ok) { return (New-HostAnswer 'relay_deny' $false "relay_deny refused: $($reach.why)" $started) }
+    try {
+        # --plain: a setup from before the no-terminal fix stops at its terminal check.
+        $sshArgs = $reach.args
+        $out = & ssh @sshArgs $target "sudo hollow-relay-setup --plain --deny $value" 2>&1
+        $ok = $LASTEXITCODE -eq 0
+    } finally {
+        foreach ($f in $reach.files) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue }
+    }
+    $text = (@($out) | ForEach-Object { "$_" }) -join "`n"
+    # allowMiss: a cleanup removing what the run already lifted.
+    if (-not $ok -and $step.allowMiss -and $text -match 'is not on the list') { $ok = $true }
+    return (New-HostAnswer 'relay_deny' $ok "relay_deny $value`: $text" $started)
 }

@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/providers/connection_status_provider.dart';
+import 'package:hollow/src/core/providers/link_down_provider.dart';
 import 'package:hollow/src/core/providers/share_tab_provider.dart';
 import 'package:hollow/src/rust/api/share.dart' as share_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
@@ -17,8 +18,6 @@ import 'package:hollow/src/ui/share/share_card.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 enum _DialogState { input, loading, confirm }
-
-const _kOfflineText = "You're offline. Reconnect to fetch this file.";
 
 class PasteLinkDialog extends ConsumerStatefulWidget {
   final String? initialLink;
@@ -93,7 +92,7 @@ class _PasteLinkDialogState extends ConsumerState<PasteLinkDialog> {
                 // Only blame the people sharing it when our own link is up.
                 _errorText = ref.read(overallConnectionProvider).isOnline
                     ? 'Nobody sharing this file is online. Try again later.'
-                    : _kOfflineText;
+                    : linkDownNote(ref.read(linkDownProvider), LinkNote.pasteLink);
               });
             }
           });
@@ -268,7 +267,7 @@ class _PasteLinkDialogState extends ConsumerState<PasteLinkDialog> {
     if (!ref.read(overallConnectionProvider).isOnline) {
       setState(() {
         _decoding = false;
-        _errorText = _kOfflineText;
+        _errorText = linkDownNote(ref.read(linkDownProvider), LinkNote.pasteLink);
       });
       return;
     }

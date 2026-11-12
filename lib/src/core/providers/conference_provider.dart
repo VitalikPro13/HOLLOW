@@ -11,12 +11,16 @@ import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/friends_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
+import 'package:hollow/src/core/providers/event_provider.dart'
+    show showEventToast;
+import 'package:hollow/src/core/providers/relay_denial_provider.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/shell_tab.dart';
 import 'package:hollow/src/core/providers/split_view_provider.dart';
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
 import 'package:hollow/src/rust/api/conference.dart' as conference_api;
+import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/ui/app.dart' show hollowNavigatorKey;
 import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
@@ -142,6 +146,10 @@ class ConferenceState {
   /// `'conf:<id>:main'` key, so the drawer is the one conference chat surface.
   final List<WaitingEntry> waiting;
 
+  /// The meeting this relay refused that a start or knock is asking about
+  /// again, null when none: the screens show it as joining.
+  final String? askingRelayFor;
+
   const ConferenceState({
     this.rooms = const [],
     this.roomsLoaded = false,
@@ -155,6 +163,7 @@ class ConferenceState {
     this.hostName,
     this.hostAvatarHash,
     this.waiting = const [],
+    this.askingRelayFor,
   });
 
   bool get meetingActive => activeConfId != null;
@@ -181,14 +190,19 @@ class ConferenceState {
     String? hostAvatarHash,
     List<WaitingEntry>? waiting,
     bool clearActive = false,
+    String? askingRelayFor,
+    bool clearAsking = false,
   }) {
     final nextRoomsError =
         clearRoomsError ? null : (roomsError ?? this.roomsError);
+    final nextAsking =
+        clearAsking ? null : (askingRelayFor ?? this.askingRelayFor);
     if (clearActive) {
       return ConferenceState(
         rooms: rooms ?? this.rooms,
         roomsLoaded: roomsLoaded ?? this.roomsLoaded,
         roomsError: nextRoomsError,
+        askingRelayFor: nextAsking,
       );
     }
     return ConferenceState(
@@ -204,6 +218,7 @@ class ConferenceState {
       hostName: hostName ?? this.hostName,
       hostAvatarHash: hostAvatarHash ?? this.hostAvatarHash,
       waiting: waiting ?? this.waiting,
+      askingRelayFor: nextAsking,
     );
   }
 }
@@ -315,6 +330,85 @@ class ConferenceNotifier extends Notifier<ConferenceState> {
     );
   }
 
+  /// How long a start or join waits for the relay to answer being asked again.
+  static const _askAgainFor = Duration(seconds: 4);
+
+  /// One ask per meeting: a second tap or link waits on the first ask instead
+  /// of sending its own, and the first caller alone acts on the answer.
+  final Map<String, Future<bool>> _relayAsks = {};
+
+  /// Asks the person dropped while they were still running.
+  final Set<String> _droppedAsks = {};
+
+  /// Whether a start, knock or rejoin of [confId] stops here: this relay still
+  /// refuses it, or another caller's ask owns the answer. A refused meeting is
+  /// left at once, so starting or joining it again is what asks the relay, about
+  /// this meeting's room only; a lift answers within a round trip.
+  Future<bool> _relayStillRefuses(String confId) async {
+    final sid = conferenceServerId(confId);
+    if (!ref.read(serverRelayDeniedProvider(sid))) return false;
+    final pending = _relayAsks[confId];
+    if (pending != null) {
+      await pending;
+      return true;
+    }
+    _droppedAsks.remove(confId);
+    final ask = _askRelayAgain(confId);
+    _relayAsks[confId] = ask;
+    state = state.copyWith(askingRelayFor: confId);
+    try {
+      final refused = await ask;
+      if (_droppedAsks.remove(confId)) return true;
+      if (refused) {
+        showEventToast(kMeetingDeniedText,
+            kind: 'relay_denied_meeting', id: sid);
+        // A meeting we still hold cannot seat anyone through this relay.
+        await leaveRefusedMeeting(confId);
+      }
+      return refused;
+    } finally {
+      _relayAsks.remove(confId);
+      if (state.askingRelayFor == confId) {
+        state = state.copyWith(clearAsking: true);
+      }
+    }
+  }
+
+  /// True when the relay still refuses [confId] once asked. The ask is not
+  /// awaited: the wait below is bounded even if the node never answers it.
+  Future<bool> _askRelayAgain(String confId) async {
+    final sid = conferenceServerId(confId);
+    bool refused() => ref.read(serverRelayDeniedProvider(sid));
+    unawaited(Future.sync(() => network_api.retryRelayDenial(room: sid))
+        .catchError((_) {}));
+    final until = DateTime.now().add(_askAgainFor);
+    while (refused() &&
+        !_droppedAsks.contains(confId) &&
+        DateTime.now().isBefore(until)) {
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    }
+    return refused();
+  }
+
+  /// Drops the running ask: whatever the relay answers, nothing starts.
+  void dropRelayAsk() {
+    final confId = state.askingRelayFor;
+    if (confId == null) return;
+    _droppedAsks.add(confId);
+    state = state.copyWith(clearAsking: true);
+  }
+
+  /// Leaves the active meeting [confId] because this relay refuses it, at any
+  /// stage (seated, stepped out, waiting or joining); a host ends it.
+  Future<void> leaveRefusedMeeting(String confId) async {
+    if (state.activeConfId != confId) return;
+    if (state.isHost) {
+      await endMeeting();
+    } else {
+      await leaveMeeting();
+    }
+  }
+
   /// Toasts why a meeting's call cannot start now, if it cannot.
   bool _callBlocksMeeting() {
     if (ref.read(callProvider).status != CallStatus.idle) {
@@ -333,6 +427,7 @@ class ConferenceNotifier extends Notifier<ConferenceState> {
   Future<void> startMeeting(ConferenceRoom room) async {
     if (state.activeConfId == room.confId &&
         meetingOutOfSeat(state, ref.read(voiceChannelProvider))) {
+      if (await _relayStillRefuses(room.confId)) return;
       return rejoin();
     }
     if (_callBlocksMeeting()) return;
@@ -343,6 +438,7 @@ class ConferenceNotifier extends Notifier<ConferenceState> {
     }
     // The voice join would decline on its own, after the meeting started.
     if (!await ensureTurnForCallFromRef(ref)) return;
+    if (await _relayStillRefuses(room.confId)) return;
     if (state.meetingActive) {
       // Hosting/attending another meeting — leave it first.
       if (state.isHost) {
@@ -400,6 +496,7 @@ class ConferenceNotifier extends Notifier<ConferenceState> {
         !meetingOutOfSeat(state, ref.read(voiceChannelProvider))) {
       return;
     }
+    if (await _relayStillRefuses(confId)) return;
     if (_callBlocksMeeting() || !await ensureTurnForCallFromRef(ref)) return;
     if (state.activeConfId != confId) return;
     state = state.copyWith(lobbyStatus: ConferenceLobbyStatus.admitted);
@@ -506,12 +603,16 @@ class ConferenceNotifier extends Notifier<ConferenceState> {
     if (!state.roomsLoaded) await loadRooms();
     final ownRoom = state.roomById(confId);
     if (ownRoom != null) {
-      if (state.activeConfId == confId && state.isHost) return rejoin();
+      if (state.activeConfId == confId && state.isHost) {
+        if (await _relayStillRefuses(confId)) return;
+        return rejoin();
+      }
       _toast('This is your room. Starting the meeting',
           HollowToastType.info);
       await startMeeting(ownRoom);
       return;
     }
+    if (await _relayStillRefuses(confId)) return;
     if (state.meetingActive && state.activeConfId != confId) {
       if (state.isHost) {
         await endMeeting();

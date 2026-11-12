@@ -26,7 +26,6 @@ import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/ui/dialogs/report_user_dialog.dart';
 import 'package:hollow/src/core/providers/composer_focus_provider.dart';
 import 'package:hollow/src/core/providers/composer_insert_provider.dart';
-import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/core/providers/download_manager_provider.dart';
 import 'package:hollow/src/core/providers/event_provider.dart';
 import 'package:hollow/src/core/providers/file_transfer_provider.dart';
@@ -2623,12 +2622,12 @@ class _ChannelConnectionStatus extends ConsumerWidget {
     final localPeerId = ref.watch(identityProvider).peerId;
     // "Offline" is about US, not about an empty room (issue #23): with the relay
     // link up this header must never claim we are offline.
-    final amOnline = ref.watch(overallConnectionProvider).isOnline;
+    final linkDown = ownLinkOfflineStatus(ref, key: ValueKey('conn-$serverId'));
+    if (linkDown != null) return linkDown;
     final isCustomRelay =
         ref.watch(relayDomainProvider) != kDefaultRelayDomain;
 
     ConnectionStage stageFor(bool anyOnline) {
-      if (!amOnline) return ConnectionStage.offline;
       // Online members in a WS room are already inside the MLS group.
       if (anyOnline) return ConnectionStage.encrypted;
       if (isCustomRelay) return ConnectionStage.customNetwork;
@@ -2656,8 +2655,8 @@ class _ChannelConnectionStatus extends ConsumerWidget {
       },
       // Without the member list only our own link is known: "Only you" would
       // be a guess about everyone else.
-      loading: () => ownLinkOfflineStatus(ref) ?? const SizedBox.shrink(),
-      error: (_, _) => ownLinkOfflineStatus(ref) ?? const SizedBox.shrink(),
+      loading: () => const SizedBox.shrink(),
+      error: (_, _) => const SizedBox.shrink(),
     );
   }
 }

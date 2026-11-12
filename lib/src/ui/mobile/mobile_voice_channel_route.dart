@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/link_down_provider.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
@@ -105,10 +106,7 @@ class _MobileVoiceChannelRouteState
     _close();
   }
 
-  static bool _isOffline(OverallConnection link) =>
-      link == OverallConnection.offline ||
-      link == OverallConnection.reconnecting ||
-      link == OverallConnection.error;
+  static bool _isOffline(OverallConnection link) => link.isDown;
 
   Future<void> _leaveBeforeJoined() async {
     await leaveVoiceRoom(context, ref);
@@ -251,7 +249,8 @@ class _MobileVoiceChannelRouteState
     final conference = _source.isConference;
     final Widget status;
     if (offline) {
-      status = const HollowEmptyState(title: "You're offline");
+      status = HollowEmptyState(
+          title: linkDownNote(ref.watch(linkDownProvider), LinkNote.title));
     } else if (!_slow) {
       status = const SizedBox.shrink();
     } else {

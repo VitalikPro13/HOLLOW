@@ -93,7 +93,7 @@ class RelayDeniedDialog extends ConsumerWidget {
           HollowDialogText(
               '${relayLoginDenialText(kind)} $kLoginDeniedStopsText'),
           const SizedBox(height: HollowSpacing.sm),
-          const HollowDialogText(kDeniedKeepsText),
+          const HollowDialogText('$kDeniedKeepsText $kLoginDeniedWorksText'),
           const SizedBox(height: HollowSpacing.md),
           Text(domain,
               style: HollowTypography.mono.copyWith(color: hollow.textTertiary)),

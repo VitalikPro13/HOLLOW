@@ -1,0 +1,124 @@
+{
+  "_": [
+    "The Danger zone destroy warning while this relay refuses the account (t14-denyproof round 3, U5), on a THROWAWAY test relay.",
+    "b goes on the denylist by identity, opens Settings > Security > Destroy identity, the dialog warns that the order cannot reach",
+    "other devices from here; CANCEL (never confirm). Lifted at the end; restart b (or Try again) to reconnect.",
+    "run: FLEET_RELAY_SSH=hollowsrv FLEET_BACKEND=macos pwsh -NoProfile -File scripts/fleet.ps1 -Scenario deny_account_destroy -ReuseData -Peers a=windows:p,b=windows:q"
+  ],
+  "peers": [
+    "a",
+    "b"
+  ],
+  "steps": [
+    {
+      "peer": "all",
+      "op": "wait_for",
+      "provider": "connection",
+      "equals": "connected",
+      "timeout_ms": 120000
+    },
+    {
+      "peer": "a",
+      "op": "relay_deny",
+      "value": "check"
+    },
+    {
+      "peer": "b",
+      "op": "capture",
+      "from": "provider",
+      "key": "peerId",
+      "as": "ID_B"
+    },
+    {
+      "peer": "a",
+      "op": "relay_deny",
+      "value": "add identity ${ID_B}"
+    },
+    {
+      "peer": "b",
+      "op": "wait_for",
+      "target": "contains:This relay does not accept this account",
+      "timeout_ms": 20000
+    },
+    {
+      "peer": "b",
+      "op": "key",
+      "value": "escape"
+    },
+    {
+      "peer": "b",
+      "op": "wait",
+      "ms": 800
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "semantics:Settings",
+      "index": 0
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "type:SettingsPlace > text:Security",
+      "index": 0
+    },
+    {
+      "peer": "b",
+      "op": "reveal",
+      "target": "type:SettingsPlace > text:Destroy identity"
+    },
+    {
+      "peer": "b",
+      "op": "wait",
+      "ms": 500
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "type:SettingsPlace > text:Destroy identity",
+      "index": 0
+    },
+    {
+      "peer": "b",
+      "op": "wait_for",
+      "target": "contains:so the order can't reach your other devices from here",
+      "timeout_ms": 10000
+    },
+    {
+      "peer": "b",
+      "op": "wait",
+      "ms": 500
+    },
+    {
+      "peer": "b",
+      "op": "shot",
+      "name": "ad-01-destroy-warning-refused"
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "dialog > text:Cancel",
+      "index": 0
+    },
+    {
+      "peer": "b",
+      "op": "wait_for",
+      "gone": "dialog",
+      "timeout_ms": 5000
+    },
+    {
+      "peer": "a",
+      "op": "relay_deny",
+      "value": "remove identity ${ID_B}"
+    }
+  ],
+  "cleanup": [
+    {
+      "peer": "a",
+      "op": "relay_deny",
+      "value": "remove identity ${ID_B}",
+      "soft": true,
+      "allowMiss": true
+    }
+  ]
+}

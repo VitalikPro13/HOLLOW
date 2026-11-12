@@ -28,7 +28,8 @@ ConnectionVisual connectionVisual(
   OverallConnection connection, {
   bool invisible = false,
 }) {
-  if (invisible) {
+  // Invisible hides us from others, never our own state from us.
+  if (invisible && connection != OverallConnection.refused) {
     return ConnectionVisual(
       label: 'Invisible',
       color: hollow.textSecondary,

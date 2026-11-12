@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/link_down_provider.dart';
 import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/ui/call/call_actions.dart';
@@ -1102,9 +1103,7 @@ class _HowOthersAddYouState extends ConsumerState<HowOthersAddYou> {
     final nicknameState = ref.watch(temporaryNicknameProvider);
     // A claim travels to the relay, so without our link it can only spin.
     final link = ref.watch(overallConnectionProvider);
-    final offline = link == OverallConnection.offline ||
-        link == OverallConnection.reconnecting ||
-        link == OverallConnection.error;
+    final offline = link.isDown;
     ref.listen(temporaryNicknameProvider, (_, next) {
       if (next.status == NicknameStatus.claimed) _claimController.clear();
     });
@@ -1198,10 +1197,11 @@ class _HowOthersAddYouState extends ConsumerState<HowOthersAddYou> {
           ),
         if (offline && nicknameState.status != NicknameStatus.claimed) ...[
           const SizedBox(height: HollowSpacing.sm),
-          const HollowEmptyState(
+          HollowEmptyState(
             dense: true,
-            title: "You're offline",
-            description: "Claim a nickname once you're back.",
+            title: linkDownNote(ref.watch(linkDownProvider), LinkNote.title),
+            description:
+                linkDownNote(ref.watch(linkDownProvider), LinkNote.nickname),
           ),
         ] else if (nicknameState.status == NicknameStatus.failed &&
             nicknameState.error != null) ...[

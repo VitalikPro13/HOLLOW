@@ -1,0 +1,555 @@
+{
+  "_": [
+    "A change the owner makes while the relay refuses its server reaches the member after the lift, whichever of",
+    "the two asks the relay again first (t14-denyproof round 2). a (desktop) owns a server, b (desktop) joins.",
+    "The server goes on the test relay's denylist, a makes a channel, the entry is lifted; PART 2 a presses Try again",
+    "first, PART 3 b does. b must show the channel both times. Needs: FRESH identities on the test relay,",
+    "FLEET_RELAY_SSH (+ FLEET_RELAY_SSH_OPTS) naming it.",
+    "run: pwsh -NoProfile -File scripts/fleet.ps1 -Scenario deny_lift -Attach -Peers a=windows:p,b=windows:q"
+  ],
+  "peers": [
+    "a",
+    "b"
+  ],
+  "steps": [
+    {
+      "peer": "all",
+      "op": "wait_for",
+      "provider": "connection",
+      "equals": "connected",
+      "timeout_ms": 120000
+    },
+    {
+      "peer": "a",
+      "op": "relay_deny",
+      "value": "check"
+    },
+    {
+      "peer": "a",
+      "op": "log",
+      "message": "PART 1: a makes a server, b joins, messages flow"
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "semantics:Create a server"
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "dialog > text:Add a server",
+      "timeout_ms": 10000
+    },
+    {
+      "peer": "a",
+      "op": "enter_text",
+      "target": "hint:My Awesome Server",
+      "value": "lift-${RUN}"
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "dialog > text:Create",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "server:lift-${RUN}",
+      "timeout_ms": 30000
+    },
+    {
+      "peer": "a",
+      "op": "open_server",
+      "name": "lift-${RUN}"
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "channel:general",
+      "timeout_ms": 30000
+    },
+    {
+      "peer": "a",
+      "op": "right_click",
+      "target": "server:lift-${RUN}"
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "menu > text:Invite people"
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "type:HollowCopyField",
+      "timeout_ms": 20000
+    },
+    {
+      "peer": "a",
+      "op": "capture",
+      "target": "type:HollowCopyField",
+      "as": "INVITE"
+    },
+    {
+      "peer": "a",
+      "op": "capture",
+      "target": "type:HollowCopyField",
+      "regex": "server=([0-9a-f]{40})",
+      "as": "SID"
+    },
+    {
+      "peer": "a",
+      "op": "log",
+      "message": "server id ${SID}"
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "dialog > semantics:Close",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "gone": "dialog",
+      "timeout_ms": 10000
+    },
+    {
+      "peer": "a",
+      "op": "open_channel",
+      "name": "general"
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "semantics:Create a server"
+    },
+    {
+      "peer": "b",
+      "op": "enter_text",
+      "target": "hint:Invite link",
+      "value": "${INVITE}"
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "text:Join",
+      "index": 0
+    },
+    {
+      "peer": "b",
+      "op": "wait_for",
+      "target": "server:lift-${RUN}",
+      "timeout_ms": 120000
+    },
+    {
+      "peer": "b",
+      "op": "open_server",
+      "name": "lift-${RUN}"
+    },
+    {
+      "peer": "b",
+      "op": "wait_for",
+      "target": "channel:general",
+      "timeout_ms": 60000
+    },
+    {
+      "peer": "b",
+      "op": "open_channel",
+      "name": "general"
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "text:probe-b",
+      "timeout_ms": 90000
+    },
+    {
+      "peer": "b",
+      "op": "enter_text",
+      "target": "field",
+      "value": "seated b ${RUN}"
+    },
+    {
+      "peer": "b",
+      "op": "key",
+      "value": "enter"
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "text:seated b ${RUN}",
+      "timeout_ms": 60000
+    },
+    {
+      "peer": "all",
+      "op": "shot",
+      "name": "dl-01-before"
+    },
+    {
+      "peer": "a",
+      "op": "log",
+      "message": "PART 2: the owner comes back first, then the member"
+    },
+    {
+      "peer": "a",
+      "op": "relay_deny",
+      "value": "add server ${SID}"
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "contains:This server is not available on this relay",
+      "timeout_ms": 15000
+    },
+    {
+      "peer": "b",
+      "op": "wait_for",
+      "target": "contains:This server is not available on this relay",
+      "timeout_ms": 15000
+    },
+    {
+      "peer": "a",
+      "op": "log",
+      "message": "a makes #first while the relay refuses the server"
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "semantics:Create channel",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "dialog > text:Create channel",
+      "timeout_ms": 10000
+    },
+    {
+      "peer": "a",
+      "op": "enter_text",
+      "target": "dialog > type:TextField",
+      "value": "first-${RUN}"
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "dialog > text:Create",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "channel:first-${RUN}",
+      "timeout_ms": 30000
+    },
+    {
+      "peer": "a",
+      "op": "open_channel",
+      "name": "general"
+    },
+    {
+      "peer": "a",
+      "op": "log",
+      "message": "a lift comes minutes later in real life: past every resent copy of an ask (35 s)"
+    },
+    {
+      "peer": "b",
+      "op": "wait",
+      "ms": 40000
+    },
+    {
+      "peer": "b",
+      "op": "expect_no_text",
+      "value": "first-${RUN}"
+    },
+    {
+      "peer": "a",
+      "op": "relay_deny",
+      "value": "remove server ${SID}"
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 2500
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "text:Try again",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "gone": "contains:This server is not available on this relay",
+      "timeout_ms": 20000
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "type:ChatComposerRow",
+      "timeout_ms": 10000
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "text:Try again",
+      "index": 0
+    },
+    {
+      "peer": "b",
+      "op": "wait_for",
+      "gone": "contains:This server is not available on this relay",
+      "timeout_ms": 20000
+    },
+    {
+      "peer": "b",
+      "op": "wait_for",
+      "target": "type:ChatComposerRow",
+      "timeout_ms": 10000
+    },
+    {
+      "peer": "b",
+      "op": "wait_for",
+      "target": "channel:first-${RUN}",
+      "timeout_ms": 90000
+    },
+    {
+      "peer": "all",
+      "op": "shot",
+      "name": "dl-02-owner-first"
+    },
+    {
+      "peer": "a",
+      "op": "log",
+      "message": "PART 3: the member comes back first, then the owner"
+    },
+    {
+      "peer": "a",
+      "op": "relay_deny",
+      "value": "add server ${SID}"
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "contains:This server is not available on this relay",
+      "timeout_ms": 15000
+    },
+    {
+      "peer": "b",
+      "op": "wait_for",
+      "target": "contains:This server is not available on this relay",
+      "timeout_ms": 15000
+    },
+    {
+      "peer": "a",
+      "op": "log",
+      "message": "a makes #second while the relay refuses the server"
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "semantics:Create channel",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "dialog > text:Create channel",
+      "timeout_ms": 10000
+    },
+    {
+      "peer": "a",
+      "op": "enter_text",
+      "target": "dialog > type:TextField",
+      "value": "second-${RUN}"
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "dialog > text:Create",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "channel:second-${RUN}",
+      "timeout_ms": 30000
+    },
+    {
+      "peer": "a",
+      "op": "open_channel",
+      "name": "general"
+    },
+    {
+      "peer": "a",
+      "op": "log",
+      "message": "a lift comes minutes later in real life: past every resent copy of an ask (35 s)"
+    },
+    {
+      "peer": "b",
+      "op": "wait",
+      "ms": 40000
+    },
+    {
+      "peer": "b",
+      "op": "expect_no_text",
+      "value": "second-${RUN}"
+    },
+    {
+      "peer": "a",
+      "op": "relay_deny",
+      "value": "remove server ${SID}"
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 2500
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "text:Try again",
+      "index": 0
+    },
+    {
+      "peer": "b",
+      "op": "wait_for",
+      "gone": "contains:This server is not available on this relay",
+      "timeout_ms": 20000
+    },
+    {
+      "peer": "b",
+      "op": "wait_for",
+      "target": "type:ChatComposerRow",
+      "timeout_ms": 10000
+    },
+    {
+      "peer": "b",
+      "op": "log",
+      "message": "b's own catch-up finds nobody holding the change: a is still refused"
+    },
+    {
+      "peer": "b",
+      "op": "wait",
+      "ms": 15000
+    },
+    {
+      "peer": "b",
+      "op": "expect_no_text",
+      "value": "second-${RUN}"
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "text:Try again",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "gone": "contains:This server is not available on this relay",
+      "timeout_ms": 20000
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "type:ChatComposerRow",
+      "timeout_ms": 10000
+    },
+    {
+      "peer": "b",
+      "op": "wait_for",
+      "target": "channel:second-${RUN}",
+      "timeout_ms": 90000
+    },
+    {
+      "peer": "a",
+      "op": "enter_text",
+      "target": "field",
+      "value": "after from a ${RUN}"
+    },
+    {
+      "peer": "a",
+      "op": "key",
+      "value": "enter"
+    },
+    {
+      "peer": "b",
+      "op": "wait_for",
+      "target": "text:after from a ${RUN}",
+      "timeout_ms": 60000
+    },
+    {
+      "peer": "all",
+      "op": "shot",
+      "name": "dl-03-member-first"
+    }
+  ],
+  "cleanup": [
+    {
+      "peer": "a",
+      "op": "relay_deny",
+      "value": "remove server ${SID}",
+      "soft": true,
+      "allowMiss": true
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "text:Try again",
+      "index": 0,
+      "allowMiss": true,
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "text:Try again",
+      "index": 0,
+      "allowMiss": true,
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 4000
+    },
+    {
+      "peer": "a",
+      "op": "right_click",
+      "target": "server:lift-${RUN}"
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "menu > text:Server settings"
+    },
+    {
+      "peer": "a",
+      "op": "reveal",
+      "target": "text:Delete server",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "text:Delete server",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "dialog > text:Delete server",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "gone": "server:lift-${RUN}",
+      "timeout_ms": 30000
+    }
+  ]
+}

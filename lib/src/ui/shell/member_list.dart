@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/link_down_provider.dart';
 import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
@@ -323,19 +324,19 @@ Offset memberCardAnchor(BuildContext context) {
   return Offset(pos.dx - kProfileCardPopupWidth - 10, pos.dy - 100);
 }
 
-class _PresenceNote extends StatelessWidget {
+class _PresenceNote extends ConsumerWidget {
   final bool touch;
 
   const _PresenceNote({required this.touch});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
     return Padding(
       padding: EdgeInsets.fromLTRB(touch ? HollowSpacing.lg : HollowSpacing.sm,
           0, touch ? HollowSpacing.lg : HollowSpacing.sm, HollowSpacing.md),
       child: Text(
-        "You're offline, so who's online may be out of date.",
+        linkDownNote(ref.watch(linkDownProvider), LinkNote.presence),
         style: (touch ? HollowTypography.bodySmall : HollowTypography.caption)
             .copyWith(color: hollow.textSecondary),
       ),

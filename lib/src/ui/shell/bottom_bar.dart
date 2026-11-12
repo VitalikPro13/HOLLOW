@@ -384,7 +384,7 @@ class DockIdentity extends ConsumerWidget {
     final refusal = overall == OverallConnection.refused
         ? ref.watch(relayLoginDenialProvider)
         : null;
-    if (refusal != null && !invisible) {
+    if (refusal != null) {
       line = HollowPressable(
         subtle: true,
         semanticLabel: '${visual.label}, show why',
