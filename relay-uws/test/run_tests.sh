@@ -58,6 +58,7 @@ run test_reports ../src/reports.cpp ../src/crypto.cpp $LIBS
 run test_ring_auth
 run test_ring_evict
 run test_roster ../src/crypto.cpp $LIBS
+run test_roster_check ../src/crypto.cpp $LIBS
 run test_send_budget
 run test_server_stats
 run test_session

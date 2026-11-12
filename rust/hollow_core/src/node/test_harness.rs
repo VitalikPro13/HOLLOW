@@ -299,6 +299,7 @@ fn cmd_kind(cmd: &WsCommand) -> &'static str {
         WsCommand::SendToRoomTopic { .. } => "send_topic",
         WsCommand::CheckPeers { .. } => "check_peers",
         WsCommand::DiscoverPeers { .. } => "discover_peers",
+        WsCommand::RosterCheck { .. } => "roster_check",
         WsCommand::GetTurnCredentials => "get_turn",
         WsCommand::GetMediaForwarder => "get_forwarder",
         WsCommand::ClaimNickname { .. } => "claim_nickname",
@@ -369,6 +370,14 @@ struct RelayInner {
     unsubscribed_topics: HashSet<String>,
     /// A relay from before the catch-up end mark.
     withhold_catchup_end: bool,
+    /// A relay without `roster_check` (design ROSTER-CHECK): says so, answers nothing.
+    roster_check_off: bool,
+    /// A relay that says it answers `roster_check` and never does.
+    roster_check_silent: bool,
+    /// Every `roster_check` asked: (asker, master).
+    roster_checks: Vec<(String, String)>,
+    /// `roster_checked` answers held back until the test releases them: (asker, answer).
+    roster_answers_held: Option<Vec<(String, WsEvent)>>,
     /// nickname -> (claimer device_peer_id, claimer's self-reported master).
     /// Mirrors the relay's temporary-nickname registry. TTL not modeled;
     /// an offline holder resolves as not_found like the real staleness check.
@@ -542,7 +551,7 @@ pub(crate) fn label_carried_frame(frame: &[u8], plaintext: &str) {
     {
         CARRIED_OPS.lock().unwrap_or_else(|p| p.into_inner()).insert(body, op_json.clone());
     }
-    if !matches!(msg.wire_kind().as_str(), "mls_kp" | "mls_kp_forward" | "mls_kp_ack") {
+    if !matches!(msg.wire_kind().as_str(), "mls_kp" | "mls_kp_forward" | "mls_kp_ack" | "profile_request") {
         return;
     }
     if let Ok(super::types::HavenMessage::Encrypted { body, .. }) = serde_json::from_slice(super::frame_auth::unchecked_body(frame)) {
@@ -664,6 +673,15 @@ fn roster_counts(rosters: &HashMap<String, InboxRoster>, master: &str, device: &
     held.roster.fold(|d| held.seen.get(&format!("{base}|{d}")).copied(), super::roster_book::now_ms()).is_member(device)
 }
 
+/// Whether the relay's fold of `master` places `device` at all: a member, a removed
+/// device or a pending join (`roster_check::places`).
+fn roster_places(rosters: &HashMap<String, InboxRoster>, master: &str, device: &str) -> bool {
+    let Some(held) = rosters.get(master) else { return false };
+    let base = held.roster.base();
+    let st = held.roster.fold(|d| held.seen.get(&format!("{base}|{d}")).copied(), super::roster_book::now_ms());
+    st.is_member(device) || st.removed.contains_key(device) || st.pending.contains(device)
+}
+
 /// Whether server authority over every roster shown for `master` counts `device`: what
 /// the relay judges a lock link's device by (`RosterBook::counted_authority`).
 fn lock_counts(rosters: &HashMap<String, InboxRoster>, master: &str, device: &str) -> bool {
@@ -777,6 +795,8 @@ impl MockRelay {
             }
         });
         // Tell the node it's connected (mirrors WsEvent::Connected on real auth).
+        let answers = !self.inner.lock().unwrap().roster_check_off;
+        let _ = event_tx.send(WsEvent::RelayRosterCheck { answers });
         let _ = event_tx.send(WsEvent::Connected);
         self.deliver_kill_signal(&peer_id);
     }
@@ -1180,6 +1200,7 @@ impl MockRelay {
             // Coming back online: re-emit Connected so the node re-runs its
             // join flow (inbox + friend DM rooms) from scratch.
             if let Some(conn) = inner.conns.get(peer_id) {
+                let _ = conn.event_tx.send(WsEvent::RelayRosterCheck { answers: !inner.roster_check_off });
                 let _ = conn.event_tx.send(WsEvent::Connected);
             }
             inner.deliver_kill_signals(peer_id);
@@ -1256,6 +1277,34 @@ impl MockRelay {
     /// subscribes to (the join ring).
     pub(crate) fn set_unsubscribed_topic(&self, topic: &str) {
         self.inner.lock().unwrap().unsubscribed_topics.insert(topic.to_string());
+    }
+
+    /// A relay without `roster_check`: nodes that connect after this hear it lacks one.
+    pub(crate) fn without_roster_check(&self) {
+        self.inner.lock().unwrap().roster_check_off = true;
+    }
+
+    /// How many `roster_check`s `from` asked.
+    pub(crate) fn roster_checks_from(&self, from: &str) -> usize {
+        self.inner.lock().unwrap().roster_checks.iter().filter(|(f, _)| f == from).count()
+    }
+
+    /// A relay that says it answers `roster_check` and never does.
+    pub(crate) fn silent_roster_check(&self) {
+        self.inner.lock().unwrap().roster_check_silent = true;
+    }
+
+    /// Hold every `roster_checked` answer until [`Self::release_roster_answers`].
+    pub(crate) fn hold_roster_answers(&self) {
+        self.inner.lock().unwrap().roster_answers_held = Some(Vec::new());
+    }
+
+    /// Send the held answers and answer at once from now on.
+    pub(crate) fn release_roster_answers(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        for (to, ev) in inner.roster_answers_held.take().unwrap_or_default() {
+            inner.write(&to, ev);
+        }
     }
 
     /// A relay that never marks the end of a catch-up.
@@ -1795,6 +1844,36 @@ impl RelayInner {
                 }
                 if end && !inner.withhold_catchup_end {
                     inner.write(from, WsEvent::TopicCatchupDone { room: room_code, channel: channel_id });
+                }
+            }
+            WsCommand::RosterCheck { room_code, master, device, n } => {
+                // The relay's rule (roster_check_vectors.json) over this relay's rooms and book.
+                inner.roster_checks.push((from.to_string(), master.clone()));
+                if inner.roster_check_off || inner.roster_check_silent {
+                    return;
+                }
+                let in_room = |p: &str| inner.rooms.get(&room_code).is_some_and(|s| s.contains(p));
+                let facts = super::roster_check::RelayFacts {
+                    full: true,
+                    master: master.clone(),
+                    device: device.clone(),
+                    nonce: n.clone(),
+                    room: room_code.clone(),
+                    asker_in_room: in_room(from),
+                    locked: inner.room_door(&room_code).is_some(),
+                    newest_door: inner.receives(&room_code, from),
+                    device_listed: in_room(&device) && inner.shares(&room_code, &device, from) && !inner.hidden.contains(&device),
+                    placed: roster_places(&inner.inbox_rosters, &master, &device),
+                };
+                let roster = super::roster_check::relay_answers_with(&facts)
+                    .then(|| inner.inbox_rosters.get(&master).and_then(|held| serde_json::to_value(&held.roster).ok()))
+                    .flatten();
+                let answer = WsEvent::RosterChecked { room: room_code, master, device, n, roster };
+                match inner.roster_answers_held.as_mut() {
+                    Some(held) => held.push((from.to_string(), answer)),
+                    None => {
+                        inner.write(from, answer);
+                    }
                 }
             }
             WsCommand::DiscoverPeers { room_code } => {
@@ -27932,7 +28011,10 @@ fn harness_fixed_sleep_budget_does_not_grow() {
     // reached no member while refused, a given-up join or left meeting is not joined
     // again, a leave forgetting nothing) and spawn staggers for two sibling pairs; every
     // wait past an ask polls `digest_busy` instead (28.0 s).
-    const BUDGET_MS: u64 = 1_221_800;
+    // 2026-11-12: t14-rostercheck added two absence proofs, a KeyPackage a removed device
+    // never gets and none past a silent relay, three 100 ms poll steps, no KeyPackage
+    // before a held answer, and no key a later answer adds (20.7 s; scan 1242.4 s).
+    const BUDGET_MS: u64 = 1_242_500;
 
     let src = include_str!("test_harness.rs");
     // Built from pieces so this scan does not count its own source text.
@@ -64763,12 +64845,17 @@ async fn lead_c_a_quiet_members_post_lands_after_the_roster_trade() {
     assert!(!crate::crdt::authority::authority_set(&s).contains(&m), "precondition: M is outside X's authority set");
     assert!(!s.post_allowed(&m, Some(&d1_id), crate::crdt::hlc::wall_clock_ms() as i64), "precondition: X holds no roster of M");
 
+    relay.start_wiretap();
     w3c1h_post(&d1, &[&j], &server_id, &general, "lc-quiet-1", &d1_id).await;
     let proof_at_x = || x.store().channel_post_proofs(&["lc-quiet-1"]).get("lc-quiet-1").map(|d| d.device.clone());
     assert!(
         wait_until(40, async || proof_at_x().as_deref() == Some(d1_id.as_str())).await,
         "X never took M's post: no roster trade brought M's roster and a catch-up after it",
     );
+    // A roster X's book never keeps stays a first sight: a profile held with it is
+    // dropped when it does not land, never fetched again on every landing.
+    let asked = [&d1_id, &d2.device_id].iter().map(|d| g13w3_sent(&relay, &x.device_id, d, "profile_request")).sum::<usize>();
+    assert!(asked <= 4, "X asked M's devices for their profile {asked} times");
     assert!(!x.store().load_server_rosters(&m).unwrap_or_default().is_empty(), "the roster X asked for is kept outside its authority set");
     assert!(x.store().load_roster(&m).ok().flatten().is_none(), "precondition held: X's book never took M's roster");
     super::authority_view::unrefuse_book_for_test(&tag_kp(xd_tag).peer_id());
@@ -68123,4 +68210,436 @@ async fn t14d_a_member_the_settling_brings_back_gets_the_door_after_an_early_loc
         wait_until(30, async || k.live_server_state(server_id).await.and_then(|s| s.join_lock.newest_door()).is_some_and(|(n, _, _)| n == relay_tip(relay, server_id).n)).await,
         "K holds the relay's newest door",
     );
+}
+
+// w4-rostercheck
+
+/// Owner `O` creates a server; `M`'s device `X` joins and becomes its admin, so with the
+/// owner away `X` is the walk's target. `M`'s other device `Y` then removes `X` and shows
+/// the relay, but nobody in the server hears it. Returns (owner, X, joiner, server, M).
+async fn w4rc_removed_admin(relay: &MockRelay, tags: (u8, u8, u8, u8, u8, u8)) -> (TestNode, TestNode, TestNode, String, String) {
+    let (owner, x, joiner, sid, m, _) = w4rc_removed_admin_with(relay, tags, None).await;
+    (owner, x, joiner, sid, m)
+}
+
+/// [`w4rc_removed_admin`], with an honest member (master, device) seated after `X`.
+async fn w4rc_removed_admin_with(
+    relay: &MockRelay,
+    tags: (u8, u8, u8, u8, u8, u8),
+    member: Option<(u8, u8)>,
+) -> (TestNode, TestNode, TestNode, String, String, Option<TestNode>) {
+    let (o_m, o_d, m_m, x_d, y_d, j_d) = tags;
+    let now = super::roster_book::now_ms();
+    let mut owner = spawn_node_seeded(relay, o_m, o_d, &[], Some(protected_roster(o_m, &[o_d], now - 60_000))).await;
+    let mut x = spawn_node_seeded(relay, m_m, x_d, &[], Some(protected_roster(m_m, &[x_d, y_d], now - 60_000))).await;
+    let joiner = spawn_node_seeded(relay, j_d, j_d.wrapping_add(1), &[], Some(protected_roster(j_d, &[j_d.wrapping_add(1)], now - 60_000))).await;
+    let sid = create_server_and_wait(&mut owner, "Removed admin").await;
+    let m = x.master_id.clone();
+    join_and_wait(&mut x, &sid).await;
+    expect_mls_leaf(&owner, &sid, &x.device_id, 30).await;
+    let mut honest = None;
+    if let Some((h_m, h_d)) = member {
+        let mut h = spawn_node_seeded(relay, h_m, h_d, &[], Some(protected_roster(h_m, &[h_d], now - 60_000))).await;
+        join_and_wait(&mut h, &sid).await;
+        expect_mls_leaf(&owner, &sid, &h.device_id, 30).await;
+        expect_mls_leaf(&h, &sid, &h.device_id, 30).await;
+        honest = Some(h);
+    }
+    owner
+        .cmd_tx
+        .send(NodeCommand::ChangeRole { server_id: sid.clone(), peer_id: m.clone(), new_role: "admin".into() })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(15, async || x.live_role(&sid, &m).await == crate::crdt::operations::MemberRole::Admin).await,
+        "the admin sees its role",
+    );
+    let mut seated: Vec<&TestNode> = vec![&x];
+    seated.extend(honest.as_ref());
+    g13w3_owner_away(relay, &owner, &seated).await;
+    let mut removal = protected_roster(m_m, &[x_d, y_d], now - 60_000);
+    let base = removal.base();
+    removal.add_removal(crate::identity::roster::sign_removal(&tag_kp(y_d), &m, &base, &x.device_id, &[]));
+    relay.show_roster(&tag_kp(y_d).peer_id(), &m, removal);
+    assert!(!relay.counts(&m, &x.device_id), "setup: the relay's fold removes X");
+    // HARNESS HONESTY: the resolver is process-global and X seeded it with its own stale
+    // roster; in the field the joiner places X only through the server's view.
+    super::resolver::blind_for_test(&joiner.device_id, &x.device_id);
+    if let Some(h) = &honest {
+        super::resolver::blind_for_test(&joiner.device_id, &h.device_id);
+    }
+    (owner, x, joiner, sid, m, honest)
+}
+
+/// The view path (t14-mlsjoin review finding 2): every member the joiner reaches holds
+/// `M`'s roster from before `X`'s removal, so the view places `X`; the relay's copy shows
+/// the removal and the joiner's KeyPackage never reaches `X`. The owner back seats it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn w4rc_a_joiner_never_hands_its_key_package_to_a_device_its_owner_removed() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (owner, x, mut joiner, sid, _m) = w4rc_removed_admin(&relay, (161, 162, 163, 164, 165, 166)).await;
+    relay.start_wiretap();
+    joiner.cmd_tx.send(join_cmd(&sid)).await.unwrap();
+    assert!(expect_joined(&mut joiner, &sid, 20).await, "the removed admin still answers the join");
+    // Absence proof: a KeyPackage the removed device must never get.
+    sleep_ms(6_000).await;
+    assert_eq!(g13w3_sent(&relay, &joiner.device_id, &x.device_id, "mls_kp"), 0, "the removed device got the joiner's KeyPackage");
+    assert!(!x.mls_members(&sid).await.contains(&joiner.device_id), "the removed device seated the joiner");
+    assert!(relay.roster_checks_from(&joiner.device_id) > 0, "the joiner asked the relay");
+    relay.set_online(&owner.device_id, true);
+    expect_mls_leaf(&owner, &sid, &joiner.device_id, 60).await;
+    drop((owner, x, joiner));
+}
+
+/// The same server on a relay without `roster_check`: the joiner judges by what it
+/// holds, as before the check, so the removed device is asked (the residual AR-15 names).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn w4rc_a_relay_without_the_check_seats_as_before() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    relay.without_roster_check();
+    let (owner, x, mut joiner, sid, _m) = w4rc_removed_admin(&relay, (171, 172, 173, 174, 175, 176)).await;
+    relay.start_wiretap();
+    joiner.cmd_tx.send(join_cmd(&sid)).await.unwrap();
+    assert!(expect_joined(&mut joiner, &sid, 20).await, "the joiner joins");
+    expect_mls_leaf(&x, &sid, &joiner.device_id, 40).await;
+    assert_eq!(relay.roster_checks_from(&joiner.device_id), 0, "nothing asks a relay that has no check");
+    drop((owner, x, joiner));
+}
+
+/// A first-sight roster a co-member's device sends into the server room is held until
+/// the relay's copy is merged in (MED-2): the joiner's book never counts the removed
+/// device, which is no member of what it brought once the removal is merged.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn w4rc_a_stale_roster_notice_places_nobody_before_the_relays_copy() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let now = super::roster_book::now_ms();
+    let mut owner = spawn_node_seeded(&relay, 181, 182, &[], Some(protected_roster(181, &[182], now - 60_000))).await;
+    let mut joiner = spawn_node_seeded(&relay, 186, 187, &[], Some(protected_roster(186, &[187], now - 60_000))).await;
+    let mut x = spawn_node_seeded(&relay, 183, 184, &[], Some(protected_roster(183, &[184, 185], now - 60_000))).await;
+    let sid = create_server_and_wait(&mut owner, "Stale notice").await;
+    join_and_wait(&mut joiner, &sid).await;
+    expect_mls_leaf(&owner, &sid, &joiner.device_id, 30).await;
+    let m = x.master_id.clone();
+    let stale = protected_roster(183, &[184, 185], now - 60_000);
+    let mut removal = stale.clone();
+    let base = removal.base();
+    removal.add_removal(crate::identity::roster::sign_removal(&tag_kp(185), &m, &base, &x.device_id, &[]));
+    relay.show_roster(&tag_kp(185).peer_id(), &m, removal);
+    let counts_x = |n: &TestNode, x: &str| {
+        let store = n.store();
+        super::roster_book::load(&store, &m).is_some_and(|r| super::roster_book::fold(&store, &r).is_member(x))
+    };
+    // While the relay's answers wait, X's own first sight in the room places nothing.
+    relay.hold_roster_answers();
+    join_and_wait(&mut x, &sid).await;
+    let held_until = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while std::time::Instant::now() < held_until {
+        assert!(!counts_x(&joiner, &x.device_id), "the joiner's book counted the removed device before the relay answered");
+        sleep_ms(100).await;
+    }
+    relay.release_roster_answers();
+    assert!(
+        wait_until(20, async || joiner.live_server_state(&sid).await.is_some_and(|s| s.members.contains_key(&m))).await,
+        "the joiner's server names M",
+    );
+    send_as(&relay, &sid, &x, &joiner, super::types::HavenMessage::RosterNotice { roster: stale }).await;
+    let counts_x = |n: &TestNode| counts_x(n, &x.device_id);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        assert!(!counts_x(&joiner), "the joiner's book counted the removed device");
+        sleep_ms(100).await;
+    }
+    // Merged with the relay's copy, the removed deliverer is no member of what it brought,
+    // so the first sight keeps nothing; a roster held later still shows the removal.
+    let store = joiner.store();
+    if let Some(held) = super::roster_book::load(&store, &m) {
+        assert!(super::roster_book::fold(&store, &held).removed.contains_key(&x.device_id), "a held roster shows the removal");
+    }
+    assert!(relay.roster_checks_from(&joiner.device_id) > 0, "the joiner asked the relay");
+    drop((owner, x, joiner));
+}
+
+/// A relay that says it answers and never does: the walk waits and skips, mints no
+/// storm of KeyPackages, and seats nobody through a device it could not check.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn w4rc_a_silent_relay_costs_no_key_package_storm() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut nodes, sid) = t14_strangers(&relay, &[(191, 192), (193, 194)], "Silent").await;
+    let ids: Vec<String> = nodes.iter().map(|n| n.device_id.clone()).collect();
+    super::resolver::blind_for_test(&ids[1], &ids[0]);
+    relay.silent_roster_check();
+    relay.start_wiretap();
+    nodes[1].cmd_tx.send(join_cmd(&sid)).await.unwrap();
+    assert!(expect_joined(&mut nodes[1], &sid, 20).await, "the stranger joins");
+    // Absence proof: two ask windows in which no KeyPackage may leave.
+    sleep_ms(12_000).await;
+    assert!(t14_key_packages_from(&relay, &ids[1]).is_empty(), "a KeyPackage went out past an unanswered check");
+    assert!(relay.roster_checks_from(&ids[1]) <= 4, "asked {} times in 12 s", relay.roster_checks_from(&ids[1]));
+    drop(nodes);
+}
+
+/// A target the relay's copy rules out counts as asked and the walk goes on to the next
+/// member in the same pass, rather than stopping at it until the owner is back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn w4rc_a_target_the_relay_rules_out_passes_the_walk_on() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (owner, x, mut joiner, sid, _m, honest) =
+        w4rc_removed_admin_with(&relay, (131, 132, 133, 134, 135, 136), Some((138, 139))).await;
+    let honest = honest.expect("the honest member");
+    relay.start_wiretap();
+    joiner.cmd_tx.send(join_cmd(&sid)).await.unwrap();
+    assert!(expect_joined(&mut joiner, &sid, 20).await, "the joiner joins");
+    assert!(
+        wait_until(15, async || g13w3_sent(&relay, &joiner.device_id, &honest.device_id, "mls_kp") > 0).await,
+        "the walk never went past the device the relay's copy removes",
+    );
+    assert_eq!(g13w3_sent(&relay, &joiner.device_id, &x.device_id, "mls_kp"), 0, "the removed device got the joiner's KeyPackage");
+    drop((owner, x, joiner, honest));
+}
+
+/// The walk waits for the relay's answer about its target instead of passing it: a lone
+/// stranger's first KeyPackage reaches the only member as the answer lands, not a pass
+/// gap later.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn w4rc_the_walk_waits_for_the_answer_about_its_target() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut nodes, sid) = t14_strangers(&relay, &[(141, 142), (143, 144)], "Waits").await;
+    let ids: Vec<String> = nodes.iter().map(|n| n.device_id.clone()).collect();
+    super::resolver::blind_for_test(&ids[1], &ids[0]);
+    relay.start_wiretap();
+    // The answer comes after the walk chose its target.
+    relay.hold_roster_answers();
+    nodes[1].cmd_tx.send(join_cmd(&sid)).await.unwrap();
+    assert!(expect_joined(&mut nodes[1], &sid, 20).await, "the stranger joins");
+    assert!(wait_until(10, async || relay.roster_checks_from(&ids[1]) > 0).await, "the stranger asked the relay");
+    // Absence proof: nothing goes before the answer.
+    sleep_ms(2_000).await;
+    assert_eq!(g13w3_sent(&relay, &ids[1], &ids[0], "mls_kp"), 0, "a KeyPackage went before the relay answered");
+    relay.release_roster_answers();
+    let released = std::time::Instant::now();
+    assert!(
+        wait_until(20, async || g13w3_sent(&relay, &ids[1], &ids[0], "mls_kp") > 0).await,
+        "the stranger asked the owner",
+    );
+    let took = released.elapsed();
+    hollow_log!("[w4rc] first KeyPackage {took:?} after the answer");
+    assert!(took < std::time::Duration::from_secs(2), "the walk passed its target and waited out a pass gap: {took:?}");
+    drop(nodes);
+}
+
+// w4-rostercheck fix round
+
+/// LOW-1: a first-sight roster whose deliverer the room hides lands alone after the wait;
+/// once a device of that identity shows, the joiner asks the relay at once, and the
+/// removal the relay's copy carries lands in its book.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn w4rc_a_roster_landed_alone_is_checked_once_its_deliverer_shows() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let now = super::roster_book::now_ms();
+    let mut owner = spawn_node_seeded(&relay, 211, 212, &[], Some(protected_roster(211, &[212], now - 60_000))).await;
+    let mut x = spawn_node_seeded(&relay, 213, 214, &[], Some(protected_roster(213, &[214, 215], now - 60_000))).await;
+    let sid = create_server_and_wait(&mut owner, "Landed alone").await;
+    join_and_wait(&mut x, &sid).await;
+    expect_mls_leaf(&owner, &sid, &x.device_id, 30).await;
+    let m = x.master_id.clone();
+    let y = tag_kp(215).peer_id();
+    let stale = protected_roster(213, &[214, 215], now - 60_000);
+    let mut removal = stale.clone();
+    let base = removal.base();
+    removal.add_removal(crate::identity::roster::sign_removal(&tag_kp(214), &m, &base, &y, &[]));
+    relay.show_roster(&x.device_id, &m, removal);
+    // X hides: the joiner meets M only through the notice X sends it.
+    relay.set_background(&x, true);
+    let mut joiner = spawn_node_seeded(&relay, 216, 217, &[], Some(protected_roster(216, &[217], now - 60_000))).await;
+    join_and_wait(&mut joiner, &sid).await;
+    expect_mls_leaf(&owner, &sid, &joiner.device_id, 30).await;
+    assert!(
+        wait_until(20, async || joiner.live_server_state(&sid).await.is_some_and(|s| s.members.contains_key(&m))).await,
+        "the joiner's server names M",
+    );
+    let book = |n: &TestNode| {
+        let store = n.store();
+        super::roster_book::load(&store, &m).map(|r| super::roster_book::fold(&store, &r))
+    };
+    send_as(&relay, &sid, &x, &joiner, super::types::HavenMessage::RosterNotice { roster: stale }).await;
+    assert!(
+        wait_until(15, async || book(&joiner).is_some_and(|st| st.is_member(&y))).await,
+        "the stale roster lands alone while its deliverer hides",
+    );
+    let asked = relay.roster_checks_from(&joiner.device_id);
+    relay.set_background(&x, false);
+    assert!(
+        wait_until(8, async || book(&joiner).is_some_and(|st| st.removed.contains_key(&y))).await,
+        "the joiner never asked the relay about M once X showed ({} asks before, {} after)",
+        asked,
+        relay.roster_checks_from(&joiner.device_id),
+    );
+    drop((owner, x, joiner));
+}
+
+/// MED-2: a first-sight profile held with its roster is stored when the roster lands,
+/// never fetched again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn w4rc_a_first_sight_profile_lands_with_its_roster_without_a_second_fetch() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let now = super::roster_book::now_ms();
+    let mut owner = spawn_node_seeded(&relay, 221, 222, &[], Some(protected_roster(221, &[222], now - 60_000))).await;
+    let mut joiner = spawn_node_seeded(&relay, 223, 224, &[], Some(protected_roster(223, &[224], now - 60_000))).await;
+    let mut x = spawn_node_seeded(&relay, 225, 226, &[], Some(protected_roster(225, &[226], now - 60_000))).await;
+    let sid = create_server_and_wait(&mut owner, "Profile rider").await;
+    join_and_wait(&mut joiner, &sid).await;
+    expect_mls_leaf(&owner, &sid, &joiner.device_id, 30).await;
+    join_and_wait(&mut x, &sid).await;
+    expect_mls_leaf(&owner, &sid, &x.device_id, 30).await;
+    expect_mls_leaf(&joiner, &sid, &x.device_id, 30).await;
+    let m = x.master_id.clone();
+    assert!(
+        wait_until(20, async || joiner.store().load_roster(&m).ok().flatten().is_some()).await,
+        "setup: the joiner holds M's roster",
+    );
+    // The joiner forgets M's roster: X's next profile is a first sight again.
+    {
+        let store = joiner.store();
+        let c = store.conn_for_test();
+        c.execute("DELETE FROM device_lists WHERE master_peer_id = ?1", [&m]).unwrap();
+        c.execute("DELETE FROM server_rosters WHERE master_peer_id = ?1", [&m]).unwrap();
+        super::server_rosters::touched();
+    }
+    relay.start_wiretap();
+    let update = |status: &str| NodeCommand::UpdateProfile {
+        display_name: "Xavier".to_string(),
+        status: status.to_string(),
+        about_me: String::new(),
+        avatar_bytes: None,
+        banner_bytes: None,
+        twitch_username: String::new(),
+        showcase_board: None,
+        showcase_assets: None,
+        avatar_frame: None,
+        avatar_anim: None,
+        banner_anim: None,
+        support_creds: None,
+    };
+    x.cmd_tx.send(update("held with its roster")).await.unwrap();
+    assert!(
+        wait_until(20, async || {
+            joiner.store().load_profile(&m).ok().flatten().is_some_and(|p| p.status == "held with its roster")
+        })
+        .await,
+        "the profile that came with M's first roster never landed",
+    );
+    assert!(joiner.store().load_roster(&m).ok().flatten().is_some(), "its roster landed with it");
+    let asked = g13w3_sent(&relay, &joiner.device_id, &x.device_id, "profile_request");
+    assert_eq!(asked, 0, "the joiner fetched the profile it was carried again");
+    drop((owner, x, joiner));
+}
+
+/// LOW-7: a Legacy server (32-hex id, an unlocked room) seats its leafless member with
+/// the check on: when the owner shows, the member's re-bootstrap KeyPackage waits for the
+/// relay's copy of the owner's roster, and goes once the copy counts the owner's device.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn w4rc_a_legacy_lone_joiner_is_seated_with_the_check() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o_m, o_d, j_m, j_d) = (231u8, 232u8, 233u8, 234u8);
+    let now = super::roster_book::now_ms();
+    let o = spawn_node_seeded(&relay, o_m, o_d, &[], Some(protected_roster(o_m, &[o_d], now - 60_000))).await;
+    let j = spawn_node_seeded(&relay, j_m, j_d, &[], Some(protected_roster(j_m, &[j_d], now - 60_000))).await;
+    let server_id = "a7c1".repeat(8);
+    let mut legacy = ServerState::new(server_id.clone(), "Old Server".into(), tag_kp(o_m).peer_id());
+    super::swarm::install_master_signer_for_test(&mut legacy, &tag_kp(o_m));
+    let add_j = legacy.author_checked(crate::crdt::operations::CrdtPayload::MemberAdded {
+        peer_id: j.master_id.clone(), display_name: "j".into(), follow: None, ask: join_ask(&server_id, 1, &tag_kp(j_m)),
+    }).unwrap();
+    legacy.owner_pin = None;
+    let json = serde_json::to_string(&legacy).unwrap();
+    let stage = |db: &str, pass: &str| {
+        let store = crate::storage::MessageStore::open(db, pass).unwrap();
+        store.save_server_state(&server_id, &json).unwrap();
+        store.insert_crdt_op(&add_j).unwrap();
+    };
+    // J holds the server and no group; the owner is online but not yet in its room.
+    let j = restart_node_with(&relay, j, j_m, j_d, stage).await;
+    assert!(
+        wait_until(20, async || j.live_server_state(&server_id).await.is_some_and(|s| s.anchor() == crate::crdt::server_state::Anchor::Legacy)).await,
+        "setup: J holds the Legacy server",
+    );
+    relay.start_wiretap();
+    relay.hold_roster_answers();
+    let o = restart_node_with(&relay, o, o_m, o_d, stage).await;
+    assert!(wait_until(10, async || relay.room_devices(&server_id).contains(&o.device_id)).await, "setup: the owner shows in the room");
+    let held_until = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    while std::time::Instant::now() < held_until {
+        assert!(t14_key_packages_from(&relay, &j.device_id).is_empty(), "J's KeyPackage went out before the relay's copy counted the owner's device");
+        sleep_ms(100).await;
+    }
+    assert!(relay.roster_checks_from(&j.device_id) > 0, "J asked the relay about the owner in the unlocked room");
+    relay.release_roster_answers();
+    expect_mls_leaf(&o, &server_id, &j.device_id, 40).await;
+    drop((o, j));
+}
+
+/// LOW-2: a keyless first-sight roster lands merged with the relay's copy without the
+/// copy's recovery key: the relay never picks the key of a roster we hold keyless.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn w4rc_a_keyless_first_sight_takes_no_key_from_the_relays_copy() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let now = super::roster_book::now_ms();
+    let mut owner = spawn_node_seeded(&relay, 241, 242, &[], Some(protected_roster(241, &[242], now - 60_000))).await;
+    let mut joiner = spawn_node_seeded(&relay, 243, 244, &[], Some(protected_roster(243, &[244], now - 60_000))).await;
+    let keyless = crate::identity::roster::Roster::legacy_for_test(&tag_kp(245), &[&tag_kp(246)]);
+    let mut x = spawn_node_seeded(&relay, 245, 246, &[], Some(keyless)).await;
+    let m = x.master_id.clone();
+    // Whoever holds M's master key and a phrase showed the relay a keyed roster.
+    relay.show_roster(&x.device_id, &m, protected_roster(245, &[246], now - 60_000));
+    let sid = create_server_and_wait(&mut owner, "Keyless").await;
+    join_and_wait(&mut joiner, &sid).await;
+    expect_mls_leaf(&owner, &sid, &joiner.device_id, 30).await;
+    join_and_wait(&mut x, &sid).await;
+    expect_mls_leaf(&owner, &sid, &x.device_id, 30).await;
+    let held = || joiner.store().load_roster(&m).ok().flatten();
+    assert!(wait_until(20, async || held().is_some()).await, "the joiner holds M's roster");
+    assert!(relay.roster_checks_from(&joiner.device_id) > 0, "setup: the joiner asked the relay");
+    sleep_ms(1_000).await; // NOTE1_000 absence: no later answer adds the key
+    assert!(held().is_some_and(|r| r.r_pub.is_empty()), "the relay's copy picked the recovery key of a keyless first sight");
+    drop((owner, x, joiner));
 }

@@ -29,6 +29,8 @@ struct RosterBook {
         std::unordered_map<std::string, int64_t> seen_ms;  // seen_key(base, device) -> first seen
         // Server authority over the held statements (no clock), until the roster changes.
         mutable std::optional<roster::Authority> authority;
+        // The roster as JSON for a `roster_check` answer, until the roster changes.
+        mutable std::optional<std::string> dumped;
     };
 
     static std::string seen_key(const std::string& base, const std::string& device) { return base + "|" + device; }
@@ -80,6 +82,12 @@ struct RosterBook {
         return *h.authority;
     }
 
+    // The held statements as a `roster_check` answer carries them, dumped once per change.
+    const std::string& dump(const Held& h) const {
+        if (!h.dumped) h.dumped = roster::to_json(h.roster).dump();
+        return *h.dumped;
+    }
+
     // Fold `shown` (as parsed, unverified) into the record for `master` and judge
     // `device`. A roster for another master, or one past any ceiling, changes nothing
     // and counts nobody. The record is charged to `share` when `device` turns out a
@@ -114,7 +122,10 @@ struct RosterBook {
         held.seen_ms = std::move(seen);
         out.state = fold(held, now_ms, c);
         out.member = out.state.is_member(device);
-        if (out.changed) held.authority.reset();
+        if (out.changed) {
+            held.authority.reset();
+            held.dumped.reset();
+        }
 
         const size_t weight = record_bytes(master, held);
         records[master] = std::move(held);

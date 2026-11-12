@@ -2294,38 +2294,74 @@ pub(crate) fn walk_leaf_ask(
     local_master: &str,
     minted: Option<Vec<u8>>,
 ) -> bool {
+    use super::roster_check::Confirm;
     let view = walk_view(server, ws_room_peers);
-    let Some((target, restart)) = leaf_ask_target_in(mls, server, server_id, local_master, ws_room_peers, &view) else { return false };
     let legacy = server.anchor() == crate::crdt::server_state::Anchor::Legacy;
-    if restart && !legacy && !mls.lead.walk_may_restart(server_id) {
-        return false;
-    }
-    let devices = if legacy { online_devices_for(ws_room_peers, &target) } else { view.devices(&target, ws_room_peers) };
-    if devices.is_empty() {
-        return false;
-    }
-    let kept = if legacy || restart { None } else { mls.lead.walk_package(server_id) };
-    let kp_bytes = match kept.or(minted) {
-        Some(kp) => kp,
-        None => match mint_group_key_package(mls, crypto_store, server_id, false) {
-            Ok(kp) => kp,
-            Err(e) => { hollow_log!("[HOLLOW-MLS] server-group KP gen failed: {e}"); return false; }
-        },
+    let span = super::standing::membership_span(server, local_master);
+    let mut minted = minted;
+    // A package minted for our join waits for the walk rather than being dropped.
+    let park = |minted: &mut Option<Vec<u8>>| {
+        if let Some(kp) = minted.take().filter(|_| !legacy) {
+            mls.lead.keep_walk_package(server_id, kp, span);
+        }
     };
-    let msg = HavenMessage::MlsKeyPackage {
-        server_id: server_id.to_string(),
-        key_package: base64::engine::general_purpose::STANDARD.encode(&kp_bytes),
-        channel_id: None,
-    };
-    let reached: Vec<String> = devices.into_iter().filter(|dev| carry_key_package(ws_cmd_tx, ws_room_peers, dev, &msg)).collect();
-    if reached.is_empty() {
-        return false;
+    // A target the relay's copy does not confirm counts as asked and the next one is
+    // tried, within one pass.
+    for _ in 0..=server.members.len() {
+        let Some((target, restart)) = leaf_ask_target_in(mls, server, server_id, local_master, ws_room_peers, &view) else {
+            park(&mut minted);
+            return false;
+        };
+        let devices = if legacy { online_devices_for(ws_room_peers, &target) } else { view.devices(&target, ws_room_peers) };
+        if devices.is_empty() {
+            park(&mut minted);
+            return false;
+        }
+        // Before the pass window and any mint, so a target we wait on spends neither.
+        let confirmed = match super::roster_check::confirm(ws_cmd_tx, ws_room_peers, server_id, &target, &devices) {
+            Confirm::Wait => {
+                park(&mut minted);
+                return false;
+            }
+            Confirm::Skip => Vec::new(),
+            Confirm::Ready => devices.into_iter().filter(|d| relay_confirmed(server_id, d)).collect(),
+        };
+        if confirmed.is_empty() {
+            park(&mut minted);
+            if legacy || restart {
+                return false;
+            }
+            mls.lead.skip_walk_target(server_id, &target, span);
+            continue;
+        }
+        if restart && !legacy && !mls.lead.walk_may_restart(server_id) {
+            park(&mut minted);
+            return false;
+        }
+        let kept = if legacy || restart { None } else { mls.lead.walk_package(server_id) };
+        let kp_bytes = match kept.or(minted.take()) {
+            Some(kp) => kp,
+            None => match mint_group_key_package(mls, crypto_store, server_id, false) {
+                Ok(kp) => kp,
+                Err(e) => { hollow_log!("[HOLLOW-MLS] server-group KP gen failed: {e}"); return false; }
+            },
+        };
+        let msg = HavenMessage::MlsKeyPackage {
+            server_id: server_id.to_string(),
+            key_package: base64::engine::general_purpose::STANDARD.encode(&kp_bytes),
+            channel_id: None,
+        };
+        let reached: Vec<String> = confirmed.into_iter().filter(|dev| carry_key_package(ws_cmd_tx, ws_room_peers, dev, &msg)).collect();
+        if reached.is_empty() {
+            return false;
+        }
+        if !legacy {
+            mls.lead.note_walk_ask(server_id, &target, reached, kp_bytes, restart, span);
+        }
+        hollow_log!("[HOLLOW-MLS] Asked {target} for a leaf in {server_id}");
+        return true;
     }
-    if !legacy {
-        mls.lead.note_walk_ask(server_id, &target, reached, kp_bytes, restart, super::standing::membership_span(server, local_master));
-    }
-    hollow_log!("[HOLLOW-MLS] Asked {target} for a leaf in {server_id}");
-    true
+    false
 }
 
 /// Ask for a leaf in a server group we hold no copy of: our own siblings when the owner
@@ -3114,8 +3150,45 @@ pub(crate) fn carry_key_package(
     if send_room_for_peer(ws_room_peers, device).is_none() {
         return false;
     }
+    if let Some(server) = key_package_server(msg) {
+        match super::roster_check::gate(server, device) {
+            super::roster_check::Gate::Pass => {}
+            super::roster_check::Gate::Refuse => return false,
+            // On its way once the relay's copy counts the device; dropped otherwise.
+            super::roster_check::Gate::Hold => {
+                let master = want_judged(server, device);
+                super::roster_check::hold(server, &master, device, msg.clone());
+                return true;
+            }
+        }
+    }
     super::olm_lane::carry(ws_cmd_tx, device, None, msg, super::olm_lane::NoSession::Queue);
     true
+}
+
+/// Ask the relay about `device`'s identity for `server`; returns that identity.
+fn want_judged(server: &str, device: &str) -> String {
+    let master = super::resolver::resolve(device);
+    super::roster_check::want(server, &master, vec![device.to_string()]);
+    master
+}
+
+/// The server a KeyPackage is for; none for an ack, which carries no package.
+fn key_package_server(msg: &HavenMessage) -> Option<&str> {
+    match msg {
+        HavenMessage::MlsKeyPackage { server_id, .. } | HavenMessage::MlsKeyPackageForward { server_id, .. } => Some(server_id),
+        _ => None,
+    }
+}
+
+/// Whether the relay's copy of `device`'s roster, merged with ours, lets a KeyPackage
+/// for `server` reach it (design ROSTER-CHECK); one not yet judged is asked about.
+fn relay_confirmed(server: &str, device: &str) -> bool {
+    if super::roster_check::allows(server, device) {
+        return true;
+    }
+    want_judged(server, device);
+    false
 }
 
 /// [`carry_key_package`] to every online device of `identity` (a master or a device),
@@ -3126,7 +3199,10 @@ pub(crate) fn carry_key_package_to_identity(
     identity: &str,
     msg: &HavenMessage,
 ) -> usize {
-    key_package_devices(ws_room_peers, identity).iter().filter(|dev| carry_key_package(ws_cmd_tx, ws_room_peers, dev, msg)).count()
+    key_package_devices(ws_room_peers, identity, key_package_server(msg))
+        .iter()
+        .filter(|dev| carry_key_package(ws_cmd_tx, ws_room_peers, dev, msg))
+        .count()
 }
 
 /// The devices [`carry_key_package_to_identity`] sends to: checked before a mint, since
@@ -3134,12 +3210,16 @@ pub(crate) fn carry_key_package_to_identity(
 pub(crate) fn key_package_devices(
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     identity: &str,
+    server: Option<&str>,
 ) -> Vec<String> {
     let mut devices = online_devices_for(ws_room_peers, identity);
     if devices.is_empty() && ws_room_for_peer(ws_room_peers, identity).is_some() {
         devices.push(identity.to_string());
     }
-    devices.retain(|d| send_room_for_peer(ws_room_peers, d).is_some());
+    devices.retain(|d| {
+        send_room_for_peer(ws_room_peers, d).is_some()
+            && server.is_none_or(|s| super::roster_check::gate(s, d) != super::roster_check::Gate::Refuse)
+    });
     devices
 }
 
@@ -3533,7 +3613,7 @@ fn ask_repair_of_stale_leaves(
             .filter(|m| !lead.excludes(m) && holders.iter().any(|h| h == m))
             .collect();
         let Some(target) = next_stale_ask_target(authority, by_standing, &asked) else { continue };
-        if key_package_devices(ws_room_peers, &target).is_empty() {
+        if key_package_devices(ws_room_peers, &target, Some(&server_id)).is_empty() {
             continue;
         }
         let Ok(kp_bytes) = mint_group_key_package(mls_mgr, crypto_store, &group_key, false) else { continue };
@@ -7007,5 +7087,63 @@ mod standing_golden_tests {
         assert_eq!(ask(&["adm", "own"]).as_deref(), Some("mem"));
         assert_eq!(ask(&["adm", "own", "mem"]), None, "one pass per run");
         assert_eq!(next_stale_ask_target(None, order(), &[]).as_deref(), Some("own"), "no authority online");
+    }
+
+    /// Design ROSTER-CHECK MED-3: the one KeyPackage send path never hands a package to a
+    /// foreign device the relay's copy has not confirmed, for every caller. A device not
+    /// judged yet gets it once the answer counts it (a forward is sent once, so dropping
+    /// it would strand the joiner), never when the answer leaves it out.
+    #[test]
+    fn no_key_package_reaches_a_foreign_device_the_relay_has_not_confirmed() {
+        use crate::node::roster_check::{self, Placement};
+        let sid = "0123456789abcdef0123456789abcdef";
+        let dev = "12D3KooWRBy97UB99e3J6hiPesre1MZeuNQvfan4gBziswrRJsNK";
+        let rooms: HashMap<String, std::collections::HashSet<String>> = [(sid.to_string(), [dev.to_string()].into())].into();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let kp = HavenMessage::MlsKeyPackage { server_id: sid.into(), key_package: "AA==".into(), channel_id: Some("c".into()) };
+        let sent = |rx: &mut tokio::sync::mpsc::UnboundedReceiver<super::super::ws_client::WsCommand>| {
+            std::iter::from_fn(|| rx.try_recv().ok()).count()
+        };
+        roster_check::clear_for_test();
+        assert!(carry_key_package(&tx, &rooms, dev, &kp), "a relay that never said it checks: as before");
+        assert_eq!(sent(&mut rx), 1);
+        roster_check::set_relay(true, "us-master");
+        assert!(carry_key_package(&tx, &rooms, dev, &kp), "not judged yet: on its way once judged");
+        assert_eq!(sent(&mut rx), 0, "nothing reaches it before the answer");
+        assert!(roster_check::take_released().is_empty(), "still held");
+        assert_eq!(key_package_devices(&rooms, dev, Some(sid)), vec![dev.to_string()], "a device not judged yet is still a target");
+        roster_check::set_placement(sid, "them", Placement { counted: [dev.to_string()].into(), ..Placement::default() });
+        let released = roster_check::take_released();
+        assert_eq!(released.len(), 1, "the answer counts it: released");
+        assert!(carry_key_package(&tx, &rooms, &released[0].0, &released[0].1));
+        assert_eq!(sent(&mut rx), 1, "and it goes");
+        roster_check::set_placement(sid, dev, Placement::default());
+        assert!(!carry_key_package(&tx, &rooms, dev, &kp), "judged and not counted: never");
+        roster_check::set_placement(sid, "them", Placement { removed: [dev.to_string()].into(), ..Placement::default() });
+        assert!(!carry_key_package(&tx, &rooms, dev, &kp), "removed: never");
+        assert!(key_package_devices(&rooms, dev, Some(sid)).is_empty(), "and no target");
+        assert_eq!(sent(&mut rx), 0);
+        roster_check::clear_for_test();
+        roster_check::set_relay(true, "us-master");
+        assert!(carry_key_package(&tx, &rooms, dev, &kp));
+        roster_check::set_placement(sid, "them", Placement { removed: [dev.to_string()].into(), ..Placement::default() });
+        assert!(roster_check::take_released().is_empty(), "a held package the answer removes is dropped");
+        assert!(roster_check::take_released().is_empty(), "for good");
+        roster_check::clear_for_test();
+    }
+
+    /// rv-rostercheck (reviewer): `carry_key_package` is the one KeyPackage send path
+    /// the roster check gates; a KeyPackage paced through `frame_budget` never meets it.
+    #[test]
+    fn rv_every_key_package_send_passes_the_relay_gate() {
+        let src = include_str!("swarm.rs");
+        let mut bypass = Vec::new();
+        for (i, _) in src.match_indices("pace_carried_to_identity_of(") {
+            let tail = &src[i..(i + 600).min(src.len())];
+            if tail.contains("HavenMessage::MlsKeyPackage") {
+                bypass.push(src[..i].lines().count());
+            }
+        }
+        assert!(bypass.is_empty(), "KeyPackages sent around carry_key_package (roster_check::gate) at swarm.rs lines {bypass:?}");
     }
 }

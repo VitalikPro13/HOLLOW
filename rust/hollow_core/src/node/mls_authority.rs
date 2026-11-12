@@ -369,10 +369,60 @@ pub(crate) fn judge_welcome(
             .filter(|master| super::conference::hosts_meeting(conf_id, master, conf_nonce));
         return welcome_verdict(facts, &GroupRules::Meeting { host }, asked);
     }
-    match server_states.get(server_id) {
-        Some(state) => welcome_verdict(facts, &GroupRules::Server { state, channel }, asked),
-        None => Verdict::Hold("no state for this server yet".into()),
+    let Some(state) = server_states.get(server_id) else { return Verdict::Hold("no state for this server yet".into()) };
+    let ours = welcome_verdict(facts, &GroupRules::Server { state, channel }, asked);
+    if matches!(ours, Verdict::Refuse(_)) {
+        return ours;
     }
+    let placed = |leaf: &LeafIdentity| {
+        if !super::roster_check::applies(&leaf.master) {
+            return Some(super::roster_check::Placed::Ask);
+        }
+        super::roster_check::placed(server_id, &leaf.master, &leaf.device)
+    };
+    match relay_welcome_verdict(facts, &placed) {
+        Some(relay @ Verdict::Refuse(_)) => {
+            if let Some(sender) = facts.sender.bound() {
+                for leaf in facts.leaves.iter().filter_map(LeafView::bound).filter(|l| placed(l) == Some(super::roster_check::Placed::Removed)) {
+                    super::roster_check::note_refused_sender(&sender.device, &leaf.master);
+                }
+            }
+            relay
+        }
+        Some(hold) => {
+            if let Some(sender) = facts.sender.bound().filter(|s| placed(s).is_none()) {
+                super::roster_check::want(server_id, &sender.master, vec![sender.device.clone()]);
+            }
+            if matches!(ours, Verdict::Hold(_)) { ours } else { hold }
+        }
+        None => ours,
+    }
+}
+
+/// A server Welcome judged by the relay's copy of each identity's roster merged with
+/// ours (design ROSTER-CHECK), `placed` giving each leaf's judgement (`None` = not
+/// asked yet; own identity and relays without the check = `Ask`): a sender not
+/// confirmed waits, a leaf the merged authority removes is refused, a leaf whose
+/// identity's copy is under another recovery key waits. A refusal here forks nothing:
+/// a groupless receiver holds no group, and staging already spent the package.
+pub(crate) fn relay_welcome_verdict(
+    facts: &WelcomeFacts,
+    placed: &dyn Fn(&LeafIdentity) -> Option<super::roster_check::Placed>,
+) -> Option<Verdict> {
+    use super::roster_check::Placed;
+    let leaves: Vec<&LeafIdentity> = facts.leaves.iter().filter_map(LeafView::bound).collect();
+    if let Some(leaf) = leaves.iter().chain(facts.sender.bound().iter()).find(|l| placed(l) == Some(Placed::Removed)) {
+        return Some(Verdict::Refuse(format!("the relay's copy of {}'s roster removes {}", leaf.master, leaf.device)));
+    }
+    if let Some(sender) = facts.sender.bound()
+        && placed(sender) != Some(Placed::Ask)
+    {
+        return Some(Verdict::Hold(format!("the relay's copy of {}'s roster does not confirm sender {} yet", sender.master, sender.device)));
+    }
+    if let Some(leaf) = leaves.iter().find(|l| placed(l) == Some(Placed::Conflict)) {
+        return Some(Verdict::Hold(format!("the relay holds another recovery key for {}", leaf.master)));
+    }
+    None
 }
 
 /// [`commit_verdict`] for a group key, with the rules its server or meeting follows;
@@ -1280,5 +1330,49 @@ mod tests {
         crate::node::resolver::update_many("bob", ["bob-gone"]);
         assert_eq!(judged(&state, "bob-gone"), Verdict::Accept, "a roster we hold judges its own devices");
         crate::node::resolver::clear_all();
+    }
+
+    /// The Welcome gate sits on the path every server Welcome takes (`judge_welcome`).
+    #[test]
+    fn every_server_welcome_passes_the_relays_copy() {
+        use crate::node::roster_check::{self, Placement};
+        let state = server(&["owner", "alice", "bob"]);
+        let states: std::collections::HashMap<String, ServerState> = [(state.server_id.clone(), state.clone())].into();
+        let sid = state.server_id.clone();
+        let sender = leaf("bob-d", "bob");
+        let w = welcome(sender.clone(), vec![sender.clone(), leaf("alice-d", "alice")], false);
+        roster_check::clear_for_test();
+        roster_check::set_relay(true, "alice");
+        roster_check::set_placement(&sid, "bob", Placement { removed: ["bob-d".to_string()].into(), ..Placement::default() });
+        assert!(matches!(judge_welcome(&states, &sid, None, None, true, &w), Verdict::Refuse(_)), "the server group");
+        assert!(matches!(judge_welcome(&states, &sid, Some("general"), None, true, &w), Verdict::Refuse(_)), "a subgroup");
+        roster_check::clear_for_test();
+    }
+
+    #[test]
+    fn a_welcome_is_judged_by_the_relays_copy_of_each_identitys_roster() {
+        use crate::node::roster_check::Placed;
+        let sender = leaf("bob-d", "bob");
+        let other = leaf("carol-d", "carol");
+        let us = leaf("alice-d", "alice");
+        let w = welcome(sender.clone(), vec![sender.clone(), other.clone(), us.clone()], false);
+        let with = |s: Option<Placed>, o: Option<Placed>| {
+            move |l: &LeafIdentity| match l.master.as_str() {
+                "bob" => s,
+                "carol" => o,
+                _ => Some(Placed::Ask),
+            }
+        };
+        let v = |s, o| relay_welcome_verdict(&w, &with(s, o));
+        assert_eq!(v(Some(Placed::Ask), Some(Placed::Ask)), None, "confirmed everywhere: our own rules decide");
+        assert_eq!(v(Some(Placed::Ask), None), None, "a leaf nobody asked about yet is left to our rules");
+        assert_eq!(v(Some(Placed::Ask), Some(Placed::Skip)), None);
+        for unconfirmed in [None, Some(Placed::Skip), Some(Placed::Conflict)] {
+            assert!(matches!(v(unconfirmed, Some(Placed::Ask)), Some(Verdict::Hold(_))), "a sender not confirmed waits: {unconfirmed:?}");
+        }
+        assert!(matches!(v(Some(Placed::Removed), Some(Placed::Ask)), Some(Verdict::Refuse(_))), "a removed sender is refused");
+        assert!(matches!(v(Some(Placed::Ask), Some(Placed::Removed)), Some(Verdict::Refuse(_))), "any removed leaf is refused");
+        assert!(matches!(v(None, Some(Placed::Removed)), Some(Verdict::Refuse(_))), "a removal outranks a wait");
+        assert!(matches!(v(Some(Placed::Ask), Some(Placed::Conflict)), Some(Verdict::Hold(_))), "a key conflict waits, never refuses");
     }
 }

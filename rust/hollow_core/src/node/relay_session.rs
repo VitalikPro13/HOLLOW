@@ -259,6 +259,9 @@ pub(crate) enum AuthReply {
         /// The relay's breaker closes sockets (else it only counts): the pacer waits only then.
         #[serde(default)]
         enforced: bool,
+        /// The relay answers `roster_check` (design ROSTER-CHECK).
+        #[serde(default)]
+        roster_check: bool,
     },
     Resumed {
         h: u64,
@@ -268,6 +271,8 @@ pub(crate) enum AuthReply {
         reprove: bool,
         #[serde(default)]
         enforced: bool,
+        #[serde(default)]
+        roster_check: bool,
     },
     AuthFailed {
         #[serde(default)]
@@ -282,6 +287,12 @@ impl AuthReply {
     /// A challenge advertising sessions carries exactly the number 1.
     pub(crate) fn offers_sessions(&self) -> bool {
         matches!(self, Self::AuthChallenge { session: Some(v), .. } if v.as_u64() == Some(1))
+    }
+
+    /// Whether a login or resume says the relay answers `roster_check`; told on both, since
+    /// a restart can bring up a relay with or without it under a resumed session.
+    pub(crate) fn answers_roster_check(&self) -> bool {
+        matches!(self, Self::AuthOk { roster_check: true, .. } | Self::Resumed { roster_check: true, .. })
     }
 
     /// The relay's clock a challenge carries, absent from a relay older than 0.12.1.
@@ -307,14 +318,14 @@ pub(crate) enum Established {
 pub(crate) fn judge(ask: &Ask, held: bool, reply: AuthReply) -> Result<Established, String> {
     match (ask, reply) {
         (_, AuthReply::AuthFailed { error, .. }) => Err(error),
-        (Ask::Resume { .. }, AuthReply::Resumed { h, gap, reprove, enforced }) => {
+        (Ask::Resume { .. }, AuthReply::Resumed { h, gap, reprove, enforced, .. }) => {
             Ok(Established::Resumed { h, gap, reprove, enforced })
         }
         (_, AuthReply::Resumed { .. }) => Err("the relay resumed a session nobody asked for".to_string()),
         (Ask::V2, AuthReply::AuthOk { credit, enforced, .. }) => {
             Ok(Established::Fresh { sid: None, lost: held, credit, enforced })
         }
-        (_, AuthReply::AuthOk { sid, resume_failed, credit, enforced }) => Ok(Established::Fresh {
+        (_, AuthReply::AuthOk { sid, resume_failed, credit, enforced, .. }) => Ok(Established::Fresh {
             sid: sid.filter(|s| is_sid_shape(s)),
             lost: held || resume_failed.is_some(),
             credit,
@@ -986,6 +997,18 @@ mod tests {
         assert!(!offers(&format!(r#"{{"type":"auth_challenge","nonce":"{nonce}","session":0}}"#)));
         assert!(!offers(&format!(r#"{{"type":"auth_challenge","nonce":"{nonce}","session":"1"}}"#)));
         assert!(!offers(r#"{"type":"auth_ok","sid":"00112233445566778899aabbccddeeff"}"#));
+    }
+
+    /// Design ROSTER-CHECK MED-1: the capability comes from every login AND resume, so a
+    /// resume onto a relay a restart replaced without the check stops the asking.
+    #[test]
+    fn the_roster_check_is_told_on_every_login_and_resume() {
+        let says = |t: &str| serde_json::from_str::<AuthReply>(t).unwrap().answers_roster_check();
+        assert!(says(r#"{"type":"auth_ok","sid":"00112233445566778899aabbccddeeff","roster_check":true}"#));
+        assert!(says(r#"{"type":"resumed","h":3,"roster_check":true}"#));
+        assert!(!says(r#"{"type":"resumed","h":3}"#), "a resume onto a relay without it");
+        assert!(!says(r#"{"type":"auth_ok","sid":"00112233445566778899aabbccddeeff"}"#));
+        assert!(!says(r#"{"type":"auth_failed","error":"x","roster_check":true}"#));
     }
 
     /// The breaker's numbers in the answers: `enforced` only from a relay that says so

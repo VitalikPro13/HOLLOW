@@ -48,6 +48,9 @@ inline constexpr int64_t DH_W = 4;
 inline constexpr int64_t IDS_PER_W = 32;
 inline constexpr int64_t RESUME_W_PER_ROOM = 4;
 inline constexpr int64_t CHECK_PEERS_SCAN_W = 2048;
+// A roster_check: the lookup and the fold, then 1 W per KiB of the largest answer
+// (roster::MAX_ROSTER_BYTES), so a small request never buys a big reply cheaply.
+inline constexpr int64_t ROSTER_CHECK_W = 2 + 256;
 // Deposits to strangers are counted per payer over a sliding window of this many minutes.
 inline constexpr int64_t DISTINCT_MINUTES = 10;
 // All payers' stranger trackers together (StrangerBook): about 3,000 that sketch, or

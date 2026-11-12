@@ -7021,6 +7021,7 @@ static void test_denylist() {
 }
 
 #include "live_t14_relay.inc"
+#include "live_rostercheck.inc"
 
 int main(int argc, char** argv) {
     if (argc != 3) {
@@ -7118,6 +7119,13 @@ int main(int argc, char** argv) {
         test_hidden_sender_reach();
         test_hidden_sender_reaches_away_provers();
         test_guest_text_msg_counts_against_the_minute();
+        SSL_CTX_free(g_ctx);
+        if (failures) printf("%d FAILED\n", failures);
+        return failures ? 1 : 0;
+    }
+    // =rostercheck: the roster_check query (design ROSTER-CHECK).
+    if (only && std::string(only) == "rostercheck") {
+        rostercheck_live();
         SSL_CTX_free(g_ctx);
         if (failures) printf("%d FAILED\n", failures);
         return failures ? 1 : 0;
@@ -7298,6 +7306,7 @@ int main(int argc, char** argv) {
         test_rate_limit_idle_address();
         presence_inbox_visibility_both_ways();
         presence_short_answer();
+        rostercheck_live();
     }
     if (!bounds_only) {
         test_session_logins();

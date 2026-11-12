@@ -27,6 +27,7 @@ pub(crate) const HOLD_FOR: Duration = Duration::from_secs(600);
 
 /// The asker's card as its ask carried it: the avatar its hash signs, if any, and the
 /// latest stamp the ask's frame allows.
+#[derive(Debug)]
 pub(crate) struct HeldCard {
     pub card: SignedCard,
     pub avatar: Option<Vec<u8>>,

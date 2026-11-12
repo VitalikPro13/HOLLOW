@@ -1497,6 +1497,12 @@ async fn run_event_loop(
     // never expires mid-call. A fresh set also arrives on every Connected, so this
     // only matters for continuously-connected sessions.
     let mut turn_refresh_timer = tokio::time::interval(Duration::from_secs(50 * 60));
+    // The relay is shown our roster again now and then, so a record its budget evicted
+    // while we stayed connected comes back (design ROSTER-CHECK, LOW-6).
+    super::roster_check::reset_for_loop();
+    let mut roster_show_timer = tokio::time::interval(Duration::from_secs(30 * 60 + super::roster_check::random_u64() % 300));
+    roster_show_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    roster_show_timer.tick().await;
     turn_refresh_timer.tick().await; // consume immediate first tick
 
     // -- Performance sentinels (quiet by default; see src/sentinel.rs) --
@@ -1515,6 +1521,32 @@ async fn run_event_loop(
         if bare_presence.stale() {
             let audited = audited_rooms(&server_states, active_room.as_deref());
             Box::pin(settle_bare_presence(&mut bare_presence, &mut ws_room_peers, &mut synced_peers, &event_tx, &ws_cmd_tx, audited)).await;
+        }
+        if super::roster_check::has_work() {
+            super::roster_check::drain(&ws_cmd_tx, &ws_room_peers);
+            for (staged, copy) in super::roster_check::take_ready_staged() {
+                if copy.is_none() {
+                    hollow_log!("[HOLLOW-SECURITY] No relay answer for {}'s roster in time: it lands as delivered", staged.roster.master);
+                }
+                let outcome = Box::pin(land_staged(
+                    &event_tx, &ws_cmd_tx, &local_peer_str, &device_peer_id, staged, copy, &mut crdt_resync,
+                    &server_states, &db_path, &db_passphrase,
+                )).await;
+                enforce_device_revocations(
+                    &outcome.newly_revoked, &mut olm, &crypto_store, mls.as_ref(), &server_states,
+                    &local_peer_str, &ws_room_peers, &mut pending_mls_removals,
+                );
+            }
+            for (device, msg) in super::roster_check::take_released() {
+                super::crypto_handler::carry_key_package(&ws_cmd_tx, &ws_room_peers, &device, &msg);
+            }
+            for (device, roster) in super::roster_check::take_notices() {
+                if let Some(room) = super::crypto_handler::send_room_for_peer(&ws_room_peers, &device) {
+                    hollow_log!("[HOLLOW-ROSTER] Handing {device} the relay's copy of {}'s roster that removes it", roster.master);
+                    super::crypto_handler::send_message_to_peer_in_room(&ws_cmd_tx, &room, &device, HavenMessage::RosterNotice { roster });
+                }
+            }
+            super::roster_check::settle();
         }
         // A device its roster just stopped counting loses its seat in our meetings now.
         if seat_watch.moved()
@@ -1540,19 +1572,24 @@ async fn run_event_loop(
                 lock_keeper.watch(&room, &owner, &ws_cmd_tx);
             }
         }
-        // Join asks held until we knew what we missed, judged like any other ask.
-        if join_hold.holds_any() {
+        // Join asks held until we knew what we missed, judged like any other ask, and
+        // profiles whose first-sight roster waited for the relay's copy.
+        let replays = super::roster_check::take_replays();
+        if join_hold.holds_any() || !replays.is_empty() {
             let started = std::time::Instant::now();
-            let due = {
+            let mut due: Vec<(bool, String, HavenMessage, i64)> = if join_hold.holds_any() {
                 let visible = |sid: &str| super::join_hold::visible_members(sid, &server_states, &ws_room_peers);
-                join_hold.due(&visible, &server_states)
+                join_hold.due(&visible, &server_states).into_iter().map(|a| (a.old_link, a.from, a.msg, a.frame_ts)).collect()
+            } else {
+                Vec::new()
             };
-            for ask in due {
+            due.extend(replays.into_iter().map(|(from, msg, frame_ts)| (false, from, msg, frame_ts)));
+            for (old_link, from, msg, frame_ts) in due {
                 #[cfg(all(feature = "forwarder", not(any(target_os = "android", target_os = "ios"))))]
                 let fwd_bridge: FwdBridge = (&mut embedded_fwd, &cmd_tx);
                 #[cfg(not(all(feature = "forwarder", not(any(target_os = "android", target_os = "ios")))))]
                 let fwd_bridge: FwdBridge = std::marker::PhantomData;
-                super::join_verdict::OLD_LINK.scope(ask.old_link, handle_incoming_request(
+                super::join_verdict::OLD_LINK.scope(old_link, handle_incoming_request(
                     &mut olm, &crypto_store, &crdt_store, &mut crdt_resync, &event_tx,
                     &mut pending_messages, &mut frame_budget, &mut key_request_in_flight,
                     &mut server_states, &bundle_keypair,
@@ -1590,7 +1627,7 @@ async fn run_event_loop(
                     &guest_rooms,
                     &subscribed_channels,
                     &db_path, &db_passphrase,
-                    &local_peer_str, &ask.from, is_invisible,
+                    &local_peer_str, &from, is_invisible,
                     &mut pending_friend_accepts, &mut pending_friend_requests,
                     &mut pending_friend_removals,
                     &mut answer_resent,
@@ -1602,8 +1639,8 @@ async fn run_event_loop(
                     &mut declined_file_ids,
                     &mut peer_auto_dl,
                     fwd_bridge,
-                    ask.msg,
-                    ask.frame_ts,
+                    msg,
+                    frame_ts,
                     &mut None,
                 ))
                 .await;
@@ -4597,18 +4634,21 @@ async fn run_event_loop(
                                                 } else if !mls_bootstrap_requested.get(sid).is_some_and(|t| t.elapsed() < MLS_BOOTSTRAP_TIMEOUT) {
                                                     // We're a member but lost our MLS group — send
                                                     // KeyPackage to this peer for re-bootstrap.
-                                                    hollow_log!("[HOLLOW-MLS] No group for {sid}, sending KeyPackage to {peer_id} for bootstrap (PeerJoined)");
-                                                    if let Ok(kp_bytes) = crate::node::crypto_handler::mint_group_key_package(mls_mgr, &crypto_store, sid, false) {
-                                                        let kp_b64 = base64::engine::general_purpose::STANDARD.encode(&kp_bytes);
-                                                        super::frame_budget::pace_carried_to_identity_of(
-                                                            &mut frame_budget, &ws_cmd_tx, &ws_room_peers, &device_peer_id,
-                                                            &peer_id, &HavenMessage::MlsKeyPackage {
-                                                                server_id: sid.clone(),
-                                                                key_package: kp_b64,
-                                                                channel_id: None,
-                                                            },
-                                                        );
-                                                        mls_bootstrap_requested.insert(sid.clone(), std::time::Instant::now());
+                                                    // Through the KeyPackage gate (design ROSTER-CHECK), minted
+                                                    // only when a device of it may take one.
+                                                    if !crate::node::crypto_handler::key_package_devices(&ws_room_peers, &peer_id, Some(sid)).is_empty() {
+                                                        hollow_log!("[HOLLOW-MLS] No group for {sid}, sending KeyPackage to {peer_id} for bootstrap (PeerJoined)");
+                                                        if let Ok(kp_bytes) = crate::node::crypto_handler::mint_group_key_package(mls_mgr, &crypto_store, sid, false) {
+                                                            let kp_b64 = base64::engine::general_purpose::STANDARD.encode(&kp_bytes);
+                                                            crate::node::crypto_handler::carry_key_package_to_identity(
+                                                                &ws_cmd_tx, &ws_room_peers, &peer_id, &HavenMessage::MlsKeyPackage {
+                                                                    server_id: sid.clone(),
+                                                                    key_package: kp_b64,
+                                                                    channel_id: None,
+                                                                },
+                                                            );
+                                                            mls_bootstrap_requested.insert(sid.clone(), std::time::Instant::now());
+                                                        }
                                                     }
                                                 }
                                             }
@@ -5185,12 +5225,16 @@ async fn run_event_loop(
                                                 }
                                                 continue;
                                             }
+                                            // Through the KeyPackage gate (design ROSTER-CHECK), minted only
+                                            // when a device of it may take one.
+                                            if crate::node::crypto_handler::key_package_devices(&ws_room_peers, pid_str, Some(sid)).is_empty() {
+                                                continue;
+                                            }
                                             hollow_log!("[HOLLOW-MLS] No group for {sid}, sending KeyPackage to {pid_str} for bootstrap (RoomMembers)");
                                             if let Ok(kp_bytes) = crate::node::crypto_handler::mint_group_key_package(mls_mgr, &crypto_store, sid, false) {
                                                 let kp_b64 = base64::engine::general_purpose::STANDARD.encode(&kp_bytes);
-                                                super::frame_budget::pace_carried_to_identity_of(
-                                                    &mut frame_budget, &ws_cmd_tx, &ws_room_peers, &device_peer_id,
-                                                    pid_str, &HavenMessage::MlsKeyPackage {
+                                                crate::node::crypto_handler::carry_key_package_to_identity(
+                                                    &ws_cmd_tx, &ws_room_peers, pid_str, &HavenMessage::MlsKeyPackage {
                                                         server_id: sid.clone(),
                                                         key_package: kp_b64,
                                                         channel_id: None,
@@ -5417,6 +5461,76 @@ async fn run_event_loop(
                     }
                     WsEvent::TopicCatchupDone { room, channel } => {
                         join_hold.ring_ended(&room, &channel);
+                    }
+                    WsEvent::RelayRosterCheck { answers } => {
+                        super::roster_check::set_relay(answers, &local_peer_str);
+                        if !answers {
+                            hollow_log!("[HOLLOW-SECURITY] This relay answers no roster check: co-members' devices are judged by the rosters we hold alone");
+                        }
+                    }
+                    WsEvent::RosterChecked { room, master, device, n, roster } => {
+                        let Some(copy) = super::roster_check::take_answer(&room, &master, &device, &n, roster) else {
+                            hollow_log!("[HOLLOW-SECURITY] Dropped a roster check answer for {master}: we asked for none like it");
+                            continue;
+                        };
+                        hollow_log!("[HOLLOW-ROSTER] The relay's copy of {master}'s roster: {}", if copy.is_some() { "held" } else { "none" });
+                        // A first sight lands first, merged with the copy; then the copy is
+                        // judged against what we hold, before it is merged into a held
+                        // roster, so it never picks the key of one we hold keyless.
+                        if let Some(staged) = super::roster_check::take_staged_for_answer(&master, &device, copy.is_some()) {
+                            let outcome = Box::pin(land_staged(
+                                &event_tx, &ws_cmd_tx, &local_peer_str, &device_peer_id, staged, Some(copy.clone()),
+                                &mut crdt_resync, &server_states, &db_path, &db_passphrase,
+                            )).await;
+                            enforce_device_revocations(
+                                &outcome.newly_revoked, &mut olm, &crypto_store, mls.as_ref(), &server_states,
+                                &local_peer_str, &ws_room_peers, &mut pending_mls_removals,
+                            );
+                        }
+                        let naming: Vec<String> = server_states.iter()
+                            .filter(|(_, s)| super::roster_book::server_names_master(s, &master))
+                            .map(|(sid, _)| sid.clone())
+                            .collect();
+                        // A null answer judges only the device it named (`roster_check::take_answer`).
+                        if let Some(copy) = copy {
+                            if let Ok(store) = crate::storage::MessageStore::lease(&db_path, &db_passphrase) {
+                                for sid in &naming {
+                                    if let Some(state) = server_states.get(sid) {
+                                        let placement = super::authority_view::relay_placement(&store, &db_path, state, &master, Some(&copy));
+                                        super::roster_check::set_placement(sid, &master, placement);
+                                    }
+                                }
+                            }
+                            let outcome = Box::pin(super::roster_book::ingest_relay(
+                                &event_tx, &ws_cmd_tx, &local_peer_str, &device_peer_id, copy, &db_path, &db_passphrase,
+                            )).await;
+                            if outcome.changed {
+                                crdt_resync.floor.reset_shells_of_owner(&server_states, &master, std::time::Instant::now());
+                            }
+                            enforce_device_revocations(
+                                &outcome.newly_revoked, &mut olm, &crypto_store, mls.as_ref(), &server_states,
+                                &local_peer_str, &ws_room_peers, &mut pending_mls_removals,
+                            );
+                        }
+                        // A walk parked on this identity goes on now, not at the next tick.
+                        // Only one the tick would run now: an ask in flight keeps its target,
+                        // or any answer about anyone would step the walk.
+                        if let Some(mls_mgr) = mls.as_mut() {
+                            for sid in &naming {
+                                let Some(state) = server_states.get(sid) else { continue };
+                                let leafless = state.members.contains_key(&local_peer_str)
+                                    && mls_mgr.seat(sid) == crate::crypto::Seat::Missing
+                                    && !pending_server_joins.contains_key(sid)
+                                    && !mls_welcome_grace.contains_key(sid)
+                                    && leaf_ask_due(mls_mgr, &mls_bootstrap_requested, sid);
+                                if leafless && crate::node::crypto_handler::request_server_leaf(
+                                    mls_mgr, &crypto_store, &ws_cmd_tx, &ws_room_peers, state, sid,
+                                    &local_peer_str, &device_peer_id,
+                                ) {
+                                    mls_bootstrap_requested.insert(sid.clone(), std::time::Instant::now());
+                                }
+                            }
+                        }
                     }
                     WsEvent::LockChain { server, links, put } => {
                         // A server we are in: keep the relay's chain where ours is. During a
@@ -6309,8 +6423,7 @@ async fn run_event_loop(
                                 && mls_mgr.seat(sid) == crate::crypto::Seat::Missing
                                 && !pending_server_joins.contains_key(*sid)
                                 && !mls_welcome_grace.contains_key(*sid)
-                                && (mls_bootstrap_requested.get(*sid).is_none_or(|t| t.elapsed() >= MLS_BOOTSTRAP_TIMEOUT)
-                                    || mls_mgr.lead.walk_step_due(sid))
+                                && leaf_ask_due(mls_mgr, &mls_bootstrap_requested, sid)
                         })
                         .map(|(sid, _)| sid.clone())
                         .collect();
@@ -7410,6 +7523,11 @@ async fn run_event_loop(
                 let _ = ws_cmd_tx.send(super::ws_client::WsCommand::GetTurnCredentials);
             }
 
+            _ = roster_show_timer.tick() => {
+                arm_started = Some(("timer", "roster_show", std::time::Instant::now()));
+                super::roster_book::show_relay(&ws_cmd_tx, &local_peer_str, &db_path, &db_passphrase);
+            }
+
             // -- MLS state debounce (2s) --
             // RECEIVE-path only: a regressed receive ratchet can ratchet forward again
             // after a crash, so deferring its persistence is safe. Send-path encrypts
@@ -7797,20 +7915,37 @@ async fn land_admitted_join_asks(
     });
     for held in landed {
         let roster = held.roster.clone();
+        let Some(card) =
+            super::roster_book::held_for_relay(&held.sender, &roster, held.card, local_peer_str, server_states, db_path, db_passphrase)
+        else {
+            continue;
+        };
         let outcome = super::roster_book::ingest(
             event_tx, ws_cmd_tx, local_peer_str, device_peer_id, &held.sender, Some(held.roster), db_path, db_passphrase,
         ).await;
         enforce_device_revocations(
             &outcome.newly_revoked, olm, crypto_store, mls, server_states, local_peer_str, ws_room_peers, pending_mls_removals,
         );
-        if super::roster_book::carried_master(&roster, &held.sender).is_none() {
-            continue;
-        }
-        if let Some(c) = held.card
-            && super::profile_card::store_card(&c.card, c.avatar.as_deref(), c.ceiling, db_path, db_passphrase)
-        {
-            let _ = event_tx.send(NetworkEvent::ProfileUpdated { peer_id: c.card.master.clone() }).await;
-        }
+        land_held_card(event_tx, &roster, &held.sender, card, db_path, db_passphrase).await;
+    }
+}
+
+/// A join ask's card, stored once the ask's roster places the device that carried it.
+async fn land_held_card(
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    roster: &crate::identity::roster::Roster,
+    sender: &str,
+    card: Option<super::join_stash::HeldCard>,
+    db_path: &str,
+    db_passphrase: &str,
+) {
+    if super::roster_book::carried_master(roster, sender).is_none() {
+        return;
+    }
+    if let Some(c) = card
+        && super::profile_card::store_card(&c.card, c.avatar.as_deref(), c.ceiling, db_path, db_passphrase)
+    {
+        let _ = event_tx.send(NetworkEvent::ProfileUpdated { peer_id: c.card.master.clone() }).await;
     }
 }
 
@@ -7836,6 +7971,60 @@ fn note_union_members(crdt_resync: &mut super::crdt_resync::CrdtResync, server_i
     let contacts = super::union_list::contacts(store);
     let members = crdt_resync.union.sources(server_id, &|m| contacts.contains(m), local_master);
     crdt_resync.witness.note_members(server_id, members);
+}
+
+/// Whether a leafless server's leaf ask may go out now: no ask in the last
+/// [`MLS_BOOTSTRAP_TIMEOUT`], or the walk's target let it step on.
+fn leaf_ask_due(mls_mgr: &crate::crypto::MlsManager, requested: &HashMap<String, std::time::Instant>, server_id: &str) -> bool {
+    requested.get(server_id).is_none_or(|t| t.elapsed() >= MLS_BOOTSTRAP_TIMEOUT) || mls_mgr.lead.walk_step_due(server_id)
+}
+
+/// Land a first-sight roster held for the relay's copy (design ROSTER-CHECK): merged
+/// with the copy under the staged roster's own key (a keyless one takes no key from it),
+/// or alone when none came; delivered by the first deliverer the result still counts. A
+/// copy under another key lands nothing: one of the two was fooled. What rode in lands
+/// after it: a profile frame is handled again, a join ask's card is stored. Returns what
+/// the ingest changed, for the caller to enforce.
+#[allow(clippy::too_many_arguments)]
+async fn land_staged(
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    local_master: &str,
+    local_device: &str,
+    staged: super::roster_check::Staged,
+    copy: Option<Option<crate::identity::roster::Roster>>,
+    crdt_resync: &mut super::crdt_resync::CrdtResync,
+    server_states: &HashMap<String, ServerState>,
+    db_path: &str,
+    db_passphrase: &str,
+) -> super::roster_book::Ingested {
+    let roster = staged.roster.verified(super::types::now_ms());
+    let master = roster.master.clone();
+    let roster = match copy.flatten() {
+        Some(relay) if !roster.r_pub.is_empty() && !relay.r_pub.is_empty() && relay.r_pub != roster.r_pub => {
+            hollow_log!("[HOLLOW-SECURITY] Dropped a first roster for {master}: the relay holds another recovery key for it");
+            return super::roster_book::Ingested::default();
+        }
+        Some(relay) if roster.r_pub.is_empty() => roster.merged(&super::roster_book::keyless(&relay)),
+        Some(relay) => roster.merged(&relay),
+        None => roster,
+    };
+    let members = roster.fold(|_| None, super::types::now_ms()).members;
+    let Some(sender) = staged.landing_deliverer(&members) else {
+        hollow_log!("[HOLLOW-SECURITY] Dropped a first roster for {master}: the relay's copy removes every device that delivered it");
+        return super::roster_book::Ingested::default();
+    };
+    let outcome = super::roster_book::ingest(
+        event_tx, ws_cmd_tx, local_master, local_device, &sender, Some(roster.clone()), db_path, db_passphrase,
+    ).await;
+    if outcome.changed {
+        crdt_resync.floor.reset_shells_of_owner(server_states, &master, std::time::Instant::now());
+    }
+    let held = super::roster_book::holds(&master, db_path, db_passphrase);
+    for (from, card) in super::roster_check::after_landing(&master, staged.riders, held, &members) {
+        land_held_card(event_tx, &roster, &from, card, db_path, db_passphrase).await;
+    }
+    outcome
 }
 
 /// Enforce device revocations just learned from an ingested device list. For
@@ -13420,7 +13609,7 @@ async fn handle_incoming_request_inner(
                                     showcase_assets_b64, showcase_assets_hash, avatar_frame,
                                     avatar_anim, banner_anim, support_creds,
                                     support_creds_sig, profile_sig, profile_pk, stream_overlay,
-                                    super::frame_auth::stamp_ceiling(frame_ts_ms),
+                                    super::frame_auth::stamp_ceiling(frame_ts_ms), (card.as_deref(), frame_ts_ms),
                                     db_path, db_passphrase,
                                 ).await else {
                                     return;
@@ -15683,8 +15872,19 @@ async fn handle_incoming_request_inner(
             // signature needs it: it verifies against `resolve(sender)`, and this ingest
             // is what teaches the resolver device-to-master. The profile FIELDS are
             // still refused without a valid signature, downstream.
+            let replay = || HavenMessage::ProfileUpdate {
+                display_name: display_name.clone(), status: status.clone(), about_me: about_me.clone(), updated_at,
+                avatar_b64: avatar_b64.clone(), banner_b64: banner_b64.clone(), is_invisible: peer_invisible,
+                twitch_username: twitch_username.clone(), device_list: device_list.clone(),
+                avatar_hash: avatar_hash.clone(), banner_hash: banner_hash.clone(), showcase_board: showcase_board.clone(),
+                showcase_assets_b64: showcase_assets_b64.clone(), showcase_assets_hash: showcase_assets_hash.clone(),
+                avatar_frame: avatar_frame.clone(), avatar_anim: avatar_anim.clone(), banner_anim: banner_anim.clone(),
+                support_creds: support_creds.clone(), support_creds_sig: support_creds_sig.clone(),
+                profile_sig: profile_sig.clone(), profile_pk: profile_pk.clone(), card: card.clone(),
+                stream_overlay: stream_overlay.clone(),
+            };
             if !super::roster_book::admit_profile_roster(
-                peer_str, device_list.as_ref(), master_peer_str, server_states, db_path, db_passphrase,
+                peer_str, device_list.as_ref(), master_peer_str, server_states, db_path, db_passphrase, replay, frame_ts_ms,
             ) {
                 return;
             }
@@ -16392,8 +16592,9 @@ async fn handle_incoming_request_inner(
 
         HavenMessage::ProfileCard { card, avatar_b64, device_list } => {
             // The roster first: it is what binds the sending device to the card's master.
+            let replay = || HavenMessage::ProfileCard { card: card.clone(), avatar_b64: avatar_b64.clone(), device_list: device_list.clone() };
             if !super::roster_book::admit_profile_roster(
-                peer_str, device_list.as_ref(), master_peer_str, server_states, db_path, db_passphrase,
+                peer_str, device_list.as_ref(), master_peer_str, server_states, db_path, db_passphrase, replay, frame_ts_ms,
             ) {
                 return;
             }

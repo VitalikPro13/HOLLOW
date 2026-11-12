@@ -39,6 +39,8 @@ pub(crate) const UNKNOWN_SERVER_DEVICES: u32 = 1_536;
 pub(crate) const UNKNOWN_ROOM_DEVICES: u32 = 64;
 const TOPIC_CATCHUP_W: i64 = 202;
 const CHECK_PEERS_W: i64 = 2_050;
+/// A roster check: lookup and fold, then 1 W per KiB of the largest answer (`breaker::ROSTER_CHECK_W`).
+const ROSTER_CHECK_W: i64 = 2 + 2 + 256;
 /// Any other text frame: the frame, its answer and one signature check.
 const OTHER_W: i64 = 10;
 /// A destroy order's roster checks, as many as a big roster holds.
@@ -187,6 +189,7 @@ fn text_cost(text: &str, rooms: &impl RoomSizes) -> Cost {
         }
         "lock_get" => Cost::w(1 + 2 * len("locks").min(256)),
         "check_peers" => Cost::w(CHECK_PEERS_W),
+        "roster_check" => Cost::w(ROSTER_CHECK_W),
         "discover_peers" => Cost::w(2 + ids_w(reach(rooms, field("room")))),
         "kill_deposit" => Cost::w(2 + SIG_W * (KILL_SIGS + 2) + len("targets")),
         _ => Cost::w(OTHER_W),

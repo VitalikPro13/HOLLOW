@@ -109,6 +109,8 @@ static void test_vectors() {
             relay = lock_put_w(static_cast<int64_t>(links.size()), 0, 0) + lock_put_held_w(base_first, false, true, 1);
         }
         if (type == "check_peers") relay = 2 + CHECK_PEERS_SCAN_W;
+        if (type == "roster_check") relay = 2 + ROSTER_CHECK_W;
+        if (type == "roster_check") check("the client prices a roster check as the relay does", k["w"] == relay);
         if (type == "hb" || type == "ack") relay = 1;
         check("the client's price covers the relay: " + k.value("name", ""), k["w"].get<int64_t>() >= relay);
     }

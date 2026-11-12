@@ -12,6 +12,7 @@
 #include "ip_key.h"
 #include "kill_order.h"
 #include "presence_view.h"
+#include "roster_check.h"
 #include "roster_crypto.h"
 #include "validate.h"
 #include "turn_uris.h"
@@ -3242,6 +3243,55 @@ void sweep_link_guesses(RelayState& state) {
     });
 }
 
+// A member's `roster_check` (roster_check.h): the statements the relay holds for one
+// identity whose device the asker sees in a server room, or null. Every refusal answers
+// the same null, so the answer tells nothing about why.
+static void handle_roster_check(SSLWebSocket* ws, PerSocketData* data, const json& j, RelayState& state) {
+    roster_check::Facts f;
+    f.full = !data->is_guest && !data->is_fetch;
+    f.master = json_text(j, "master");
+    f.device = json_text(j, "device");
+    f.nonce = json_text(j, "n");
+    f.room = json_text(j, "room");
+    const RosterBook::Held* held = nullptr;
+    auto rit = state.ws_rooms.find(f.room);
+    if (rit != state.ws_rooms.end()) {
+        WsRoom& r = rit->second;
+        auto mine = r.peers.find(data->peer_id);
+        f.asker_in_room = mine != r.peers.end() && mine->second == ws;
+        Audience aud = audience(state, r, f.room);
+        f.locked = aud.locked;
+        auto door = r.doors.open.find(data->peer_id);
+        f.newest_door = door != r.doors.open.end() && door->second == door_room::PROVED;
+        auto dev = r.peers.find(f.device);
+        f.device_listed = dev != r.peers.end() &&
+                          presence::listed(f.device, dev->second, data->peer_id,
+                                           [&](const std::string& pid) { return aud.shares(pid, data->peer_id); });
+        held = state.roster_book.get(f.master);
+        // The fold runs only for an ask every other rule admits.
+        f.placed = true;
+        if (!held || !roster_check::answers(f)) {
+            f.placed = false;
+        } else {
+            f.placed = roster_check::places(state.roster_book.fold(*held, wall_now_ms(), relay_roster_crypto()), f.device);
+        }
+    }
+    const bool answered = held && roster_check::answers(f);
+    // Only shape-checked fields are echoed.
+    auto echo = [](bool ok, const std::string& v) { return ok ? v : std::string(); };
+    json head = {{"type", "roster_checked"},
+                 {"room", echo(roster_check::room_shape(f.room), f.room)},
+                 {"master", echo(is_peer_id_shape(f.master), f.master)},
+                 {"device", echo(is_peer_id_shape(f.device), f.device)},
+                 {"n", echo(roster_check::nonce_shape(f.nonce), f.nonce)}};
+    std::string text = head.dump();
+    text.pop_back();
+    text += ",\"roster\":";
+    text += answered ? state.roster_book.dump(*held) : std::string("null");
+    text += "}";
+    send_stream(ws, std::string_view(text), false, Meta::answer());
+}
+
 // Session control (section 9.4 to 9.7). Returns true when `type` was one; the socket
 // may be closed afterwards.
 static bool handle_session_control(SSLWebSocket* ws, PerSocketData* data, const json& j, const std::string& type,
@@ -3363,6 +3413,8 @@ static void handle_text_message(SSLWebSocket* ws, PerSocketData* data,
             breaker::bump(static_cast<int64_t>((d.count + breaker::IDS_PER_W - 1) / breaker::IDS_PER_W));
         }
         send_json(ws, answer);
+    } else if (type == "roster_check") {
+        handle_roster_check(ws, data, j, state);
     } else if (type == "subscribe") {
         static const json no_topics = json::array();
         auto topics = j.find("topics");
@@ -3657,6 +3709,9 @@ static void mint_session(RelayState& state, SSLWebSocket* ws, PerSocketData* dat
                {"hb_secs", session::HB_SECS}, {"credit", credit}};
     // A pacing client mirrors the credit always and waits only on a relay that enforces.
     if (breaker::enforced()) ok["enforced"] = true;
+    // The relay answers `roster_check`: told on every login and resume, so a client never
+    // asks a relay a restart replaced by one without it.
+    ok["roster_check"] = true;
     if (resume_failed) ok["resume_failed"] = resume_failed;
     state.sessions[data->peer_id] = std::move(s);
     write_raw(ws, ok.dump(), uWS::OpCode::TEXT);
@@ -3789,6 +3844,7 @@ static void resume_session(RelayState& state, SSLWebSocket* ws, PerSocketData* d
                     {"reprove", reprove},        {"grace_secs", g_grace_secs}, {"hb_secs", session::HB_SECS}};
     // Said again on a resume: a restart may have brought up a relay that enforces.
     if (breaker::enforced()) resumed["enforced"] = true;
+    resumed["roster_check"] = true;
     write_raw(ws, resumed.dump(), uWS::OpCode::TEXT);
     session_bounds::ring_ack(state, s, in_h);
     send_kill_signals(state, ws, peer);
@@ -4654,6 +4710,8 @@ static breaker::Plan plan_text(RelayState& state, const PerSocketData* data, con
         auto rit = state.ws_rooms.find(json_text(j, "room"));
         const int64_t n = rit == state.ws_rooms.end() ? 0 : static_cast<int64_t>(rit->second.peers.size());
         plan.w = 2 + (n + breaker::IDS_PER_W - 1) / breaker::IDS_PER_W;
+    } else if (type == "roster_check") {
+        plan.w = 2 + breaker::ROSTER_CHECK_W;
     } else if (type == "kill_deposit") {
         auto targets = j.find("targets");
         const int64_t n = targets != j.end() && targets->is_array() ? static_cast<int64_t>(targets->size()) : 0;

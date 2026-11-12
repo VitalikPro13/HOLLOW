@@ -1080,15 +1080,35 @@ pub(crate) fn notice_may_be_kept(
     local_master: &str,
     co_member: impl Fn(&str) -> bool,
 ) -> bool {
-    master == local_master
+    sight(store, master, sender, local_master, co_member) != Sight::Stranger
+}
+
+/// On what terms a roster for `master` may be kept here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Sight {
+    /// Ours, held already, or a friend row of any state.
+    Known,
+    /// A first sight only a server we hold names: held for the relay's copy first.
+    CoMember,
+    Stranger,
+}
+
+fn sight(store: &MessageStore, master: &str, sender: &str, local_master: &str, co_member: impl Fn(&str) -> bool) -> Sight {
+    let known = master == local_master
         || load(store, master).is_some()
         || store.load_device_list(master).ok().flatten().is_some()
         || store.get_friend_row(master).ok().flatten().is_some()
         // A friend added by nickname, keyed by its device until its roster lands: a first
         // sight needs the deliverer as a member, and that landing re-keys the row to the
         // master (`fold_in_store`), so the row admits one identity at most.
-        || store.get_friend_row(sender).ok().flatten().is_some()
-        || co_member(master)
+        || store.get_friend_row(sender).ok().flatten().is_some();
+    if known {
+        Sight::Known
+    } else if co_member(master) {
+        Sight::CoMember
+    } else {
+        Sight::Stranger
+    }
 }
 
 /// Whether `state` names `master`: its owner, a member, or the author of an op it keeps
@@ -1100,8 +1120,7 @@ pub(crate) fn server_names_master(state: &crate::crdt::server_state::ServerState
         || state.has_op_author(master)
 }
 
-/// [`notice_may_be_kept`] against our store, a co-member being a master some server we
-/// hold names.
+/// [`sight`] against our store, a co-member being a master some server we hold names.
 fn named_here(
     master: &str,
     sender: &str,
@@ -1109,10 +1128,45 @@ fn named_here(
     server_states: &std::collections::HashMap<String, crate::crdt::server_state::ServerState>,
     db_path: &str,
     db_passphrase: &str,
-) -> bool {
+) -> Sight {
     let co_member = |m: &str| server_states.values().any(|s| server_names_master(s, m));
     MessageStore::lease(db_path, db_passphrase)
-        .is_ok_and(|store| notice_may_be_kept(&store, master, sender, local_master, co_member))
+        .map_or(Sight::Stranger, |store| sight(&store, master, sender, local_master, co_member))
+}
+
+/// The servers we hold that name `master`, where the relay is asked about it.
+fn naming_servers(
+    master: &str,
+    server_states: &std::collections::HashMap<String, crate::crdt::server_state::ServerState>,
+) -> Vec<String> {
+    let mut out: Vec<String> =
+        server_states.iter().filter(|(_, s)| server_names_master(s, master)).map(|(id, _)| id.clone()).collect();
+    out.sort();
+    out
+}
+
+/// A first sight a server names, on a relay that answers checks: held until the relay's
+/// copy lands with it (MED-2), so a stale roster places nobody meanwhile. A held foreign
+/// master is checked again in the background.
+fn defer_for_relay(
+    sight: Sight,
+    roster: &Roster,
+    sender: &str,
+    rider: super::roster_check::Rider,
+    server_states: &std::collections::HashMap<String, crate::crdt::server_state::ServerState>,
+) -> Option<super::roster_check::Rider> {
+    let servers = naming_servers(&roster.master, server_states);
+    match sight {
+        Sight::CoMember if super::roster_check::applies(&roster.master) => {
+            // One that does not count its deliverer goes on to the ingest, which drops it.
+            super::roster_check::stage(roster.clone(), sender, rider, &servers)
+        }
+        Sight::Known if !servers.is_empty() => {
+            super::roster_check::background(&roster.master, &servers);
+            Some(rider)
+        }
+        _ => Some(rider),
+    }
 }
 
 /// [`ingest`] for a `RosterNotice` or `RosterSync`, kept only when [`named_here`].
@@ -1129,20 +1183,46 @@ pub(crate) async fn ingest_notice(
     db_passphrase: &str,
 ) -> Ingested {
     let master = roster.master.clone();
-    let kept = named_here(&master, sender, local_master, server_states, db_path, db_passphrase);
-    if !kept {
+    let sight = named_here(&master, sender, local_master, server_states, db_path, db_passphrase);
+    if sight == Sight::Stranger {
         hollow_log!("[HOLLOW-SECURITY] Dropped a roster notice for {master} from {sender}: nothing here names it");
         return Ingested::default();
     }
+    if defer_for_relay(sight, &roster, sender, super::roster_check::Rider::Nothing, server_states).is_none() {
+        return Ingested::default();
+    }
     ingest(event_tx, ws_cmd_tx, local_master, local_device, sender, Some(roster), db_path, db_passphrase).await
+}
+
+/// A roster a carrier with its own gate (a landed join ask) is about to ingest: held for
+/// the relay's copy instead when it is a first sight only a server names (MED-2), its card
+/// with it. `None` when held; else the card back, to land now.
+pub(crate) fn held_for_relay(
+    sender: &str,
+    roster: &Roster,
+    card: Option<super::join_stash::HeldCard>,
+    local_master: &str,
+    server_states: &std::collections::HashMap<String, crate::crdt::server_state::ServerState>,
+    db_path: &str,
+    db_passphrase: &str,
+) -> Option<Option<super::join_stash::HeldCard>> {
+    use super::roster_check::Rider;
+    let sight = named_here(&roster.master, sender, local_master, server_states, db_path, db_passphrase);
+    match defer_for_relay(sight, roster, sender, Rider::Card(card), server_states)? {
+        Rider::Card(card) => Some(card),
+        Rider::Nothing | Rider::Profile(_) => Some(None),
+    }
 }
 
 /// Whether the roster a `ProfileCard` or `ProfileUpdate` carries may reach [`ingest`]:
 /// none, or one [`named_here`] (HOL-SEC-193). A device consents to any identity its owner
 /// mints, and an MLS leaf's certificate proves only that some group seated it (a
 /// meeting's host seats any leaf), so neither names a master here. On `false` the caller
-/// drops the card or profile it rode with. Sync and borrowing: the swarm handler's debug
-/// frame sits within a few KB of a Windows worker's 2 MB stack.
+/// drops the card or profile it rode with; a first sight held for the relay's copy keeps
+/// `replay()`'s frame (and its stamp) and hands it back once the roster lands. Sync and
+/// borrowing: the swarm handler's debug frame sits within a few KB of a Windows worker's
+/// 2 MB stack.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn admit_profile_roster(
     sender: &str,
     roster: Option<&Roster>,
@@ -1150,13 +1230,29 @@ pub(crate) fn admit_profile_roster(
     server_states: &std::collections::HashMap<String, crate::crdt::server_state::ServerState>,
     db_path: &str,
     db_passphrase: &str,
+    replay: impl FnOnce() -> super::types::HavenMessage,
+    frame_ts: i64,
 ) -> bool {
     let Some(roster) = roster else { return true };
-    let kept = named_here(&roster.master, sender, local_master, server_states, db_path, db_passphrase);
-    if !kept {
+    let sight = named_here(&roster.master, sender, local_master, server_states, db_path, db_passphrase);
+    if sight == Sight::Stranger {
         hollow_log!("[HOLLOW-SECURITY] Dropped a profile from {sender} carrying a roster for {}: nothing here names it", roster.master);
+        return false;
     }
-    kept
+    let held = || super::roster_check::Rider::Profile(Box::new((replay(), frame_ts)));
+    let rider = if sight == Sight::CoMember && super::roster_check::applies(&roster.master) { held() } else { super::roster_check::Rider::Nothing };
+    defer_for_relay(sight, roster, sender, rider, server_states).is_some()
+}
+
+/// Whether we hold a roster for `master`.
+pub(crate) fn holds(master: &str, db_path: &str, db_passphrase: &str) -> bool {
+    MessageStore::lease(db_path, db_passphrase).is_ok_and(|store| load(&store, master).is_some())
+}
+
+/// `roster` without its recovery key and phrase statements: the relay's copy merged into
+/// a roster we hold keyless (or a keyless first sight) never picks the key.
+pub(crate) fn keyless(roster: &Roster) -> Roster {
+    Roster { r_pub: String::new(), recoveries: Vec::new(), phrase_admits: Vec::new(), ..roster.clone() }
 }
 
 /// Removals a DM carried (F2): `rm` from `sender`, a member of `master` (the DM's
@@ -1179,6 +1275,25 @@ pub(crate) async fn ingest_carried(
         event_tx, ws_cmd_tx, local_master, local_device, sender, Some(incoming), db_path, db_passphrase, Source::Carried,
     ))
     .await
+}
+
+/// The relay's copy of `roster.master`'s statements merged into the roster we hold
+/// (`Source::Relay`): a removal it shows counts as from any carrier, nothing else.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn ingest_relay(
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    local_master: &str,
+    local_device: &str,
+    roster: Roster,
+    db_path: &str,
+    db_passphrase: &str,
+) -> Ingested {
+    if roster.master == local_master {
+        return Ingested::default();
+    }
+    Box::pin(ingest_inner(event_tx, ws_cmd_tx, local_master, local_device, "", Some(roster), db_path, db_passphrase, Source::Relay))
+        .await
 }
 
 /// [`ingest_carried`] for the push fetch: the store half only, and the running app is
@@ -1224,6 +1339,9 @@ enum Source {
     Sibling,
     /// Removals a DM carried: a part of a roster, never all of it.
     Carried,
+    /// The statements the relay holds (design ROSTER-CHECK): merged into a roster we
+    /// hold, never a first sight, never our own, and no device of the identity showed it.
+    Relay,
 }
 
 /// [`ingest`] for a friend's roster one of our own devices shared with its friend list,
@@ -1557,9 +1675,16 @@ fn fold_in_store(
     let master = incoming.master.as_str();
     let stored = load(store, master);
     let known = stored.is_some() || store.load_device_list(master).ok().flatten().is_some();
-    if source == Source::Carried && stored.is_none() {
+    if matches!(source, Source::Carried | Source::Relay) && stored.is_none() {
         return None;
     }
+    let stripped;
+    let incoming = if source == Source::Relay && stored.as_ref().is_some_and(|r| r.r_pub.is_empty()) {
+        stripped = keyless(incoming);
+        &stripped
+    } else {
+        incoming
+    };
     if source == Source::Sibling {
         let friend = store.get_friend_row(master).ok().flatten().is_some_and(|(status, ..)| status == "accepted");
         if !friend {
@@ -1607,7 +1732,7 @@ fn fold_in_store(
         && sender != local_master
         && super::resolver::is_device_of(sender, local_master);
     // The resolver has not followed this fold yet: a member is never refused once it has.
-    if source != Source::Carried
+    if !matches!(source, Source::Carried | Source::Relay)
         && master != local_master
         && (now.is_member(sender) || (sibling && !super::resolver::is_revoked(sender)))
     {
@@ -1837,6 +1962,50 @@ mod tests {
             }
             out
         }
+    }
+
+    /// Design ROSTER-CHECK LOW-1: the relay's copy merges only into a roster we hold,
+    /// never our own, confirms nobody's freshness, and a removal it carries counts.
+    #[tokio::test]
+    async fn the_relays_copy_lands_only_on_a_held_roster_and_confirms_nobody() {
+        let me = Observer::new(201, 202);
+        let _ = me.own();
+        let (bob, bob_dev, bob_phone) = (kp(203), kp(204), kp(205));
+        let bob_id = bob.peer_id();
+        let held = Roster::legacy_for_test(&bob, &[&bob_dev, &bob_phone]);
+        let mut removing = held.clone();
+        removing.add_removal(sign_removal(&bob_dev, &bob_id, LEGACY_BASE, &bob_phone.peer_id(), &[]));
+
+        let first = ingest_relay(&me.events, &me.ws, &me.master.peer_id(), &me.device.peer_id(), removing.clone(), &me.db, &me.pass).await;
+        assert!(!first.changed && load(&me.store(), &bob_id).is_none(), "a relay copy is never a first sight");
+
+        // Nor of an identity whose only row is a 0.11 device list, which a deliverer check
+        // would wave through as known.
+        let (carol, carol_dev) = (kp(206), kp(207));
+        let carol_id = carol.peer_id();
+        let legacy = super::super::types::SignedDeviceList {
+            master_peer_id: carol_id.clone(),
+            devices: vec![carol_dev.peer_id()],
+            ..Default::default()
+        };
+        me.store().save_device_list(&carol_id, &serde_json::to_string(&legacy).unwrap(), 0, &[carol_dev.peer_id()], 1).unwrap();
+        let carol_roster = Roster::legacy_for_test(&carol, &[&carol_dev]);
+        let listed = ingest_relay(&me.events, &me.ws, &me.master.peer_id(), &me.device.peer_id(), carol_roster, &me.db, &me.pass).await;
+        assert!(!listed.changed && load(&me.store(), &carol_id).is_none(), "a relay copy is never a first sight of a listed identity");
+
+        me.ingest(&bob_dev.peer_id(), &held).await;
+        assert!(me.state_of(&bob_id).is_member(&bob_phone.peer_id()));
+        let stamped = me.store().roster_confirmed_at(&bob_id, &bob_dev.peer_id());
+        let landed = ingest_relay(&me.events, &me.ws, &me.master.peer_id(), &me.device.peer_id(), removing, &me.db, &me.pass).await;
+        assert!(landed.newly_revoked.contains(&bob_phone.peer_id()), "the relay's removal counts");
+        assert!(!me.state_of(&bob_id).is_member(&bob_phone.peer_id()));
+        assert_eq!(me.store().roster_confirmed_at(&bob_id, &bob_dev.peer_id()), stamped, "the relay confirms nobody's roster");
+
+        let (ours, _) = me.own();
+        let mut ours_removing = ours.clone();
+        ours_removing.add_removal(sign_removal(&me.device, &me.master.peer_id(), &ours.base(), &me.device.peer_id(), &[]));
+        let own = ingest_relay(&me.events, &me.ws, &me.master.peer_id(), &me.device.peer_id(), ours_removing, &me.db, &me.pass).await;
+        assert!(!own.changed, "our own roster never takes a relay copy");
     }
 
     fn guard() -> std::sync::MutexGuard<'static, ()> {
@@ -3618,7 +3787,7 @@ mod tests {
         roster: &Roster,
         servers: &std::collections::HashMap<String, crate::crdt::server_state::ServerState>,
     ) -> Option<Ingested> {
-        if !admit_profile_roster(sender, Some(roster), &me.master.peer_id(), servers, &me.db, &me.pass) {
+        if !admit_profile_roster(sender, Some(roster), &me.master.peer_id(), servers, &me.db, &me.pass, || super::super::types::HavenMessage::ProfileRequest, 0) {
             return None;
         }
         Some(ingest(&me.events, &me.ws, &me.master.peer_id(), &me.device.peer_id(), sender, Some(roster.clone()), &me.db, &me.pass).await)
@@ -3685,7 +3854,7 @@ mod tests {
         for (master, dev) in [(&me.master, &sib), (&friend, &fdev), (&nick, &ndev), (&owner, &odev)] {
             assert!(me.state_of(&master.peer_id()).is_member(&dev.peer_id()), "{} was dropped", master.peer_id());
         }
-        let no_roster = admit_profile_roster(&fdev.peer_id(), None, &me.master.peer_id(), &none, &me.db, &me.pass);
+        let no_roster = admit_profile_roster(&fdev.peer_id(), None, &me.master.peer_id(), &none, &me.db, &me.pass, || super::super::types::HavenMessage::ProfileRequest, 0);
         assert!(no_roster, "a profile with no roster was refused");
     }
 
@@ -4145,5 +4314,59 @@ mod tests {
         assert_eq!(out.masters, vec![bob.peer_id()], "setup: the node follows the stored roster");
         assert_eq!(noted, vec![(Some(bob.peer_id()), dropped.peer_id())], "the dropped device moves the lock");
         assert!(reconcile_dirty(&me.store(), None, &me.master.peer_id(), &me.device.peer_id()).dropped.is_empty(), "once");
+    }
+
+    // rv-rostercheck (reviewer): a first-sight roster staged for the relay's copy is
+    // displaced by any co-member's notice for the same master, unverified, and the
+    // displacing roster then lands as delivered by a device it does not count.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn rv_a_non_members_notice_never_displaces_a_staged_first_roster() {
+        let _g = guard();
+        let me = Observer::new(0x01, 0x02);
+        let (owner, odev, cdev) = (kp(0x73), kp(0x74), kp(0x75));
+        let servers = server_of(&owner);
+        super::super::roster_check::clear_for_test();
+        super::super::roster_check::set_relay(true, &me.master.peer_id());
+        let honest = Roster::legacy_for_test(&owner, &[&odev]);
+        notice(&me, &odev.peer_id(), &honest, &servers).await;
+        assert!(super::super::roster_check::is_staged(&owner.peer_id()), "setup: the owner's first roster is staged");
+        // A co-member's device sends a roster for the owner that counts nobody.
+        notice(&me, &cdev.peer_id(), &Roster::new(&owner.peer_id()), &servers).await;
+        let staged = super::super::roster_check::take_staged(&owner.peer_id()).expect("a staged roster");
+        super::super::roster_check::clear_for_test();
+        assert_eq!(
+            staged.sender,
+            odev.peer_id(),
+            "a roster whose own fold does not count its deliverer replaced the owner's staged roster"
+        );
+    }
+
+    // rv-rostercheck (reviewer): R-ID-03's draft says the relay's copy never picks the
+    // recovery key; for a roster we hold keyless, ingest_relay adopts the copy's key.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn rv_the_relays_copy_never_picks_the_key_of_a_roster_we_hold_keyless() {
+        let _g = guard();
+        let me = Observer::new(211, 212);
+        let _ = me.own();
+        let (bob, bob_dev, rec) = (kp(213), kp(214), kp(215));
+        let held = Roster::legacy_for_test(&bob, &[&bob_dev]);
+        me.ingest(&bob_dev.peer_id(), &held).await;
+        assert!(load(&me.store(), &bob.peer_id()).is_some_and(|r| r.r_pub.is_empty()), "setup: held keyless");
+        let mut keyed = Roster::new(&bob.peer_id());
+        keyed.add_consent(crate::identity::roster::sign_consent(&bob_dev, &bob.peer_id()));
+        keyed
+            .add_phrase_statement(
+                &crate::identity::roster::r_pub_of(&rec),
+                Some(crate::identity::roster::sign_recovery(&bob, &rec, 1_000, &[bob_dev.peer_id()], false)),
+                None,
+            )
+            .expect("a fresh roster takes any key");
+        let _ = ingest_relay(&me.events, &me.ws, &me.master.peer_id(), &me.device.peer_id(), keyed, &me.db, &me.pass).await;
+        assert!(
+            load(&me.store(), &bob.peer_id()).is_some_and(|r| r.r_pub.is_empty()),
+            "the relay's copy picked the recovery key of a roster we hold keyless"
+        );
     }
 }

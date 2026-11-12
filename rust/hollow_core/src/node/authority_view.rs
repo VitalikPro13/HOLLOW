@@ -26,6 +26,20 @@ pub(crate) fn view_for(store: &MessageStore, db_path: &str, state: &ServerState,
 }
 
 fn entry_for(store: &MessageStore, db_path: &str, state: &ServerState, master: &str, co_members: CoMemberRosters<'_>) -> ViewEntry {
+    let (pinned, carried) = candidates(store, db_path, state, master, co_members);
+    let (pinned, carried): (Vec<&Roster>, Vec<&Roster>) = (pinned.iter().collect(), carried.iter().collect());
+    authority::judge_held(master, &authority::key_rule(state, master), &pinned, &carried)
+}
+
+/// The rosters a view judges `master` by: pinned (book, then co-member rosters) and
+/// carried (held `cp_roster`s).
+fn candidates(
+    store: &MessageStore,
+    db_path: &str,
+    state: &ServerState,
+    master: &str,
+    co_members: CoMemberRosters<'_>,
+) -> (Vec<Roster>, Vec<Roster>) {
     let (mut pinned, mut carried): (Vec<Roster>, Vec<Roster>) = (Vec::new(), Vec::new());
     if !ignored_for_test(db_path, master) {
         // Read raw: `judge` verifies every statement it keeps, once.
@@ -37,8 +51,60 @@ fn entry_for(store: &MessageStore, db_path: &str, state: &ServerState, master: &
         pinned.extend(co_members(master));
         carried.extend(authority::held_cp_rosters(state).into_iter().filter(|r| r.master == master));
     }
-    let (pinned, carried): (Vec<&Roster>, Vec<&Roster>) = (pinned.iter().collect(), carried.iter().collect());
-    authority::judge_held(master, &authority::key_rule(state, master), &pinned, &carried)
+    (pinned, carried)
+}
+
+/// `master`'s devices in `state` judged with the relay's copy merged under OUR key
+/// (design ROSTER-CHECK): the copy is carried, so it merges only under the key our own
+/// rosters chose and never picks it. A copy under another key is a conflict; ours
+/// legacy and the copy keyed counts a device only where both count it. With no roster
+/// of ours the copy alone judges; no copy places nothing.
+pub(crate) fn relay_placement(
+    store: &MessageStore,
+    db_path: &str,
+    state: &ServerState,
+    master: &str,
+    relay: Option<&Roster>,
+) -> super::roster_check::Placement {
+    let co = |m: &str| co_member_rosters(store, &state.server_id, m);
+    let (pinned, carried) = candidates(store, db_path, state, master, &co);
+    placement_from(master, &authority::key_rule(state, master), &pinned, &carried, relay)
+}
+
+/// [`relay_placement`] over the rosters already gathered.
+pub(crate) fn placement_from(
+    master: &str,
+    rule: &authority::KeyRule,
+    pinned: &[Roster],
+    carried: &[Roster],
+    relay: Option<&Roster>,
+) -> super::roster_check::Placement {
+    use super::roster_check::Placement;
+    let Some(relay) = relay else { return Placement::default() };
+    let pinned: Vec<&Roster> = pinned.iter().collect();
+    let mut carried: Vec<&Roster> = carried.iter().collect();
+    // No roster of ours: the relay's copy alone. The gate only narrows what the caller
+    // already places, so the copy can take a device away but never add one.
+    let Some(key) = authority::judge_held(master, rule, &pinned, &carried).key else {
+        let alone = authority::judge(master, &authority::KeyRule::FirstHeld, &[relay]).auth.unwrap_or_default();
+        let removed: std::collections::BTreeSet<String> = alone.removed.into_keys().collect();
+        let counted = alone.counted.into_iter().filter(|d| !removed.contains(d)).collect();
+        return Placement { counted, removed, conflict: false };
+    };
+    if !key.is_empty() && relay.r_pub != key {
+        return Placement { conflict: true, ..Placement::default() };
+    }
+    carried.push(relay);
+    let Some(merged) = authority::judge_held(master, rule, &pinned, &carried).auth else { return Placement::default() };
+    let mut out = Placement { counted: merged.counted, removed: merged.removed.into_keys().collect(), conflict: false };
+    if key.is_empty() && !relay.r_pub.is_empty() {
+        let alone = authority::judge(master, &authority::KeyRule::FirstHeld, &[relay]).auth.unwrap_or_default();
+        out.counted.retain(|d| alone.counts(d));
+        out.removed.extend(alone.removed.into_keys());
+    }
+    let removed = out.removed.clone();
+    out.counted.retain(|d| !removed.contains(d));
+    out
 }
 
 /// The co-member rosters of `master` held for `server_id` (section 9's keep rules).
@@ -243,6 +309,70 @@ mod tests {
     use super::*;
     use crate::crdt::authority::DeviceVerdict;
     use crate::crdt::testkeys::keys;
+
+    /// A phrase-rooted roster of `master` keeping `devices`, each consenting.
+    fn rooted(master: &crate::identity::native_identity::NativeKeypair, recovery: &crate::identity::native_identity::NativeKeypair, devices: &[&crate::identity::native_identity::NativeKeypair]) -> Roster {
+        use crate::identity::roster;
+        let mut r = Roster::new(&master.peer_id());
+        for d in devices {
+            r.add_consent(roster::sign_consent(d, &master.peer_id()));
+        }
+        let keep: Vec<String> = devices.iter().map(|d| d.peer_id()).collect();
+        r.add_phrase_statement(&roster::r_pub_of(recovery), Some(roster::sign_recovery(master, recovery, 1_000, &keep, false)), None)
+            .expect("a fresh roster takes any key");
+        r
+    }
+
+    /// Design ROSTER-CHECK MED-4: the relay's copy merges under OUR key and never picks
+    /// it; a removal anywhere in the merge wins; another key is a conflict, never a
+    /// refusal; ours legacy and the copy keyed counts only what both count.
+    #[test]
+    fn the_relays_copy_is_judged_under_our_key() {
+        use crate::crdt::authority::KeyRule;
+        use crate::node::roster_check::Placed;
+        let (m, m_id, _) = keys(51);
+        let (rec, _, _) = keys(52);
+        let (rec2, _, _) = keys(55);
+        let (phone, phone_id, _) = keys(53);
+        let (laptop, laptop_id, _) = keys(54);
+        let ours = rooted(&m, &rec, &[&phone, &laptop]);
+        let rule = KeyRule::FirstHeld;
+        let at = |relay: Option<&Roster>, pinned: &[Roster]| placement_from(&m_id, &rule, pinned, &[], relay);
+
+        let none = at(None, std::slice::from_ref(&ours));
+        assert_eq!(none.of(&phone_id), Placed::Skip, "no answer places nothing");
+        let same = at(Some(&ours), std::slice::from_ref(&ours));
+        assert_eq!((same.of(&phone_id), same.of(&laptop_id)), (Placed::Ask, Placed::Ask));
+
+        let mut removing = ours.clone();
+        let base = removing.base();
+        removing.add_removal(crate::identity::roster::sign_removal(&phone, &m_id, &base, &laptop_id, &[]));
+        let removed = at(Some(&removing.verified(1_000)), std::slice::from_ref(&ours));
+        assert_eq!(removed.of(&laptop_id), Placed::Removed, "the relay's removal counts");
+        assert_eq!(removed.of(&phone_id), Placed::Ask);
+
+        let forged = rooted(&m, &rec2, &[&phone, &laptop]);
+        let conflict = at(Some(&forged), std::slice::from_ref(&ours));
+        assert_eq!(conflict.of(&phone_id), Placed::Conflict, "another key is a conflict");
+        let mut forged_removal = forged.clone();
+        let fbase = forged_removal.base();
+        forged_removal.add_removal(crate::identity::roster::sign_removal(&phone, &m_id, &fbase, &laptop_id, &[]));
+        assert_eq!(at(Some(&forged_removal), std::slice::from_ref(&ours)).of(&laptop_id), Placed::Conflict, "and never a refusal");
+
+        let legacy = Roster::legacy_for_test(&m, &[&phone, &laptop]);
+        let keyed_phone_only = rooted(&m, &rec, &[&phone]);
+        let both = at(Some(&keyed_phone_only), std::slice::from_ref(&legacy));
+        assert_eq!(both.of(&phone_id), Placed::Ask, "counted in both");
+        assert_eq!(both.of(&laptop_id), Placed::Skip, "ours legacy counts it, the keyed copy does not");
+        let legacy_phone_only = Roster::legacy_for_test(&m, &[&phone]);
+        let keyed_both = rooted(&m, &rec, &[&phone, &laptop]);
+        let only_relay = at(Some(&keyed_both), std::slice::from_ref(&legacy_phone_only));
+        assert_eq!(only_relay.of(&laptop_id), Placed::Skip, "the keyed copy counts it, ours legacy does not: the copy never picks");
+        assert_eq!(only_relay.of(&phone_id), Placed::Ask);
+
+        assert_eq!(at(Some(&ours), &[]).of(&phone_id), Placed::Ask, "no roster of ours: the copy alone narrows");
+        assert_eq!(at(Some(&removing.verified(1_000)), &[]).of(&laptop_id), Placed::Removed, "and its removal counts");
+    }
 
     /// A saved roster re-judges its master in EVERY held server whose view holds it,
     /// whichever server the save came through (C2's `server_rosters::keep` included).

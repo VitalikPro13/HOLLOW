@@ -69,6 +69,7 @@ pub(crate) mod retire_round;
 pub(crate) mod ring_auth;
 pub(crate) mod room_bounds;
 pub(crate) mod roster_book;
+pub(crate) mod roster_check;
 pub(crate) mod roster_reach;
 pub(crate) mod roster_round;
 pub(crate) mod sealed_box;

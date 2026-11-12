@@ -319,7 +319,50 @@ impl LeadBook {
     /// said it commits it: asked again, that commit's Welcome never came, and the same
     /// bytes would only read as already seated.
     pub(crate) fn walk_package(&self, group_key: &str) -> Option<Vec<u8>> {
-        self.with(|i| i.walks.get(group_key).filter(|w| w.ack != Some(KpOutcome::Commit)).map(|w| w.package.clone()))
+        self.with(|i| {
+            i.walks
+                .get(group_key)
+                .filter(|w| w.ack != Some(KpOutcome::Commit) && !w.package.is_empty())
+                .map(|w| w.package.clone())
+        })
+    }
+
+    fn walk_entry<'a>(i: &'a mut Inner, group_key: &str, span: usize) -> &'a mut Walk {
+        i.walks.entry(group_key.to_string()).or_insert_with(|| Walk {
+            asked: Vec::new(),
+            package: Vec::new(),
+            devices: Vec::new(),
+            sent: Instant::now(),
+            pass_started: Instant::now(),
+            passes: 0,
+            ack: None,
+            span,
+        })
+    }
+
+    /// Keep a package minted before the walk could send it (our join's), for its pass.
+    pub(crate) fn keep_walk_package(&self, group_key: &str, package: Vec<u8>, span: usize) {
+        self.settle_walk(group_key, span);
+        self.with(|i| {
+            let walk = Self::walk_entry(i, group_key, span);
+            if walk.package.is_empty() {
+                walk.package = package;
+            }
+        })
+    }
+
+    /// `target` counts as asked in this pass without a package: the relay's copy of its
+    /// roster confirmed none of its devices (design ROSTER-CHECK).
+    pub(crate) fn skip_walk_target(&self, group_key: &str, target: &str, span: usize) {
+        self.settle_walk(group_key, span);
+        self.with(|i| {
+            let walk = Self::walk_entry(i, group_key, span);
+            if !walk.asked.iter().any(|m| m == target) {
+                walk.asked.push(target.to_string());
+            }
+            walk.devices.clear();
+            walk.ack = None;
+        })
     }
 
     /// Masters already asked in this pass.
@@ -915,6 +958,25 @@ mod tests {
         assert_eq!(view_master(&s, "t14m2"), None, "another identity's master id");
         assert_eq!(view_master(&s, "t14own-d").as_deref(), Some("t14own"));
         crate::node::resolver::forget("t14m2-d");
+    }
+
+    /// Design ROSTER-CHECK MED-5: a target the relay's copy does not confirm counts as
+    /// asked without a package, so the walk goes on; a package minted for the join waits
+    /// for the pass; neither starts a pass window.
+    #[test]
+    fn a_skipped_target_steps_the_walk_and_a_kept_package_waits_for_it() {
+        let book = LeadBook::default();
+        book.skip_walk_target("g", "a", 1);
+        assert_eq!(book.walk_asked("g"), vec!["a".to_string()], "the skipped target counts as asked");
+        assert_eq!(book.walk_package("g"), None, "a skip sends no package");
+        assert_eq!(next_walk_target(&["a".to_string(), "b".to_string()], &book.walk_asked("g")), Some(("b".to_string(), false)));
+        book.keep_walk_package("g", b"join".to_vec(), 1);
+        assert_eq!(book.walk_package("g"), Some(b"join".to_vec()), "the join's package is kept for the pass");
+        book.keep_walk_package("g", b"later".to_vec(), 1);
+        assert_eq!(book.walk_package("g"), Some(b"join".to_vec()), "one package per pass");
+        book.skip_walk_target("g", "a", 2);
+        assert_eq!(book.walk_asked("g"), vec!["a".to_string()], "another membership starts afresh");
+        assert_eq!(book.walk_package("g"), None);
     }
 
     /// t14-mlsjoin: a walk that asked everyone starts a new pass, with a fresh package,

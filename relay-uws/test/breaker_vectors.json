@@ -62,6 +62,8 @@
      "hex_op": 3, "room": "dm-b", "told": 5, "bound": 5, "floor": 40, "w": 49, "joins": 0, "relay_deliveries": 40},
     {"name": "discover_peers",
      "text": "{\"type\":\"discover_peers\",\"room\":\"dm-a\",\"digest\":true}", "room": "dm-a", "told": 100, "w": 6, "joins": 0, "relay_deliveries": 0},
+    {"name": "a roster check pays for the largest answer",
+     "text": "{\"type\":\"roster_check\",\"room\":\"0123456789abcdef0123456789abcdef\",\"master\":\"m\",\"device\":\"d\",\"n\":\"a1\"}", "w": 260, "joins": 0, "relay_deliveries": 0},
     {"name": "inactive pays one per room joined",
      "text": "{\"type\":\"inactive\"}", "rooms_joined": 7, "w": 8, "joins": 0, "relay_deliveries": 0},
     {"name": "a heartbeat",

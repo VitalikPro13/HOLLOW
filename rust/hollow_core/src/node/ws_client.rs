@@ -157,6 +157,9 @@ pub enum WsCommand {
     /// Ask the relay for the peers currently connected to a room, over the live
     /// WS connection (replaces the HTTP /bootstrap poll — no fresh TLS handshake).
     DiscoverPeers { room_code: String },
+    /// Ask the relay for the statements it holds for `master`, whose `device` we see in
+    /// `room_code` (design ROSTER-CHECK); `n` names the ask in the answer.
+    RosterCheck { room_code: String, master: String, device: String, n: String },
     /// Ask the relay for time-limited TURN credentials over the authenticated WS
     /// connection, so retries ride the normal reconnect machinery.
     GetTurnCredentials,
@@ -336,6 +339,10 @@ pub enum WsEvent {
     /// set on the answer to our own `LockPut`: whether its newest lock is now the
     /// relay's. Unverified here: whoever reads it checks it back to the owner.
     LockChain { server: String, links: Vec<super::join_lock::LockLink>, put: Option<bool> },
+    /// Whether this relay answers `RosterCheck`: said on every login and resume.
+    RelayRosterCheck { answers: bool },
+    /// The relay's answer to a `RosterCheck`: its held statements, unverified, or none.
+    RosterChecked { room: String, master: String, device: String, n: String, roster: Option<serde_json::Value> },
 }
 
 impl WsEvent {
@@ -377,6 +384,8 @@ impl WsEvent {
             Self::LinkCodeResolved { .. } => "LinkCodeResolved",
             Self::KillSignal { .. } => "KillSignal",
             Self::LockChain { .. } => "LockChain",
+            Self::RelayRosterCheck { .. } => "RelayRosterCheck",
+            Self::RosterChecked { .. } => "RosterChecked",
         }
     }
 }
@@ -458,6 +467,13 @@ enum ServerMsg {
         #[serde(default)] digest: Option<u64>,
         #[serde(default)] count: Option<u64>,
         #[serde(default)] joined: Option<bool>,
+    },
+    RosterChecked {
+        #[serde(default)] room: String,
+        #[serde(default)] master: String,
+        #[serde(default)] device: String,
+        #[serde(default)] n: String,
+        #[serde(default)] roster: Option<serde_json::Value>,
     },
     TurnCredentials {
         #[serde(default)] username: String,
@@ -859,6 +875,7 @@ impl Rooms {
             | WsCommand::SetTopicBuffer { room_code, .. }
             | WsCommand::TopicCatchup { room_code, .. }
             | WsCommand::DiscoverPeers { room_code }
+            | WsCommand::RosterCheck { room_code, .. }
             | WsCommand::SendToRoom { room_code, .. }
             | WsCommand::SendPublic { room_code, .. }
             | WsCommand::SendToRoomTopic { room_code, .. }
@@ -2124,6 +2141,7 @@ impl Client {
             Err(e) => Err(e),
         };
         let held = self.sid.is_some();
+        let checks = result.as_ref().is_ok_and(|opened| opened.reply.answers_roster_check());
         let judged = result.and_then(|opened| {
             relay_session::judge(&opened.ask, held, opened.reply)
                 .map(|established| (opened.stream, opened.door, established, opened.path))
@@ -2191,6 +2209,9 @@ impl Client {
             }
             self.notify(relay_session::on_drop(held));
         }
+        // Before the session's own events, so nothing the node does on them asks a relay
+        // that no longer answers.
+        let _ = self.event_tx.send(WsEvent::RelayRosterCheck { answers: checks });
         self.establish_on(stream, door, established, path).await;
     }
 
@@ -2563,6 +2584,9 @@ fn command_frame(cmd: &WsCommand) -> Option<Frame> {
         WsCommand::DiscoverPeers { room_code } => {
             json(serde_json::json!({ "type": "discover_peers", "room": room_code, "digest": true }))
         }
+        WsCommand::RosterCheck { room_code, master, device, n } => json(serde_json::json!({
+            "type": "roster_check", "room": room_code, "master": master, "device": device, "n": n
+        })),
         WsCommand::GetTurnCredentials => json(serde_json::json!({ "type": "get_turn_credentials" })),
         WsCommand::GetMediaForwarder => json(serde_json::json!({ "type": "get_media_forwarder" })),
         WsCommand::Subscribe { room_code, topics } => {
@@ -3487,6 +3511,9 @@ fn handle_server_message(
             return;
         }
         ServerMsg::LockChain { server, links, put } => WsEvent::LockChain { server, links, put },
+        ServerMsg::RosterChecked { room, master, device, n, roster } => {
+            WsEvent::RosterChecked { room, master, device, n, roster: roster.filter(|r| r.is_object()) }
+        }
         ServerMsg::RoomDenied { room } => {
             let Some(room) = deniable_ask(rooms, &room) else {
                 hollow_log!("[HOLLOW-WS] Ignored a refusal naming a room we never asked for or that no refusal can name");
@@ -3685,6 +3712,23 @@ mod tests {
         let Frame::Text(t) = command_frame(&WsCommand::DiscoverPeers { room_code: "r".into() }).unwrap() else { panic!() };
         let v: serde_json::Value = serde_json::from_str(t.as_str()).unwrap();
         assert_eq!(v, serde_json::json!({ "type": "discover_peers", "room": "r", "digest": true }));
+    }
+
+    /// Design ROSTER-CHECK: the ask on the wire, and its answer read back with the
+    /// statements only when they are an object.
+    #[test]
+    fn a_roster_check_asks_and_reads_its_answer() {
+        let ask = WsCommand::RosterCheck { room_code: "r".into(), master: "m".into(), device: "d".into(), n: "a1".into() };
+        let Frame::Text(t) = command_frame(&ask).unwrap() else { panic!() };
+        let v: serde_json::Value = serde_json::from_str(t.as_str()).unwrap();
+        assert_eq!(v, serde_json::json!({ "type": "roster_check", "room": "r", "master": "m", "device": "d", "n": "a1" }));
+        let read = |text: &str| match serde_json::from_str::<ServerMsg>(text).unwrap() {
+            ServerMsg::RosterChecked { roster, .. } => roster.filter(|r| r.is_object()),
+            _ => panic!("not a roster_checked"),
+        };
+        assert!(read(r#"{"type":"roster_checked","room":"r","master":"m","device":"d","n":"a1","roster":null}"#).is_none());
+        assert!(read(r#"{"type":"roster_checked","room":"r","master":"m","device":"d","n":"a1","roster":[1]}"#).is_none());
+        assert!(read(r#"{"type":"roster_checked","room":"r","master":"m","device":"d","n":"a1","roster":{"master":"m"}}"#).is_some());
     }
 
     /// g13: the record comes from the presence frames as read; an answer that matches it

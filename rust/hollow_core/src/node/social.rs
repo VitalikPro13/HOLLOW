@@ -2633,6 +2633,8 @@ pub(crate) async fn handle_envelope_profile_update(
     profile_pk: Option<String>,
     stream_overlay: Option<Box<super::types::OverlayField>>,
     ceiling: i64,
+    // What a first sight held for the relay's copy hands back with the profile.
+    (card, frame_ts_ms): (Option<&super::types::SignedCard>, i64),
     db_path: &str,
     db_passphrase: &str,
 ) -> Option<Vec<String>> {
@@ -2644,8 +2646,21 @@ pub(crate) async fn handle_envelope_profile_update(
     // envelope, so the "our roster changed" re-announce is that handler's job, not
     // ours. `newly_revoked` is surfaced so the swarm caller can drop Olm sessions and
     // remove MLS leaves for a device removed this way.
+    // A first sight held for the relay's copy comes back by the direct arm, which takes
+    // the same fields.
+    let replay = || HavenMessage::ProfileUpdate {
+        display_name: display_name.clone(), status: status.clone(), about_me: about_me.clone(), updated_at,
+        avatar_b64: avatar_b64.clone(), banner_b64: banner_b64.clone(), is_invisible: false,
+        twitch_username: twitch_username.clone(), device_list: device_list.clone(),
+        avatar_hash: avatar_hash.clone(), banner_hash: banner_hash.clone(), showcase_board: showcase_board.clone(),
+        showcase_assets_b64: showcase_assets_b64.clone(), showcase_assets_hash: showcase_assets_hash.clone(),
+        avatar_frame: avatar_frame.clone(), avatar_anim: avatar_anim.clone(), banner_anim: banner_anim.clone(),
+        support_creds: support_creds.clone(), support_creds_sig: support_creds_sig.clone(),
+        profile_sig: profile_sig.clone(), profile_pk: profile_pk.clone(), card: card.cloned().map(Box::new),
+        stream_overlay: stream_overlay.clone(),
+    };
     if !super::roster_book::admit_profile_roster(
-        &sender_peer_id, device_list.as_ref(), local_master_peer_id, server_states, db_path, db_passphrase,
+        &sender_peer_id, device_list.as_ref(), local_master_peer_id, server_states, db_path, db_passphrase, replay, frame_ts_ms,
     ) {
         return None;
     }
