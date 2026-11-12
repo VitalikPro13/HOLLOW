@@ -627,6 +627,16 @@ pub(crate) fn cleaned_send_source(source_path: &str) -> Result<String, String> {
     Ok(dest.to_string_lossy().to_string())
 }
 
+/// Every folder [`cleaned_send_source`] made, for the boot sweep's orphan temps.
+pub(crate) fn send_copy_dirs() -> Vec<PathBuf> {
+    let Some(entries) = shares_dir().ok().and_then(|d| std::fs::read_dir(d).ok()) else { return Vec::new() };
+    entries
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()) && e.file_name().to_string_lossy().starts_with(SEND_COPY_PREFIX))
+        .map(|e| e.path())
+        .collect()
+}
+
 /// True for a cleaned copy [`cleaned_send_source`] made.
 fn is_send_copy(path: &Path) -> bool {
     let (Some(dir), Ok(shares)) = (path.parent(), shares_dir()) else { return false };

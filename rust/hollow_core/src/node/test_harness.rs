@@ -63819,7 +63819,11 @@ async fn w3c1e_floor_on_cp1(tags: [u8; 6], voice: bool, promote_j: bool) -> W3c1
     // would write its own child of it, which no recovery steps back from.
     relay.set_online(&settler.device_id, false);
     let pre = j.live_server_state(&server_id).await.expect("J holds the server");
-    let cp1 = w3c1e_checkpoint(&server_id, &master, thief_tag, &pre, crate::crdt::hlc::wall_clock_ms());
+    // A content hash in the upper half, so `puppet_mark` always finds a fork ranking below.
+    let cp1 = (0..64u64)
+        .map(|i| w3c1e_checkpoint(&server_id, &master, thief_tag, &pre, crate::crdt::hlc::wall_clock_ms() + i))
+        .find(|cp| cp.content_hash()[0] >= 0x80)
+        .expect("a checkpoint hashing into the upper half");
     for to in [&j, &k] {
         carry_as(&thief, to, crdt_broadcast(&server_id, &cp1)).await;
     }
@@ -64019,7 +64023,10 @@ async fn t14d_a_puppet_mods_kick_during_a_recovery_keeps_the_shell_until_the_set
     assert!(k.store().load_all_servers().is_ok_and(|rows| rows.iter().any(|(sid, _)| sid == server_id)), "the shell keeps its row");
 
     // The settler comes back, learns the kick and settles: its settling counts K again.
+    // It reads the relay's chain only once settled, so the lock it moves is the
+    // settling's, never one for the kick it is about to drop.
     relay.set_recording(&f.settler.device_id, true);
+    relay.hold_lock_reads(&f.settler.device_id);
     relay.set_online(&f.settler.device_id, true);
     assert!(
         wait_until(30, async || f.settler.live_server_state(server_id).await.is_some_and(|s| !s.is_member(&k_master))).await,
@@ -64029,7 +64036,9 @@ async fn t14d_a_puppet_mods_kick_during_a_recovery_keeps_the_shell_until_the_set
     // the chain K recorded as one can check it.
     relay.hold_direct(&f.settler.device_id, &k.device_id);
     relay.hold_direct(&j.device_id, &k.device_id);
+    assert_eq!(relay_tip(relay, server_id).n, tip0.n, "precondition: nothing moved the lock before the settling");
     f.settle().await;
+    relay.release_lock_reads(&f.settler.device_id);
     // An honest J never moves a lock the thief's link heads; the settling's own move does.
     assert!(wait_until(15, async || relay_tip(relay, server_id).n > tip0.n).await, "the settling moves the lock");
     assert!(
@@ -64051,7 +64060,7 @@ async fn t14d_a_puppet_mods_kick_during_a_recovery_keeps_the_shell_until_the_set
         "the settling reaches the shell and counts K again",
     );
     assert!(
-        k.live_server_state(server_id).await.and_then(|s| s.join_lock.newest_door()).is_some_and(|(n, _, _)| n == relay_tip(relay, server_id).n),
+        wait_until(15, async || k.live_server_state(server_id).await.and_then(|s| s.join_lock.newest_door()).is_some_and(|(n, _, _)| n == relay_tip(relay, server_id).n)).await,
         "K holds the relay's newest door",
     );
     let m_id = f.master.peer_id();
@@ -66471,16 +66480,8 @@ async fn t14_deny_a_refused_server_s_file_is_served_to_nobody() {
 
     assert!(wait_until(20, idle).await, "precondition: the posts' own pushes end");
     let before = opens(&fid);
-    // The holder can answer `gone` for a moment after its own post completes: ask again.
-    let mut served = false;
-    for _ in 0..5 {
-        carry_as(&a, &o, ask(&fid)).await;
-        if wait_until(4, async || opens(&fid) > before).await {
-            served = true;
-            break;
-        }
-    }
-    assert!(served, "precondition: the holder serves a member's ask");
+    carry_as(&a, &o, ask(&fid)).await;
+    assert!(wait_until(10, async || opens(&fid) > before).await, "precondition: the holder serves a member's ask");
     assert!(wait_until(20, idle).await, "precondition: that stream ends");
 
     relay.deny_room(&sid);
@@ -68071,4 +68072,55 @@ async fn t14_deny_a_meeting_left_while_refused_is_asked_about_on_its_next_start(
     })
     .await;
     assert!(back, "a start after the lift hears the relay carries the meeting");
+}
+
+// w4-filerace
+/// Section 8.8 class 2 in the order a settler back online usually takes: it moves the
+/// lock on the kick it holds before it settles, so the relay hides the shell K before
+/// the settling counts K again and moves the lock once more. Whatever the settler hands
+/// K is lost on the way (a stale door it handed is the same loss), and so is J's answer
+/// to K's first ask, so K asks again once its read of the relay's chain shows a lock
+/// past its own door.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn t14d_a_member_the_settling_brings_back_gets_the_door_after_an_early_lock_move() {
+    let _g = test_guard();
+    let f = w3c1e_floor_on_cp1([180u8, 181, 182, 183, 184, 186], false, true).await;
+    let (relay, j, k, server_id) = (&f.relay, &f.j, &f.k, &f.server_id);
+    let (j_master, k_master) = (j.master_id.clone(), k.master_id.clone());
+    let tip0 = relay_tip(relay, server_id).n;
+
+    j.cmd_tx.send(NodeCommand::KickMember { server_id: server_id.clone(), peer_id: k_master.clone() }).await.unwrap();
+    let shell_of = |s: &ServerState| s.recovery.as_ref().and_then(|r| r.shell.clone());
+    assert!(
+        wait_until(20, async || k.live_server_state(server_id).await.is_some_and(|s| shell_of(&s).as_deref() == Some(j_master.as_str()))).await,
+        "precondition: K is kept as a shell of J's kick",
+    );
+
+    relay.swallow_direct(&f.settler.device_id, &k.device_id);
+    relay.swallow_direct(&j.device_id, &k.device_id);
+    relay.set_online(&f.settler.device_id, true);
+    assert!(
+        wait_until(30, async || f.settler.live_server_state(server_id).await.is_some_and(|s| !s.is_member(&k_master))).await,
+        "precondition: the settler holds the kick",
+    );
+    assert!(wait_until(30, async || relay_tip(relay, server_id).n > tip0).await, "precondition: the settler moves the lock on the kick");
+    assert!(wait_until(20, async || !relay.sees_room(server_id, &k.device_id)).await, "precondition: the move hides the shell");
+    let tip1 = relay_tip(relay, server_id).n;
+    f.settle().await;
+    assert!(wait_until(20, async || relay_tip(relay, server_id).n > tip1).await, "precondition: the settling moves the lock again");
+    relay.release_direct(&j.device_id, &k.device_id);
+
+    assert!(
+        wait_until(60, async || relay.sees_room(server_id, &k.device_id)).await,
+        "K proves the relay's newest door (relay tip {}, K's door {:?})",
+        relay_tip(relay, server_id).n,
+        k.live_server_state(server_id).await.and_then(|s| s.join_lock.newest_door().map(|(n, _, _)| n)),
+    );
+    let settled = |s: &ServerState| !s.in_recovery() && s.is_member(&k_master) && shell_of(s).is_none();
+    assert!(wait_until(30, async || k.live_server_state(server_id).await.is_some_and(|s| settled(&s))).await, "the settling reaches K");
+    assert!(
+        wait_until(30, async || k.live_server_state(server_id).await.and_then(|s| s.join_lock.newest_door()).is_some_and(|(n, _, _)| n == relay_tip(relay, server_id).n)).await,
+        "K holds the relay's newest door",
+    );
 }

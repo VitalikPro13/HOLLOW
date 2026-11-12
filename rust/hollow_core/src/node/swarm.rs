@@ -900,6 +900,9 @@ async fn run_event_loop(
         }
         tokio::task::spawn_blocking(move || {
             crate::node::at_rest::migrate_plaintext(&sweep_targets);
+            for dir in crate::node::share_handler::send_copy_dirs() {
+                crate::node::at_rest::sweep_folder(&dir);
+            }
         });
     }
 
@@ -1532,6 +1535,11 @@ async fn run_event_loop(
         // A door that just reached our state proves itself to the relay before
         // anything else goes out.
         door_rooms.sync(&server_states, &local_peer_str, &ws_cmd_tx);
+        for room in door_rooms.due_rereads(&server_states, &local_peer_str) {
+            if let Some(owner) = server_states.get(&room).and_then(|s| s.anchor_owner()) {
+                lock_keeper.watch(&room, &owner, &ws_cmd_tx);
+            }
+        }
         // Join asks held until we knew what we missed, judged like any other ask.
         if join_hold.holds_any() {
             let started = std::time::Instant::now();
@@ -5450,7 +5458,7 @@ async fn run_event_loop(
                                 );
                             }
                         }
-                        door_rooms.chain_read(&server, &ws_cmd_tx);
+                        door_rooms.chain_read(&server, lock_keeper.relay_tip(&server).map(|t| t.n), &server_states, &local_peer_str, &ws_cmd_tx);
                         // A server we are joining: seal to it, and judge what waited for it.
                         let held = sync_handler::handle_join_lock_chain(
                             &mut pending_server_joins, &ws_cmd_tx, &ws_room_peers, &crdt_store, &device_peer_id, &server, links,

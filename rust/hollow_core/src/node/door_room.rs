@@ -138,6 +138,11 @@ pub(crate) fn reached_view(room: &str, sender: &str, sealed_at: i64, ws_room_pee
     [(room.to_string(), picked)].into()
 }
 
+/// We hold `room`'s server as a member, or as the hold or shell of a recovery.
+fn held(server_states: &ServerStates, room: &str, local_master: &str) -> bool {
+    server_states.get(room).is_some_and(|s| !s.is_deleted() && s.held_as_member(local_master))
+}
+
 /// The identity `device` speaks for: its master, unless it is a bare master id, a
 /// revoked device or one its roster disowns (HOL-SEC-083).
 pub(crate) fn speaks_for(device: &str) -> Option<String> {
@@ -160,6 +165,9 @@ pub(crate) struct DoorRooms {
     /// Hidden rooms whose door ask waits for a fresh read of the relay's chain: a grant
     /// counts only against that chain, and answerers hand one device a door once.
     reading: HashMap<String, Instant>,
+    /// Hidden rooms whose chain we last read again on our own: a lock that moved past
+    /// our door since our last ask is asked about again (no new status says it moved).
+    reread: HashMap<String, Instant>,
     /// (room, asker) -> the door we last handed it, and when.
     answered: HashMap<(String, String), (u64, Instant)>,
     /// (room, asker) -> the removal we told that former member's device of. Once per
@@ -191,7 +199,7 @@ impl DoorRooms {
     pub(crate) fn sync(&mut self, server_states: &ServerStates, local_master: &str, ws_cmd_tx: &WsCmdTx) {
         let late: Vec<String> = self.reading.iter().filter(|(_, t)| t.elapsed() >= CHAIN_WAIT).map(|(r, _)| r.clone()).collect();
         for room in late {
-            self.chain_read(&room, ws_cmd_tx);
+            self.chain_read(&room, None, server_states, local_master, ws_cmd_tx);
         }
         let mut kept: HashSet<&str> = HashSet::new();
         for (sid, state) in server_states {
@@ -278,10 +286,11 @@ impl DoorRooms {
         if proved {
             self.hidden.remove(room);
             self.asked.remove(room);
+            self.reread.remove(room);
             return false;
         }
         self.hidden.insert(room.to_string());
-        if !server_states.get(room).is_some_and(|s| !s.is_deleted() && s.held_as_member(local_master)) {
+        if !held(server_states, room, local_master) {
             return false;
         }
         // Hand the socket our newest door again in case it never got it; one it
@@ -296,12 +305,53 @@ impl DoorRooms {
         true
     }
 
-    /// The relay's chain for `room` was read (or the wait for it ran out): a door ask
-    /// that waited for it goes now, while the relay still hides us.
-    pub(crate) fn chain_read(&mut self, room: &str, ws_cmd_tx: &WsCmdTx) {
-        if self.reading.remove(room).is_none() || !self.hidden.contains(room) {
+    /// Hidden rooms of servers we hold whose relay chain is due a read of our own, at
+    /// most one per `ASK_GAP` each: the relay sends no new status when a lock moves past
+    /// a door it already hides us behind.
+    pub(crate) fn due_rereads(&mut self, server_states: &ServerStates, local_master: &str) -> Vec<String> {
+        let due: Vec<String> = self
+            .hidden
+            .iter()
+            .filter(|r| !self.reading.contains_key(*r))
+            .filter(|r| self.reread.get(*r).is_none_or(|t| t.elapsed() >= ASK_GAP))
+            .filter(|r| self.asked.get(*r).is_none_or(|t| t.elapsed() >= ASK_GAP))
+            .filter(|r| held(server_states, r, local_master))
+            .cloned()
+            .collect();
+        let now = Instant::now();
+        for room in &due {
+            self.reread.insert(room.clone(), now);
+        }
+        due
+    }
+
+    /// The newest door we hold for `room`: our state's, or one a member handed us.
+    fn held_door(&self, room: &str, server_states: &ServerStates, local_master: &str) -> Option<u64> {
+        let ours = server_states.get(room).and_then(|s| s.liveness_state(local_master).join_lock.newest_door_id()).map(|(n, _)| n);
+        ours.max(self.granted.get(room).map(|(n, _, _)| *n))
+    }
+
+    /// The relay's chain for `room` was read (or the wait for it ran out), its newest lock
+    /// `relay_tip`: a door ask that waited for it goes now while the relay still hides us,
+    /// and so does a new one, `ASK_GAP` after the last, when that lock is past our door.
+    pub(crate) fn chain_read(
+        &mut self,
+        room: &str,
+        relay_tip: Option<u64>,
+        server_states: &ServerStates,
+        local_master: &str,
+        ws_cmd_tx: &WsCmdTx,
+    ) {
+        let waited = self.reading.remove(room).is_some();
+        if !self.hidden.contains(room) {
             return;
         }
+        let passed = || relay_tip.is_some_and(|tip| self.held_door(room, server_states, local_master).is_none_or(|n| tip > n));
+        let again = || self.asked.get(room).is_none_or(|t| t.elapsed() >= ASK_GAP) && held(server_states, room, local_master) && passed();
+        if !waited && !again() {
+            return;
+        }
+        self.asked.insert(room.to_string(), Instant::now());
         hollow_log!("[HOLLOW-WS] The relay hides us in {room}: asking its members for the newest door");
         let mut salt = [0u8; 16];
         let nonce = if getrandom::fill(&mut salt).is_ok() { hex::encode(salt) } else { String::new() };
@@ -447,6 +497,7 @@ impl DoorRooms {
     pub(crate) fn on_connected(&mut self) {
         self.hidden.clear();
         self.asked.clear();
+        self.reread.clear();
     }
 }
 
@@ -691,9 +742,9 @@ mod tests {
 
         assert!(doors.on_status(&sid, false, &states, &owner, &tx), "a hidden member reads the relay's chain");
         assert_eq!(asks(&mut rx), 0, "the ask went before the relay's chain was read");
-        doors.chain_read(&sid, &tx);
+        doors.chain_read(&sid, None, &states, &owner, &tx);
         assert_eq!(asks(&mut rx), 1, "the read chain sends the ask");
-        doors.chain_read(&sid, &tx);
+        doors.chain_read(&sid, None, &states, &owner, &tx);
         assert_eq!(asks(&mut rx), 0, "a second read asks again");
 
         let mut doors = DoorRooms::default();
@@ -707,7 +758,54 @@ mod tests {
         let mut doors = DoorRooms::default();
         assert!(doors.on_status(&sid, false, &states, &owner, &tx));
         assert!(!doors.on_status(&sid, true, &states, &owner, &tx));
-        doors.chain_read(&sid, &tx);
+        doors.chain_read(&sid, None, &states, &owner, &tx);
         assert_eq!(asks(&mut rx), 0, "a room that shows us again asked for a door");
+    }
+
+    /// A member the relay keeps hiding asks again once the relay's chain, read on its own
+    /// every `ASK_GAP`, shows a lock past the door it holds; never sooner than `ASK_GAP`
+    /// after its last ask, never for a door it already holds, a server it does not hold,
+    /// or a room that shows it again.
+    #[test]
+    fn a_hidden_member_asks_again_once_the_relays_lock_passes_its_door() {
+        use std::time::Instant;
+        let (kp, owner, pk) = keys(1);
+        let (state, _) = ServerState::found("S".into(), owner.clone(), kp, pk);
+        let sid = state.server_id.clone();
+        let states = std::collections::HashMap::from([(sid.clone(), state)]);
+        let none = std::collections::HashMap::new();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let asks = |rx: &mut tokio::sync::mpsc::UnboundedReceiver<WsCommand>| {
+            std::iter::from_fn(|| rx.try_recv().ok())
+                .filter(|c| matches!(c, WsCommand::SendToRoom { data, .. } if matches!(serde_json::from_slice(data), Ok(HavenMessage::DoorAsk { .. }))))
+                .count()
+        };
+        let long_ago = || Instant::now().checked_sub(super::ASK_GAP).unwrap();
+        let mut doors = DoorRooms::default();
+        assert!(doors.on_status(&sid, false, &states, &owner, &tx));
+        doors.chain_read(&sid, Some(1), &states, &owner, &tx);
+        assert_eq!(asks(&mut rx), 1, "precondition: the first ask");
+        assert!(doors.due_rereads(&states, &owner).is_empty(), "a read went out right after an ask");
+
+        doors.chain_read(&sid, Some(2), &states, &owner, &tx);
+        assert_eq!(asks(&mut rx), 0, "a moved lock was asked about within the gap");
+        doors.asked.insert(sid.clone(), long_ago());
+        doors.granted.insert(sid.clone(), (2, String::new(), zeroize::Zeroizing::new([7u8; 32])));
+        doors.chain_read(&sid, Some(2), &states, &owner, &tx);
+        assert_eq!(asks(&mut rx), 0, "a door we hold was asked about");
+        doors.chain_read(&sid, Some(3), &none, &owner, &tx);
+        assert_eq!(asks(&mut rx), 0, "a server we do not hold was asked about");
+        doors.chain_read(&sid, Some(3), &states, &owner, &tx);
+        assert_eq!(asks(&mut rx), 1, "a lock past our door was not asked about again");
+
+        doors.asked.insert(sid.clone(), long_ago());
+        assert!(doors.due_rereads(&none, &owner).is_empty(), "a server we do not hold was read");
+        assert_eq!(doors.due_rereads(&states, &owner), vec![sid.clone()], "a hidden room's chain was not read again");
+        assert!(doors.due_rereads(&states, &owner).is_empty(), "a second read within the gap");
+        doors.reread.insert(sid.clone(), long_ago());
+        assert!(!doors.on_status(&sid, true, &states, &owner, &tx));
+        assert!(doors.due_rereads(&states, &owner).is_empty(), "a room that shows us was read");
+        doors.chain_read(&sid, Some(9), &states, &owner, &tx);
+        assert_eq!(asks(&mut rx), 0, "a room that shows us asked");
     }
 }

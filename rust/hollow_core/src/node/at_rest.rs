@@ -11,7 +11,8 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{OnceLock, RwLock};
+use std::sync::{Mutex, MutexGuard, OnceLock, RwLock};
+use std::time::{Duration, SystemTime};
 
 use aes_gcm::aead::{Aead, Payload};
 use aes_gcm::{Aes256Gcm, Key, KeyInit, Nonce};
@@ -115,10 +116,24 @@ fn lookup_key(uid: &[u8; 16]) -> Option<FileKey> {
     }
     // An unloaded ring looks exactly like a missing key: an FFI read can run before
     // the node starts, and an import drops the ring with the database it came from.
-    // `ensure_ready` is a no-op once a store is registered, so a genuine miss costs
-    // nothing.
+    // A genuine miss costs one query.
     ensure_ready().ok()?;
-    ring_key(uid)
+    ring_key(uid).or_else(|| load_one_key(uid))
+}
+
+/// A row written after our ring loaded, by another process sharing the database (the
+/// iOS push extension, a push fetch). The ring's write lock spans the query, so a
+/// `forget_key` racing it cannot leave the key cached after its row is gone.
+fn load_one_key(uid: &[u8; 16]) -> Option<FileKey> {
+    let mut guard = ring().write().ok()?;
+    if let Some(fk) = guard.keys.get(uid) {
+        return Some(fk.clone());
+    }
+    let stores = guard.stores.clone();
+    let (key, nonce) = stores.iter().find_map(|s| MessageStore::lease(&s.db_path, &s.passphrase).ok()?.load_file_key(uid).ok().flatten())?;
+    let fk = FileKey { key: Zeroizing::new(key), nonce };
+    guard.keys.insert(*uid, fk.clone());
+    Some(fk)
 }
 
 fn mint_key() -> Result<([u8; 16], FileKey), String> {
@@ -266,15 +281,61 @@ pub fn plaintext_len(path: &Path) -> Result<u64, String> {
     }
 }
 
+/// A file opened for reading, judged by the header in the handle it is read from.
+enum Opened {
+    Plain(File),
+    Sealed { file: File, header: Header, len: u64, key: FileKey },
+}
+
+/// Open `path` with the key its header names. A writer can swap a newer file in and
+/// retire the old key between our open and the lookup; the path then names the newer
+/// file, which we read instead.
+fn open_for_read(path: &Path) -> Result<Opened, String> {
+    open_for_read_with(path, &lookup_key)
+}
+
+fn open_for_read_with(path: &Path, lookup: &dyn Fn(&[u8; 16]) -> Option<FileKey>) -> Result<Opened, String> {
+    for _ in 0..3 {
+        let mut file = File::open(path).map_err(|e| format!("Failed to open file: {e}"))?;
+        let len = file.metadata().map_err(|e| format!("Failed to stat file: {e}"))?.len();
+        let mut buf = [0u8; HEADER_LEN as usize];
+        let header = if len < HEADER_LEN {
+            None
+        } else {
+            file.read_exact(&mut buf).map_err(|e| format!("Failed to read header: {e}"))?;
+            parse_header(&buf)
+        };
+        let Some(header) = header else {
+            file.rewind().map_err(|e| format!("Failed to seek: {e}"))?;
+            return Ok(Opened::Plain(file));
+        };
+        if let Some(key) = lookup(&header.uid) {
+            return Ok(Opened::Sealed { file, header, len, key });
+        }
+        let swapped = read_header(path).ok().flatten().is_some_and(|(now, _)| now.uid != header.uid);
+        if !swapped {
+            break;
+        }
+    }
+    Err("File key missing".to_string())
+}
+
 /// Decrypt a whole file. A file with no header is legacy plaintext and passes
 /// through; a header whose key row is gone is an error, never a passthrough.
 pub fn read_all(path: &Path) -> Result<Vec<u8>, String> {
-    let Some((h, len)) = read_header(path)? else {
-        return std::fs::read(path).map_err(|e| format!("Failed to read file: {e}"));
+    read_opened(open_for_read(path)?)
+}
+
+fn read_opened(opened: Opened) -> Result<Vec<u8>, String> {
+    let (mut f, h, len, fk) = match opened {
+        Opened::Plain(mut f) => {
+            let mut out = Vec::new();
+            f.read_to_end(&mut out).map_err(|e| format!("Failed to read file: {e}"))?;
+            return Ok(out);
+        }
+        Opened::Sealed { file, header, len, key } => (file, header, len, key),
     };
-    let fk = lookup_key(&h.uid).ok_or("File key missing")?;
     let n = chunk_count_from_len(len, h.chunk_size);
-    let mut f = File::open(path).map_err(|e| format!("Failed to open file: {e}"))?;
     f.seek(SeekFrom::Start(HEADER_LEN)).map_err(|e| format!("Failed to seek: {e}"))?;
 
     let mut out = Vec::with_capacity(plain_len_from(len, h.chunk_size) as usize);
@@ -291,22 +352,23 @@ pub fn read_all(path: &Path) -> Result<Vec<u8>, String> {
 
 /// Decrypt only the chunks `offset..offset+len` touches.
 pub fn read_range(path: &Path, offset: u64, len: usize) -> Result<Vec<u8>, String> {
-    let Some((h, file_len)) = read_header(path)? else {
-        let mut f = File::open(path).map_err(|e| format!("Failed to open file: {e}"))?;
-        f.seek(SeekFrom::Start(offset)).map_err(|e| format!("Failed to seek: {e}"))?;
-        let mut out = vec![0u8; len];
-        let mut filled = 0usize;
-        while filled < len {
-            match f.read(&mut out[filled..]) {
-                Ok(0) => break,
-                Ok(n) => filled += n,
-                Err(e) => return Err(format!("Failed to read file: {e}")),
+    let (mut f, h, file_len, fk) = match open_for_read(path)? {
+        Opened::Plain(mut f) => {
+            f.seek(SeekFrom::Start(offset)).map_err(|e| format!("Failed to seek: {e}"))?;
+            let mut out = vec![0u8; len];
+            let mut filled = 0usize;
+            while filled < len {
+                match f.read(&mut out[filled..]) {
+                    Ok(0) => break,
+                    Ok(n) => filled += n,
+                    Err(e) => return Err(format!("Failed to read file: {e}")),
+                }
             }
+            out.truncate(filled);
+            return Ok(out);
         }
-        out.truncate(filled);
-        return Ok(out);
+        Opened::Sealed { file, header, len, key } => (file, header, len, key),
     };
-    let fk = lookup_key(&h.uid).ok_or("File key missing")?;
     let total = plain_len_from(file_len, h.chunk_size);
     if offset >= total || len == 0 {
         return Ok(Vec::new());
@@ -317,7 +379,6 @@ pub fn read_range(path: &Path, offset: u64, len: usize) -> Result<Vec<u8>, Strin
     let first = (offset / cs) as u32;
     let last = ((end - 1) / cs) as u32;
 
-    let mut f = File::open(path).map_err(|e| format!("Failed to open file: {e}"))?;
     let mut out = Vec::with_capacity((end - offset) as usize);
     for idx in first..=last {
         let at = HEADER_LEN + idx as u64 * (cs + TAG_LEN);
@@ -339,12 +400,14 @@ pub fn export_to(src: &Path, dest: &Path) -> Result<u64, String> {
     if let Some(parent) = dest.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let Some((h, len)) = read_header(src)? else {
-        return std::fs::copy(src, dest).map_err(|e| format!("Failed to copy file: {e}"));
+    let (mut inf, h, len, fk) = match open_for_read(src)? {
+        Opened::Plain(mut f) => {
+            let mut out = File::create(dest).map_err(|e| format!("Failed to create file: {e}"))?;
+            return std::io::copy(&mut f, &mut out).map_err(|e| format!("Failed to copy file: {e}"));
+        }
+        Opened::Sealed { file, header, len, key } => (file, header, len, key),
     };
-    let fk = lookup_key(&h.uid).ok_or("File key missing")?;
     let n = chunk_count_from_len(len, h.chunk_size);
-    let mut inf = File::open(src).map_err(|e| format!("Failed to open file: {e}"))?;
     inf.seek(SeekFrom::Start(HEADER_LEN)).map_err(|e| format!("Failed to seek: {e}"))?;
     let mut out = File::create(dest).map_err(|e| format!("Failed to create file: {e}"))?;
 
@@ -365,9 +428,71 @@ pub fn export_to(src: &Path, dest: &Path) -> Result<u64, String> {
 
 // ── writing ─────────────────────────────────────────────────────────────────
 
-fn tmp_sibling(path: &Path) -> PathBuf {
+/// The temp of one write, named by its key: two writers of one path never share a
+/// half-written temp.
+fn tmp_sibling(path: &Path, uid: &[u8; 16]) -> PathBuf {
+    first_touch();
     let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-    path.with_file_name(format!("{name}.hfe.tmp"))
+    path.with_file_name(format!("{name}.{}.hfe.tmp", hex::encode(&uid[..8])))
+}
+
+/// `{target}.{16 lowercase hex}.hfe.tmp`, split into the target's name and the key tag.
+fn temp_parts(name: &str) -> Option<(&str, &str)> {
+    let (target, tag) = name.strip_suffix(".hfe.tmp")?.rsplit_once('.')?;
+    let hex = tag.len() == 16 && tag.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    (hex && !target.is_empty()).then_some((target, tag))
+}
+
+/// When this process first touched the at-rest layer: every temp it writes is newer,
+/// so the boot sweep never takes a live writer's temp.
+fn first_touch() -> SystemTime {
+    static AT: OnceLock<SystemTime> = OnceLock::new();
+    *AT.get_or_init(SystemTime::now)
+}
+
+/// Coarse filesystems stamp modification times to a second or two.
+const MTIME_SLACK: Duration = Duration::from_secs(3);
+
+fn older_than(path: &Path, cutoff: SystemTime) -> bool {
+    std::fs::metadata(path).and_then(|m| m.modified()).is_ok_and(|t| t + MTIME_SLACK < cutoff)
+}
+
+/// Held while a file's bytes are swapped, truncated, moved or unlinked, so the key that
+/// change retires is always the key of the file it replaced. Per process: the iOS push
+/// extension writes under a lock of its own.
+fn swap_lock() -> MutexGuard<'static, ()> {
+    static SWAP: Mutex<()> = Mutex::new(());
+    SWAP.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// A temp a write of an earlier run left (modified before `cutoff`), removed with the
+/// key row its header names when its name tags that key, the temp's own.
+fn remove_orphan_temp(path: &Path, cutoff: SystemTime) {
+    if !older_than(path, cutoff) {
+        return;
+    }
+    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+    let tag = temp_parts(&name).map(|(_, tag)| tag);
+    let uid = read_header(path).ok().flatten().map(|(h, _)| h.uid).filter(|u| tag.is_some_and(|t| t == hex::encode(&u[..8])));
+    if std::fs::remove_file(path).is_ok()
+        && let Some(uid) = uid
+    {
+        forget_key(&uid);
+    }
+}
+
+/// Temps a write of `target` that died mid-way left beside it, in either naming.
+fn remove_orphan_temps(target: &Path, cutoff: SystemTime) {
+    let (Some(dir), Some(name)) = (target.parent(), target.file_name()) else { return };
+    let name = name.to_string_lossy();
+    let legacy = format!("{name}.hfe.tmp");
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let n = entry.file_name().to_string_lossy().to_string();
+        if n == legacy || temp_parts(&n).is_some_and(|(t, _)| t == name) {
+            remove_orphan_temp(&entry.path(), cutoff);
+        }
+    }
 }
 
 /// Encrypt `plaintext` to `path`, replacing whatever is there. Atomic: the
@@ -378,7 +503,7 @@ pub fn write_all(path: &Path, plaintext: &[u8]) -> Result<(), String> {
     }
     let (uid, fk) = mint_key()?;
     persist_key(&uid, &fk)?;
-    let tmp = tmp_sibling(path);
+    let tmp = tmp_sibling(path, &uid);
     match write_sealed(&tmp, &uid, &fk, DEFAULT_CHUNK_SIZE, plaintext) {
         Ok(()) => {}
         Err(e) => {
@@ -389,6 +514,7 @@ pub fn write_all(path: &Path, plaintext: &[u8]) -> Result<(), String> {
     }
     // The target may still be a legacy plaintext file or an older ciphertext:
     // its key row dies with it.
+    let _swap = swap_lock();
     let old_uid = read_header(path).ok().flatten().map(|(h, _)| h.uid);
     std::fs::rename(&tmp, path).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
@@ -472,23 +598,29 @@ impl Writer {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        // The target may hold an older ciphertext whose key row would otherwise
-        // outlive the bytes it unlocks.
-        let old_uid = read_header(path).ok().flatten().map(|(h, _)| h.uid);
         let (uid, fk) = mint_key()?;
         persist_key(&uid, &fk)?;
-        let mut file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(path)
-            .map_err(|e| format!("Failed to create file: {e}"))?;
-        if let Some(old) = old_uid {
-            forget_key(&old);
-        }
-        file.write_all(&build_header(chunk_size, &uid))
-            .map_err(|e| format!("Failed to write header: {e}"))?;
+        let file = {
+            // The target may hold an older ciphertext whose key row would otherwise
+            // outlive the bytes it unlocks. The header lands under the lock too, so a
+            // swap never reads a truncated file as one without a key.
+            let _swap = swap_lock();
+            let old_uid = read_header(path).ok().flatten().map(|(h, _)| h.uid);
+            let opened = OpenOptions::new().read(true).write(true).create(true).truncate(true).open(path);
+            let mut file = match opened {
+                Ok(file) => file,
+                Err(e) => {
+                    forget_key(&uid);
+                    return Err(format!("Failed to create file: {e}"));
+                }
+            };
+            if let Some(old) = old_uid {
+                forget_key(&old);
+            }
+            file.write_all(&build_header(chunk_size, &uid))
+                .map_err(|e| format!("Failed to write header: {e}"))?;
+            file
+        };
         file.set_len(cipher_len_for(total_len, chunk_size))
             .map_err(|e| format!("Failed to size file: {e}"))?;
         Ok(Writer {
@@ -582,6 +714,7 @@ impl Writer {
 
 /// Unlink `path` and destroy its key row, which is the cryptographic erase.
 pub fn remove(path: &Path) -> Result<(), String> {
+    let _swap = swap_lock();
     let uid = read_header(path).ok().flatten().map(|(h, _)| h.uid);
     match std::fs::remove_file(path) {
         Ok(()) => {}
@@ -594,9 +727,17 @@ pub fn remove(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Move a file. The uid lives in the header, so a rename costs nothing.
+/// Move a file. The uid lives in the header, so a rename costs nothing; a sealed file
+/// it replaces loses its key row with its bytes.
 pub fn rename(from: &Path, to: &Path) -> Result<(), String> {
-    std::fs::rename(from, to).map_err(|e| format!("Failed to move file: {e}"))
+    let _swap = swap_lock();
+    let moved = read_header(from).ok().flatten().map(|(h, _)| h.uid);
+    let replaced = read_header(to).ok().flatten().map(|(h, _)| h.uid).filter(|u| Some(*u) != moved);
+    std::fs::rename(from, to).map_err(|e| format!("Failed to move file: {e}"))?;
+    if let Some(old) = replaced {
+        forget_key(&old);
+    }
+    Ok(())
 }
 
 // ── boot: temp wipe and the plaintext sweep ─────────────────────────────────
@@ -650,6 +791,11 @@ fn is_transient(name: &str) -> bool {
 /// converts without sweeping the identity and database files beside it. Blocking:
 /// callers run it in `spawn_blocking` and watch [`status`].
 pub fn migrate_plaintext(targets: &[PathBuf]) {
+    migrate_plaintext_before(targets, first_touch());
+}
+
+/// [`migrate_plaintext`], taking only temps modified before `cutoff` as orphans.
+fn migrate_plaintext_before(targets: &[PathBuf], cutoff: SystemTime) {
     SWEEP_RUNNING.store(true, Ordering::Relaxed);
     SWEEP_TOTAL.store(0, Ordering::Relaxed);
     SWEEP_DONE.store(0, Ordering::Relaxed);
@@ -661,7 +807,7 @@ pub fn migrate_plaintext(targets: &[PathBuf]) {
             if !is_encrypted(target) {
                 todo.push(target.clone());
             }
-            let _ = std::fs::remove_file(tmp_sibling(target));
+            remove_orphan_temps(target, cutoff);
             continue;
         }
         let entries = match std::fs::read_dir(target) {
@@ -675,8 +821,7 @@ pub fn migrate_plaintext(targets: &[PathBuf]) {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
             if name.ends_with(".hfe.tmp") {
-                // An orphan from a sweep that died mid-file: no key row can match it.
-                let _ = std::fs::remove_file(entry.path());
+                remove_orphan_temp(&entry.path(), cutoff);
                 continue;
             }
             if is_transient(&name) {
@@ -720,10 +865,34 @@ pub fn migrate_plaintext(targets: &[PathBuf]) {
     }
 }
 
+/// A folder only an earlier run's writes filled (a cleaned send copy's): its orphan
+/// temps go with their keys, then the folder itself once empty.
+pub fn sweep_folder(dir: &Path) {
+    sweep_folder_before(dir, first_touch());
+}
+
+fn sweep_folder_before(dir: &Path, cutoff: SystemTime) {
+    let old = older_than(dir, cutoff);
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        if entry.file_name().to_string_lossy().ends_with(".hfe.tmp") {
+            remove_orphan_temp(&entry.path(), cutoff);
+        }
+    }
+    if old {
+        let _ = std::fs::remove_dir(dir);
+    }
+}
+
 fn migrate_one(path: &Path) -> Result<u64, String> {
-    let total_len = std::fs::metadata(path)
-        .map_err(|e| format!("Failed to stat file: {e}"))?
-        .len();
+    migrate_one_with(path, &|| {}, &|| {})
+}
+
+/// `before_swap` runs once the copy is sealed and `in_swap` between the check and the
+/// rename: where a live write can land, and where none may.
+fn migrate_one_with(path: &Path, before_swap: &dyn Fn(), in_swap: &dyn Fn()) -> Result<u64, String> {
+    let meta = std::fs::metadata(path).map_err(|e| format!("Failed to stat file: {e}"))?;
+    let (total_len, stamp) = (meta.len(), meta.modified().ok());
     let mut src = File::open(path).map_err(|e| format!("Failed to open file: {e}"))?;
     // A live handler may have replaced the file with ciphertext since the scan;
     // re-encrypting that would make it unreadable.
@@ -738,7 +907,7 @@ fn migrate_one(path: &Path) -> Result<u64, String> {
 
     let (uid, fk) = mint_key()?;
     persist_key(&uid, &fk)?;
-    let tmp = tmp_sibling(path);
+    let tmp = tmp_sibling(path, &uid);
     let mut reader = std::io::BufReader::new(src);
     if let Err(e) =
         write_sealed_from_reader(&tmp, &uid, &fk, DEFAULT_CHUNK_SIZE, &mut reader, total_len)
@@ -748,6 +917,18 @@ fn migrate_one(path: &Path) -> Result<u64, String> {
         return Err(e);
     }
     drop(reader);
+    before_swap();
+    let _swap = swap_lock();
+    // Sealing takes as long as the file is big: a write that replaced it meanwhile is
+    // newer than what we sealed, and stays.
+    let now = std::fs::metadata(path).ok();
+    let unchanged = now.as_ref().is_some_and(|m| m.len() == total_len && m.modified().ok() == stamp) && !is_encrypted(path);
+    if !unchanged {
+        let _ = std::fs::remove_file(&tmp);
+        forget_key(&uid);
+        return if now.is_none() || is_encrypted(path) { Ok(0) } else { Err("The file changed while it was being protected".to_string()) };
+    }
+    in_swap();
     if let Err(e) = std::fs::rename(&tmp, path) {
         let _ = std::fs::remove_file(&tmp);
         forget_key(&uid);
@@ -822,6 +1003,11 @@ mod tests {
         reset_for_test();
         init(&db, &"7a".repeat(32)).expect("init ring");
         Fixture { _dir: dir, root, db }
+    }
+
+    /// A sweep cutoff after every temp a test writes, so each counts as an orphan.
+    fn later() -> SystemTime {
+        SystemTime::now() + Duration::from_secs(3600)
     }
 
     fn body(n: usize) -> Vec<u8> {
@@ -971,10 +1157,10 @@ mod tests {
         }
         // Crash point 1: a temp written, no row. Crash point 2: a temp plus a row,
         // no rename. Crash point 3: already done.
-        std::fs::write(tmp_sibling(&a), b"garbage").expect("orphan tmp");
+        std::fs::write(tmp_sibling(&a, &[0u8; 16]), b"garbage").expect("orphan tmp");
         let (uid, fk) = mint_key().expect("key");
         persist_key(&uid, &fk).expect("row");
-        write_sealed(&tmp_sibling(&b), &uid, &fk, DEFAULT_CHUNK_SIZE, &data).expect("sealed tmp");
+        write_sealed(&tmp_sibling(&b, &uid), &uid, &fk, DEFAULT_CHUNK_SIZE, &data).expect("sealed tmp");
         write_all(&c, &data).expect("already done");
         std::fs::write(dir.join(".stream_send_x.tmp"), b"in flight").expect("transient");
 
@@ -984,20 +1170,25 @@ mod tests {
         std::fs::write(&loose, &data).expect("seed the loose file");
         let keep = f.root.join("identity.key");
         std::fs::write(&keep, b"not content").expect("seed a root file");
+        let loose_orphan = tmp_sibling(&loose, &[1u8; 16]);
+        std::fs::write(&loose_orphan, b"garbage").expect("an orphan temp beside the loose file");
 
         let targets = vec![dir.clone(), loose.clone()];
-        migrate_plaintext(&targets);
+        migrate_plaintext_before(&targets, later());
         assert_eq!(status().failed, 0, "nothing should fail");
         assert_eq!(status().done, 3, "a.bin, b.bin and the loose file convert; c.bin was done");
         assert!(is_encrypted(&loose), "a named single file converts");
         assert_eq!(std::fs::read(&keep).expect("root file"), b"not content", "the data root is never swept");
-        migrate_plaintext(&targets);
+        assert!(!loose_orphan.exists(), "a loose file's orphan temp is swept");
+        assert!(!key_row_exists_for_test(&uid), "a swept temp's own key row goes with it");
+        migrate_plaintext_before(&targets, later());
 
         for p in [&a, &b, &c] {
             assert!(is_encrypted(p), "{p:?} converged to ciphertext");
             assert_eq!(read_all(p).expect("read"), data, "{p:?} round trips");
         }
-        assert!(!tmp_sibling(&a).exists() && !tmp_sibling(&b).exists(), "no .hfe.tmp left");
+        let temps = std::fs::read_dir(&dir).expect("files").flatten().filter(|e| e.file_name().to_string_lossy().ends_with(".hfe.tmp")).count();
+        assert_eq!(temps, 0, "no .hfe.tmp left");
         assert_eq!(
             std::fs::read(dir.join(".stream_send_x.tmp")).expect("transient survives"),
             b"in flight",
@@ -1141,5 +1332,293 @@ mod tests {
 
         let left: Vec<_> = std::fs::read_dir(dir.path().join("temp")).expect("temp").flatten().collect();
         assert!(left.is_empty(), "the boot sweep left {} entries", left.len());
+    }
+
+    /// Two writers replace one path while a reader reads it: every write lands, every
+    /// read sees one whole file, and what stays on disk keeps its key.
+    #[test]
+    fn at_rest_concurrent_replaces_of_one_path_stay_readable() {
+        let _g = guard();
+        let f = fixture();
+        let path = f.root.join("raced.bin");
+        let data = body(300_000);
+        write_all(&path, &data).expect("seed");
+        let writing = AtomicU32::new(2);
+        std::thread::scope(|s| {
+            for _ in 0..2 {
+                s.spawn(|| {
+                    for _ in 0..40 {
+                        write_all(&path, &data).expect("a replace beside another writer");
+                    }
+                    writing.fetch_sub(1, Ordering::SeqCst);
+                });
+            }
+            s.spawn(|| {
+                while writing.load(Ordering::SeqCst) > 0 {
+                    assert_eq!(read_all(&path).expect("a read during replaces"), data);
+                    assert_eq!(read_range(&path, 262_000, 1_000).expect("a range read during replaces"), &data[262_000..263_000]);
+                }
+            });
+        });
+        assert_eq!(read_all(&path).expect("the last write stays readable"), data);
+        let rows = MessageStore::lease(&f.db, &"7a".repeat(32)).expect("store").load_file_keys().expect("rows").len();
+        assert_eq!(rows, 1, "every replaced file's key row dies with it");
+        let temps = std::fs::read_dir(&f.root).expect("root").flatten().filter(|e| e.file_name().to_string_lossy().ends_with(".hfe.tmp")).count();
+        assert_eq!(temps, 0, "a replace left its temp behind");
+    }
+
+    /// Many writers replacing one small file: a write's swap of the file and its key's
+    /// retirement never interleave with another's, so no replaced file's key row stays.
+    #[test]
+    fn at_rest_concurrent_small_replaces_leave_one_key_row() {
+        let _g = guard();
+        let f = fixture();
+        let path = f.root.join("small.bin");
+        let data = body(16);
+        std::thread::scope(|s| {
+            for _ in 0..4 {
+                s.spawn(|| {
+                    for _ in 0..150 {
+                        write_all(&path, &data).expect("a small replace beside other writers");
+                    }
+                });
+            }
+        });
+        assert_eq!(read_all(&path).expect("the last write stays readable"), data);
+        let rows = MessageStore::lease(&f.db, &"7a".repeat(32)).expect("store").load_file_keys().expect("rows").len();
+        assert_eq!(rows, 1, "every replaced file's key row dies with it");
+    }
+
+    /// A writer swaps a newer file in and retires the old key between a read's open
+    /// and its key lookup: the read takes the newer file, never a missing key.
+    #[test]
+    fn at_rest_a_read_whose_key_a_swap_retired_reads_the_newer_file() {
+        let _g = guard();
+        let f = fixture();
+        let path = f.root.join("swapped.bin");
+        let (old, new) = (body(5_000), body(7_000));
+        write_all(&path, &old).expect("seed");
+        let swapped = std::cell::Cell::new(false);
+        let lookup = |uid: &[u8; 16]| {
+            if !swapped.replace(true) {
+                write_all(&path, &new).expect("a swap between the open and the lookup");
+            }
+            lookup_key(uid)
+        };
+        let opened = open_for_read_with(&path, &lookup).expect("the read reopens the newer file");
+        assert_eq!(read_opened(opened).expect("read"), new);
+    }
+
+    /// The push process (iOS NSE) seals a file into the shared files/ and its row into
+    /// the shared messages.db; the running app's ring never saw that row.
+    #[test]
+    fn at_rest_a_file_another_process_sealed_reads_back() {
+        let _g = guard();
+        let f = fixture();
+        let path = f.root.join("nse.bin");
+        let data = body(10_000);
+        let (uid, fk) = mint_key().expect("key");
+        MessageStore::lease(&f.db, &"7a".repeat(32)).expect("store").insert_file_key(&uid, &fk.key, &fk.nonce).expect("row");
+        write_sealed(&path, &uid, &fk, DEFAULT_CHUNK_SIZE, &data).expect("sealed");
+        assert_eq!(read_all(&path).expect("a file another process sealed reads in the app"), data);
+        assert!(key_in_ring_for_test(&uid), "the key it found stays in the ring");
+    }
+
+    /// A live write replaces a legacy plaintext file while the boot sweep seals it: the
+    /// newer file stays, and the sweep's copy goes with its key.
+    #[test]
+    fn at_rest_a_write_during_the_sweep_is_not_reverted() {
+        let _g = guard();
+        let f = fixture();
+        let path = f.root.join("custom.img");
+        std::fs::write(&path, body(50_000)).expect("legacy plaintext");
+        let new = b"the newer bytes a live handler wrote".to_vec();
+        migrate_one_with(&path, &|| write_all(&path, &new).expect("a live write during the sweep"), &|| {}).expect("the sweep");
+        let rows = MessageStore::lease(&f.db, &"7a".repeat(32)).expect("store").load_file_keys().expect("rows").len();
+        let got = read_all(&path).expect("read");
+        assert!(got == new, "the sweep sealed the OLD plaintext over a newer write ({} bytes on disk, {rows} key rows)", got.len());
+        assert_eq!(rows, 1, "the sweep's own key row stays");
+        let temps = std::fs::read_dir(&f.root).expect("root").flatten().filter(|e| e.file_name().to_string_lossy().ends_with(".hfe.tmp")).count();
+        assert_eq!(temps, 0, "the sweep left its temp behind");
+    }
+
+    /// A live write arriving between the sweep's check and its swap waits for the swap,
+    /// then replaces the sweep's copy.
+    #[test]
+    fn at_rest_a_write_racing_the_sweeps_swap_waits_for_it() {
+        let _g = guard();
+        let f = fixture();
+        let path = f.root.join("raced.img");
+        std::fs::write(&path, body(50_000)).expect("legacy plaintext");
+        let new = b"the newer bytes a live handler wrote".to_vec();
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        std::thread::scope(|s| {
+            let in_swap = || {
+                let (path, new, tx) = (&path, &new, tx.clone());
+                s.spawn(move || {
+                    write_all(path, new).expect("a live write at the swap");
+                    let _ = tx.send(());
+                });
+                let _ = rx.recv_timeout(Duration::from_millis(500));
+            };
+            migrate_one_with(&path, &|| {}, &in_swap).expect("the sweep");
+        });
+        assert_eq!(read_all(&path).expect("read"), new, "the sweep's swap reverted a live write");
+        let rows = MessageStore::lease(&f.db, &"7a".repeat(32)).expect("store").load_file_keys().expect("rows").len();
+        assert_eq!(rows, 1, "the replaced copy's key row stays");
+    }
+
+    /// A loose file's orphan sweep takes only `{name}.{16 hex}.hfe.tmp`, never another
+    /// file's temp that shares its prefix.
+    #[test]
+    fn at_rest_the_loose_orphan_sweep_spares_another_file_s_temp() {
+        let _g = guard();
+        let f = fixture();
+        let loose = f.root.join("custom_background.img");
+        write_all(&loose, &body(100)).expect("loose");
+        let other = tmp_sibling(&f.root.join("custom_background.img.bak"), &[9u8; 16]);
+        std::fs::write(&other, b"another file's temp").expect("other temp");
+        let own = tmp_sibling(&loose, &[8u8; 16]);
+        std::fs::write(&own, b"its own orphan").expect("own temp");
+        migrate_plaintext_before(std::slice::from_ref(&loose), later());
+        assert!(!own.exists(), "precondition: the sweep took the loose file's own orphan");
+        assert!(other.exists(), "the sweep of one loose file removed another file's temp {other:?}");
+    }
+
+    /// Temps this process may still be writing are never orphans to the boot sweep,
+    /// in a swept folder or beside a loose file.
+    #[test]
+    fn at_rest_the_sweep_spares_a_temp_this_process_is_writing() {
+        let _g = guard();
+        let f = fixture();
+        let dir = f.root.join("files");
+        std::fs::create_dir_all(&dir).expect("dir");
+        let (uid, fk) = mint_key().expect("key");
+        persist_key(&uid, &fk).expect("row");
+        let live = tmp_sibling(&dir.join("x.bin"), &uid);
+        write_sealed(&live, &uid, &fk, DEFAULT_CHUNK_SIZE, &body(100)).expect("a live write's temp");
+        let loose = f.root.join("custom_background.img");
+        write_all(&loose, &body(100)).expect("loose");
+        let loose_live = tmp_sibling(&loose, &[7u8; 16]);
+        std::fs::write(&loose_live, b"in flight").expect("loose temp");
+        migrate_plaintext(&[dir.clone(), loose.clone()]);
+        assert!(live.exists() && loose_live.exists(), "the sweep took a temp written after this process started");
+        assert!(key_row_exists_for_test(&uid), "the sweep forgot a live write's key");
+    }
+
+    /// A cleaned send copy's folder keeps the copy; its orphan temps go with their keys,
+    /// and a folder left with nothing goes too.
+    #[test]
+    fn at_rest_a_folder_sweep_takes_orphan_temps_and_their_keys() {
+        let _g = guard();
+        let f = fixture();
+        let kept = f.root.join("send_aa");
+        let copy = kept.join("photo.jpg");
+        write_all(&copy, &body(100)).expect("the copy");
+        let orphan = |dir: &Path| {
+            let (uid, fk) = mint_key().expect("key");
+            persist_key(&uid, &fk).expect("row");
+            write_sealed(&tmp_sibling(&dir.join("photo.jpg"), &uid), &uid, &fk, DEFAULT_CHUNK_SIZE, &body(100)).expect("sealed temp");
+            uid
+        };
+        let in_kept = orphan(&kept);
+        let emptied = f.root.join("send_bb");
+        std::fs::create_dir_all(&emptied).expect("dir");
+        let in_emptied = orphan(&emptied);
+        for dir in [&kept, &emptied] {
+            sweep_folder_before(dir, later());
+        }
+        assert!(!key_row_exists_for_test(&in_kept) && !key_row_exists_for_test(&in_emptied), "a swept temp kept its key row");
+        assert_eq!(read_all(&copy).expect("the copy stays"), body(100));
+        let left = std::fs::read_dir(&kept).expect("kept").count();
+        assert_eq!(left, 1, "only the copy stays in its folder");
+        assert!(!emptied.exists(), "a folder left empty goes");
+        sweep_folder(&kept);
+        assert!(kept.exists(), "a folder holding a copy stays");
+    }
+
+    /// Removes beside replaces of the same path: a remove's unlink and its key's
+    /// retirement name one file, so no key row outlives its file.
+    #[test]
+    fn at_rest_a_remove_beside_replaces_leaves_no_stray_row() {
+        let _g = guard();
+        let f = fixture();
+        let path = f.root.join("removed.bin");
+        let data = body(16);
+        let removing = AtomicBool::new(true);
+        std::thread::scope(|s| {
+            for _ in 0..3 {
+                s.spawn(|| {
+                    while removing.load(Ordering::SeqCst) {
+                        write_all(&path, &data).expect("a replace");
+                    }
+                });
+            }
+            s.spawn(|| {
+                for _ in 0..3_000 {
+                    remove(&path).expect("a remove");
+                }
+                removing.store(false, Ordering::SeqCst);
+            });
+        });
+        remove(&path).expect("the last remove");
+        let rows = MessageStore::lease(&f.db, &"7a".repeat(32)).expect("store").load_file_keys().expect("rows").len();
+        assert_eq!(rows, 0, "a key row outlived its file");
+    }
+
+    /// A remove, a chunked create and a move each beside a replace of the same path:
+    /// every key row left names a file on disk.
+    #[test]
+    fn at_rest_a_remove_create_or_move_beside_a_replace_leaves_no_stray_row() {
+        let _g = guard();
+        let f = fixture();
+        let path = f.root.join("contended.bin");
+        let from = f.root.join("incoming.bin");
+        let data = body(16);
+        std::thread::scope(|s| {
+            for _ in 0..2 {
+                s.spawn(|| {
+                    for _ in 0..300 {
+                        write_all(&path, &data).expect("a replace");
+                    }
+                });
+            }
+            s.spawn(|| {
+                for _ in 0..300 {
+                    remove(&path).expect("a remove");
+                }
+            });
+            s.spawn(|| {
+                for _ in 0..300 {
+                    drop(Writer::create(&path, MIN_CHUNK_SIZE, data.len() as u64).expect("a chunked create"));
+                }
+            });
+            s.spawn(|| {
+                for _ in 0..300 {
+                    write_all(&from, &data).expect("a write to move");
+                    rename(&from, &path).expect("a move");
+                }
+            });
+        });
+        remove(&path).expect("the last remove");
+        let rows = MessageStore::lease(&f.db, &"7a".repeat(32)).expect("store").load_file_keys().expect("rows").len();
+        assert_eq!(rows, 0, "a key row outlived its file");
+    }
+
+    /// A move over a sealed file retires the replaced file's key; moving a file onto
+    /// itself keeps its own.
+    #[test]
+    fn at_rest_a_move_over_a_sealed_file_retires_its_key() {
+        let _g = guard();
+        let f = fixture();
+        let (from, to) = (f.root.join("a.bin"), f.root.join("b.bin"));
+        write_all(&from, &body(10)).expect("from");
+        write_all(&to, &body(20)).expect("to");
+        let (moved, replaced) = (uid_of(&from).expect("sealed"), uid_of(&to).expect("sealed"));
+        rename(&from, &to).expect("move");
+        assert!(!key_row_exists_for_test(&replaced), "the replaced file's key row stayed");
+        rename(&to, &to).expect("a move onto itself");
+        assert!(key_row_exists_for_test(&moved) && key_in_ring_for_test(&moved), "the moved file lost its key");
+        assert_eq!(read_all(&to).expect("read"), body(10));
     }
 }

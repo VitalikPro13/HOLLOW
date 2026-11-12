@@ -2229,6 +2229,18 @@ impl MessageStore {
         Ok(out)
     }
 
+    /// One at-rest file key, for a row another process wrote after our ring loaded.
+    pub fn load_file_key(&self, uid: &[u8; 16]) -> Result<Option<([u8; 32], [u8; 8])>, String> {
+        let row = self
+            .conn
+            .query_row("SELECT key, nonce FROM file_keys WHERE uid = ?1", rusqlite::params![uid.as_slice()], |r| {
+                Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Vec<u8>>(1)?))
+            })
+            .optional()
+            .map_err(|e| format!("Failed to query file_keys: {e}"))?;
+        Ok(row.and_then(|(key, nonce)| Some((<[u8; 32]>::try_from(key.as_slice()).ok()?, <[u8; 8]>::try_from(nonce.as_slice()).ok()?))))
+    }
+
     pub fn insert_file_key(&self, uid: &[u8; 16], key: &[u8; 32], nonce: &[u8; 8]) -> Result<(), String> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
