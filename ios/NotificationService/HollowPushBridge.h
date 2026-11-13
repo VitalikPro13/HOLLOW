@@ -55,6 +55,9 @@ char *hollow_push_fetch_and_decrypt(const char *data_dir,
 char *hollow_push_open_wake(const char *data_dir, const char *fields_json);
 
 int32_t hollow_push_server_hidden(const char *data_dir, const char *server_id);
+// 1 when a channel wake for server_id whose posts were not read must name nothing
+// (flagged 18+, not yet known not to be, or nothing to judge with), else 0.
+int32_t hollow_push_server_age_restricted(const char *data_dir, const char *server_id);
 
 // Free a string returned by hollow_push_fetch_and_decrypt or hollow_push_open_wake.
 void hollow_push_string_free(char *ptr);

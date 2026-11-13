@@ -1416,6 +1416,8 @@ async fn run_event_loop(
     // Hidden age-restricted servers as last told to the relay (muted) and to Dart.
     let mut age_sent = super::age_gate::Sent::default();
     let mut age_gate_timer = tokio::time::interval(Duration::from_secs(5));
+    // What this computer last told the relay to silence on our siblings, at which roster.
+    let mut sib_sent: Option<(super::age_gate::SiblingMute, u64)> = None;
     age_gate_timer.tick().await; // consume immediate first tick
 
     let mut rebootstrap_timer = tokio::time::interval(Duration::from_secs(30));
@@ -2853,7 +2855,7 @@ async fn run_event_loop(
                     NodeCommand::SetPushPrefs { prefs_json } => {
                         push_prefs = Some(prefs_json);
                         if let Some(step) = push_age_gate(
-                            &mut age_sent, &db_path, &db_passphrase, &server_states, push_prefs.as_deref(), true, false, &ws_cmd_tx, &event_tx,
+                            &mut age_sent, &db_path, &db_passphrase, &server_states, &local_peer_str, push_prefs.as_deref(), true, false, &ws_cmd_tx, &event_tx,
                         ) {
                             step.await;
                         }
@@ -2863,8 +2865,9 @@ async fn run_event_loop(
                         super::age_gate::share_with_own_devices(
                             &ws_cmd_tx, &ws_room_peers, &local_peer_str, &device_peer_id, &db_path, &db_passphrase,
                         );
+                        mute_siblings_due(&mut sib_sent, &db_path, &db_passphrase, &server_states, &local_peer_str, false, &ws_cmd_tx);
                         if let Some(step) = push_age_gate(
-                            &mut age_sent, &db_path, &db_passphrase, &server_states, push_prefs.as_deref(), true, true, &ws_cmd_tx, &event_tx,
+                            &mut age_sent, &db_path, &db_passphrase, &server_states, &local_peer_str, push_prefs.as_deref(), true, true, &ws_cmd_tx, &event_tx,
                         ) {
                             step.await;
                         }
@@ -4133,10 +4136,13 @@ async fn run_event_loop(
                         }
                         let force = push_prefs.is_some();
                         if let Some(step) = push_age_gate(
-                            &mut age_sent, &db_path, &db_passphrase, &server_states, push_prefs.as_deref(), force, false, &ws_cmd_tx, &event_tx,
+                            &mut age_sent, &db_path, &db_passphrase, &server_states, &local_peer_str, push_prefs.as_deref(), force, false, &ws_cmd_tx, &event_tx,
                         ) {
                             step.await;
                         }
+                        // The relay forgets nothing of ours across a socket, but a fresh
+                        // session may meet a relay that restarted without it.
+                        mute_siblings_due(&mut sib_sent, &db_path, &db_passphrase, &server_states, &local_peer_str, true, &ws_cmd_tx);
                     }
 
                     // The socket is gone, the relay holds our session: every room, peer, call,
@@ -4152,6 +4158,10 @@ async fn run_event_loop(
                     // missed. Only a gap (frames that fell out of its ring) runs the catch-ups.
                     WsEvent::Resumed { gap } => {
                         hollow_log!("[HOLLOW-WS] Relay session resumed (gap: {gap})");
+                        // The ring's replay follows: a phone's 18+ hold ends once all of it arrived.
+                        if super::age_gate::Platform::current() != super::age_gate::Platform::Desktop {
+                            let _ = ws_cmd_tx.send(super::ws_client::WsCommand::Flush);
+                        }
                         mls_turn.on_session(true);
                         turn_book.on_session();
                         super::roster_reach::on_session_up(&ws_cmd_tx, &cmd_tx, &device_peer_id, false, &db_path, &db_passphrase);
@@ -4882,6 +4892,11 @@ async fn run_event_loop(
                         if awaiting_inbox_answer.as_deref() == Some(room.as_str()) {
                             awaiting_inbox_answer = None;
                             let _ = event_tx.send(NetworkEvent::RelayConnected).await;
+                            // The inbox replay follows this answer: a phone's 18+ hold ends
+                            // only once all of it has arrived.
+                            if super::age_gate::Platform::current() != super::age_gate::Platform::Desktop {
+                                let _ = ws_cmd_tx.send(super::ws_client::WsCommand::Flush);
+                            }
                         }
                         let peers: Vec<String> = peers.into_iter().filter(|p| bare_presence.admits(p)).collect();
                         let local_peer = local_peer_str.to_string();
@@ -5458,6 +5473,16 @@ async fn run_event_loop(
                             &event_tx, &ws_cmd_tx, &blob, signal,
                             &master_peer_str, &device_peer_id, &db_path, &db_passphrase,
                         ).await;
+                    }
+                    // Everything the relay held for us arrived (a fresh session's inbox, a
+                    // resume, a return to the screen): a phone's 18+ hold may end. A flush
+                    // answered before a fresh session's inbox join says nothing of its replay.
+                    WsEvent::Flushed => {
+                        if awaiting_inbox_answer.is_none()
+                            && let Some(allowed) = super::age_gate::settled_allowed_at(&db_path, &db_passphrase)
+                        {
+                            let _ = event_tx.send(NetworkEvent::AgeGateChanged { allowed }).await;
+                        }
                     }
                     WsEvent::TopicCatchupDone { room, channel } => {
                         join_hold.ring_ended(&room, &channel);
@@ -7645,10 +7670,16 @@ async fn run_event_loop(
             // so each expiry triggers exactly one reconcile and old rows never re-fire.
             // A phone mutes at the relay every server it hides, from the moment it hides
             // it (a flag, a gate change, a join not caught up yet), and tells Dart.
-            _ = age_gate_timer.tick(), if super::age_gate::Platform::current() != super::age_gate::Platform::Desktop => {
+            // A computer re-tells the relay what to silence on our other devices when the
+            // set, the choice or our roster moved (a flag, a join or leave, a sibling's entry).
+            _ = age_gate_timer.tick() => {
                 arm_started = Some(("timer", "age_gate", std::time::Instant::now()));
-                if let Some(step) = push_age_gate(
-                    &mut age_sent, &db_path, &db_passphrase, &server_states, push_prefs.as_deref(), false, true, &ws_cmd_tx, &event_tx,
+                if super::age_gate::Platform::current() == super::age_gate::Platform::Desktop {
+                    if awaiting_inbox_answer.is_none() {
+                        mute_siblings_due(&mut sib_sent, &db_path, &db_passphrase, &server_states, &local_peer_str, false, &ws_cmd_tx);
+                    }
+                } else if let Some(step) = push_age_gate(
+                    &mut age_sent, &db_path, &db_passphrase, &server_states, &local_peer_str, push_prefs.as_deref(), false, true, &ws_cmd_tx, &event_tx,
                 ) {
                     step.await;
                 }
@@ -8169,13 +8200,44 @@ fn silent_reask_refused(
         *asked += 1;
         *next = now + std::time::Duration::from_secs(30u64 << *asked);
         hollow_log!("[HOLLOW-CRDT] A rebuild refused our admission to {sid}: asking again ({asked})");
-        let _ = cmd_tx.try_send(NodeCommand::JoinServer {
-            server_id: sid.clone(),
-            twitch_proof_json: None,
-            nsfw_confirmed: true,
-            owner_pin: state.anchor_owner(),
-            join_key: None,
-        });
+        let _ = cmd_tx.try_send(readmission_ask(sid, state));
+    }
+}
+
+/// The join a sibling's announce starts here, carrying only the 18+ yes THIS device holds.
+async fn sibling_announced_join(
+    db_path: &str,
+    db_passphrase: &str,
+    server_id: &str,
+    owner_pin: Option<String>,
+    join_key: Option<String>,
+    quiet: bool,
+    announced_at: i64,
+) -> PendingJoin {
+    let nsfw_confirmed =
+        off_worker_stack(db_path, db_passphrase, server_id, super::age_gate::own_consent_at).await.unwrap_or(false);
+    PendingJoin {
+        twitch_proof_json: None,
+        nsfw_confirmed,
+        owner_pin,
+        join_key,
+        reply_secret: super::join_lane::ReplySecret::new(),
+        from_sibling: true,
+        quiet,
+        announced_at,
+        ..Default::default()
+    }
+}
+
+/// The join a rebuild's refused admission asks again with: no 18+ yes of its own, so only
+/// one this device holds goes out (`age_gate::join_consent_at`).
+fn readmission_ask(server_id: &str, state: &ServerState) -> NodeCommand {
+    NodeCommand::JoinServer {
+        server_id: server_id.to_string(),
+        twitch_proof_json: None,
+        nsfw_confirmed: false,
+        owner_pin: state.anchor_owner(),
+        join_key: None,
     }
 }
 
@@ -9794,17 +9856,54 @@ fn push_age_gate<'a>(
     db_path: &str,
     db_passphrase: &str,
     server_states: &super::types::ServerStates,
+    local_master: &str,
     push_prefs: Option<&str>,
     force: bool,
     tell_dart: bool,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     event_tx: &'a mpsc::Sender<NetworkEvent>,
 ) -> Option<BoxedStep<'a>> {
-    let (prefs, moved) = age_sent.due(db_path, db_passphrase, server_states, push_prefs, force, tell_dart);
-    if let Some(prefs_json) = prefs {
-        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SetPushPrefs { prefs_json });
+    let (prefs, moved) = age_sent.due(db_path, db_passphrase, server_states, local_master, push_prefs, force, tell_dart);
+    if let Some(super::age_gate::PrefsOut { json: prefs_json, sib_local, sib_view }) = prefs {
+        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::SetPushPrefs { prefs_json, sib_local, sib_view });
     }
     moved.map(|allowed| emit_boxed(event_tx, NetworkEvent::AgeGateChanged { allowed }))
+}
+
+/// A computer tells the relay what to silence on our other devices when that moved, its
+/// roster changed (`roster_rev`) or `force` (a fresh inbox join); phones send nothing.
+#[allow(clippy::too_many_arguments)]
+fn mute_siblings_due(
+    last: &mut Option<(super::age_gate::SiblingMute, u64)>,
+    db_path: &str,
+    db_passphrase: &str,
+    server_states: &super::types::ServerStates,
+    local_master: &str,
+    force: bool,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+) {
+    let platform = super::age_gate::Platform::current();
+    if platform != super::age_gate::Platform::Desktop {
+        return;
+    }
+    let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) else { return };
+    let Some(mute) = super::age_gate::sibling_mute(&store, platform, server_states.iter(), local_master) else {
+        return;
+    };
+    let rev = super::roster_book::revision(local_master);
+    let next = (mute, rev);
+    if !force && last.as_ref() == Some(&next) {
+        return;
+    }
+    // The relay judges these stamps by its own clock; one it would refuse is not
+    // recorded, so the next tick tries again.
+    let Some(super::age_gate::SiblingMute { at, set_at, servers }) =
+        super::age_gate::frame_for_relay(&next.0, super::relay_clock::now_ms())
+    else {
+        return;
+    };
+    *last = Some(next);
+    let _ = ws_cmd_tx.send(super::ws_client::WsCommand::MuteSiblings { master: local_master.to_string(), at, set_at, servers });
 }
 
 /// The relay let us into `room` again after refusing it: whatever it refused, it
@@ -13248,21 +13347,11 @@ async fn handle_incoming_request_inner(
             hollow_log!("[HOLLOW-CRDT] Sibling {peer_str} announced server {server_id}; running join flow");
             // Lightweight inline join (mirrors handle_join_server): join the rooms, read
             // the lock, and ask whoever is in the room, the announcer included, which
-            // same-identity fast-paths us. The receiver's gates are `!is_sibling`, so no
-            // proof and NSFW pre-confirmed. Our signed device list attributes us to our
-            // master with any member.
-            let mut pending = PendingJoin {
-                twitch_proof_json: None,
-                nsfw_confirmed: true,
-                owner_pin: owner,
-                device_list: super::roster_book::join_roster(&master_keypair.peer_id(), device_peer_id, db_path, db_passphrase),
-                join_key,
-                reply_secret: super::join_lane::ReplySecret::new(),
-                from_sibling: true,
-                quiet: !fresh,
-                announced_at: frame_ts_ms,
-                ..Default::default()
-            };
+            // same-identity fast-paths us. The receiver's gates are `!is_sibling`; any
+            // other member asks the 18+ question unless THIS device holds its own yes.
+            // Our signed device list attributes us to our master with any member.
+            let mut pending = sibling_announced_join(db_path, db_passphrase, &server_id, owner, join_key, !fresh, frame_ts_ms).await;
+            pending.device_list = super::roster_book::join_roster(&master_keypair.peer_id(), device_peer_id, db_path, db_passphrase);
             off_worker_stack(db_path, db_passphrase, &server_id, super::age_gate::unsettle_at).await;
             sync_handler::request_join_lock(ws_cmd_tx, &server_id, &mut pending);
             let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom { room_code: server_id.clone() });
@@ -16964,5 +17053,66 @@ mod tests {
             );
         }
         super::super::resolver::clear_all();
+    }
+
+    /// A computer whose own clock runs an hour slow judges its `mute_siblings` stamps by
+    /// the relay's clock, and one the relay would refuse is never recorded as sent, so the
+    /// next tick carries it once it fits (review MED-2).
+    #[test]
+    fn w4_iospush_a_slow_computer_stamps_its_mutes_by_the_relays_clock() {
+        let _lock = super::super::relay_clock::TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        super::super::age_gate::set_test_platform(Some(super::super::age_gate::Platform::Desktop));
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let path = tmp.path().join("sib.db").to_string_lossy().into_owned();
+        let pass = "ab".repeat(32);
+        let store = crate::storage::MessageStore::open(&path, &pass).unwrap();
+        let local = super::super::relay_clock::local_ms();
+        let hour = 3_600_000;
+        // A sibling with a right clock chose 30 min ago in the relay's time.
+        let entry = super::super::age_gate::AgeGateEntry { allow: false, at: local + hour - 1_800_000 };
+        store.save_setting(super::super::age_gate::PHONES_KEY, &serde_json::to_string(&entry).unwrap()).unwrap();
+        let states = super::super::types::ServerStates::new();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut last = None;
+        super::super::relay_clock::forget_for_test();
+        mute_siblings_due(&mut last, &path, &pass, &states, "me", false, &tx);
+        assert!(rx.try_recv().is_err() && last.is_none(), "a choice past what the relay takes waits, unrecorded");
+        let relay_secs = u64::try_from((local + hour) / 1000).unwrap();
+        super::super::relay_clock::observe(relay_secs);
+        mute_siblings_due(&mut last, &path, &pass, &states, "me", false, &tx);
+        let sent = rx.try_recv();
+        super::super::relay_clock::forget_for_test();
+        super::super::age_gate::set_test_platform(None);
+        let Ok(super::super::ws_client::WsCommand::MuteSiblings { at, .. }) = sent else {
+            panic!("the relay's clock takes the choice, yet nothing was sent");
+        };
+        assert_eq!(at, entry.at);
+    }
+
+    /// A rebuild's re-ask carries no 18+ yes of its own: only one this device holds is
+    /// added where the join is built (review LOW-4).
+    #[test]
+    fn w4_iospush_a_rebuild_reask_carries_no_18_plus_yes_of_its_own() {
+        let state = ServerState::new("s".into(), "S".into(), "o".into());
+        let NodeCommand::JoinServer { nsfw_confirmed, .. } = readmission_ask("s", &state) else {
+            panic!("a re-ask is a join");
+        };
+        assert!(!nsfw_confirmed, "a re-ask consented for a device that never said yes");
+    }
+
+    /// A join a sibling's announce starts carries only the 18+ yes this device holds, and
+    /// none on a phone whose gate is closed (review LOW-4).
+    #[tokio::test]
+    async fn w4_iospush_a_sibling_announced_join_carries_only_this_devices_yes() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let path = tmp.path().join("sibjoin.db").to_string_lossy().into_owned();
+        let pass = "ab".repeat(32);
+        let store = crate::storage::MessageStore::open(&path, &pass).unwrap();
+        let ask = async || sibling_announced_join(&path, &pass, "adult", None, None, true, 1).await.nsfw_confirmed;
+        assert!(!ask().await, "a device that never said yes carried a yes");
+        super::super::age_gate::note_consent(&store, super::super::age_gate::Platform::Desktop, "adult");
+        assert!(ask().await, "control: the yes this device gave");
+        let _phone = super::super::age_gate::phone_process_for_test(super::super::age_gate::Platform::Ios);
+        assert!(!ask().await, "a closed phone carried a yes");
     }
 }

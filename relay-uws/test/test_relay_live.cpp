@@ -7022,6 +7022,7 @@ static void test_denylist() {
 
 #include "live_t14_relay.inc"
 #include "live_rostercheck.inc"
+#include "live_sib_mute.inc"
 
 int main(int argc, char** argv) {
     if (argc != 3) {
@@ -7061,6 +7062,13 @@ int main(int argc, char** argv) {
     // RELAY_LIVE_ONLY=sessions runs the session cases alone, =bounds the bounds cases alone
     // (the mutation passes), =probe only the RELAY_LIVE_PROBE probes and the drain.
     const char* only = getenv("RELAY_LIVE_ONLY");
+    // =sib: the sibling mute cases alone (the mutation pass).
+    if (only && std::string(only) == "sib") {
+        test_sib_mute();
+        SSL_CTX_free(g_ctx);
+        if (failures) printf("%d FAILED\n", failures);
+        return failures ? 1 : 0;
+    }
     if (only && std::string(only) == "door_grace") {
         hs_door_moved_in_grace();
         test_hidden_door_rooms(true);
@@ -7326,6 +7334,7 @@ int main(int argc, char** argv) {
         test_mailbox_read_once();
         test_mailbox_gap_after_read();
         test_session_push_in_grace();
+        test_sib_mute();
         test_session_expiry();
         test_handshake_review();
         test_hidden();

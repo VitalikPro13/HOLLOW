@@ -66,6 +66,8 @@ pub(crate) async fn run_fetch(
     db_path: &str,
     db_passphrase: &str,
 ) -> Result<Vec<FetchedDm>, String> {
+    let relay_domain = fetch_relay_domain(relay_domain, db_path, db_passphrase)
+        .inspect_err(|_| hollow_log!("[HOLLOW-FETCH] This install's relay is unreadable, nothing fetched"))?;
     let relay_url = format!("wss://{relay_domain}/ws");
     // The push payload names the server; one we are not a member of is never
     // joined, or the payload steers our socket into any room (J4).
@@ -185,6 +187,22 @@ pub(crate) async fn run_fetch(
 
     hollow_log!("[HOLLOW-FETCH] Fetch complete, returning {} messages", merged.len());
     Ok(merged)
+}
+
+/// The app setting Dart's relay picker saves (`relay_domain_provider.dart`).
+pub(crate) const RELAY_DOMAIN_KEY: &str = "relay_domain";
+const OFFICIAL_RELAY: &str = "relay.anonlisten.com";
+
+/// The relay a fetch dials: the one given, else the one this install uses. Only a
+/// database that reads and holds no choice means the official relay; any read error
+/// refuses the fetch, never dialing a relay this install may not use.
+pub(crate) fn fetch_relay_domain(given: &str, db_path: &str, db_passphrase: &str) -> Result<String, String> {
+    if !given.is_empty() {
+        return Ok(given.to_string());
+    }
+    let store = crate::storage::MessageStore::lease(db_path, db_passphrase)?;
+    let chosen = store.load_setting(RELAY_DOMAIN_KEY)?;
+    Ok(chosen.map(|d| d.trim().to_string()).filter(|d| !d.is_empty()).unwrap_or_else(|| OFFICIAL_RELAY.to_string()))
 }
 
 /// Compute the single room the fetch joins: the server room for a channel
@@ -2497,6 +2515,47 @@ mod tests {
         assert_eq!(fetched("b15-other", "other words"), None, "a proof for other words is kept");
         crate::node::resolver::clear_all();
     }
+    /// A push process never heard Dart's `set_relay_url`: an empty relay (the NSE, a
+    /// cold Android fetch process) means the relay this install uses, from its own
+    /// database, never the official one (a self-hosted install's wakes must not knock there).
+    #[tokio::test]
+    async fn w4_iospush_a_fetch_with_no_relay_given_dials_the_installs_own_relay() {
+        let (_tmp, path, pass) = temp_store();
+        let me = kp(185);
+        let sid = "srv-own-relay";
+        let state = server_with(sid, &[(&me.peer_id(), "me")]);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let own = listener.local_addr().unwrap().to_string();
+        {
+            let store = crate::storage::MessageStore::open(&path, &pass).unwrap();
+            store.save_server_state(sid, &serde_json::to_string(&state).unwrap()).unwrap();
+            store.save_setting(RELAY_DOMAIN_KEY, &own).unwrap();
+        }
+        let mut olm = OlmManager::new();
+        let mut mls = None;
+        let crypto_store = CryptoStore::open(path.clone(), pass.clone()).unwrap();
+        let proto = me.to_protobuf_encoding().unwrap();
+        let (id, pk, sender) = (me.peer_id(), pk_b64(&me), kp(186).peer_id());
+        let fetch = run_fetch(
+            "", &id, &id, &proto, &pk, None,
+            &sender, Some(sid), Duration::from_secs(2),
+            &mut olm, &mut mls, &crypto_store, &path, &pass,
+        );
+        let dialed = tokio::time::timeout(Duration::from_secs(3), listener.accept());
+        let (_fetched, dialed) = tokio::join!(fetch, dialed);
+        assert!(matches!(dialed, Ok(Ok(_))), "the fetch never dialed the relay this install uses");
+        assert_eq!(fetch_relay_domain("relay.example.org", &path, &pass).as_deref(), Ok("relay.example.org"), "a relay given wins");
+    }
+
+    /// Only a database that reads and holds no choice means the official relay: one that
+    /// cannot be read refuses the fetch (review LOW-6).
+    #[test]
+    fn w4_iospush_an_unreadable_relay_choice_refuses_the_fetch() {
+        let (_tmp, path, pass) = temp_store();
+        crate::storage::MessageStore::open(&path, &pass).unwrap();
+        assert_eq!(fetch_relay_domain("", &path, &pass).as_deref(), Ok(OFFICIAL_RELAY), "no choice saved");
+        assert!(fetch_relay_domain("", &path, &"cd".repeat(32)).is_err(), "an unreadable database dialed a relay");
+    }
 }
 
 // w2-c
@@ -2522,4 +2581,5 @@ mod w2c_cleared {
         assert_eq!(row("m2", t + 10), Some(ChannelInsert::Stored));
         assert_eq!(row("m2", t + 10), Some(ChannelInsert::Duplicate));
     }
+
 }

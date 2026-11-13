@@ -198,6 +198,17 @@ db_passphrase) -> Vec<FetchedDm>`.
 - `set_push_prefs(prefs_json)` — channel push filters; the reserved `~dm` entry carries muted DM senders as device ids → "nothing" (relay `dm_push_muted()` skips only the wake-up, the deposit stays buffered; synced on `setDmEnabled` and on device-list or own-device-id changes, only after `loadAll`). It ALSO lists our OWN sibling device ids (#90), because a sibling now leaves a relay-buffered copy of our own DMs for an offline phone and that must never wake it; channel push filters
   (`{server: {level, channels{cid: level}}}`) registered with the relay; cached
   in swarm.rs and re-sent on every reconnect like the token.
+- Age-restricted servers (0.14, `sib_mute.h`, gates wiki `security_write_gates`
+  "Push wakes of age-restricted servers"): a phone mutes what it hides in its own
+  filters (`age_gate::Sent`), but asleep it cannot hear its computer's OFF, so a
+  computer sends `mute_siblings` and the relay keeps marks in the reserved `~sib`
+  entry of each sibling's prefs. Order = (`at` the choice, `set_at` the newest
+  `is_nsfw`/admission clock it holds, data only); equal stamps only add. A phone's
+  own prefs carry `sib_local` (its sideload toggle) and `sib_view` (the view it
+  caught up to): a view at or past the marks lifts them, its own filters cover the
+  rest. Traps: the relay judges both stamps by ITS clock (`relay_clock`), a frame it
+  would refuse is never recorded as sent; marks go with a writer the fold stops
+  counting and with an evicted roster record.
 - `get_push_profile(peer_id) -> PushProfile` — opens its OWN SQLCipher connection,
   reads `load_profile_light` + `load_avatar`. Tier 1 (name + avatar, no node).
 - `get_push_channel_meta(server_id, channel_id) -> PushChannelMeta` — server +

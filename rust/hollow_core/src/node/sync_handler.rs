@@ -2204,7 +2204,7 @@ pub(crate) async fn handle_join_server(
     hollow_log!("[HOLLOW-CRDT] Joining server {server_id}");
     // A phone that hides age-restricted servers never consents to one, and knows
     // nothing yet of what this server is.
-    let nsfw_confirmed = super::age_gate::join_consent_at(db_path, db_passphrase, nsfw_confirmed);
+    let nsfw_confirmed = super::age_gate::join_consent_at(db_path, db_passphrase, &server_id, nsfw_confirmed);
     super::age_gate::unsettle_at(db_path, db_passphrase, &server_id);
     // The request NONCE. Every answer names it, so an answer replayed out of a
     // three-day ring can never resolve the join the user made afterwards.

@@ -732,6 +732,15 @@ pub fn join_server(
     if !crate::crdt::anchor::valid_server_id(&server_id) {
         return Err(NOT_A_SERVER_ID.into());
     }
+    // The person answered the 18+ question here: this device keeps the yes, so its next
+    // rejoin of this server does not ask again.
+    if nsfw_confirmed {
+        if let Ok(guard) = super::storage::get_store().lock() {
+            if let Some(store) = guard.as_ref() {
+                node::age_gate::note_consent(store, node::age_gate::Platform::current(), &server_id);
+            }
+        }
+    }
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
     let state = guard.as_ref().ok_or("Node is not running")?;

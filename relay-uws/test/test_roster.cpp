@@ -9,6 +9,7 @@
 //   g++ -std=c++17 -I../src test_roster.cpp ../src/crypto.cpp -lsodium -lcrypto
 //       -o test_roster && ./test_roster
 
+#include "breaker.h"
 #include "roster_book.h"
 #include "roster_crypto.h"
 
@@ -168,6 +169,13 @@ int main() {
     if (sodium_init() < 0) return 1;
     printf("roster\n");
     const RosterCrypto crypto = roster_crypto();
+
+    // A sibling mute's price (breaker.h) covers the biggest roster the relay may fold.
+    check("the roster statement cap breaker.h prices",
+          breaker::ROSTER_SIG_CAP == static_cast<int64_t>(roster::MAX_RECOVERY_TIES + roster::MAX_PHRASE_ADMITS +
+                                                          roster::MAX_CONSENTS + roster::MAX_VOUCHES +
+                                                          roster::MAX_PENDING + 2 * roster::MAX_LEGACY +
+                                                          roster::MAX_REMOVALS + roster::MAX_RESERVED + 1));
 
     // Peer ids: the relay reads the same key the client does, and nothing else.
     {
@@ -353,6 +361,11 @@ int main() {
         }
         check("the real record survives a flood from another share", book.get(m.id) != nullptr);
         check("the table stays within its budget", book.ledger.total() <= book.budget);
+        // What was written on an evicted record's word goes with it (sib_mute.h forget).
+        const auto evicted = book.take_evicted();
+        check("an eviction names the record it let go", !evicted.empty() && evicted.front().master != m.id);
+        check("with the devices it named", RosterBook::named_devices(evicted.front()).count(evicted.front().master) == 1);
+        check("and is told once", book.take_evicted().empty());
     }
 
     if (failures) {

@@ -330,8 +330,8 @@ class SystemNotificationNotifier
 
     final profiles = ref.read(profileProvider);
     final senderName = displayNameFor(profiles, fromPeerId);
-    final servers = ref.read(serverListProvider);
-    final serverName = servers[serverId]?.name ?? 'Server';
+    final serverName =
+        ref.read(serverListProvider.notifier).nameOf(serverId) ?? 'Server';
     final resolvedChannelName =
         channelName ?? _channelName(serverId, channelId);
     final sourceKey = '$serverId:$channelId';

@@ -48,7 +48,8 @@ pub(crate) fn link_refusal(state: &ServerState, ask: Option<&JoinAsk>, old_link:
 
 /// The gates a joiner meets, in the order the joiner is told: a reset link, ban,
 /// private, full, Twitch, owner-verify, adult-content consent. Our own devices skip
-/// them; a reset link, private, full and consent never refuse a returning member.
+/// them; a reset link, private and full never refuse a returning member. The 18+
+/// consent does: it belongs to the joining device, which may have lost the server.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn verdict(
     state: &ServerState,
@@ -107,7 +108,7 @@ pub(crate) fn verdict(
             };
         }
     }
-    if !already_member && state.is_nsfw() && !nsfw_confirmed {
+    if state.is_nsfw() && !nsfw_confirmed {
         return refuse(format!("nsfw_confirm:{}", state.name()), false);
     }
     Verdict::Admit
@@ -168,5 +169,23 @@ mod tests {
             Verdict::Admit,
             "a returning member is no newcomer",
         );
+    }
+
+    /// A member whose device lost the server (a reset, a fresh install) is asked the
+    /// 18+ question again: the consent belongs to the device that joins, and only our
+    /// own devices skip it.
+    #[test]
+    fn w4_iospush_a_returning_member_is_asked_the_18_plus_question_again() {
+        let (mut s, _) = crate::crdt::testkeys::owned_state("s1", "Adult", 1);
+        let op = s.create_op(crate::crdt::operations::CrdtPayload::ServerSettingChanged { key: "is_nsfw".into(), value: "true".into() });
+        let _ = s.apply_op(&op);
+        let joiner = crate::identity::native_identity::NativeKeypair::from_secret_bytes(&[51; 32]);
+        let judge = |sibling: bool, member: bool, confirmed: bool| {
+            verdict(&s, &joiner.peer_id(), sibling, member, None, false, None, confirmed, "owner", |_| false)
+        };
+        let ask = Verdict::Refuse { reason: "nsfw_confirm:Adult".into(), settles: false };
+        assert_eq!(judge(false, true, false), ask, "a returning member");
+        assert_eq!(judge(false, true, true), Verdict::Admit, "a returning member who confirmed");
+        assert_eq!(judge(true, true, false), Verdict::Admit, "our own device");
     }
 }

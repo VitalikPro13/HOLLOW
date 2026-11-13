@@ -24,6 +24,7 @@ import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:hollow/src/ui/components/server_avatar.dart';
+import 'package:hollow/src/ui/components/server_name_text.dart';
 import 'package:hollow/src/ui/settings/channel_override_dropdown.dart';
 import 'package:hollow/src/ui/settings/settings_kit.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -423,7 +424,8 @@ class _ServersSection extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final servers = ref.watch(serverListProvider).values.toList()
+    // A server the phone's hold keeps off the list keeps its settings row.
+    final servers = ref.watch(keptServersProvider).values.toList()
       ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
 
     return SettingsSection(
@@ -540,6 +542,9 @@ class _ServerNotificationRowState
           leading: ServerAvatar(
               serverId: widget.serverId, name: widget.name, size: 32),
           title: widget.name,
+          titleWidget: ServerNameText(widget.name,
+              isNsfw: ref.watch(keptServersProvider
+                  .select((m) => m[widget.serverId]?.isNsfw ?? false))),
           subtitle: switch (overrides) {
             0 => null,
             1 => '1 channel set differently',

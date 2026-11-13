@@ -22,6 +22,7 @@ import 'package:hollow/src/ui/components/hollow_skeleton.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:hollow/src/ui/components/server_avatar.dart';
+import 'package:hollow/src/ui/components/server_name_text.dart';
 import 'package:hollow/src/ui/settings/settings_kit.dart';
 
 /// The top of Settings > Files & Storage, shared with the phone's settings
@@ -487,6 +488,7 @@ class _ContextRow extends ConsumerWidget {
 
     String label;
     Widget leading;
+    Widget? title;
     if (isDm) {
       final profile =
           ref.watch(profileProvider.select((m) => m[usage.contextId]));
@@ -496,7 +498,7 @@ class _ContextRow extends ConsumerWidget {
       // context_id = "serverId:channelId"
       final parts = usage.contextId.split(':');
       final serverId = parts.isNotEmpty ? parts.first : usage.contextId;
-      final server = ref.watch(serverListProvider.select((m) => m[serverId]));
+      final server = ref.watch(keptServersProvider.select((m) => m[serverId]));
       final serverName = server?.name ??
           (serverId.length > 8 ? '${serverId.substring(0, 8)}…' : serverId);
       final channelShort = parts.length > 1 && parts[1].length > 6
@@ -504,12 +506,14 @@ class _ContextRow extends ConsumerWidget {
           : (parts.length > 1 ? parts[1] : '');
       label = channelShort.isEmpty ? serverName : '$serverName • #$channelShort';
       leading = ServerAvatar(serverId: serverId, name: serverName, size: 32);
+      title = ServerNameText(label, isNsfw: server?.isNsfw ?? false);
     }
     final files = usage.fileCount == 1 ? '1 file' : '${usage.fileCount} files';
 
     return SettingsRow(
       leading: leading,
       title: label,
+      titleWidget: title,
       subtitle: '${formatBytes(usage.bytesDb.toInt())} · $files',
       trailing: Row(
         mainAxisSize: MainAxisSize.min,

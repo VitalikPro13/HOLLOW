@@ -390,6 +390,8 @@ class EventStreamNotifier extends Notifier<bool> {
   /// The gate or the hidden set moved: reload what depends on it, and leave a
   /// server that is hidden now.
   Future<void> _onAgeGateChanged() async {
+    // Our computers' choice arrived: nothing is left to wait for.
+    ref.read(ageGateProvider.notifier).release();
     await ref.read(ageGateProvider.notifier).load();
     await ref.read(serverListProvider.notifier).loadFromDb();
     final hidden = ref.read(ageGateProvider).hidden;

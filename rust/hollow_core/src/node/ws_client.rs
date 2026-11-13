@@ -186,7 +186,14 @@ pub enum WsCommand {
     /// `prefs_json` = {"<server_room>": {"level": "all|mentions|nothing",
     /// "channels": {"<channel_id>": ...}}}. The relay checks these BEFORE firing
     /// a push, because an iOS alert push cannot be suppressed after delivery.
-    SetPushPrefs { prefs_json: String },
+    SetPushPrefs { prefs_json: String, sib_local: bool, sib_view: Option<(i64, i64)> },
+    /// Silence the channel wakes of `servers` on our identity's other devices (relay
+    /// `sib_mute.h`); a computer sends it after its inbox join, `[]` when its phones show
+    /// age-restricted servers.
+    MuteSiblings { master: String, at: i64, set_at: i64, servers: Vec<String> },
+    /// [`WsEvent::Flushed`] once the relay has written us everything it wrote before
+    /// reading this (a heartbeat in queue order); nothing on a socket without sessions.
+    Flush,
     /// Targeted channel-message frame for an OFFLINE server member (0x09). The
     /// relay buffers `data` for replay to the member's background fetch node and
     /// fires a channel push filtered by that member's prefs and `mention`. Empty
@@ -284,6 +291,9 @@ pub enum WsEvent {
     /// The relay replayed all it holds of a ring we asked for with `end`, every
     /// frame of it ahead of this event.
     TopicCatchupDone { room: String, channel: String },
+    /// The answer to a [`WsCommand::Flush`]: every frame the relay wrote before it came
+    /// ahead of this event.
+    Flushed,
     /// Encrypted message from another peer, routed through a room.
     Message { room: String, from: String, data: Vec<u8> },
     /// Direct message from a specific peer (shard transfers, etc.)
@@ -361,6 +371,7 @@ impl WsEvent {
             Self::DoorStatus { .. } => "DoorStatus",
             Self::RoomMembers { .. } => "RoomMembers",
             Self::TopicCatchupDone { .. } => "TopicCatchupDone",
+            Self::Flushed => "Flushed",
             Self::Message { .. } => "Message",
             Self::DirectMessage { .. } => "DirectMessage",
             Self::BinaryDirect { .. } => "BinaryDirect",
@@ -918,6 +929,17 @@ struct Socket {
     live: Liveness,
     /// The local and the relay's address this socket runs between.
     path: Option<(SocketAddr, SocketAddr)>,
+    /// Heartbeats written and answered here: the relay answers each, in order.
+    hb_out: u64,
+    hb_in: u64,
+    /// The heartbeat count each pending [`WsCommand::Flush`] waits to see answered.
+    flushes: VecDeque<u64>,
+}
+
+impl Socket {
+    fn new(write: WsSink, read: SplitStream<WsStream>, door: RelaySession, session: bool, now: Instant, path: Option<(SocketAddr, SocketAddr)>) -> Self {
+        Self { write, read, door, session, live: Liveness::new(now), path, hb_out: 0, hb_in: 0, flushes: VecDeque::new() }
+    }
 }
 
 struct Attempt {
@@ -1530,6 +1552,13 @@ impl Client {
         let narrowed = self.rooms.unrefused(cmd)?;
         let cmd = narrowed.as_ref().unwrap_or(cmd);
         match cmd {
+            WsCommand::Flush => {
+                let acked = self.inbound.acked();
+                let s = self.socket.as_mut().filter(|s| s.session)?;
+                s.hb_out += 1;
+                s.flushes.push_back(s.hb_out);
+                Some((relay_session::hb_frame(acked), false))
+            }
             WsCommand::JoinRoom { room_code } => {
                 self.render_join(room_code, None, replay).map(|t| (Frame::text(t), true))
             }
@@ -1722,6 +1751,13 @@ impl Client {
                 if session {
                     self.out.ack(h);
                     self.flag.answered();
+                    if let Some(s) = self.socket.as_mut() {
+                        s.hb_in += 1;
+                        while s.flushes.front().is_some_and(|&n| n <= s.hb_in) {
+                            s.flushes.pop_front();
+                            let _ = self.event_tx.send(WsEvent::Flushed);
+                        }
+                    }
                 }
             }
             ServerMsg::Ack { h } => {
@@ -1797,6 +1833,7 @@ impl Client {
     async fn beat(&mut self) -> bool {
         let Some(socket) = self.socket.as_mut() else { return false };
         let msg = if socket.session {
+            socket.hb_out += 1;
             self.flag.beat_sent();
             if let Some(pace) = self.pace.as_mut() {
                 pace.spend(relay_pace::Cost { w: 1, joins: 0 }, None, Instant::now());
@@ -1914,6 +1951,11 @@ impl Client {
         match ctl {
             Control::Nudge { reason, external } => self.nudge(&reason, external).await,
             Control::Background(background) => {
+                // Back on the screen: what the relay held for us while away is told apart
+                // from what it had not written yet (the phone's 18+ hold waits on it).
+                if self.background && !background {
+                    self.push(WsCommand::Flush);
+                }
                 self.background = background;
                 if background {
                     self.rooms.audit.pause();
@@ -2274,7 +2316,8 @@ impl Client {
                 self.sid = sid;
                 self.inbound = Inbound::default();
                 self.replayed_joins.clear();
-                self.socket = Some(Socket { write, read, door, session, live: Liveness::new(now), path });
+                self.keep_flushes();
+                self.socket = Some(Socket::new(write, read, door, session, now, path));
                 self.flag.fresh_session();
                 self.up(now);
                 hollow_log!("[HOLLOW-WS] Connected and authenticated ({})", if session { "new session" } else { "no session" });
@@ -2294,7 +2337,8 @@ impl Client {
                 if reprove {
                     self.session_door = Some(door.clone());
                 }
-                self.socket = Some(Socket { write, read, door, session: true, live: Liveness::new(now), path });
+                self.keep_flushes();
+                self.socket = Some(Socket::new(write, read, door, true, now, path));
                 self.flag.new_socket();
                 self.up(now);
                 hollow_log!(
@@ -2357,6 +2401,16 @@ impl Client {
     fn forget_socket(&mut self, socket: &Socket) {
         if !socket.session {
             self.replayed_joins.clear();
+        }
+        if !socket.flushes.is_empty() {
+            self.push(WsCommand::Flush);
+        }
+    }
+
+    /// A socket replaced with a flush unanswered asks again on the next one.
+    fn keep_flushes(&mut self) {
+        if self.socket.as_ref().is_some_and(|s| !s.flushes.is_empty()) {
+            self.push(WsCommand::Flush);
         }
     }
 
@@ -2474,7 +2528,8 @@ impl Queued for WsCommand {
             | WsCommand::SendToRoomTopic { data, .. }
             | WsCommand::SendChannelDirect { data, .. } => data.len(),
             WsCommand::Carry { json, .. } => json.len(),
-            WsCommand::SetPushPrefs { prefs_json } => prefs_json.len(),
+            WsCommand::SetPushPrefs { prefs_json, .. } => prefs_json.len(),
+            WsCommand::MuteSiblings { servers, .. } => 96 + 43 * servers.len(),
             WsCommand::KillDeposit { blob, .. } => blob.len(),
             WsCommand::JoinInbox { .. } | WsCommand::LockPut { .. } => 4096,
             _ => 0,
@@ -2608,15 +2663,31 @@ fn command_frame(cmd: &WsCommand) -> Option<Frame> {
         WsCommand::RegisterPushToken { token, platform } => {
             json(serde_json::json!({ "type": "register_push_token", "token": token, "platform": platform }))
         }
-        WsCommand::SetPushPrefs { prefs_json } => {
+        WsCommand::SetPushPrefs { prefs_json, sib_local, sib_view } => {
             // Embedded as a real JSON object so the relay parses it directly; a
             // malformed prefs string is dropped here.
             let Ok(prefs) = serde_json::from_str::<serde_json::Value>(prefs_json) else {
                 hollow_log!("[HOLLOW-WS] SetPushPrefs: invalid prefs JSON, skipped");
                 return None;
             };
-            json(serde_json::json!({ "type": "set_push_prefs", "prefs": prefs }))
+            let mut frame = serde_json::json!({ "type": "set_push_prefs", "prefs": prefs });
+            if *sib_local {
+                frame["sib_local"] = serde_json::Value::Bool(true);
+            }
+            if let Some((at, set_at)) = sib_view {
+                frame["sib_view"] = serde_json::json!({ "at": at, "set_at": set_at });
+            }
+            json(frame)
         }
+        // Priced like any heartbeat; `render` writes it with the real count.
+        WsCommand::Flush => Some(relay_session::hb_frame(0)),
+        WsCommand::MuteSiblings { master, at, set_at, servers } => json(serde_json::json!({
+            "type": "mute_siblings",
+            "master": master,
+            "at": at,
+            "set_at": set_at,
+            "servers": servers,
+        })),
         WsCommand::SetOfflineBuffer { enabled, retention_secs } => json(serde_json::json!({
             "type": "set_offline_buffer",
             "enabled": enabled,
@@ -4351,8 +4422,19 @@ mod tests {
         );
         assert_eq!(text(WsCommand::Subscribe { room_code: "r".into(), topics: vec!["a".into()] }), serde_json::json!({ "type": "subscribe", "room": "r", "topics": ["a"] }));
         assert_eq!(text(WsCommand::SetOfflineBuffer { enabled: true, retention_secs: 5 }), serde_json::json!({ "type": "set_offline_buffer", "enabled": true, "retention_secs": 5 }));
-        assert_eq!(text(WsCommand::SetPushPrefs { prefs_json: r#"{"s":{"level":"all"}}"#.into() })["prefs"]["s"]["level"], "all");
-        assert!(command_frame(&WsCommand::SetPushPrefs { prefs_json: "not json".into() }).is_none(), "malformed prefs write nothing");
+        let prefs = |sib_local| text(WsCommand::SetPushPrefs { prefs_json: r#"{"s":{"level":"all"}}"#.into(), sib_local, sib_view: None });
+        assert_eq!(prefs(false)["prefs"]["s"]["level"], "all");
+        assert!(prefs(false).get("sib_local").is_none(), "a device that follows its siblings says nothing");
+        assert_eq!(prefs(true)["sib_local"], true);
+        assert!(prefs(false).get("sib_view").is_none());
+        let viewed = text(WsCommand::SetPushPrefs { prefs_json: "{}".into(), sib_local: false, sib_view: Some((4, 9)) });
+        assert_eq!(viewed["sib_view"], serde_json::json!({ "at": 4, "set_at": 9 }), "a phone's caught-up view");
+        assert_eq!(text(WsCommand::Flush)["type"], "hb", "a flush is a heartbeat in queue order");
+        assert!(command_frame(&WsCommand::SetPushPrefs { prefs_json: "not json".into(), sib_local: false, sib_view: None }).is_none(), "malformed prefs write nothing");
+        assert_eq!(
+            text(WsCommand::MuteSiblings { master: "m".into(), at: 2, set_at: 3, servers: vec!["s".into()] }),
+            serde_json::json!({ "type": "mute_siblings", "master": "m", "at": 2, "set_at": 3, "servers": ["s"] })
+        );
         assert_eq!(text(WsCommand::KillAck { signal: None }), kill_ack_frame(None));
         assert!(command_frame(&WsCommand::SetDoor { room_code: "r".into(), door: None }).is_none());
         let auth = super::super::ring_auth::RingAuth { owner: "o".into(), ts_ms: 5, sig: "s".into() };

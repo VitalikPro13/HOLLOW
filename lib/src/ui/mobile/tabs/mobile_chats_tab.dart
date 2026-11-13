@@ -33,6 +33,7 @@ import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/saved_messages_avatar.dart';
 import 'package:hollow/src/ui/components/server_avatar.dart';
+import 'package:hollow/src/ui/components/server_name_text.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/pending_join_ui.dart';
@@ -505,8 +506,14 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
       HomeFilter.unread => ranked.where((e) => e.isUnread && matches(e)).toList(),
       HomeFilter.mentions => mentions.where(matches).toList(),
     };
-    final hasConversations = ranked.isNotEmpty;
+    // A held server is still one of ours: the layout must not flip to first run.
+    final hasConversations =
+        ranked.isNotEmpty || ref.watch(ageHoldHidesServersProvider);
     final rooms = homeVoiceRooms(ref);
+    // Stands in for the empty state too: the person has servers, just not yet.
+    final holdNotice = _filter == HomeFilter.all &&
+        q.isEmpty &&
+        ref.watch(ageHoldHidesServersProvider);
 
     return AmbientBackground(
       color1: hollow.accent,
@@ -636,7 +643,7 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
                             ),
                           ),
                   )
-                else if (shown.isEmpty)
+                else if (shown.isEmpty && !holdNotice)
                   SliverToBoxAdapter(
                     child: Padding(
                       padding: const EdgeInsets.symmetric(
@@ -652,7 +659,7 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
                       ),
                     ),
                   )
-                else
+                else if (shown.isNotEmpty)
                   SliverList.builder(
                     itemCount: shown.length,
                     // Keyed by identity: this list mixes DMs and servers and
@@ -667,6 +674,8 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
                       child: _row(context, shown[i]),
                     ),
                   ),
+                if (holdNotice)
+                  const SliverToBoxAdapter(child: AgeHoldNotice()),
                 const SliverToBoxAdapter(
                     child: SizedBox(height: HollowSpacing.xl)),
               ],
@@ -752,6 +761,30 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
           },
         );
     }
+  }
+}
+
+const kAgeHoldNoticeText =
+    'Age-restricted servers appear once Hollow connects.';
+
+/// Where the phone's hold keeps flagged servers off the list, so a failed or
+/// slow connection never reads as "you have no such servers".
+class AgeHoldNotice extends StatelessWidget {
+  const AgeHoldNotice({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    return Padding(
+      padding: const EdgeInsets.symmetric(
+        horizontal: HollowSpacing.lg,
+        vertical: HollowSpacing.md,
+      ),
+      child: Text(
+        kAgeHoldNoticeText,
+        style: HollowTypography.bodySmall.copyWith(color: hollow.textSecondary),
+      ),
+    );
   }
 }
 
@@ -1003,14 +1036,14 @@ class _ServerRow extends ConsumerWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
+                    ServerNameText(
                       name,
+                      isNsfw: ref.watch(serverListProvider
+                          .select((m) => m[serverId]?.isNsfw ?? false)),
                       style: HollowTypography.subheading.copyWith(
                         fontWeight: hot ? FontWeight.w600 : FontWeight.w500,
                         color: hollow.textPrimary,
                       ),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
                     ),
                     Text(
                       memberCount == 1 ? '1 member' : '$memberCount members',

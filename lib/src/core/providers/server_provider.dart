@@ -17,13 +17,54 @@ final serverListLoadStateProvider =
 /// Manages the list of servers the user has joined.
 class ServerListNotifier extends Notifier<Map<String, ServerInfo>> {
   @override
-  Map<String, ServerInfo> build() => {};
+  Map<String, ServerInfo> build() {
+    // A phone's hold drops flagged servers at once and lists them again from
+    // Rust once it ends.
+    ref.listen(ageGateProvider.select((g) => g.held), (was, held) {
+      if (held) {
+        refilter();
+      } else if (was == true) {
+        loadFromDb();
+      }
+    });
+    return {};
+  }
 
   /// Whether a server may be listed on this device. Rust already leaves hidden
   /// servers out; this is the second layer for anything that inserts on an event.
-  bool _shown(String serverId, {bool isNsfw = false}) {
-    final gate = ref.read(ageGateProvider);
-    return gate.allowedHere || (!isNsfw && !gate.hidden.contains(serverId));
+  bool _shown(String serverId, {bool isNsfw = false}) =>
+      ref.read(ageGateProvider).lists(serverId, isNsfw: isNsfw);
+
+  Map<String, ServerInfo> get _unlisted => ref.read(_unlistedServersProvider);
+
+  set _unlisted(Map<String, ServerInfo> next) =>
+      ref.read(_unlistedServersProvider.notifier).state = next;
+
+  /// Drop what the gate no longer lists, at once and without a database read, so
+  /// the next frame (or the app switcher's snapshot) never shows it.
+  void refilter() {
+    final unlisted = Map.of(_unlisted);
+    final kept = Map.of(state)
+      ..removeWhere((id, s) {
+        if (_shown(id, isNsfw: s.isNsfw)) return false;
+        unlisted[id] = s;
+        return true;
+      });
+    if (kept.length == state.length) return;
+    // Held before listed-no-more, so no reader sees the server in neither.
+    _unlisted = unlisted;
+    state = kept;
+  }
+
+  /// A server's name for a notification. The hold is about what the screen shows,
+  /// so a server only the hold keeps off the list is still named.
+  String? nameOf(String serverId) {
+    final listed = state[serverId];
+    if (listed != null) return listed.name;
+    final held = _unlisted[serverId];
+    if (held == null) return null;
+    final unheld = ref.read(ageGateProvider).withHeld(false);
+    return unheld.lists(serverId, isNsfw: held.isNsfw) ? held.name : null;
   }
 
   /// Load servers from the local DB (called on startup).
@@ -35,15 +76,18 @@ class ServerListNotifier extends Notifier<Map<String, ServerInfo>> {
       await ref.read(ageGateProvider.notifier).load();
       final servers = await crdt_api.getJoinedServers();
       final map = <String, ServerInfo>{};
+      final unlisted = <String, ServerInfo>{};
       for (final s in servers) {
-        if (!_shown(s.serverId, isNsfw: s.isNsfw)) continue;
-        map[s.serverId] = ServerInfo(
+        final info = ServerInfo(
           serverId: s.serverId,
           name: s.name,
           memberCount: s.memberCount,
           channelCount: s.channelCount,
+          isNsfw: s.isNsfw,
         );
+        (_shown(s.serverId, isNsfw: s.isNsfw) ? map : unlisted)[s.serverId] = info;
       }
+      _unlisted = unlisted;
       state = map;
       load.state = (loaded: true, error: null);
     } catch (e) {
@@ -61,7 +105,8 @@ class ServerListNotifier extends Notifier<Map<String, ServerInfo>> {
   void onServerCreated(String serverId, String name) {
     // A phone that hides age-restricted servers lists one only once Rust does: it
     // cannot know yet what a server it just joined is.
-    if (!ref.read(ageGateProvider).allowedHere) {
+    final gate = ref.read(ageGateProvider);
+    if (!gate.allowedHere || gate.held) {
       onServerUpdated(serverId);
       return;
     }
@@ -73,6 +118,7 @@ class ServerListNotifier extends Notifier<Map<String, ServerInfo>> {
       // Keep real counts if we already had them; else optimistic 1/1.
       memberCount: existing?.memberCount ?? 1,
       channelCount: existing?.channelCount ?? 1, // #general
+      isNsfw: existing?.isNsfw ?? false,
     );
     state = updated;
     // Correct the counts (and name) from the DB without blocking the insert.
@@ -92,6 +138,7 @@ class ServerListNotifier extends Notifier<Map<String, ServerInfo>> {
         name: match.name.isNotEmpty ? match.name : fallbackName,
         memberCount: match.memberCount,
         channelCount: match.channelCount,
+        isNsfw: match.isNsfw,
       );
       state = updated;
     } catch (_) {
@@ -103,23 +150,23 @@ class ServerListNotifier extends Notifier<Map<String, ServerInfo>> {
   Future<void> onServerUpdated(String serverId) async {
     try {
       final servers = await crdt_api.getJoinedServers();
-      final match = servers
-          .where((s) => s.serverId == serverId)
-          .where((s) => _shown(s.serverId, isNsfw: s.isNsfw))
-          .firstOrNull;
-      final updated = Map.of(state);
+      final match = servers.where((s) => s.serverId == serverId).firstOrNull;
+      final listed = Map.of(state)..remove(serverId);
+      final unlisted = Map.of(_unlisted)..remove(serverId);
+      // A server gone from Rust's list was left, kicked or deleted while offline.
       if (match != null) {
-        updated[serverId] = ServerInfo(
+        final info = ServerInfo(
           serverId: match.serverId,
           name: match.name,
           memberCount: match.memberCount,
           channelCount: match.channelCount,
+          isNsfw: match.isNsfw,
         );
-      } else {
-        // Server no longer exists (user was kicked or server deleted while offline).
-        updated.remove(serverId);
+        (_shown(serverId, isNsfw: match.isNsfw) ? listed : unlisted)[serverId] =
+            info;
       }
-      state = updated;
+      _unlisted = unlisted;
+      state = listed;
     } catch (e) {
       debugPrint('[HOLLOW] Failed to refresh server $serverId: $e');
     }
@@ -127,9 +174,38 @@ class ServerListNotifier extends Notifier<Map<String, ServerInfo>> {
 
   /// Called when a ServerDeleted event arrives.
   void onServerDeleted(String serverId) {
+    _unlisted = Map.of(_unlisted)..remove(serverId);
     state = Map.of(state)..remove(serverId);
   }
 }
+
+/// What [ServerListNotifier] holds but does not list; written only by it.
+final _unlistedServersProvider =
+    StateProvider<Map<String, ServerInfo>>((ref) => const {});
+
+/// Joined servers only the phone's hold keeps off the list: the gate itself
+/// would list them, so the person never left them and they still count.
+final heldServersProvider = Provider<Map<String, ServerInfo>>((ref) {
+  final unheld = ref.watch(ageGateProvider).withHeld(false);
+  return {
+    for (final e in ref.watch(_unlistedServersProvider).entries)
+      if (unheld.lists(e.key, isNsfw: e.value.isNsfw)) e.key: e.value,
+  };
+});
+
+/// The servers the person is in on this device: listed or held. Read this, not
+/// [serverListProvider], where a held server must not look left (a page open
+/// on it, first-run checks, per-server settings, the call bar).
+final keptServersProvider = Provider<Map<String, ServerInfo>>((ref) {
+  final held = ref.watch(heldServersProvider);
+  final listed = ref.watch(serverListProvider);
+  return held.isEmpty ? listed : {...listed, ...held};
+});
+
+/// The phone is holding back a flagged server it would otherwise list.
+final ageHoldHidesServersProvider = Provider<bool>((ref) =>
+    ref.watch(ageGateProvider.select((g) => g.held)) &&
+    ref.watch(heldServersProvider).values.any((s) => s.isNsfw));
 
 final serverListProvider =
     NotifierProvider<ServerListNotifier, Map<String, ServerInfo>>(

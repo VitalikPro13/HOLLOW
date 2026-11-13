@@ -8,6 +8,7 @@ import 'package:hollow/src/core/providers/server_settings_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/components/server_name_text.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
@@ -104,10 +105,9 @@ class _ServerSettingsPlaceState extends ConsumerState<ServerSettingsPlace> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Text(
+                    ServerNameText(
                       server.name,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
+                      isNsfw: server.isNsfw,
                       style: HollowTypography.subheading
                           .copyWith(color: hollow.textPrimary),
                     ),

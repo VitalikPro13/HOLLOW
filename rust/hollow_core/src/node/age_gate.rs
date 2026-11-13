@@ -18,8 +18,12 @@ pub(crate) const LOCAL_KEY: &str = "age_gate_local";
 pub(crate) const ASKED_KEY: &str = "age_gate_asked";
 /// Set by an Android build installed from a store: it behaves like an iPhone.
 pub(crate) const STORE_INSTALL_KEY: &str = "age_gate_store_install";
+/// The relay refuses a longer list whole (`sib_mute.h`).
+const MAX_SIB_SERVERS: usize = 256;
 /// One row per server whose flags this device has caught up on.
 const SETTLED_PREFIX: &str = "age_settled:";
+/// This device's own yes to a server's 18+ question, per server.
+const CONSENT_PREFIX: &str = "age_consent:";
 /// Present once this database tracks settled servers; an older one held each server
 /// fully before it learned to.
 const SETTLED_INIT_KEY: &str = "age_settled_init";
@@ -225,19 +229,38 @@ pub(crate) fn unsettle(store: &MessageStore, server_id: &str) {
     let _ = store.delete_setting(&format!("{SETTLED_PREFIX}{server_id}"));
 }
 
-/// The 18+ consent a join from this device may carry: none while the gate is closed,
-/// whatever the UI asked.
-pub(crate) fn join_consent(store: &MessageStore, platform: Platform, nsfw_confirmed: bool) -> bool {
-    nsfw_confirmed && allowed_here(store, platform)
+/// Whether THIS device's person said yes to the 18+ question for `server_id`. Never
+/// shared or copied: a reset or another device asks again.
+pub(crate) fn consent_held(store: &MessageStore, server_id: &str) -> bool {
+    store.load_setting(&format!("{CONSENT_PREFIX}{server_id}")).ok().flatten().is_some()
 }
 
-/// [`join_consent`] on the node's database; a store that will not open consents to nothing.
-pub(crate) fn join_consent_at(db_path: &str, db_passphrase: &str, nsfw_confirmed: bool) -> bool {
-    let platform = Platform::current();
-    if platform == Platform::Desktop || !nsfw_confirmed {
-        return nsfw_confirmed;
+/// The person here answered yes for `server_id`; nothing a phone with the gate closed keeps.
+pub(crate) fn note_consent(store: &MessageStore, platform: Platform, server_id: &str) {
+    if allowed_here(store, platform) {
+        let _ = store.save_setting(&format!("{CONSENT_PREFIX}{server_id}"), "1");
     }
-    MessageStore::lease(db_path, db_passphrase).is_ok_and(|store| join_consent(&store, platform, true))
+}
+
+/// The 18+ consent a join from this device may carry: the answer just given or one this
+/// device holds, and none while the gate is closed, whatever the UI asked.
+pub(crate) fn join_consent(store: &MessageStore, platform: Platform, server_id: &str, nsfw_confirmed: bool) -> bool {
+    (nsfw_confirmed || consent_held(store, server_id)) && allowed_here(store, platform)
+}
+
+/// [`join_consent`] on the node's database; a store that will not open consents only
+/// to what was just answered, and on a phone to nothing.
+pub(crate) fn join_consent_at(db_path: &str, db_passphrase: &str, server_id: &str, nsfw_confirmed: bool) -> bool {
+    let platform = Platform::current();
+    match MessageStore::lease(db_path, db_passphrase) {
+        Ok(store) => join_consent(&store, platform, server_id, nsfw_confirmed),
+        Err(_) => platform == Platform::Desktop && nsfw_confirmed,
+    }
+}
+
+/// The 18+ consent an automatic join from this device carries: only a yes it holds.
+pub(crate) fn own_consent_at(db_path: &str, db_passphrase: &str, server_id: &str) -> bool {
+    join_consent_at(db_path, db_passphrase, server_id, false)
 }
 
 /// [`note_settled`] on the node's database.
@@ -276,6 +299,17 @@ pub(crate) fn server_hidden_in(store: &MessageStore, platform: Platform, server_
     state.is_none_or(|s| hidden_when_closed(store, server_id, &s))
 }
 
+/// Whether a wake for `server_id` whose posts were not read must name nothing, the gate
+/// open or not: flagged 18+, not yet known not to be, or not held.
+pub(crate) fn server_age_restricted_in(store: &MessageStore, server_id: &str) -> bool {
+    store
+        .load_server_state(server_id)
+        .ok()
+        .flatten()
+        .and_then(|json| serde_json::from_str::<ServerState>(&json).ok())
+        .is_none_or(|s| hidden_when_closed(store, server_id, &s))
+}
+
 /// Every server of `states` [`hidden`] keeps off this device.
 pub(crate) fn hidden_servers<'a>(
     store: &MessageStore,
@@ -312,24 +346,51 @@ pub(crate) fn overlay_push_prefs(prefs_json: &str, hidden: &[String]) -> Option<
 pub(crate) struct Sent {
     relay: Option<Vec<String>>,
     told: Option<Vec<String>>,
+    /// The view of the flags the relay last got with the filters.
+    view: Option<(i64, i64)>,
+}
+
+/// The push filters for the relay with this device's own `~sib` terms.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct PrefsOut {
+    pub json: String,
+    /// This phone's own yes: it does not follow its siblings' marks.
+    pub sib_local: bool,
+    /// The (`at`, `set_at`) view a phone has caught up to: the relay lifts the marks its
+    /// siblings set at or below it, as the filters already mute what this phone hides.
+    pub sib_view: Option<(i64, i64)>,
 }
 
 impl Sent {
     /// [`Sent::step`] on the node's database; the bool is `allowed_here` once Dart must
     /// hear `AgeGateChanged`.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn due(
         &mut self,
         db_path: &str,
         db_passphrase: &str,
         server_states: &super::types::ServerStates,
+        local_master: &str,
         dart_prefs: Option<&str>,
         force: bool,
         tell_dart: bool,
-    ) -> (Option<String>, Option<bool>) {
+    ) -> (Option<PrefsOut>, Option<bool>) {
         let platform = Platform::current();
         let Ok(store) = MessageStore::lease(db_path, db_passphrase) else { return (None, None) };
         let hidden = hidden_servers(&store, platform, server_states.iter());
+        let view = (platform != Platform::Desktop)
+            .then(|| {
+                let (at, set_at, _) = view_stamps(&store, server_states.iter(), local_master);
+                stamps_for_relay(at, set_at, super::relay_clock::now_ms())
+            })
+            .flatten();
+        let force = force || (view.is_some() && view != self.view);
         let (prefs, moved) = self.step(hidden, dart_prefs, force, tell_dart);
+        let prefs = prefs.map(|json| {
+            self.view = view;
+            // Only this phone's own yes lifts its siblings' marks for it, never a computer's.
+            PrefsOut { json, sib_local: local_allowed(&store, platform), sib_view: view }
+        });
         (prefs, moved.then(|| allowed_here(&store, platform)))
     }
 
@@ -351,6 +412,85 @@ impl Sent {
         self.relay = Some(hidden);
         (prefs, moved)
     }
+}
+
+/// What a computer tells the relay to silence on its siblings (`mute_siblings`): the
+/// flagged servers our identity holds while its phones hide them, none once they show.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct SiblingMute {
+    pub at: i64,
+    pub set_at: i64,
+    pub servers: Vec<String>,
+}
+
+/// How far ahead of the relay's clock it takes a stamp (`sib_mute.h` MAX_FUTURE_MS).
+const RELAY_FUTURE_MS: i64 = 10 * 60 * 1000;
+/// Kept back from that bound for our reading of the relay's clock.
+const RELAY_FUTURE_SLACK_MS: i64 = 30_000;
+
+/// The view of the flags this device holds, as the relay orders it: the choice's stamp
+/// (never chosen = closed, the oldest choice) and the newest clock among the `is_nsfw`
+/// registers of the servers we hold and our own admission to each. Data only, so two
+/// devices with the same view stamp it alike and a staler view never stamps it newer.
+pub(crate) fn view_stamps<'a>(
+    store: &MessageStore,
+    states: impl Iterator<Item = (&'a String, &'a ServerState)>,
+    local_master: &str,
+) -> (i64, i64, Vec<&'a String>) {
+    let at = held(store).map_or(1, |e| e.at).max(1);
+    let ms = |physical: u64| i64::try_from(physical).unwrap_or(i64::MAX);
+    let mut set_at = 1;
+    let mut flagged = Vec::new();
+    for (sid, state) in states {
+        if !state.members.contains_key(local_master) || !crate::crdt::anchor::valid_server_id(sid) {
+            continue;
+        }
+        if let Some(reg) = state.settings.get("is_nsfw") {
+            set_at = set_at.max(ms(reg.hlc().physical_ms));
+        }
+        if let Some(span) = state.member_record.get(local_master).and_then(|spans| spans.last()) {
+            set_at = set_at.max(ms(span.from_ms));
+        }
+        if state.is_nsfw() {
+            flagged.push(sid);
+        }
+    }
+    (at, set_at, flagged)
+}
+
+/// The [`SiblingMute`] this computer stands behind now; phones send none.
+pub(crate) fn sibling_mute<'a>(
+    store: &MessageStore,
+    platform: Platform,
+    states: impl Iterator<Item = (&'a String, &'a ServerState)>,
+    local_master: &str,
+) -> Option<SiblingMute> {
+    if platform != Platform::Desktop {
+        return None;
+    }
+    let (at, set_at, flagged) = view_stamps(store, states, local_master);
+    let mut servers: Vec<String> =
+        if held(store).is_some_and(|e| e.allow) { Vec::new() } else { flagged.into_iter().cloned().collect() };
+    servers.sort();
+    servers.truncate(MAX_SIB_SERVERS);
+    Some(SiblingMute { at, set_at, servers })
+}
+
+/// The (`at`, `set_at`) pair as the relay at `relay_now_ms` takes it: a register clocked
+/// ahead (a server's future op) counts as now plus the drift the CRDT allows, and a choice
+/// stamped past what the relay accepts sends nothing yet, so the caller tries again later.
+pub(crate) fn stamps_for_relay(at: i64, set_at: i64, relay_now_ms: i64) -> Option<(i64, i64)> {
+    if at > relay_now_ms.saturating_add(RELAY_FUTURE_MS - RELAY_FUTURE_SLACK_MS) {
+        return None;
+    }
+    let ahead = i64::try_from(crate::crdt::hlc::MAX_DRIFT_MS).unwrap_or(i64::MAX);
+    Some((at, set_at.min(relay_now_ms.saturating_add(ahead)).max(1)))
+}
+
+/// [`stamps_for_relay`] for a whole frame.
+pub(crate) fn frame_for_relay(mute: &SiblingMute, relay_now_ms: i64) -> Option<SiblingMute> {
+    let (at, set_at) = stamps_for_relay(mute.at, mute.set_at, relay_now_ms)?;
+    Some(SiblingMute { at, set_at, servers: mute.servers.clone() })
 }
 
 /// Share the identity's choice we hold with every other device of ours, an away one
@@ -388,6 +528,16 @@ pub(crate) fn share_with_sibling(
         ws_cmd_tx, sibling, Some(&own_inbox), &super::types::HavenMessage::AgeGateSync { entry },
         super::olm_lane::NoSession::Queue,
     );
+}
+
+/// What a phone shows once everything the relay held for it arrived; nothing on a
+/// computer, which holds nothing back.
+pub(crate) fn settled_allowed_at(db_path: &str, db_passphrase: &str) -> Option<bool> {
+    let platform = Platform::current();
+    if platform == Platform::Desktop {
+        return None;
+    }
+    MessageStore::lease(db_path, db_passphrase).ok().map(|store| allowed_here(&store, platform))
 }
 
 /// Take a sibling's [`AgeGateSync`]: `Some(allowed here)` when this device's view moved.
@@ -536,12 +686,149 @@ mod tests {
     #[test]
     fn agegate_a_closed_gate_never_sends_nsfw_consent() {
         let (_t, st) = store();
-        assert!(!join_consent(&st, Platform::Ios, true), "an iPhone never consents while closed");
-        assert!(!join_consent(&st, Platform::Android, true));
-        assert!(join_consent(&st, Platform::Desktop, true));
-        assert!(!join_consent(&st, Platform::Desktop, false));
+        assert!(!join_consent(&st, Platform::Ios, "s", true), "an iPhone never consents while closed");
+        assert!(!join_consent(&st, Platform::Android, "s", true));
+        assert!(join_consent(&st, Platform::Desktop, "s", true));
+        assert!(!join_consent(&st, Platform::Desktop, "s", false));
+        note_consent(&st, Platform::Ios, "s");
+        assert!(!consent_held(&st, "s"), "a closed phone keeps no yes");
+        assert!(!join_consent(&st, Platform::Ios, "s", false));
         save(&st, entry(true, NOW)).unwrap();
-        assert!(join_consent(&st, Platform::Ios, true));
+        assert!(join_consent(&st, Platform::Ios, "s", true));
+    }
+
+    fn flagged(id: &str, member: &str, nsfw: bool, at_ms: u64) -> (String, ServerState) {
+        let mut s = ServerState::new(id.into(), "S".into(), "o".into());
+        s.members.insert(member.into(), crate::crdt::server_state::MemberInfo { peer_id: member.into(), display_name: String::new() });
+        s.settings.insert(
+            "is_nsfw".into(),
+            AdminLwwReg::new(nsfw.to_string(), HlcTimestamp { physical_ms: at_ms, counter: 0, actor: "o".into() }, 0),
+        );
+        (id.into(), s)
+    }
+
+    /// A computer names only the flagged servers it holds while its phones hide them, and
+    /// stamps its view by the data alone (review M1).
+    #[test]
+    fn w4_iospush_a_computer_mutes_only_held_flagged_servers_and_stamps_each_move() {
+        let (_t, st) = store();
+        let me = "me";
+        let a = "0123456789abcdef0123456789abcdef01234567";
+        let b = "abcdefabcdefabcdefabcdefabcdefab";
+        let states = vec![flagged(a, me, true, 10), flagged(b, me, false, 20), flagged("1111111111111111111111111111111111111111", "other", true, 30)];
+        let mute = |states: &Vec<(String, ServerState)>| sibling_mute(&st, Platform::Desktop, states.iter().map(|(k, v)| (k, v)), me).unwrap();
+        assert_eq!(sibling_mute(&st, Platform::Ios, states.iter().map(|(k, v)| (k, v)), me), None, "a phone mutes nobody");
+        let first = mute(&states);
+        assert_eq!(first.servers, vec![a.to_string()], "only a flagged server we hold");
+        assert_eq!(first.at, 1, "never chosen = closed, the oldest choice");
+        assert_eq!(first.set_at, 20, "the newest flag register of a server we hold");
+        assert_eq!(mute(&states), first, "an unmoved view keeps its stamp");
+        let unflagged = vec![flagged(a, me, false, 40), flagged(b, me, false, 20)];
+        let moved = mute(&unflagged);
+        assert!(moved.servers.is_empty() && moved.set_at == 40, "an unflag moves the stamp");
+        let mut joined = states.clone();
+        joined[2].1.members.insert(me.into(), crate::crdt::server_state::MemberInfo { peer_id: me.into(), display_name: String::new() });
+        joined[2].1.member_record.insert(me.into(), vec![span(60)]);
+        let after_join = mute(&joined);
+        assert!(after_join.servers.len() == 2 && after_join.set_at == 60, "our own admission moves the stamp");
+        save(&st, entry(true, NOW + 80)).unwrap();
+        let on = mute(&states);
+        assert!(on.servers.is_empty() && on.at == NOW + 80, "phones showing: nothing muted, the choice's stamp");
+    }
+
+    fn span(from_ms: u64) -> crate::crdt::server_state::MemberSpan {
+        crate::crdt::server_state::MemberSpan { from_ms, until_ms: u64::MAX, ..Default::default() }
+    }
+
+    /// The relay judges both stamps against its own clock: a server's op clocked ahead is
+    /// taken as the CRDT's drift ahead of it, and a choice stamped past what it accepts
+    /// waits (review MED-2).
+    #[test]
+    fn w4_iospush_stamps_fit_the_relays_clock_or_wait() {
+        let drift = i64::try_from(crate::crdt::hlc::MAX_DRIFT_MS).unwrap();
+        assert_eq!(stamps_for_relay(5, 7, NOW), Some((5, 7)));
+        assert_eq!(stamps_for_relay(5, NOW + 3_600_000, NOW), Some((5, NOW + drift)), "a future op is clamped");
+        assert_eq!(stamps_for_relay(NOW + 9 * 60_000, 7, NOW), Some((NOW + 9 * 60_000, 7)));
+        assert_eq!(stamps_for_relay(NOW + 10 * 60_000, 7, NOW), None, "a choice the relay would refuse waits");
+        let m = SiblingMute { at: 2, set_at: NOW + 3_600_000, servers: vec!["s".into()] };
+        assert_eq!(frame_for_relay(&m, NOW).unwrap().set_at, NOW + drift);
+    }
+
+    /// Only a sideloaded Android phone whose own toggle allows tells the relay it does not
+    /// follow its siblings' marks; an iPhone or a store build never does (review L3).
+    #[test]
+    fn w4_iospush_only_a_phones_own_local_yes_lifts_its_siblings_marks() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let path = tmp.path().join("due.db").to_string_lossy().into_owned();
+        let pass = "ab".repeat(32);
+        let st = MessageStore::open(&path, &pass).unwrap();
+        let states = super::super::types::ServerStates::new();
+        let sib_local = |platform| {
+            set_test_platform(Some(platform));
+            let out = Sent::default().due(&path, &pass, &states, "me", Some("{}"), true, false).0.map(|p| p.sib_local);
+            set_test_platform(None);
+            out
+        };
+        assert_eq!(sib_local(Platform::Android), Some(false), "a closed phone follows its siblings");
+        st.save_setting(LOCAL_KEY, "true").unwrap();
+        assert_eq!(sib_local(Platform::Android), Some(true), "its own local yes");
+        assert_eq!(sib_local(Platform::Ios), Some(false), "an iPhone has no local yes");
+        st.save_setting(STORE_INSTALL_KEY, "true").unwrap();
+        assert_eq!(sib_local(Platform::Android), Some(false), "a store build behaves like an iPhone");
+    }
+
+    /// The view's stamp reads no clock: a computer that has not read a flag stamps its
+    /// set below one that has, however much later it sends (review MED-1).
+    #[test]
+    fn w4_iospush_a_later_send_of_an_older_view_stamps_it_no_newer() {
+        let (_t1, fresh) = store();
+        let (_t2, stale) = store();
+        let a = "0123456789abcdef0123456789abcdef01234567";
+        let b = "abcdefabcdefabcdefabcdefabcdefab";
+        let hour_ago = u64::try_from(super::super::frame_auth::now_ms() - 3_600_000).unwrap();
+        let fresh_view = [flagged(a, "me", true, hour_ago), flagged(b, "me", true, hour_ago + 10)];
+        let f = sibling_mute(&fresh, Platform::Desktop, fresh_view.iter().map(|(k, v)| (k, v)), "me").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let stale_view = [flagged(a, "me", true, hour_ago), flagged(b, "me", false, hour_ago - 10)];
+        let s = sibling_mute(&stale, Platform::Desktop, stale_view.iter().map(|(k, v)| (k, v)), "me").unwrap();
+        assert!(s.set_at < f.set_at, "the later send of an older view outranks the fresher one");
+    }
+
+    /// A phone hands the relay the view it caught up to whenever that view moves, its
+    /// hidden set unmoved or not, so marks it has passed are lifted (review LOW-8).
+    #[test]
+    fn w4_iospush_a_phone_tells_the_relay_each_view_it_catches_up_to() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let path = tmp.path().join("view.db").to_string_lossy().into_owned();
+        let pass = "ab".repeat(32);
+        let _st = MessageStore::open(&path, &pass).unwrap();
+        let a = "0123456789abcdef0123456789abcdef01234567";
+        let mut states = super::super::types::ServerStates::new();
+        let (id, s) = flagged(a, "me", false, 40);
+        states.insert(id, s);
+        set_test_platform(Some(Platform::Ios));
+        let mut sent = Sent::default();
+        let mut due = |states: &super::super::types::ServerStates| sent.due(&path, &pass, states, "me", Some("{}"), false, true).0;
+        let first = due(&states).map(|p| p.sib_view);
+        let again = due(&states);
+        let (id, s) = flagged(a, "me", false, 50);
+        states.insert(id, s);
+        let moved = due(&states).map(|p| p.sib_view);
+        set_test_platform(None);
+        assert_eq!(first, Some(Some((1, 40))), "the first view goes out");
+        assert_eq!(again, None, "an unmoved view is not sent again");
+        assert_eq!(moved, Some(Some((1, 50))), "a moved view goes out though nothing new is hidden");
+    }
+
+    /// A rejoin carries the 18+ yes only where THIS device gave it for THAT server.
+    #[test]
+    fn w4_iospush_a_join_carries_only_the_consent_this_device_holds() {
+        let (_t, st) = store();
+        assert!(!join_consent(&st, Platform::Desktop, "adult", false));
+        note_consent(&st, Platform::Desktop, "adult");
+        assert!(join_consent(&st, Platform::Desktop, "adult", false), "a yes given here before");
+        assert!(!join_consent(&st, Platform::Desktop, "other", false), "a yes is per server");
+        assert!(!join_consent(&st, Platform::Ios, "adult", false), "a closed gate outranks any yes");
     }
 
     #[test]
@@ -597,5 +884,43 @@ mod tests {
         assert!(!allowed_here(&st, Platform::Android), "the toggle comes back off");
         set_local(&st, Platform::Android, true).unwrap();
         assert!(allowed_here(&st, Platform::Android));
+    }
+
+    // rv-iospush (review RED tests)
+
+    /// Two computers of one identity: the one that has not read a flag yet must never
+    /// outrank the one that has, or its smaller set opens that server's wakes (review M1).
+    #[test]
+    fn rv_iospush_a_computer_with_an_older_view_never_outranks_a_fresher_one() {
+        let (_t1, fresh) = store();
+        let (_t2, stale) = store();
+        let a = "0123456789abcdef0123456789abcdef01234567";
+        let b = "abcdefabcdefabcdefabcdefabcdefab";
+        let ms = |t: i64| u64::try_from(t).unwrap();
+        let fresh_view = [flagged(a, "me", true, ms(NOW - 1000)), flagged(b, "me", true, ms(NOW - 10))];
+        let f = sibling_mute(&fresh, Platform::Desktop, fresh_view.iter().map(|(k, v)| (k, v)), "me").unwrap();
+        let stale_view = [flagged(a, "me", true, ms(NOW - 1000)), flagged(b, "me", false, ms(NOW - 5000))];
+        let s = sibling_mute(&stale, Platform::Desktop, stale_view.iter().map(|(k, v)| (k, v)), "me").unwrap();
+        assert_eq!(s.at, f.at);
+        assert!(!s.servers.contains(&b.to_string()));
+        assert!(s.set_at <= f.set_at, "a computer that has not read a flag outranks one that has");
+    }
+
+    /// A computer whose clock runs an hour slow reads a new flag: its set must outrank
+    /// the older set another computer sent, or the flagged server wakes a sleeping phone.
+    #[test]
+    fn rv_iospush_a_slow_clock_computer_still_carries_a_new_flag() {
+        let (_t1, ok) = store();
+        let (_t2, slow) = store();
+        let a = "0123456789abcdef0123456789abcdef01234567";
+        let b = "abcdefabcdefabcdefabcdefabcdefab";
+        let ms = |t: i64| u64::try_from(t).unwrap();
+        let before = [flagged(a, "me", true, ms(NOW - 1000)), flagged(b, "me", false, ms(NOW - 900))];
+        let first = sibling_mute(&ok, Platform::Desktop, before.iter().map(|(k, v)| (k, v)), "me").unwrap();
+        let _ = sibling_mute(&slow, Platform::Desktop, before.iter().map(|(k, v)| (k, v)), "me");
+        let after = [flagged(a, "me", true, ms(NOW - 1000)), flagged(b, "me", true, ms(NOW + 1000))];
+        let next = sibling_mute(&slow, Platform::Desktop, after.iter().map(|(k, v)| (k, v)), "me").unwrap();
+        assert!(next.servers.contains(&b.to_string()));
+        assert!(next.set_at > first.set_at, "the relay keeps the older set: the new flag never reaches the sleeping phone");
     }
 }

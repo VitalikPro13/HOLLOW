@@ -58,6 +58,7 @@ import 'package:hollow/src/ui/chat/composer_draft_keeper.dart';
 import 'package:hollow/src/ui/chat/emote_composer.dart';
 import 'package:hollow/src/ui/chat/emote_image.dart';
 import 'package:hollow/src/ui/components/hollow_badge.dart';
+import 'package:hollow/src/ui/components/server_name_text.dart';
 import 'package:hollow/src/core/providers/emote_provider.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/chat/pinned_messages.dart';
@@ -1570,7 +1571,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane>
             ),
           if (ref.watch(serverIsNsfwProvider(widget.serverId)).valueOrNull ??
               false)
-            const HollowBadge('NSFW', kind: HollowBadgeKind.error),
+            const NsfwBadge(),
         ],
         status: width >= 480
             ? _ChannelConnectionStatus(

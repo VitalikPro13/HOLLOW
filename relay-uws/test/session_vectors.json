@@ -103,6 +103,7 @@
     { "dir": "client_to_relay", "text": "{\"type\":\"subscribe\",\"room\":\"r\",\"topics\":[\"a\"]}", "counts": 1 },
     { "dir": "client_to_relay", "text": "{\"type\":\"check_peers\",\"peers\":[],\"rooms\":[]}", "counts": 1 },
     { "dir": "client_to_relay", "text": "{\"type\":\"discover_peers\",\"room\":\"r\",\"digest\":true}", "counts": 1 },
+    { "dir": "client_to_relay", "text": "{\"type\":\"mute_siblings\",\"master\":\"m\",\"at\":1,\"set_at\":1,\"servers\":[]}", "counts": 1 },
     { "dir": "client_to_relay", "text": "{\"type\":\"gap\",\"n\":3}", "counts": 1 },
     { "dir": "client_to_relay", "text": "{\"type\":\"members\",\"room\":\"r\",\"peers\":[]}", "counts": 1 },
     { "dir": "client_to_relay", "text": "{\"type\":5}", "counts": 1 },

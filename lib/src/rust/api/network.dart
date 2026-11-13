@@ -9,7 +9,7 @@ import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 import 'showcase.dart';
 part 'network.freezed.dart';
 
-// These functions are ignored because they are not marked as `pub`: `a_node_runs`, `event_forwarding_task`, `flat`, `get_event_rx`, `get_http_runtime`, `get_license_key`, `get_node`, `get_relay_domain`, `get_runtime`, `import_hollowpack_bytes`, `import_verified_pack`, `open_local_store`, `openable_card_url`, `push_profile_in`, `reads_persisted_server_state`, `refuse_oversized_message`, `send_node_command`, `store_profile_media`, `to_ffi_event`
+// These functions are ignored because they are not marked as `pub`: `a_node_runs`, `event_forwarding_task`, `flat`, `get_event_rx`, `get_http_runtime`, `get_license_key`, `get_node`, `get_relay_domain`, `get_runtime`, `import_hollowpack_bytes`, `import_verified_pack`, `open_local_store`, `openable_card_url`, `push_channel_meta_in`, `push_profile_in`, `reads_persisted_server_state`, `refuse_oversized_message`, `send_node_command`, `store_profile_media`, `to_ffi_event`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `EventFeed`, `NodeState`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`
 
@@ -2706,15 +2706,23 @@ class PushChannelMeta {
   /// filter was stale.
   final String notifLevel;
 
+  /// Flagged 18+ or not yet known not to be: a wake whose posts could not be read
+  /// shows nothing rather than a banner naming it.
+  final bool ageRestricted;
+
   const PushChannelMeta({
     required this.serverName,
     required this.channelName,
     required this.notifLevel,
+    required this.ageRestricted,
   });
 
   @override
   int get hashCode =>
-      serverName.hashCode ^ channelName.hashCode ^ notifLevel.hashCode;
+      serverName.hashCode ^
+      channelName.hashCode ^
+      notifLevel.hashCode ^
+      ageRestricted.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -2723,7 +2731,8 @@ class PushChannelMeta {
           runtimeType == other.runtimeType &&
           serverName == other.serverName &&
           channelName == other.channelName &&
-          notifLevel == other.notifLevel;
+          notifLevel == other.notifLevel &&
+          ageRestricted == other.ageRestricted;
 }
 
 /// Profile data for push notifications (Tier 1: cached profile, no node needed).

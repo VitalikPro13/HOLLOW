@@ -129,10 +129,10 @@ class NotificationService: UNNotificationServiceExtension {
     }
 
     let dataDir = container.appendingPathComponent("hollow_data").path
-    let relay = (entry["relay"] as? String) ?? "relay.anonlisten.com"
     let started = Date()
-    // ~25s of the ~30s budget; leaves headroom for delivery.
-    if let cstr = hollow_push_fetch_and_decrypt(dataDir, relay, sender, "", 18, "") {
+    // ~25s of the ~30s budget; leaves headroom for delivery. No relay named: Rust
+    // dials the one this install uses.
+    if let cstr = hollow_push_fetch_and_decrypt(dataDir, "", sender, "", 18, "") {
       defer { hollow_push_string_free(cstr) }
       let json = String(cString: cstr)
       let elapsed = Int(Date().timeIntervalSince(started) * 1000)
@@ -292,22 +292,12 @@ class NotificationService: UNNotificationServiceExtension {
       return
     }
 
-    // Relay domain from the push-hints cache when the sender is a known friend;
-    // default otherwise (server members usually aren't in the hints cache).
-    var relay = "relay.anonlisten.com"
-    let hintsURL = container.appendingPathComponent("push_hints/hints.json")
-    if !sender.isEmpty,
-       let data = try? Data(contentsOf: hintsURL),
-       let map = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-       let entry = map[sender] as? [String: Any],
-       let r = entry["relay"] as? String, !r.isEmpty {
-      relay = r
-    }
-
+    // No relay named: Rust dials the one this install uses.
     let dataDir = container.appendingPathComponent("hollow_data").path
     let started = Date()
+    var shown = false
     if let cstr = hollow_push_fetch_and_decrypt(
-      dataDir, relay, sender.isEmpty ? server : sender, "", 18, server) {
+      dataDir, "", sender.isEmpty ? server : sender, "", 18, server) {
       defer { hollow_push_string_free(cstr) }
       let json = String(cString: cstr)
       let elapsed = Int(Date().timeIntervalSince(started) * 1000)
@@ -319,9 +309,20 @@ class NotificationService: UNNotificationServiceExtension {
         if let subtitle = banner.subtitle {
           content.subtitle = subtitle
         }
+        shown = true
       }
     } else {
       log(container, "channel fetch returned NULL, footprint=\(currentFootprintMB())MB — generic banner")
+    }
+
+    // Nothing read of an 18+ server (or one not yet known not to be): a banner that
+    // names nothing and leads nowhere, never its generic channel banner.
+    if !shown && identityPresent() && hollow_push_server_age_restricted(dataDir, server) != 0 {
+      log(container, "channel wake: nothing read of an age-restricted server, neutral banner")
+      content.threadIdentifier = "hollow"
+      content.userInfo = [:]
+      deliverHidden(content, contentHandler)
+      return
     }
 
     contentHandler(identityPresent() ? content : request.content)

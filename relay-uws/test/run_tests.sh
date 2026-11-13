@@ -62,6 +62,7 @@ run test_roster_check ../src/crypto.cpp $LIBS
 run test_send_budget
 run test_server_stats
 run test_session
+run test_sib_mute
 # state.h includes App.h, so the session bounds need the uWebSockets headers.
 if [ -f ../uWebSockets/src/App.h ] && [ -f ../uSockets/src/libusockets.h ]; then
     run test_session_bounds -std=c++20 -I../uWebSockets/src -I../uSockets/src

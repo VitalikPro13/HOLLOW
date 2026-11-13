@@ -18,6 +18,7 @@
 #include "turn_uris.h"
 #include "push_queue.h"
 #include "session_bounds.h"
+#include "sib_mute.h"
 #include "json.hpp"
 #include <cstdio>
 #include <cstring>
@@ -862,6 +863,9 @@ static void announce_door_change(WsRoom& room, const Audience& aud, const std::s
 // Owners of `room` that `state` (the held roster's fold) no longer counts lose the
 // inbox at once; the owners left see them go. A stranger with a request pending
 // learns neither which devices a person has nor when they are online (Audience).
+static void purge_sibling_marks(RelayState& state, const roster::State& st);
+static void forget_evicted_marks(RelayState& state);
+
 static void drop_inbox_owners(RelayState& state, const std::string& room, const roster::State& st) {
     // The fold's own consequence, not the shower's work.
     breaker::Uncharged uncharged;
@@ -1124,7 +1128,11 @@ static InboxVerdict inbox_owner_by_roster(PerSocketData* data, const std::string
     const std::string master = room.substr(sizeof(INBOX_ROOM_PREFIX) - 1);
     RosterBook::Shown r = state.roster_book.show(master, *shown, data->peer_id, socket_share(state, data),
                                                  wall_now_ms(), relay_roster_crypto());
-    if (r.changed) drop_inbox_owners(state, room, r.state);
+    if (r.changed) {
+        drop_inbox_owners(state, room, r.state);
+        purge_sibling_marks(state, r.state);
+    }
+    forget_evicted_marks(state);
     // Learned from the fold only, never the roster as shown: a pending join counts once
     // the device itself consented, so nobody can name an innocent device (review D5).
     for (auto& fresh : state.deny.learn_fold(master, r.state.members, r.state.pending)) {
@@ -1806,6 +1814,8 @@ static void try_push_notify(const std::string& target_peer_id,
     notify_push_sidecar(tok_it->second.token, tok_it->second.platform, sender_peer_id);
 }
 
+static void shed_registrations(RelayState& state);
+
 // Charge what `peer` has registered to `share` (fair_share.h), or forget it when
 // nothing is left; past the budget the heaviest share's least recently refreshed
 // identity loses every registration it holds.
@@ -1815,10 +1825,7 @@ static void charge_registrations(RelayState& state, const std::string& peer, uin
         weight += t->second.token.size() + t->second.platform.size();
     }
     if (auto p = state.push_prefs.find(peer); p != state.push_prefs.end()) {
-        for (const auto& [server, pref] : p->second) {
-            weight += 96 + server.size() + pref.level.size();
-            for (const auto& [cid, level] : pref.channels) weight += 96 + cid.size() + level.size();
-        }
+        for (const auto& [server, pref] : p->second) weight += sib::pref_weight(server, pref);
     }
     const bool opted_in = state.offline_optin.count(peer) != 0;
     if (weight == 0 && !opted_in && state.push_tokens.count(peer) == 0 && state.push_prefs.count(peer) == 0) {
@@ -1826,6 +1833,12 @@ static void charge_registrations(RelayState& state, const std::string& peer, uin
         return;
     }
     state.registrations.put(peer, share, 256 + weight);
+    shed_registrations(state);
+}
+
+// Past the budget the heaviest share's least recently refreshed identity loses every
+// registration it holds.
+static void shed_registrations(RelayState& state) {
     while (state.registrations.total() > MAX_REGISTRATION_BYTES) {
         auto victim = state.registrations.victim();
         if (!victim) break;
@@ -1840,6 +1853,69 @@ static void charge_registrations(RelayState& state, const std::string& peer, uin
 
 void restore_registration(RelayState& state, const std::string& peer, uint64_t share) {
     charge_registrations(state, peer, share);
+}
+
+// `peer`'s `~sib` entry went from `before` to `after` bytes: its registration takes the
+// difference, never a walk of every pref it holds.
+static void reweigh_sibling_marks(RelayState& state, const std::string& peer, size_t before, size_t after) {
+    if (before == after || !state.registrations.contains(peer)) return;
+    state.registrations.reweigh(peer, state.registrations.weight_of(peer) - before + after);
+    shed_registrations(state);
+}
+
+// Marks whose writer the identity's new fold no longer counts go with that device: a
+// removed computer keeps no say over its siblings' wakes (sib_mute.h).
+static void purge_sibling_marks(RelayState& state, const roster::State& st) {
+    for (const auto& p : st.members) {
+        auto pit = state.push_prefs.find(p);
+        if (pit == state.push_prefs.end()) continue;
+        const size_t before = sib::entry_weight(pit->second);
+        if (sib::purge(pit->second, [&st](const std::string& d) { return st.is_member(d); })) {
+            reweigh_sibling_marks(state, p, before, sib::entry_weight(pit->second));
+        }
+    }
+}
+
+// The roster book let go of these identities' records (its byte budget): the marks their
+// folds let a computer write go with them.
+static void forget_evicted_marks(RelayState& state) {
+    for (const auto& r : state.roster_book.take_evicted()) {
+        for (const auto& d : RosterBook::named_devices(r)) {
+            auto pit = state.push_prefs.find(d);
+            if (pit == state.push_prefs.end()) continue;
+            const size_t before = sib::entry_weight(pit->second);
+            if (sib::forget(pit->second)) reweigh_sibling_marks(state, d, before, sib::entry_weight(pit->second));
+        }
+    }
+}
+
+// A computer of M silences the channel wakes of the servers it names on M's other devices
+// (sib_mute.h). Only a full socket whose device owns `inbox:{M}` writes, and only into devices
+// the held fold counts that hold a push token (no wake, nothing to silence).
+static void handle_mute_siblings(PerSocketData* data, const json& j, RelayState& state) {
+    if (data->is_guest || data->is_fetch) return;
+    const auto f = sib::parse(j, wall_now_ms());
+    if (!f) return;
+    auto rit = state.ws_rooms.find(std::string(INBOX_ROOM_PREFIX) + f->master);
+    const bool owns = rit != state.ws_rooms.end() && rit->second.owners.count(data->peer_id) != 0;
+    if (!owns) return;
+    const auto* held = state.roster_book.get(f->master);
+    if (!held) return;
+    const roster::State st = state.roster_book.fold(*held, wall_now_ms(), relay_roster_crypto());
+    if (!sib::writer_counted(owns, st, data->peer_id)) return;
+    for (const auto& p : st.members) {
+        if (p == data->peer_id || !state.push_tokens.count(p)) continue;
+        auto& prefs = state.push_prefs[p];
+        const size_t before = sib::entry_weight(prefs);
+        if (sib::apply(prefs, *f, data->peer_id)) reweigh_sibling_marks(state, p, before, sib::entry_weight(prefs));
+    }
+    // No logging: which servers an identity silences is membership metadata.
+}
+
+// The statements a fold of `r` checks (the plan prices them before the handler runs).
+static int64_t roster_sigs(const roster::Roster& r) {
+    return static_cast<int64_t>(1 + r.recoveries.size() + r.phrase_admits.size() + r.consents.size() +
+                                r.vouches.size() + r.pendings.size() + 2 * r.legacy.size() + r.removals.size());
 }
 
 static bool is_push_platform(const std::string& platform) {
@@ -2119,7 +2195,8 @@ static void handle_kill_ack(PerSocketData* data, const json& j, RelayState& stat
 // sends these on connect and whenever notification settings change; filtering
 // happens relay-side because iOS alert pushes can't be suppressed on-device.
 static void handle_set_push_prefs(PerSocketData* data, const json& j, RelayState& state) {
-    if (data->is_guest) return;
+    // A push isolate's socket never speaks for the device's prefs (nor its `~sib` level).
+    if (data->is_guest || data->is_fetch) return;
     if (!j.contains("prefs") || !j["prefs"].is_object()) return;
 
     std::unordered_map<std::string, RelayState::ServerPushPref> prefs;
@@ -2143,7 +2220,12 @@ static void handle_set_push_prefs(PerSocketData* data, const json& j, RelayState
         }
         prefs[server] = std::move(p);
     }
-    state.push_prefs[data->peer_id] = std::move(prefs);
+    auto local = j.find("sib_local");
+    auto view = j.find("sib_view");
+    auto& held = state.push_prefs[data->peer_id];
+    sib::carry(held, prefs, local != j.end() && local->is_boolean() && local->get<bool>(),
+               view == j.end() ? std::nullopt : sib::parse_view(*view, wall_now_ms()));
+    held = std::move(prefs);
     charge_registrations(state, data->peer_id, socket_share(state, data));
     // No logging — peer_id + server set is membership metadata.
 }
@@ -2345,6 +2427,8 @@ static void try_channel_push_notify(const std::string& target, const std::string
     // keep working); per-channel override beats the server level.
     std::string level = "all";
     auto pit = state.push_prefs.find(target);
+    // A sibling's mark silences mentions too: the server is one the device hides.
+    if (pit != state.push_prefs.end() && sib::muted(pit->second, server)) return;
     if (pit != state.push_prefs.end()) {
         auto sit = pit->second.find(server);
         if (sit != pit->second.end()) {
@@ -3446,6 +3530,8 @@ static void handle_text_message(SSLWebSocket* ws, PerSocketData* data,
         handle_lock_put(ws, data, j, state);
     } else if (type == "set_push_prefs") {
         handle_set_push_prefs(data, j, state);
+    } else if (type == "mute_siblings") {
+        handle_mute_siblings(data, j, state);
     } else if (type == "set_offline_buffer") {
         handle_set_offline_buffer(data, j, state);
     } else if (type == "report") {
@@ -4716,6 +4802,13 @@ static breaker::Plan plan_text(RelayState& state, const PerSocketData* data, con
         auto targets = j.find("targets");
         const int64_t n = targets != j.end() && targets->is_array() ? static_cast<int64_t>(targets->size()) : 0;
         plan.w = 2 + breaker::SIG_W * 66 + std::min<int64_t>(n, static_cast<int64_t>(KillList::MAX_TARGETS_PER_DEPOSIT));
+    } else if (type == "mute_siblings") {
+        auto servers = j.find("servers");
+        const int64_t n = servers != j.end() && servers->is_array()
+                              ? std::min<int64_t>(static_cast<int64_t>(servers->size()), sib::MAX_SERVERS)
+                              : 0;
+        const auto* held = state.roster_book.get(json_text(j, "master"));
+        plan.w = breaker::mute_siblings_w(held ? roster_sigs(held->roster) : 0, n);
     }
     return plan;
 }

@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hollow/src/core/age_gate.dart';
 import 'package:hollow/src/core/models/channel_info.dart';
 import 'package:hollow/src/core/models/channel_layout.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
@@ -438,6 +439,14 @@ class ProbeDump {
     // that says whether a relay switch actually took.
     final relayDomain = read(relayDomainProvider);
     if (relayDomain != null) out['relayDomain'] = relayDomain;
+
+    // A phone's age gate: held = flagged servers wait until the relay has
+    // delivered what our computers said while the phone was away.
+    final ageGate = read(ageGateProvider);
+    if (ageGate != null) {
+      out['ageGateHeld'] = ageGate.held;
+      out['ageGateAllowed'] = ageGate.allowedHere;
+    }
 
     // The call by state, not by widgets: a dismissed incoming card stays built
     // for its exit, so "Accept gone" cannot say a ring stopped.

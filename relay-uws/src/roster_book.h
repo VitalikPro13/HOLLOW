@@ -7,6 +7,8 @@
 #include <set>
 #include <string>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
 #include "fair_share.h"
 #include "roster.h"
@@ -45,6 +47,22 @@ struct RosterBook {
     size_t budget = MAX_BYTES;
     std::unordered_map<std::string, Held> records;
     FairShare<std::string> ledger;
+    // Records the budget let go of since the last `take_evicted`: what was written on their
+    // fold's word (sibling marks) goes with them.
+    std::vector<roster::Roster> evicted;
+
+    std::vector<roster::Roster> take_evicted() { return std::exchange(evicted, {}); }
+
+    // Every device a roster names, counted or not.
+    static std::set<std::string> named_devices(const roster::Roster& r) {
+        std::set<std::string> out;
+        for (const auto& x : r.consents) out.insert(x.device);
+        for (const auto& x : r.phrase_admits) out.insert(x.device);
+        for (const auto& x : r.vouches) out.insert(x.device);
+        for (const auto& x : r.pendings) out.insert(x.device);
+        for (const auto& x : r.legacy) out.insert(x.device);
+        return out;
+    }
 
     size_t size() const { return records.size(); }
 
@@ -160,7 +178,10 @@ struct RosterBook {
         while (ledger.total() > budget) {
             auto victim = ledger.victim();
             if (!victim) break;
-            records.erase(*victim);
+            if (auto it = records.find(*victim); it != records.end()) {
+                evicted.push_back(std::move(it->second.roster));
+                records.erase(it);
+            }
             ledger.remove(*victim);
         }
     }

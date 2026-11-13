@@ -64,6 +64,11 @@ public:
 
     bool contains(const Key& key) const { return entries_.count(key) != 0; }
 
+    size_t weight_of(const Key& key) const {
+        auto it = entries_.find(key);
+        return it == entries_.end() ? 0 : it->second.weight;
+    }
+
     std::optional<uint64_t> share_of(const Key& key) const {
         auto it = entries_.find(key);
         if (it == entries_.end()) return std::nullopt;

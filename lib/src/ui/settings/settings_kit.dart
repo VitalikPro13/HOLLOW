@@ -247,6 +247,10 @@ class SettingsRow extends StatelessWidget {
   /// A badge beside the title ("This device", "In use").
   final Widget? titleTrailing;
 
+  /// Stands in for the title's text where it lays out its own marks (a server
+  /// name that ellipsizes beside its badge); it inherits the title's style.
+  final Widget? titleWidget;
+
   /// The title in the console voice, for a thing the protocol names (a relay).
   final bool monoTitle;
 
@@ -270,6 +274,7 @@ class SettingsRow extends StatelessWidget {
     this.wideTrailing = false,
     this.enabled = true,
     this.titleTrailing,
+    this.titleWidget,
     this.monoTitle = false,
     this.peerIdTitle = false,
     this.titleColor,
@@ -301,7 +306,9 @@ class SettingsRow extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: [
-        if (peerIdTitle)
+        if (titleWidget != null)
+          DefaultTextStyle.merge(style: titleStyle, child: titleWidget!)
+        else if (peerIdTitle)
           PeerIdText(title, style: titleStyle)
         else if (titleTrailing == null)
           Text(title, style: titleStyle)

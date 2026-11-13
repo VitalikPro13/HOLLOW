@@ -414,10 +414,72 @@ void main() {
     }
     expect(sink.servers, ['shown']);
   });
+  test('an open phone back from away lists no flagged server until the relay is back',
+      () async {
+    _api.servers = [_server('clean'), _server('flagged', nsfw: true)];
+    final c = _container(_open);
+    final list = c.read(serverListProvider.notifier);
+    await list.loadFromDb();
+    expect(c.read(serverListProvider).keys, containsAll(['clean', 'flagged']));
+
+    c.read(ageGateProvider.notifier).hold();
+    expect(c.read(serverListProvider).keys, ['clean'],
+        reason: 'gone before the next frame, no database read');
+    list.onServerCreated('new', 'Adult');
+    expect(c.read(serverListProvider).keys, ['clean'],
+        reason: 'a join seen while held waits for Rust');
+
+    c.read(ageGateProvider.notifier).release();
+    await Future<void>.delayed(Duration.zero);
+    expect(c.read(serverListProvider).keys, containsAll(['clean', 'flagged']));
+
+    final desk = _container(_open, mode: AgeGateMode.desktop);
+    desk.read(ageGateProvider.notifier).hold();
+    expect(desk.read(ageGateProvider).held, isFalse, reason: 'a computer never holds');
+  });
+  test('a phone held in the background still names an 18+ server it allows',
+      () async {
+    _api.servers = [_server('flagged', nsfw: true)];
+    final sink = _Sink();
+    final c = _container(_open, extra: [
+      osNotificationSinkProvider.overrideWithValue(sink),
+      identityProtectionProvider.overrideWith((ref) async =>
+          const identity_api.ProtectionStatus(
+              isEncrypted: false,
+              hasPassword: false,
+              hasOsKeychain: false,
+              osKeychainAvailable: false)),
+    ]);
+    await c.read(identityProtectionProvider.future);
+    await c.read(serverListProvider.notifier).loadFromDb();
+    c.read(ageGateProvider.notifier).hold();
+    c.read(appLifecycleProvider.notifier).state = AppLifecycleState.paused;
+    expect(c.read(serverListProvider).keys, isEmpty, reason: 'setup: held off the list');
+    await c.read(systemNotificationProvider.notifier).notifyChannel(
+        serverId: 'flagged', channelId: 'ch', fromPeerId: 'p', text: 'hi', isMention: false);
+    expect(sink.names, ['flagged'],
+        reason: 'the hold is about the screen, a live wake still names the server');
+
+    final hidden = _container(_closed);
+    await hidden.read(serverListProvider.notifier).loadFromDb();
+    expect(hidden.read(serverListProvider.notifier).nameOf('flagged'), isNull,
+        reason: 'a server the gate hides is never named');
+  });
+  test('a channel wake of an 18+ server with nothing read shows no banner', () {
+    bool shows({bool posted = false, bool adult = false, String level = 'all'}) =>
+        channelWakeShowsFallback(
+            posted: posted, ageRestricted: adult, notifLevel: level);
+    expect(shows(), isTrue, reason: 'an unread wake of a normal server');
+    expect(shows(adult: true), isFalse,
+        reason: 'an unread 18+ wake named its server');
+    expect(shows(posted: true), isFalse);
+    expect(shows(level: 'mentions'), isFalse);
+  });
 }
 
 class _Sink extends OsNotificationSink {
   final servers = <String>[];
+  final names = <String>[];
 
   @override
   bool get isMobile => true;
@@ -435,8 +497,10 @@ class _Sink extends OsNotificationSink {
     required String senderName,
     required String messageId,
     required String text,
-  }) async =>
-      servers.add(serverId);
+  }) async {
+    servers.add(serverId);
+    names.add(serverName);
+  }
 }
 
 class _InRoom extends VoiceChannelNotifier {

@@ -67,6 +67,7 @@ import 'package:hollow/src/core/providers/emote_provider.dart';
 import 'package:hollow/src/ui/components/connection_progress.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_badge.dart';
+import 'package:hollow/src/ui/components/server_name_text.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
@@ -3177,7 +3178,7 @@ class _MobileChatHeader extends ConsumerWidget {
             ),
             if (nsfw) ...[
               const SizedBox(width: HollowSpacing.sm),
-              const HollowBadge('NSFW', kind: HollowBadgeKind.error),
+              const NsfwBadge(),
             ],
           ],
         ),

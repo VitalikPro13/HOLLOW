@@ -20544,12 +20544,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   PushChannelMeta dco_decode_push_channel_meta(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 3)
-      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
+    if (arr.length != 4)
+      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
     return PushChannelMeta(
       serverName: dco_decode_String(arr[0]),
       channelName: dco_decode_String(arr[1]),
       notifLevel: dco_decode_String(arr[2]),
+      ageRestricted: dco_decode_bool(arr[3]),
     );
   }
 
@@ -25352,10 +25353,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_serverName = sse_decode_String(deserializer);
     var var_channelName = sse_decode_String(deserializer);
     var var_notifLevel = sse_decode_String(deserializer);
+    var var_ageRestricted = sse_decode_bool(deserializer);
     return PushChannelMeta(
       serverName: var_serverName,
       channelName: var_channelName,
       notifLevel: var_notifLevel,
+      ageRestricted: var_ageRestricted,
     );
   }
 
@@ -29893,6 +29896,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_String(self.serverName, serializer);
     sse_encode_String(self.channelName, serializer);
     sse_encode_String(self.notifLevel, serializer);
+    sse_encode_bool(self.ageRestricted, serializer);
   }
 
   @protected

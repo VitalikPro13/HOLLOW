@@ -2,8 +2,9 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 
-/// Closes the phone page around [child] when [serverId] leaves the server
-/// list: kicked, banned, deleted or left from any device.
+/// Closes the phone page around [child] when the person is no longer in
+/// [serverId]: kicked, banned, deleted, left from any device, or hidden by the
+/// age gate. The phone's hold is none of these.
 class LeaveWithServer extends ConsumerStatefulWidget {
   /// Null for a page about no listed server (a DM, a meeting).
   final String? serverId;
@@ -40,7 +41,7 @@ class _LeaveWithServerState extends ConsumerState<LeaveWithServer> {
   Widget build(BuildContext context) {
     final serverId = widget.serverId;
     if (serverId != null) {
-      ref.listen(serverListProvider.select((s) => s.containsKey(serverId)),
+      ref.listen(keptServersProvider.select((s) => s.containsKey(serverId)),
           _onListedChanged);
     }
     return widget.child;

@@ -212,7 +212,7 @@ void homeRetryLists(WidgetRef ref) {
 bool homeIsFirstRun(WidgetRef ref) =>
     homeListsLoaded(ref) &&
     ref.watch(sortedFriendsProvider).isEmpty &&
-    ref.watch(serverListProvider).isEmpty;
+    ref.watch(keptServersProvider.select((m) => m.isEmpty));
 
 /// The checklist stays until there is a friend AND a server, or it is hidden.
 bool homeShowsSetup(WidgetRef ref) {
@@ -221,7 +221,7 @@ bool homeShowsSetup(WidgetRef ref) {
       !setup.hidden &&
       homeListsLoaded(ref) &&
       (ref.watch(sortedFriendsProvider).isEmpty ||
-          ref.watch(serverListProvider).isEmpty);
+          ref.watch(keptServersProvider.select((m) => m.isEmpty)));
 }
 
 const kHomeFirstRunLine =

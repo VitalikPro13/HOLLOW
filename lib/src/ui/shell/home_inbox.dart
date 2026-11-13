@@ -659,7 +659,7 @@ class _HomeSetupChecklistState extends ConsumerState<HomeSetupChecklist> {
       _SetupStep(
         title: 'Join or create a server',
         body: 'A server is a group space its members host together.',
-        done: ref.watch(serverListProvider).isNotEmpty,
+        done: ref.watch(keptServersProvider.select((m) => m.isNotEmpty)),
         action: 'Add a server',
         onAction: () => actions.addServer(context),
       ),

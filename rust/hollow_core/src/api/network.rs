@@ -2955,7 +2955,9 @@ pub fn start_fetch_node(
         .lock()
         .map_err(|e| format!("Lock poisoned: {e}"))?
         .clone()
-        .unwrap_or_else(|| "relay.anonlisten.com".to_string());
+        // A cold push process never heard Dart's `set_relay_url`: `run_fetch` then
+        // dials the relay this install saved.
+        .unwrap_or_default();
 
     // Channel wake: load the one server's MLS group so buffered group ciphertext
     // decrypts. A missing identity degrades to a content-free banner.
@@ -3130,6 +3132,9 @@ pub struct PushChannelMeta {
     /// default), so the Android background handler can drop a push whose relay-side
     /// filter was stale.
     pub notif_level: String,
+    /// Flagged 18+ or not yet known not to be: a wake whose posts could not be read
+    /// shows nothing rather than a banner naming it.
+    pub age_restricted: bool,
 }
 
 /// Resolve server + channel names and the effective local notification level
@@ -3160,31 +3165,47 @@ pub fn get_push_channel_meta(
         .to_string();
 
     let store = MessageStore::open(&db_path, &passphrase)?;
+    push_channel_meta_in(&store, &id.keypair.peer_id(), &server_id, &channel_id, node::age_gate::Platform::current())
+}
 
-    let Some(state_json) = store.load_server_state(&server_id)? else {
+/// [`get_push_channel_meta`] on an open store. A server this phone hides as
+/// age-restricted is one we do not hold, as far as a push may tell.
+pub(crate) fn push_channel_meta_in(
+    store: &MessageStore,
+    local_master: &str,
+    server_id: &str,
+    channel_id: &str,
+    platform: node::age_gate::Platform,
+) -> Result<Option<PushChannelMeta>, String> {
+    let Some(state_json) = store.load_server_state(server_id)? else {
         hollow_log!("[HOLLOW-PUSH] get_push_channel_meta: unknown server {server_id}");
         return Ok(None);
     };
     let state: crate::crdt::server_state::ServerState = serde_json::from_str(&state_json)
         .map_err(|e| format!("Failed to parse server state: {e}"))?;
 
-    let server_name = state.name.read().clone();
-    let channel_name = state
-        .channels
-        .get(&channel_id)
-        .map(|c| c.name.clone())
-        .unwrap_or_default();
-
-    if !state.members.contains_key(&id.keypair.peer_id()) {
+    if !state.members.contains_key(local_master) {
         hollow_log!("[HOLLOW-PUSH] get_push_channel_meta: not a member of {server_id}");
         return Ok(None);
     }
-    let notif_level = node::fetch::channel_notification_level(&store, &server_id, &channel_id);
+    if node::age_gate::server_hidden_in(store, platform, server_id) {
+        hollow_log!("[HOLLOW-PUSH] get_push_channel_meta: {server_id} is hidden here as age-restricted");
+        return Ok(None);
+    }
+    let server_name = state.name.read().clone();
+    let channel_name = state
+        .channels
+        .get(channel_id)
+        .map(|c| c.name.clone())
+        .unwrap_or_default();
+    let notif_level = node::fetch::channel_notification_level(store, server_id, channel_id);
+    let age_restricted = node::age_gate::hidden_when_closed(store, server_id, &state);
 
     Ok(Some(PushChannelMeta {
         server_name,
         channel_name,
         notif_level,
+        age_restricted,
     }))
 }
 
@@ -4555,5 +4576,35 @@ mod link_preview_ffi_tests {
         assert!(thumb_of(event(b64(&cut))).is_none());
         let theirs = b64(&webp(32, 32));
         assert!(thumb_of(event(theirs.clone())).is_some_and(|t| t != theirs));
+    }
+}
+
+#[cfg(test)]
+mod tests_w4_iospush {
+    use super::*;
+    use node::age_gate::Platform;
+
+    /// A push names a server only where this device shows it: a phone that hides it as
+    /// age-restricted holds no such server for a wake, and an allowed 18+ server is
+    /// marked so a wake with nothing read fails closed.
+    #[test]
+    fn w4_iospush_a_push_names_no_server_this_phone_hides() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let path = tmp.path().join("meta.db").to_string_lossy().into_owned();
+        let store = MessageStore::open(&path, &"ab".repeat(32)).unwrap();
+        let (mut adult, me) = crate::crdt::testkeys::owned_state("adult", "Adult", 1);
+        let op = adult.create_op(crate::crdt::operations::CrdtPayload::ServerSettingChanged { key: "is_nsfw".into(), value: "true".into() });
+        let _ = adult.apply_op(&op);
+        let (mut plain, _) = crate::crdt::testkeys::owned_state("plain", "Plain", 1);
+        let op = plain.create_op(crate::crdt::operations::CrdtPayload::ServerSettingChanged { key: "is_nsfw".into(), value: "false".into() });
+        let _ = plain.apply_op(&op);
+        store.save_server_state("adult", &serde_json::to_string(&adult).unwrap()).unwrap();
+        store.save_server_state("plain", &serde_json::to_string(&plain).unwrap()).unwrap();
+        let meta = |sid: &str, p: Platform| push_channel_meta_in(&store, &me, sid, "c", p).unwrap();
+
+        assert!(meta("adult", Platform::Ios).is_none(), "a hidden server named by a wake");
+        assert!(meta("adult", Platform::Android).is_none());
+        assert!(meta("adult", Platform::Desktop).is_some_and(|m| m.age_restricted));
+        assert!(meta("plain", Platform::Ios).is_some_and(|m| !m.age_restricted), "a normal push is never dropped");
     }
 }

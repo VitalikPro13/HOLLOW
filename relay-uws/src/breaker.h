@@ -535,6 +535,17 @@ inline int64_t lock_put_held_w(bool base_first, bool same_base, bool tip_next, i
 // A leave's W: only a member's leave is announced, so only it pays for the walk.
 inline int64_t leave_w(bool member, int64_t announce) { return 1 + (member ? announce : 0); }
 
+// The most statements a roster within roster.h's caps carries (recoveries, phrase admits,
+// consents, vouches, pendings, two per legacy entry, removals with the reserved ones, the
+// recovery key); test_roster.cpp pins it to those caps.
+inline constexpr int64_t ROSTER_SIG_CAP = 4 + 64 + 96 + 128 + 16 + 2 * 64 + 96 + 32 + 1;
+
+// A mute_siblings frame's W: the fold of the held roster (`sigs` statements) and, for
+// each device it may write (never more than the statements), the frame's servers.
+inline int64_t mute_siblings_w(int64_t sigs, int64_t servers) {
+    return 2 + SIG_W * sigs + sigs * (1 + (servers + IDS_PER_W - 1) / IDS_PER_W);
+}
+
 enum class Verdict : uint8_t { Pass, Work, Joins, Distinct };
 
 // The most a frame is judged at: what a pacing client's mirror, held RESERVE above the

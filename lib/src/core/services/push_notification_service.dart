@@ -897,18 +897,17 @@ Future<void> _handleChannelWake(
     return;
   }
 
-  String serverName = '';
-  String channelName = '';
-  String notifLevel = 'all';
+  var (serverName, channelName, notifLevel, ageRestricted) =
+      kChannelWakeUnknownMeta;
   if (rustReady) {
     final meta = await _loadChannelWakeMeta(server, channel);
-    // The payload names the server; one we do not hold is never joined or
-    // fetched, and nothing is shown for it.
+    // The payload names the server; one we do not hold, or one this phone hides
+    // as age-restricted, is never joined or fetched, and nothing is shown for it.
     if (meta == null) {
-      await _pushLog('channel_wake: not a server we hold — dropped');
+      await _pushLog('channel_wake: not a server we show — dropped');
       return;
     }
-    (serverName, channelName, notifLevel) = meta;
+    (serverName, channelName, notifLevel, ageRestricted) = meta;
   }
   // The sender's mention flag may skip work (a mentions-only channel with no
   // mention claimed), never add a banner: Rust judges mentions on the posts.
@@ -950,9 +949,11 @@ Future<void> _handleChannelWake(
     profileNames: profileNames,
   );
 
-  // A mentions-only channel shows only mentions we read ourselves, and an empty
-  // wake has nothing to read.
-  if (!posted && notifLevel == 'all') {
+  if (!posted && ageRestricted) {
+    await _pushLog('channel_wake: nothing read of an age-restricted or unread server, no banner');
+  }
+  if (channelWakeShowsFallback(
+      posted: posted, ageRestricted: ageRestricted, notifLevel: notifLevel)) {
     await _showChannelWakeFallback(
       sender: sender,
       server: server,
@@ -965,19 +966,41 @@ Future<void> _handleChannelWake(
   await _pushLog('Handler complete');
 }
 
-/// Resolve (serverName, channelName, notifLevel) for the wake's triggering
-/// channel from SQLCipher: null for a server we do not hold, defaults
-/// ('', '', 'all') when the lookup itself fails.
-Future<(String, String, String)?> _loadChannelWakeMeta(
+/// Whether a channel wake ends in the generic banner: a mentions-only channel shows
+/// only mentions we read ourselves, an empty wake has nothing to read, and nothing
+/// read of an 18+ server shows nothing at all.
+@visibleForTesting
+bool channelWakeShowsFallback({
+  required bool posted,
+  required bool ageRestricted,
+  required String notifLevel,
+}) =>
+    !posted && !ageRestricted && notifLevel == 'all';
+
+/// A channel wake's meta when Rust is not up or cannot read it: counted as
+/// age-restricted, so no banner names a server this phone may hide (the NSE
+/// fails closed the same way).
+@visibleForTesting
+const kChannelWakeUnknownMeta = ('', '', 'all', true);
+
+/// Resolve (serverName, channelName, notifLevel, ageRestricted) for the wake's
+/// triggering channel from SQLCipher: null for a server we do not show,
+/// [kChannelWakeUnknownMeta] when the lookup itself fails.
+Future<(String, String, String, bool)?> _loadChannelWakeMeta(
     String server, String channel) async {
   try {
     final meta = await network_api.getPushChannelMeta(
         serverId: server, channelId: channel);
     if (meta == null) return null;
-    return (meta.serverName, meta.channelName, meta.notifLevel);
+    return (
+      meta.serverName,
+      meta.channelName,
+      meta.notifLevel,
+      meta.ageRestricted,
+    );
   } catch (e) {
     await _pushLog('getPushChannelMeta FAILED: $e');
-    return ('', '', 'all');
+    return kChannelWakeUnknownMeta;
   }
 }
 

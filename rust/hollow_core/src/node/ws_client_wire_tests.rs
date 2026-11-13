@@ -632,6 +632,7 @@ struct Client {
     events: mpsc::UnboundedReceiver<WsEvent>,
     log: Vec<String>,
     directs: Vec<Vec<u8>>,
+    flushed: usize,
     _task: tokio::task::JoinHandle<()>,
 }
 
@@ -657,7 +658,7 @@ fn spawn_client_with(url: &str, timing: Timing, queued: Vec<WsCommand>) -> Clien
         event_tx,
         ctl_rx,
     );
-    Client { cmd, ctl, events, log: Vec::new(), directs: Vec::new(), _task: task }
+    Client { cmd, ctl, events, log: Vec::new(), directs: Vec::new(), flushed: 0, _task: task }
 }
 
 fn spawn_client(url: &str, timing: Timing) -> Client {
@@ -692,6 +693,9 @@ impl Client {
         }
         if let WsEvent::DirectMessage { data, .. } = e {
             self.directs.push(data.clone());
+        }
+        if matches!(e, WsEvent::Flushed) {
+            self.flushed += 1;
         }
     }
 
@@ -1305,7 +1309,7 @@ fn spawn_seamed_client(
         event_tx,
         ctl_rx,
     );
-    Client { cmd, ctl, events, log: Vec::new(), directs: Vec::new(), _task: task }
+    Client { cmd, ctl, events, log: Vec::new(), directs: Vec::new(), flushed: 0, _task: task }
 }
 
 /// An address on no interface of this machine: the OS "now" routes the relay elsewhere.
@@ -2691,4 +2695,44 @@ async fn a_short_answer_that_differs_is_joined_again_for_the_list() {
         WsEvent::RoomMembers { peers, .. } => assert_eq!(peers, vec![x, me], "the silently dropped peer is purged"),
         other => panic!("{other:?}"),
     }
+}
+
+// w4-iospush
+
+/// A flush ends only on the relay's answer to the heartbeat written in queue order: an
+/// unanswered one says nothing, one queued while suspended is answered after the resume,
+/// and coming back to the screen asks for one (the phone's 18+ hold waits on it).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn w4_iospush_a_flush_ends_only_on_the_relays_answer_in_queue_order() {
+    let relay = FakeRelay::start(true).await;
+    let mut c = spawn_client(&relay.url(), quick());
+    c.wait_kind("Connected", T).await;
+    c.send(WsCommand::Flush);
+    c.wait_kind("Flushed", T).await;
+
+    relay.with(|r| r.mute_hb_acks = true);
+    c.send(WsCommand::Flush);
+    c.settle(Duration::from_millis(400)).await;
+    assert_eq!(c.flushed, 1, "a flush the relay never answered ended");
+    relay.with(|r| r.mute_hb_acks = false);
+
+    let (done_tx, done_rx) = oneshot::channel();
+    c.ctl.send(Control::Suspend(done_tx)).unwrap();
+    tokio::time::timeout(T, done_rx).await.expect("suspend returns").unwrap();
+    c.wait_kind("Suspended", T).await;
+    let before = c.flushed;
+    c.send(WsCommand::Flush);
+    c.settle(Duration::from_millis(400)).await;
+    assert_eq!(c.flushed, before, "a suspended socket answered a flush");
+    c.nudge();
+    c.wait_kind("Resumed", T).await;
+    c.wait_kind("Flushed", T).await;
+    // The flush the muted relay never answered is asked again on the new socket.
+    c.settle(Duration::from_millis(500)).await;
+
+    let back = c.flushed;
+    c.ctl.send(Control::Background(true)).unwrap();
+    c.ctl.send(Control::Background(false)).unwrap();
+    c.wait_kind("Flushed", T).await;
+    assert!(c.flushed > back, "coming back to the screen asks for a flush");
 }

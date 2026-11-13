@@ -229,7 +229,7 @@ class _RoomCallBar extends ConsumerWidget {
     final conference = inActiveConferenceCall(ref);
     final server = conference
         ? null
-        : ref.watch(serverListProvider.select((s) => s[serverId]));
+        : ref.watch(keptServersProvider.select((s) => s[serverId]));
     final joinedAt = vc.joinedAt;
     return _CallBarRow(
       leading: server == null

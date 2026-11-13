@@ -19,7 +19,8 @@
     "client_distinct_stop": 40000,
     "client_reserve": 16000,
     "unknown_server_devices": 1536,
-    "unknown_room_devices": 64
+    "unknown_room_devices": 64,
+    "roster_sig_cap": 565
   },
   "costs": [
     {"name": "a broadcast prices the larger of presence and the node's bound, padded",
@@ -71,6 +72,8 @@
     {"name": "anything else covers one signature check",
      "text": "{\"type\":\"claim_nickname\",\"nickname\":\"abc\"}", "w": 10, "joins": 0, "relay_deliveries": 0},
     {"name": "a kill deposit to three devices",
-     "text": "{\"type\":\"kill_deposit\",\"blob\":\"x\",\"issued_at_ms\":1,\"targets\":[\"a\",\"b\",\"c\"]}", "w": 401, "joins": 0, "relay_deliveries": 0}
+     "text": "{\"type\":\"kill_deposit\",\"blob\":\"x\",\"issued_at_ms\":1,\"targets\":[\"a\",\"b\",\"c\"]}", "w": 401, "joins": 0, "relay_deliveries": 0},
+    {"name": "a sibling mute pays the fold and every device it may write times its servers",
+     "text": "{\"type\":\"mute_siblings\",\"master\":\"m\",\"at\":1,\"set_at\":1,\"servers\":[\"a\",\"b\"]}", "w": 4522, "joins": 0, "relay_deliveries": 0}
   ]
 }

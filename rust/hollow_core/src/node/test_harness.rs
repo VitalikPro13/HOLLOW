@@ -310,6 +310,8 @@ fn cmd_kind(cmd: &WsCommand) -> &'static str {
         WsCommand::ResolveLinkCode { .. } => "resolve_link_code",
         WsCommand::RegisterPushToken { .. } => "register_push_token",
         WsCommand::SetPushPrefs { .. } => "set_push_prefs",
+        WsCommand::MuteSiblings { .. } => "mute_siblings",
+        WsCommand::Flush => "flush",
         WsCommand::SendChannelDirect { .. } => "send_channel_direct",
         WsCommand::SetOfflineBuffer { .. } => "set_offline_buffer",
         WsCommand::SetTopicBuffer { .. } => "set_topic_buffer",
@@ -352,6 +354,11 @@ struct RelayInner {
     /// `inbox:{master}` room -> the devices the relay's fold counts as that master's.
     /// Only they see each other and receive there, as on the relay.
     inbox_owners: HashMap<String, HashSet<String>>,
+    /// Devices holding a push token: only they are woken, so only they take sibling marks.
+    push_tokens: HashSet<String>,
+    /// device -> the sibling mute a computer of its identity left for it, as the relay's
+    /// `~sib` entry (`relay-uws/src/sib_mute.h`).
+    sib_marks: HashMap<String, SibMark>,
     /// master -> every roster shown for it folded into one, with when the relay first
     /// saw each pending join, as on the relay (`relay-uws/src/roster_book.h`).
     inbox_rosters: HashMap<String, InboxRoster>,
@@ -682,6 +689,22 @@ fn roster_places(rosters: &HashMap<String, InboxRoster>, master: &str, device: &
     st.is_member(device) || st.removed.contains_key(device) || st.pending.contains(device)
 }
 
+/// The devices the relay's fold of `master`'s shown rosters counts.
+fn roster_members(rosters: &HashMap<String, InboxRoster>, master: &str) -> std::collections::BTreeSet<String> {
+    let Some(held) = rosters.get(master) else { return Default::default() };
+    let base = held.roster.base();
+    held.roster.fold(|d| held.seen.get(&format!("{base}|{d}")).copied(), super::roster_book::now_ms()).members
+}
+
+/// A sibling mute the relay holds for one device.
+#[derive(Clone)]
+struct SibMark {
+    at: i64,
+    set_at: i64,
+    servers: HashSet<String>,
+    by: String,
+}
+
 /// Whether server authority over every roster shown for `master` counts `device`: what
 /// the relay judges a lock link's device by (`RosterBook::counted_authority`).
 fn lock_counts(rosters: &HashMap<String, InboxRoster>, master: &str, device: &str) -> bool {
@@ -814,6 +837,21 @@ impl MockRelay {
     /// The newest lock number of a (genesis) server when the relay's fold dropped `device`.
     pub(crate) fn tip_when_dropped(&self, device: &str, server: &str) -> Option<u64> {
         self.inner.lock().unwrap().tips_at_drop.get(device)?.get(server).copied()
+    }
+
+    /// Whether a sibling's mark keeps the relay from waking `device` for `server`.
+    pub(crate) fn sib_muted(&self, device: &str, server: &str) -> bool {
+        self.inner.lock().unwrap().sib_marks.get(device).is_some_and(|m| m.servers.contains(server))
+    }
+
+    /// The flags stamp of the sibling mute held for `device`, if any.
+    pub(crate) fn sib_set_at(&self, device: &str) -> Option<i64> {
+        self.inner.lock().unwrap().sib_marks.get(device).map(|m| m.set_at)
+    }
+
+    /// Whether `device` registered a push token here.
+    pub(crate) fn has_push_token(&self, device: &str) -> bool {
+        self.inner.lock().unwrap().push_tokens.contains(device)
     }
 
     /// Whether the relay's fold of `master`'s shown rosters counts `device`.
@@ -2051,6 +2089,64 @@ impl RelayInner {
                 };
                 inner.write(from, reply);
             }
+            WsCommand::RegisterPushToken { .. } => {
+                inner.push_tokens.insert(from.to_string());
+            }
+            WsCommand::UnregisterPushToken => {
+                inner.push_tokens.remove(from);
+            }
+            // The relay answers a heartbeat after everything it wrote before reading it.
+            WsCommand::Flush => {
+                inner.write(from, WsEvent::Flushed);
+            }
+            // The relay's `sib::carry`: a device's own view at or past its siblings' marks
+            // lifts them and keeps the stamps, so an older frame cannot set them again.
+            WsCommand::SetPushPrefs { sib_view: Some((at, set_at)), .. } => {
+                let mark = inner.sib_marks.entry(from.to_string()).or_insert_with(|| SibMark {
+                    at: 0,
+                    set_at: 0,
+                    servers: HashSet::new(),
+                    by: String::new(),
+                });
+                if at > mark.at || (at == mark.at && set_at >= mark.set_at) {
+                    *mark = SibMark { at, set_at, servers: HashSet::new(), by: String::new() };
+                }
+            }
+            // The relay's `handle_mute_siblings`: only this inbox's owner the fold counts,
+            // only into the fold's other token holders; newer (choice, flags) stamps replace,
+            // equal stamps only add.
+            WsCommand::MuteSiblings { master, at, set_at, servers } => {
+                let room = format!("inbox:{master}");
+                if !inner.inbox_owners.get(&room).is_some_and(|o| o.contains(from))
+                    || !roster_counts(&inner.inbox_rosters, &master, from)
+                {
+                    return;
+                }
+                let targets: Vec<String> = roster_members(&inner.inbox_rosters, &master)
+                    .into_iter()
+                    .filter(|d| d != from && inner.push_tokens.contains(d))
+                    .collect();
+                for d in targets {
+                    match inner.sib_marks.get_mut(&d) {
+                        Some(h) if at < h.at || (at == h.at && set_at < h.set_at) => {}
+                        Some(h) if at == h.at && set_at == h.set_at => {
+                            let before = h.servers.len();
+                            for s in &servers {
+                                if h.servers.len() >= 256 {
+                                    break;
+                                }
+                                h.servers.insert(s.clone());
+                            }
+                            if h.servers.len() != before {
+                                h.by = from.to_string();
+                            }
+                        }
+                        _ => {
+                            inner.sib_marks.insert(d, SibMark { at, set_at, servers: servers.iter().cloned().collect(), by: from.to_string() });
+                        }
+                    }
+                }
+            }
             WsCommand::SendChannelDirect { room_code, target_peer, .. } => {
                 // Only from a socket that sees the room; a member who got the room's
                 // broadcast needs no copy.
@@ -2118,6 +2214,12 @@ impl RelayInner {
         let state = held.roster.fold(|d| held.seen.get(&format!("{base}|{d}")).copied(), now);
         if changed {
             self.drop_inbox_owners(room, &state.members);
+            // A writer the new fold no longer counts takes its marks with it.
+            for d in &state.members {
+                if self.sib_marks.get(d).is_some_and(|m| !m.by.is_empty() && !state.members.contains(&m.by)) {
+                    self.sib_marks.remove(d);
+                }
+            }
             for gone in was.difference(&state.members) {
                 let tips: HashMap<String, u64> =
                     self.locks.iter().filter_map(|(k, c)| Some((k.clone(), c.last()?.n))).collect();
@@ -68642,4 +68744,151 @@ async fn w4rc_a_keyless_first_sight_takes_no_key_from_the_relays_copy() {
     sleep_ms(1_000).await; // NOTE1_000 absence: no later answer adds the key
     assert!(held().is_some_and(|r| r.r_pub.is_empty()), "the relay's copy picked the recovery key of a keyless first sight");
     drop((owner, x, joiner));
+}
+
+// w4-iospush
+
+/// A computer's choice reaches the relay as marks on our other devices that hold a push
+/// token: OFF silences an 18+ server's channel wakes on a phone asleep through it, ON
+/// lifts them, and a server flagged later is added without a new choice.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn w4_iospush_an_off_while_the_phone_sleeps_mutes_its_flagged_servers_wakes() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut b, c) = sibling_pair(&relay, 204, 205, 206).await;
+    c.cmd_tx
+        .send(NodeCommand::RegisterPushToken { token: "w4-token".into(), platform: "android".into() })
+        .await
+        .unwrap();
+    assert!(wait_until(10, async || relay.has_push_token(&c.device_id)).await, "the phone registers its token");
+    ag_author(&b, true).await;
+    let server_id = create_server_and_wait(&mut b, "Adult").await;
+    b.cmd_tx
+        .send(NodeCommand::UpdateServerSetting { server_id: server_id.clone(), key: "is_nsfw".into(), value: "true".into() })
+        .await
+        .unwrap();
+    assert!(wait_until(10, async || b.server_setting(&server_id, "is_nsfw").as_deref() == Some("true")).await);
+    relay.set_online(&c.device_id, false);
+    let flag_ms = b.server_state(&server_id).and_then(|s| s.settings.get("is_nsfw").map(|r| r.hlc().physical_ms)).unwrap();
+    let flag_ms = i64::try_from(flag_ms).unwrap();
+    assert!(
+        wait_until(15, async || relay.sib_set_at(&c.device_id).is_some_and(|s| s >= flag_ms)).await,
+        "the computer never told the relay its view of the new flag",
+    );
+    assert!(!relay.sib_muted(&c.device_id, &server_id), "a computer muted a server its phones show");
+
+    ag_author(&b, false).await;
+    assert!(
+        wait_until(15, async || relay.sib_muted(&c.device_id, &server_id)).await,
+        "an OFF never reached the relay for the phone asleep through it",
+    );
+    assert!(!relay.sib_muted(&b.device_id, &server_id), "the computer marks only its siblings");
+
+    let later = create_server_and_wait(&mut b, "Later").await;
+    b.cmd_tx
+        .send(NodeCommand::UpdateServerSetting { server_id: later.clone(), key: "is_nsfw".into(), value: "true".into() })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(20, async || relay.sib_muted(&c.device_id, &later)).await,
+        "a server flagged while the phone sleeps is muted too",
+    );
+
+    ag_author(&b, true).await;
+    assert!(
+        wait_until(15, async || !relay.sib_muted(&c.device_id, &server_id) && !relay.sib_muted(&c.device_id, &later)).await,
+        "ON never lifted the marks",
+    );
+}
+
+// w4-iospush fix round
+
+/// A phone caught up to its computer's view lifts the marks that computer set on it: its
+/// own filters already mute what it hides, and a stale mark could outlive every computer
+/// (review LOW-8).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn w4_iospush_a_phone_caught_up_lifts_its_siblings_marks() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (mut b, c) = sibling_pair(&relay, 207, 208, 209).await;
+    c.cmd_tx
+        .send(NodeCommand::RegisterPushToken { token: "w4-lift".into(), platform: "android".into() })
+        .await
+        .unwrap();
+    assert!(wait_until(10, async || relay.has_push_token(&c.device_id)).await, "the phone registers its token");
+    let server_id = create_server_and_wait(&mut b, "Adult").await;
+    b.cmd_tx
+        .send(NodeCommand::UpdateServerSetting { server_id: server_id.clone(), key: "is_nsfw".into(), value: "true".into() })
+        .await
+        .unwrap();
+    ag_author(&b, false).await;
+    assert!(wait_until(20, async || relay.sib_muted(&c.device_id, &server_id)).await, "control: the computer marks the phone");
+    let held_at = ag_held(&b).map(|e| e.at);
+    assert!(
+        wait_until(20, async || {
+            ag_held(&c).map(|e| e.at) == held_at && c.live_server_state(&server_id).await.is_some_and(|s| s.is_nsfw())
+        })
+        .await,
+        "control: the phone reads the choice and the flag",
+    );
+    let _phone = ag_phone();
+    c.cmd_tx.send(NodeCommand::SetPushPrefs { prefs_json: "{}".into() }).await.unwrap();
+    assert!(
+        wait_until(15, async || !relay.sib_muted(&c.device_id, &server_id)).await,
+        "a phone caught up to its computer still carries that computer's marks",
+    );
+}
+
+/// A phone back from away hears that everything the relay held for it arrived, so its
+/// 18+ hold ends on that and never before an OFF made while it was away (review LOW-7).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn w4_iospush_a_returning_phone_hears_when_its_relay_has_delivered() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (b, mut c) = sibling_pair(&relay, 210, 211, 212).await;
+    ag_author(&b, true).await;
+    assert!(wait_until(15, async || ag_held(&c).is_some_and(|e| e.allow)).await, "control: the phone hears ON");
+    let phone = ag_phone();
+
+    relay.set_online(&c.device_id, false);
+    assert!(wait_until(10, async || !relay.online_devices().contains(&c.device_id)).await);
+    drain_events(&mut c);
+    relay.set_online(&c.device_id, true);
+    assert!(
+        wait_event(&mut c, std::time::Duration::from_secs(15), |ev| matches!(ev, NetworkEvent::AgeGateChanged { allowed: true })).await,
+        "a phone back with nothing new never heard that its relay delivered",
+    );
+
+    relay.set_online(&c.device_id, false);
+    assert!(wait_until(10, async || !relay.online_devices().contains(&c.device_id)).await);
+    // The computer acts as one while the phone is away.
+    drop(phone);
+    ag_author(&b, false).await;
+    let off_carried = async || b.carried_to(&c.device_id).await.iter().any(|m| {
+        matches!(m, super::types::HavenMessage::AgeGateSync { entry } if !entry.allow)
+    });
+    assert!(wait_until(10, off_carried).await, "b never carried the OFF to the away phone");
+    expect_relay_drained(&relay, &b, "w4-hold").await;
+    let _phone = ag_phone();
+    drain_events(&mut c);
+    relay.set_online(&c.device_id, true);
+    let mut first = None;
+    let heard = wait_event(&mut c, std::time::Duration::from_secs(15), |ev| {
+        if let NetworkEvent::AgeGateChanged { allowed } = ev {
+            first.get_or_insert(*allowed);
+            return true;
+        }
+        false
+    })
+    .await;
+    assert!(heard && first == Some(false), "the phone was told to show 18+ servers before the OFF made while away");
 }

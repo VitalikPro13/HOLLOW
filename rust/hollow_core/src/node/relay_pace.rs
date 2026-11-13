@@ -45,6 +45,9 @@ const ROSTER_CHECK_W: i64 = 2 + 2 + 256;
 const OTHER_W: i64 = 10;
 /// A destroy order's roster checks, as many as a big roster holds.
 const KILL_SIGS: i64 = 64;
+/// The most statements a roster the relay holds can make it fold (breaker.h
+/// `ROSTER_SIG_CAP`): a sibling mute is priced for the biggest.
+pub(crate) const ROSTER_SIG_CAP: i64 = 565;
 const WINDOW: Duration = Duration::from_secs(600);
 
 /// What the client knows of a room's audience.
@@ -192,8 +195,15 @@ fn text_cost(text: &str, rooms: &impl RoomSizes) -> Cost {
         "roster_check" => Cost::w(ROSTER_CHECK_W),
         "discover_peers" => Cost::w(2 + ids_w(reach(rooms, field("room")))),
         "kill_deposit" => Cost::w(2 + SIG_W * (KILL_SIGS + 2) + len("targets")),
+        "mute_siblings" => Cost::w(mute_siblings_w(ROSTER_SIG_CAP, len("servers"))),
         _ => Cost::w(OTHER_W),
     }
+}
+
+/// A sibling mute: the relay's fold of `sigs` statements and, per device it may write,
+/// the frame's servers (breaker.h `mute_siblings_w`).
+fn mute_siblings_w(sigs: i64, servers: i64) -> i64 {
+    2 + SIG_W * sigs + sigs * (1 + ids_w(servers))
 }
 
 /// The deposit target a frame may name (the relay counts strangers among them).
@@ -496,6 +506,7 @@ mod tests {
         assert_eq!(n("debt_floor"), DEBT_FLOOR);
         assert_eq!(n("unknown_server_devices"), i64::from(UNKNOWN_SERVER_DEVICES));
         assert_eq!(n("unknown_room_devices"), i64::from(UNKNOWN_ROOM_DEVICES));
+        assert_eq!(n("roster_sig_cap"), ROSTER_SIG_CAP);
         assert!(DISTINCT_STOP as i64 * 10 <= n("distinct_limit") * 8, "the client stops well below the relay");
     }
 

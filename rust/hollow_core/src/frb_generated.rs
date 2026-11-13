@@ -21072,10 +21072,12 @@ impl SseDecode for crate::api::network::PushChannelMeta {
         let mut var_serverName = <String>::sse_decode(deserializer);
         let mut var_channelName = <String>::sse_decode(deserializer);
         let mut var_notifLevel = <String>::sse_decode(deserializer);
+        let mut var_ageRestricted = <bool>::sse_decode(deserializer);
         return crate::api::network::PushChannelMeta {
             server_name: var_serverName,
             channel_name: var_channelName,
             notif_level: var_notifLevel,
+            age_restricted: var_ageRestricted,
         };
     }
 }
@@ -26565,6 +26567,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::network::PushChannelMeta {
             self.server_name.into_into_dart().into_dart(),
             self.channel_name.into_into_dart().into_dart(),
             self.notif_level.into_into_dart().into_dart(),
+            self.age_restricted.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -31111,6 +31114,7 @@ impl SseEncode for crate::api::network::PushChannelMeta {
         <String>::sse_encode(self.server_name, serializer);
         <String>::sse_encode(self.channel_name, serializer);
         <String>::sse_encode(self.notif_level, serializer);
+        <bool>::sse_encode(self.age_restricted, serializer);
     }
 }
 

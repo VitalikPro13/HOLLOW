@@ -93,10 +93,32 @@ pub unsafe extern "C" fn hollow_push_server_hidden(data_dir: *const c_char, serv
     let (Some(dir), Some(sid)) = (unsafe { cstr(data_dir) }, unsafe { cstr(server_id) }) else {
         return 1;
     };
-    i32::from(server_hidden(&dir, &sid).unwrap_or(true))
+    i32::from(judge_server(&dir, &sid, |store, sid| {
+        crate::node::age_gate::server_hidden_in(store, crate::node::age_gate::Platform::current(), sid)
+    }).unwrap_or(true))
 }
 
-fn server_hidden(data_dir: &str, server_id: &str) -> Result<bool, String> {
+/// iOS NSE: whether a channel wake whose posts could not be read must still name
+/// nothing, because `server_id` is flagged 18+ or not yet known not to be. 1 = name
+/// nothing, 0 = the generic channel banner; anything unreadable names nothing.
+///
+/// # Safety
+/// Both pointers must be valid NUL-terminated C strings for the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn hollow_push_server_age_restricted(data_dir: *const c_char, server_id: *const c_char) -> i32 {
+    crate::crash_dumps::keep_secrets_out();
+    let (Some(dir), Some(sid)) = (unsafe { cstr(data_dir) }, unsafe { cstr(server_id) }) else {
+        return 1;
+    };
+    i32::from(judge_server(&dir, &sid, crate::node::age_gate::server_age_restricted_in).unwrap_or(true))
+}
+
+/// `judge` on this install's database; true when there is nothing to judge with.
+fn judge_server(
+    data_dir: &str,
+    server_id: &str,
+    judge: impl Fn(&crate::storage::MessageStore, &str) -> bool,
+) -> Result<bool, String> {
     if data_dir.is_empty() || server_id.is_empty() {
         return Ok(true);
     }
@@ -109,7 +131,7 @@ fn server_hidden(data_dir: &str, server_id: &str) -> Result<bool, String> {
     let passphrase = hex::encode(&master_proto[..32.min(master_proto.len())]);
     let db_path = std::path::Path::new(data_dir).join("messages.db");
     let store = crate::storage::MessageStore::open(db_path.to_str().ok_or("bad db path")?, &passphrase)?;
-    Ok(crate::node::age_gate::server_hidden_in(&store, crate::node::age_gate::Platform::current(), server_id))
+    Ok(judge(&store, server_id))
 }
 
 /// The longest userInfo the extension hands over: FCM and APNs carry at most 4 KB.
@@ -225,11 +247,8 @@ fn fetch_and_decrypt(
     crate::node::resolver::seed_self(&local_master, std::slice::from_ref(&peer_id));
     crate::node::dm_room::register(&id.keypair);
 
-    let relay = if relay_domain.is_empty() {
-        "relay.anonlisten.com"
-    } else {
-        relay_domain
-    };
+    // Empty: `run_fetch` dials the relay this install uses.
+    let relay = relay_domain;
 
     // Channel wake: load the one server's MLS group so buffered group ciphertext
     // decrypts. Failure degrades to a content-free line, synced on next open.
@@ -417,6 +436,14 @@ mod tests {
         let (adult, clean) = (hidden("adult"), hidden("clean"));
         crate::node::age_gate::set_test_platform(None);
         assert_eq!((adult, clean), (1, 0), "the NSE named an 18+ server or hid a clean one");
+        let restricted = |sid: &str| unsafe {
+            super::hollow_push_server_age_restricted(root.as_ptr(), CString::new(sid).unwrap().as_ptr())
+        };
+        assert_eq!(
+            (restricted("adult"), restricted("clean"), restricted("unknown")),
+            (1, 0, 1),
+            "an unread 18+ wake named its server, or a clean one lost its banner",
+        );
     }
 
     /// The extension's fetch as a process of its own, for a simulator, where a pushed

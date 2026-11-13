@@ -78,6 +78,7 @@ static void test_vectors() {
                                               c["resume_w_per_room"] == RESUME_W_PER_ROOM);
     check("the stranger limit", c["distinct_limit"] == l.distinct);
     check("the client's reserve is the judge's margin", c["client_reserve"] == l.pace_reserve);
+    check("the roster statement cap", c["roster_sig_cap"] == ROSTER_SIG_CAP);
     check("the client stops new targets well below it",
           c["client_distinct_stop"].get<int64_t>() * 10 <= l.distinct * 8);
     // Every price covers the most the relay can charge for that frame: one delivery per
@@ -111,6 +112,11 @@ static void test_vectors() {
         if (type == "check_peers") relay = 2 + CHECK_PEERS_SCAN_W;
         if (type == "roster_check") relay = 2 + ROSTER_CHECK_W;
         if (type == "roster_check") check("the client prices a roster check as the relay does", k["w"] == relay);
+        if (type == "mute_siblings") {
+            // The most a held roster can make the relay fold, and a device per statement.
+            const int64_t servers = static_cast<int64_t>(json::parse(text).value("servers", json::array()).size());
+            relay = mute_siblings_w(ROSTER_SIG_CAP, servers);
+        }
         if (type == "hb" || type == "ack") relay = 1;
         check("the client's price covers the relay: " + k.value("name", ""), k["w"].get<int64_t>() >= relay);
     }
