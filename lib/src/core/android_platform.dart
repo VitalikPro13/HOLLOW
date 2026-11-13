@@ -57,3 +57,23 @@ Future<String?> androidInstallerPackage() async {
     return null;
   }
 }
+
+/// The two country codes the phone's telephony reports, as given: the mobile
+/// network it is on now, and the SIM's. Null off Android or when the read
+/// fails. Gated on [defaultTargetPlatform] so tests can stand in for a phone.
+Future<({String? network, String? sim})?> androidTelephonyCountries() async {
+  if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) return null;
+  try {
+    final m = await _channel
+        .invokeMapMethod<String, Object?>('getTelephonyCountries');
+    if (m == null) return null;
+    final network = m['network'];
+    final sim = m['sim'];
+    return (
+      network: network is String ? network : null,
+      sim: sim is String ? sim : null,
+    );
+  } catch (_) {
+    return null;
+  }
+}

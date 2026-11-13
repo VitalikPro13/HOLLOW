@@ -39,7 +39,8 @@ void main() {
       'Network',
       'Files & storage',
       'About',
-      'Help',
+      'App guides',
+      'Get help',
     ]) {
       expect(find.text(page), findsOneWidget, reason: page);
     }

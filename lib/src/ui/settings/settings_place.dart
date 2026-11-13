@@ -45,6 +45,7 @@ class _SettingsPlaceState extends ConsumerState<SettingsPlace> {
 
   void _go(SettingsCategory category) {
     ref.read(settingsCategoryProvider.notifier).state = category;
+    ref.read(settingsPageOpenedProvider.notifier).state++;
     _search.clear();
     setState(() => _query = '');
     if (_scroll.hasClients) _scroll.jumpTo(0);

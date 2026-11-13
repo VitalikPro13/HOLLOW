@@ -173,6 +173,7 @@ flutter:
     - assets/rust_licenses.txt
     - assets/extra_licenses.txt
     - assets/help/manifest.json
+    - assets/help/help_resources.json
     - assets/help/media/
     - legal/PRIVACY_POLICY.md
     - legal/TERMS_OF_USE.md

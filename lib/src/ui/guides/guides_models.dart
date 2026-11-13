@@ -80,7 +80,7 @@ class GuidesManifest {
 
   factory GuidesManifest.fromJson(Map<String, dynamic> json) => GuidesManifest(
         version: json['version'] as int? ?? 1,
-        title: json['title'] as String? ?? 'Help',
+        title: json['title'] as String? ?? 'App guides',
         modules: (json['modules'] as List<dynamic>? ?? const [])
             .map((e) => GuidesModule.fromJson(e as Map<String, dynamic>))
             .toList(),

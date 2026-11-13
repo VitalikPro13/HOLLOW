@@ -2,7 +2,7 @@ import 'package:flutter/widgets.dart';
 import 'package:hollow/src/core/providers/settings_place_provider.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// The rail's groups, in order. About stands alone after them.
+/// The rail's groups, in order. About and Get help stand apart after them.
 enum SettingsGroup { account, app, connection }
 
 extension SettingsGroupMeta on SettingsGroup {
@@ -27,6 +27,7 @@ extension SettingsCategoryMeta on SettingsCategory {
         SettingsCategory.network => 'Network',
         SettingsCategory.storage => 'Files & storage',
         SettingsCategory.about => 'About',
+        SettingsCategory.help => 'Get help',
       };
 
   IconData get icon => switch (this) {
@@ -42,9 +43,10 @@ extension SettingsCategoryMeta on SettingsCategory {
         SettingsCategory.network => LucideIcons.globe,
         SettingsCategory.storage => LucideIcons.hardDrive,
         SettingsCategory.about => LucideIcons.info,
+        SettingsCategory.help => LucideIcons.lifeBuoy,
       };
 
-  /// Null for About, which sits apart at the end of the rail.
+  /// Null for About and Get help, which sit apart at the end of the rail.
   SettingsGroup? get group => switch (this) {
         SettingsCategory.profile ||
         SettingsCategory.security ||
@@ -60,7 +62,7 @@ extension SettingsCategoryMeta on SettingsCategory {
         SettingsCategory.network ||
         SettingsCategory.storage =>
           SettingsGroup.connection,
-        SettingsCategory.about => null,
+        SettingsCategory.about || SettingsCategory.help => null,
       };
 }
 
@@ -173,4 +175,10 @@ const List<SettingsSearchEntry> kSettingsSearchIndex = [
   SettingsSearchEntry('Earlier versions', SettingsCategory.about, 'downgrade older build rollback'),
   SettingsSearchEntry('Feedback', SettingsCategory.about, 'contact email support bug'),
   SettingsSearchEntry('Legal', SettingsCategory.about, 'privacy terms licenses'),
+  SettingsSearchEntry('Emergency', SettingsCategory.help, 'get help emergency number 112 911 999 police ambulance fire call danger'),
+  SettingsSearchEntry('Talk to someone now', SettingsCategory.help, 'crisis suicide suicidal self-harm self harm hurt myself depressed depression anxiety lonely talk helpline hotline mental health support'),
+  SettingsSearchEntry('Someone threatens to share your photos', SettingsCategory.help, 'sextortion blackmail extortion nude nudes intimate images pictures revenge porn threat'),
+  SettingsSearchEntry('Help for children and teens', SettingsCategory.help, 'child children kids teen teens youth young helpline 116 111 abuse bullying'),
+  SettingsSearchEntry('Report a crime to the police', SettingsCategory.help, 'police crime report form stalking threat harassment'),
+  SettingsSearchEntry('Someone sent you a link to child sexual abuse material', SettingsCategory.help, 'csam child abuse illegal content report link hotline'),
 ];

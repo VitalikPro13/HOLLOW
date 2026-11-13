@@ -3,6 +3,7 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
+import 'package:hollow/src/ui/components/beside_or_below.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_chip.dart';
 import 'package:hollow/src/ui/components/hollow_divider.dart';
@@ -196,6 +197,9 @@ class SettingsSection extends StatelessWidget {
 
   /// One trailing action on the header, a ghost button.
   final Widget? action;
+
+  /// The title wraps instead of ending in an ellipsis.
+  final bool wrapTitle;
   final List<Widget> children;
 
   const SettingsSection({
@@ -204,6 +208,7 @@ class SettingsSection extends StatelessWidget {
     this.subtitle,
     this.count,
     this.action,
+    this.wrapTitle = false,
     required this.children,
   });
 
@@ -217,7 +222,10 @@ class SettingsSection extends StatelessWidget {
         children: [
           if (title != null)
             HollowSectionHeader(title!,
-                subtitle: subtitle, count: count, action: action),
+                subtitle: subtitle,
+                count: count,
+                action: action,
+                wrap: wrapTitle),
           ...children,
         ],
       ),
@@ -240,6 +248,14 @@ class SettingsRow extends StatelessWidget {
   /// A control too wide for the trailing edge on a phone (chips, a slider)
   /// goes under the title there. Desktop keeps it trailing.
   final bool wideTrailing;
+
+  /// [trailing] goes under the title whenever it does not fit beside it, at
+  /// any width or text scale, desktop included.
+  final bool stackWhenNarrow;
+
+  /// With [stackWhenNarrow]: the share of the row the title keeps beside
+  /// [trailing] before it goes below (BesideOrBelow's default otherwise).
+  final double? stackLeadShare;
 
   /// Greys the title when the row's control is locked by another setting.
   final bool enabled;
@@ -272,6 +288,8 @@ class SettingsRow extends StatelessWidget {
     this.leading,
     this.trailing,
     this.wideTrailing = false,
+    this.stackWhenNarrow = false,
+    this.stackLeadShare,
     this.enabled = true,
     this.titleTrailing,
     this.titleWidget,
@@ -352,7 +370,22 @@ class SettingsRow extends StatelessWidget {
                   trailing!,
                 ],
               )
-            : Row(
+            : stackWhenNarrow && trailing != null
+                ? BesideOrBelow(
+                    top: trailingTop,
+                    leadShare: stackLeadShare ?? BesideOrBelow.defaultLeadShare,
+                    lead: leading == null
+                        ? text
+                        : Row(
+                            children: [
+                              leading!,
+                              const SizedBox(width: HollowSpacing.md),
+                              Flexible(child: text),
+                            ],
+                          ),
+                    trail: trailing!,
+                  )
+                : Row(
                 crossAxisAlignment: trailingTop
                     ? CrossAxisAlignment.start
                     : CrossAxisAlignment.center,

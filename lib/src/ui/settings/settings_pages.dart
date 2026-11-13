@@ -12,6 +12,7 @@ import 'package:hollow/src/ui/settings/pages/network_page.dart';
 import 'package:hollow/src/ui/settings/pages/storage_page.dart';
 import 'package:hollow/src/ui/settings/stream_overlay/stream_overlay_page.dart';
 import 'package:hollow/src/ui/settings/pages/about_page.dart';
+import 'package:hollow/src/ui/settings/pages/get_help_page.dart';
 
 /// The page for [category]: the same widget on desktop and phone.
 Widget settingsPageFor(SettingsCategory category) => switch (category) {
@@ -27,4 +28,5 @@ Widget settingsPageFor(SettingsCategory category) => switch (category) {
       SettingsCategory.network => const NetworkSettingsPage(),
       SettingsCategory.storage => const StorageSettingsPage(),
       SettingsCategory.about => const AboutSettingsPage(),
+      SettingsCategory.help => const GetHelpSettingsPage(),
     };

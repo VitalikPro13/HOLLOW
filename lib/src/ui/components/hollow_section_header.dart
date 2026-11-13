@@ -30,6 +30,10 @@ class HollowSectionHeader extends StatelessWidget {
   /// A sub-group inside a section, rather than the section itself.
   final bool dense;
 
+  /// The title wraps onto more lines instead of ending in an ellipsis, for a
+  /// title that says what the group is for and must be read whole.
+  final bool wrap;
+
   const HollowSectionHeader(
     this.title, {
     super.key,
@@ -37,6 +41,7 @@ class HollowSectionHeader extends StatelessWidget {
     this.action,
     this.subtitle,
     this.dense = false,
+    this.wrap = false,
   });
 
   @override
@@ -50,7 +55,7 @@ class HollowSectionHeader extends StatelessWidget {
             title,
             style: (dense ? HollowTypography.label : HollowTypography.subheading)
                 .copyWith(color: hollow.textPrimary),
-            overflow: TextOverflow.ellipsis,
+            overflow: wrap ? null : TextOverflow.ellipsis,
           ),
         ),
         if (count != null) ...[

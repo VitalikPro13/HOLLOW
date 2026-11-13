@@ -104,8 +104,9 @@ class MobileSettingsTab extends ConsumerWidget {
         const SizedBox(height: HollowSpacing.lg),
         MobileSettingsNavRow(
           icon: LucideIcons.circleHelp,
-          title: 'Help',
-          onTap: () => _pushPage(context, 'Help', const HelpResourceCenter()),
+          title: 'App guides',
+          onTap: () =>
+              _pushPage(context, 'App guides', const HelpResourceCenter()),
         ),
         // Absent entirely on store builds (Apple 3.1.1 / Play): no gallery,
         // no prices, no import, no redeem.

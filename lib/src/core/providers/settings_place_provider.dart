@@ -15,6 +15,7 @@ enum SettingsCategory {
   network,
   storage,
   about,
+  help,
 }
 
 /// Whether Settings covers the centre. Written ONLY by [setShellTab]; open and
@@ -25,6 +26,10 @@ final settingsTabOpenProvider = StateProvider<bool>((_) => false);
 /// was left.
 final settingsCategoryProvider =
     StateProvider<SettingsCategory>((_) => SettingsCategory.profile);
+
+/// Bumped each time the rail opens a page, the page already shown included,
+/// so a page with screens of its own goes back to its first.
+final settingsPageOpenedProvider = StateProvider<int>((_) => 0);
 
 /// Opens Settings, on [category] when given. Unlike the other places it keeps
 /// the selection underneath, so closing it returns to the conversation it

@@ -9,6 +9,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.PersistableBundle
 import android.provider.Settings
+import android.telephony.TelephonyManager
 import android.view.WindowManager
 import io.flutter.embedding.android.FlutterFragmentActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -82,6 +83,15 @@ class MainActivity : FlutterFragmentActivity() {
                             false
                         }
                         result.success(opened)
+                    }
+                    // Settings > Get help's starting country: the mobile network the
+                    // phone is on now, then the SIM's. Neither read needs a permission.
+                    "getTelephonyCountries" -> {
+                        val tm = getSystemService(Context.TELEPHONY_SERVICE) as? TelephonyManager
+                        result.success(mapOf(
+                            "network" to try { tm?.networkCountryIso } catch (e: Exception) { null },
+                            "sim" to try { tm?.simCountryIso } catch (e: Exception) { null },
+                        ))
                     }
                     // The clock warning's button (clock_skew_banner.dart).
                     "openDateSettings" -> {

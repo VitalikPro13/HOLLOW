@@ -230,7 +230,7 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
       child: _ServerIcon(
         isSelected: helpOpen,
         backgroundColor: hollow.elevated,
-        tooltip: 'Help',
+        tooltip: 'App guides',
         onTap: () =>
             ref.read(helpPanelOpenProvider.notifier).state = !helpOpen,
         child: Icon(

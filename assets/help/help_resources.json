@@ -1,0 +1,3508 @@
+{
+ "checked": "2026-11-11",
+ "worldwide": {
+  "crisis": [
+   {
+    "name": "Befrienders Worldwide",
+    "url": "https://befrienders.org/find-support-now/",
+    "note": "Find an emotional support center near you"
+   },
+   {
+    "name": "Find A Helpline",
+    "url": "https://findahelpline.com",
+    "note": "Crisis lines you can call, text or chat with, country by country"
+   }
+  ],
+  "photos": [
+   {
+    "name": "Take It Down",
+    "url": "https://takeitdown.ncmec.org",
+    "note": "For nude images of you from before you turned 18. You choose the image on your device, and it never leaves it. Platforms that take part block copies of it. It can't find copies sent in encrypted apps such as Hollow."
+   },
+   {
+    "name": "StopNCII.org",
+    "url": "https://stopncii.org",
+    "note": "For intimate images of you from age 18 on. Platforms that take part block copies of it. Like Take It Down, it can't find copies sent in encrypted apps such as Hollow."
+   }
+  ],
+  "children": [
+   {
+    "name": "Child Helpline International",
+    "url": "https://childhelplineinternational.org/helplines/",
+    "note": "Find a helpline for children and young people in your country"
+   }
+  ],
+  "websites": [
+   {
+    "name": "INHOPE member hotlines",
+    "url": "https://inhope.org/EN/our-members",
+    "note": "Find the hotline in your country",
+    "link_required": null
+   },
+   {
+    "name": "IWF International Reporting Portals",
+    "url": "https://www.iwf.org.uk/about-us/our-international-work/reporting-portals/",
+    "note": "For countries without their own hotline",
+    "link_required": true
+   },
+   {
+    "name": "ICMEC hotlines and helplines",
+    "url": "https://www.icmec.org/hotlines-and-helplines/",
+    "note": "Hotlines and helplines, country by country",
+    "link_required": null
+   }
+  ]
+ },
+ "countries": {
+  "AD": {
+   "name": "Andorra",
+   "emergency": [
+    {
+     "number": "112",
+     "for": "any emergency"
+    },
+    {
+     "number": "110",
+     "for": "police"
+    },
+    {
+     "number": "118",
+     "for": "fire"
+    },
+    {
+     "number": "116",
+     "for": "ambulance"
+    }
+   ],
+   "crisis": [
+    {
+     "name": "Línia Verda",
+     "phone": [
+      "177"
+     ],
+     "url": "https://www.govern.ad/ca/tematiques/salut/assistencia-sanitaria/linea-verda",
+     "hours": "24 hours, every day"
+    }
+   ],
+   "photos": [],
+   "children": [],
+   "police": [],
+   "websites": [
+    {
+     "name": "Andorra Digital",
+     "url": "https://www.anc.ad/hotline_report/",
+     "link_required": true
+    }
+   ],
+   "notes": {}
+  },
+  "AL": {
+   "name": "Albania",
+   "emergency": [
+    {
+     "number": "112",
+     "for": "police"
+    },
+    {
+     "number": "127",
+     "for": "ambulance"
+    },
+    {
+     "number": "128",
+     "for": "fire"
+    }
+   ],
+   "crisis": [],
+   "photos": [],
+   "children": [
+    {
+     "name": "ALO 116 111",
+     "phone": [
+      "116 111"
+     ],
+     "url": "https://alo116.al/",
+     "hours": "24 hours, every day",
+     "languages": [
+      "Albanian"
+     ]
+    }
+   ],
+   "police": [
+    {
+     "name": "Report a cybercrime",
+     "url": "https://asp.gov.al/denonco-krimin-kompjuterik/"
+    }
+   ],
+   "websites": [
+    {
+     "name": "Isigurt (CRCA)",
+     "url": "https://isigurt.al/raporto/",
+     "link_required": false
+    }
+   ],
+   "notes": {}
+  },
+  "AR": {
+   "name": "Argentina",
+   "emergency": [
+    {
+     "number": "911",
+     "for": "police and ambulance"
+    },
+    {
+     "number": "100",
+     "for": "fire"
+    }
+   ],
+   "crisis": [
+    {
+     "name": "Línea 135",
+     "phone": [
+      "135",
+      "0800 345 1435"
+     ],
+     "url": "https://www.asistenciaalsuicida.org.ar/",
+     "hours": "Every day, 8:00 to midnight",
+     "languages": [
+      "Spanish"
+     ],
+     "note": "135 is free from Buenos Aires city and Greater Buenos Aires. From elsewhere, call 0800 345 1435."
+    },
+    {
+     "name": "S.O.S. Un Amigo Anónimo",
+     "phone": [
+      "+54 11 5263 0583"
+     ],
+     "url": "https://sosunamigoanonimo.com.ar/",
+     "hours": "Mon to Fri, 10:00 to 19:00. Sat, 10:00 to 16:00"
+    }
+   ],
+   "photos": [],
+   "children": [
+    {
+     "name": "Línea 102 (Buenos Aires Province only)",
+     "phone": [
+      "102"
+     ]
+    }
+   ],
+   "police": [],
+   "websites": [
+    {
+     "name": "Grooming Argentina",
+     "url": "https://groomingarg.org/denunciarcsam/",
+     "link_required": false
+    }
+   ],
+   "notes": {}
+  },
+  "AT": {
+   "name": "Austria",
+   "emergency": [
+    {
+     "number": "112",
+     "for": "any emergency"
+    }
+   ],
+   "crisis": [
+    {
+     "name": "Telefonseelsorge",
+     "phone": [
+      "142"
+     ],
+     "chat": "https://chat.onlineberatung-telefonseelsorge.at/hc/de/p/chat",
+     "url": "https://www.telefonseelsorge.at/",
+     "hours": "24 hours, every day",
+     "chat_hours": "Every day, 16:00 to 23:00",
+     "languages": [
+      "German"
+     ]
+    }
+   ],
+   "photos": [
+    {
+     "name": "Rat auf Draht",
+     "phone": [
+      "147"
+     ],
+     "url": "https://rataufdraht.at/themenubersicht/handy-internet/erpressung-mit-nacktbildern",
+     "languages": [
+      "German"
+     ],
+     "note": "For young people. What to do when someone blackmails you with nude photos."
+    }
+   ],
+   "children": [
+    {
+     "name": "Rat auf Draht",
+     "phone": [
+      "147"
+     ],
+     "chat": "https://rataufdraht.at/chat-beratung",
+     "url": "https://rataufdraht.at/",
+     "hours": "Phone 24 hours, every day",
+     "languages": [
+      "German"
+     ]
+    }
+   ],
+   "police": [],
+   "websites": [
+    {
+     "name": "Stopline",
+     "url": "https://www.stopline.at/de/melden",
+     "link_required": true
+    }
+   ],
+   "notes": {}
+  },
+  "AU": {
+   "name": "Australia",
+   "emergency": [
+    {
+     "number": "000",
+     "for": "any emergency"
+    },
+    {
+     "number": "112",
+     "for": "any emergency"
+    }
+   ],
+   "crisis": [
+    {
+     "name": "Lifeline",
+     "phone": [
+      "13 11 14",
+      "0477 13 11 14 (text)"
+     ],
+     "chat": "https://www.lifeline.org.au/crisis-chat/",
+     "url": "https://www.lifeline.org.au/crisis-support/",
+     "hours": "Phone 24 hours, every day",
+     "languages": [
+      "English"
+     ]
+    },
+    {
+     "name": "Suicide Call Back Service",
+     "phone": [
+      "1300 659 467"
+     ],
+     "chat": "https://www.suicidecallbackservice.org.au/phone-and-online-counselling/",
+     "url": "https://www.suicidecallbackservice.org.au/",
+     "hours": "Phone 24 hours, every day",
+     "languages": [
+      "English"
+     ]
+    }
+   ],
+   "photos": [
+    {
+     "name": "eSafety Commissioner",
+     "url": "https://www.esafety.gov.au/report/image-based-abuse",
+     "languages": [
+      "English"
+     ],
+     "note": "For anyone in Australia whose real or fake intimate images are shared or threatened. It can get them removed."
+    },
+    {
+     "name": "ACCCE",
+     "url": "https://www.accce.gov.au/report",
+     "languages": [
+      "English"
+     ],
+     "note": "For under 18s. Specialist investigators handle these reports."
+    }
+   ],
+   "children": [
+    {
+     "name": "Kids Helpline",
+     "phone": [
+      "1800 55 1800"
+     ],
+     "chat": "https://www.kidshelpline.com.au/get-help/webchat-counselling",
+     "url": "https://kidshelpline.com.au/",
+     "hours": "24 hours, every day"
+    }
+   ],
+   "police": [
+    {
+     "name": "ReportCyber",
+     "phone": [
+      "1300 292 371"
+     ],
+     "url": "https://www.cyber.gov.au/report-and-recover/report",
+     "hours": "Hotline 24 hours, every day",
+     "note": "For scams, hacking and account theft, not threats. No account needed."
+    }
+   ],
+   "websites": [
+    {
+     "name": "eSafety Commissioner",
+     "url": "https://www.esafety.gov.au/report/forms",
+     "link_required": false
+    }
+   ],
+   "notes": {
+    "emergency": "112 works from mobiles only."
+   }
+  },
+  "BA": {
+   "name": "Bosnia and Herzegovina",
+   "emergency": [
+    {
+     "number": "122",
+     "for": "police"
+    },
+    {
+     "number": "123",
+     "for": "fire"
+    },
+    {
+     "number": "124",
+     "for": "ambulance"
+    }
+   ],
+   "crisis": [],
+   "photos": [],
+   "children": [
+    {
+     "name": "Plavi telefon",
+     "phone": [
+      "080 05 03 05"
+     ],
+     "url": "https://plavitelefon.ba/",
+     "hours": "Mon to Fri, 9:00 to 17:00",
+     "note": "You can also chat on its website, at the same hours"
+    }
+   ],
+   "police": [],
+   "websites": [
+    {
+     "name": "International Forum of Solidarity - EMMAUS",
+     "url": "https://www.sigurnodijete.ba/",
+     "link_required": false
+    }
+   ],
+   "notes": {}
+  },
+  "BE": {
+   "name": "Belgium",
+   "emergency": [
+    {
+     "number": "112",
+     "for": "any emergency"
+    }
+   ],
+   "crisis": [
+    {
+     "name": "Zelfmoordlijn 1813",
+     "phone": [
+      "1813"
+     ],
+     "chat": "https://www.zelfmoord1813.be/ik-heb-hulp-nodig/chat-met-de-zelfmoordlijn",
+     "url": "https://www.zelfmoord1813.be/",
+     "hours": "24 hours, every day",
+     "chat_hours": "Every evening, 17:00 to midnight. Wednesday from 12:00",
+     "languages": [
+      "Dutch"
+     ]
+    },
+    {
+     "name": "Centre de Prévention du Suicide",
+     "phone": [
+      "0800 32 123"
+     ],
+     "url": "https://www.preventionsuicide.be/la-ligne-decoute",
+     "hours": "24 hours, every day",
+     "languages": [
+      "French"
+     ]
+    }
+   ],
+   "photos": [
+    {
+     "name": "Child Focus",
+     "phone": [
+      "116 000"
+     ],
+     "url": "https://childfocus.be/nl-be/Seksuele-Uitbuiting/Sextortion",
+     "hours": "24 hours, every day",
+     "languages": [
+      "Dutch",
+      "French"
+     ],
+     "note": "For people facing sextortion, and their families"
+    }
+   ],
+   "children": [
+    {
+     "name": "Awel (Dutch-speaking)",
+     "phone": [
+      "102"
+     ],
+     "url": "https://awel.be/"
+    }
+   ],
+   "police": [],
+   "websites": [
+    {
+     "name": "Child Focus",
+     "url": "https://childfocus.be/fr-be/Exploitation-Sexuelle/forme-scp",
+     "link_required": false
+    }
+   ],
+   "notes": {}
+  },
+  "BG": {
+   "name": "Bulgaria",
+   "emergency": [
+    {
+     "number": "112",
+     "for": "any emergency"
+    }
+   ],
+   "crisis": [
+    {
+     "name": "Bulgarian Red Cross support line",
+     "phone": [
+      "0800 114 66"
+     ],
+     "url": "https://en.redcross.bg/news/view?nwid=24244",
+     "hours": "Every day, 10:00 to 18:00"
+    }
+   ],
+   "photos": [],
+   "children": [
+    {
+     "name": "Национална телефонна линия за деца",
+     "phone": [
+      "116 111"
+     ],
+     "chat": "https://www.116111.bg/",
+     "hours": "Phone 24 hours, every day"
+    }
+   ],
+   "police": [],
+   "websites": [
+    {
+     "name": "Safenet",
+     "url": "https://www.safenet.bg/bg/podai-signal-za-nezakonno-sudurjanie",
+     "link_required": false
+    }
+   ],
+   "notes": {}
+  },
+  "BR": {
+   "name": "Brazil",
+   "emergency": [
+    {
+     "number": "190",
+     "for": "police"
+    },
+    {
+     "number": "192",
+     "for": "ambulance"
+    },
+    {
+     "number": "193",
+     "for": "fire"
+    }
+   ],
+   "crisis": [
+    {
+     "name": "CVV",
+     "phone": [
+      "188"
+     ],
+     "chat": "https://cvv.org.br/chat/",
+     "url": "https://cvv.org.br/",
+     "hours": "24 hours, every day",
+     "chat_hours": "Sun, 15:00 to midnight. Mon to Fri, 8:00 to midnight. Sat, 13:00 to midnight",
+     "languages": [
+      "Portuguese"
+     ]
+    }
+   ],
+   "photos": [],
+   "children": [
+    {
+     "name": "SaferNet Brasil Helpline",
+     "url": "https://new.safernet.org.br/helpline"
+    }
+   ],
+   "police": [
+    {
+     "name": "Comunica PF",
+     "url": "https://www.gov.br/pf/pt-br/canais_atendimento/comunicacao-de-crimes",
+     "note": "Run by the Federal Police"
+    }
+   ],
+   "websites": [
+    {
+     "name": "SaferNet Brasil",
+     "url": "https://new.safernet.org.br/denuncie",
+     "link_required": true
+    }
+   ],
+   "notes": {
+    "children": "SaferNet's helpline works by chat and email, not phone."
+   }
+  },
+  "CA": {
+   "name": "Canada",
+   "emergency": [
+    {
+     "number": "911",
+     "for": "any emergency"
+    }
+   ],
+   "crisis": [
+    {
+     "name": "9-8-8 Suicide Crisis Helpline",
+     "phone": [
+      "988",
+      "988 (text)"
+     ],
+     "url": "https://988.ca/",
+     "hours": "24 hours, every day",
+     "languages": [
+      "English",
+      "French"
+     ]
+    }
+   ],
+   "photos": [
+    {
+     "name": "NeedHelpNow.ca",
+     "url": "https://needhelpnow.ca/",
+     "languages": [
+      "English"
+     ],
+     "note": "For young people, or images taken before you turned 18"
+    }
+   ],
+   "children": [
+    {
+     "name": "Kids Help Phone",
+     "phone": [
+      "1-800-668-6868",
+      "686868 (text CONNECT)"
+     ],
+     "chat": "https://kidshelpphone.ca/live-chat-counselling/",
+     "url": "https://kidshelpphone.ca/",
+     "hours": "Phone 24 hours, every day",
+     "languages": [
+      "English",
+      "French"
+     ]
+    }
+   ],
+   "police": [
+    {
+     "name": "Report cybercrime and fraud",
+     "url": "https://reportcyberandfraud.canada.ca/"
+    }
+   ],
+   "websites": [
+    {
+     "name": "Cybertip.ca (Canadian Centre for Child Protection)",
+     "url": "https://www.cybertip.ca/en/report/",
+     "link_required": false
+    }
+   ],
+   "notes": {}
+  },
+  "CH": {
+   "name": "Switzerland",
+   "emergency": [
+    {
+     "number": "112",
+     "for": "any emergency"
+    }
+   ],
+   "crisis": [
+    {
+     "name": "Die Dargebotene Hand",
+     "phone": [
+      "143"
+     ],
+     "chat": "https://www.143.ch/chat-deutschschweiz/",
+     "url": "https://www.143.ch/",
+     "hours": "24 hours, every day",
+     "chat_hours": "Every day, 10:00 to 22:00",
+     "languages": [
+      "German",
+      "French",
+      "Italian"
+     ],
+     "note": "Support in English on 0800 143 000, every day 18:00 to 23:00"
+    }
+   ],
+   "photos": [
+    {
+     "name": "clickandstop",
+     "phone": [
+      "058 433 33 50"
+     ],
+     "url": "https://www.clickandstop.ch/",
+     "hours": "Mon to Wed, 8:30 to 20:00. Thu, 8:30 to 12:00 and 13:30 to 17:00. Fri, 8:30 to 11:30",
+     "languages": [
+      "German",
+      "French",
+      "Italian"
+     ],
+     "note": "Advice when your intimate images are shared or used to blackmail you"
+    }
+   ],
+   "children": [
+    {
+     "name": "Pro Juventute 147",
+     "phone": [
+      "147"
+     ],
+     "url": "https://www.147.ch/de/",
+     "hours": "24 hours, every day",
+     "languages": [
+      "German"
+     ]
+    }
+   ],
+   "police": [],
+   "websites": [
+    {
+     "name": "clickandstop",
+     "url": "https://www.clickandstop.ch/#meldeformular",
+     "link_required": true
+    }
+   ],
+   "notes": {}
+  },
+  "CO": {
+   "name": "Colombia",
+   "emergency": [
+    {
+     "number": "123",
+     "for": "any emergency"
+    }
+   ],
+   "crisis": [
+    {
+     "name": "Línea 106",
+     "phone": [
+      "106"
+     ],
+     "url": "https://minsalud.gov.co/salud/publica/salud-mental/Paginas/linea-106.aspx",
+     "hours": "24 hours, every day",
+     "languages": [
+      "Spanish"
+     ]
+    },
+    {
+     "name": "Línea de Atención para la Salud Mental",
+     "phone": [
+      "+57 606 7359950"
+     ],
+     "url": "https://construyendonos.org/",
+     "hours": "24 hours, every day"
+    }
+   ],
+   "photos": [],
+   "children": [
+    {
+     "name": "ICBF Línea 141",
+     "phone": [
+      "141"
+     ],
+     "url": "https://www.icbf.gov.co/",
+     "hours": "24 hours, every day"
+    }
+   ],
+   "police": [],
+   "websites": [
+    {
+     "name": "Te Protejo",
+     "url": "https://teprotejocolombia.org/en/inicio-english/",
+     "link_required": false
+    }
+   ],
+   "notes": {}
+  },
+  "CY": {
+   "name": "Cyprus",
+   "emergency": [
+    {
+     "number": "112",
+     "for": "any emergency"
+    }
+   ],
+   "crisis": [
+    {
+     "name": "Cyprus Samaritans",
+     "phone": [
+      "80007773"
+     ],
+     "url": "https://www.cyprussamaritans.org/",
+     "hours": "Every day, 16:00 to midnight",
+     "note": "For adults"
+    }
+   ],
+   "photos": [],
+   "children": [
+    {
+     "name": "Call 116111 Cyprus",
+     "phone": [
+      "116 111"
+     ],
+     "url": "https://call116111.com/"
+    }
+   ],
+   "police": [
+    {
+     "name": "Report a cybercrime",
+     "url": "https://digipol.police.gov.cy/portal/el/application/requests/cybercrime-app/create",
+     "note": "Run by the Cyprus Police. You can report anonymously."
+    }
+   ],
+   "websites": [
+    {
+     "name": "Cybersafety",
+     "url": "https://cybersafety.cy/activities/hotline/hotline-report/",
+     "link_required": false
+    }
+   ],
+   "notes": {}
+  },
+  "CZ": {
+   "name": "Czechia",
+   "emergency": [
+    {
+     "number": "112",
+     "for": "any emergency"
+    }
+   ],
+   "crisis": [
+    {
+     "name": "Linka první psychické pomoci",
+     "phone": [
+      "116 123"
+     ],
+     "chat": "https://linkapsychickepomoci.cz/chat/",
+     "url": "https://www.linkapsychickepomoci.cz/",
+     "hours": "24 hours, every day",
+     "chat_hours": "Tue to Thu, 13:00 to 18:00. Fri to Mon and holidays, 8:00 to 13:00",
+     "languages": [
+      "Czech",
+      "Slovak"
+     ],
+     "note": "For adults"
+    }
+   ],
+   "photos": [
+    {
+     "name": "STOPonline",
+     "phone": [
+      "+420 910 101 010"
+     ],
+     "url": "https://stoponline.cz/cs/",
+     "languages": [
+      "Czech",
+      "English"
+     ],
+     "note": "Takes reports of intimate photos shared without consent"
+    }
+   ],
+   "children": [
+    {
+     "name": "Linka bezpečí",
+     "phone": [
+      "116 111"
+     ],
+     "chat": "https://www.linkabezpeci.cz/chat",
+     "url": "https://www.linkabezpeci.cz/",
+     "hours": "24 hours, every day",
+     "chat_hours": "Every day, 9:00 to 13:00 and 15:00 to 19:00",
+     "languages": [
+      "Czech"
+     ],
+     "note": "For children and students up to 26"
+    }
+   ],
+   "police": [],
+   "websites": [
+    {
+     "name": "Stoponline.cz",
+     "url": "https://stoponline.cz/cs/nevhodny-ci-nezakonny-obsah-s-detmi/",
+     "link_required": true
+    }
+   ],
+   "notes": {}
+  },
+  "DE": {
+   "name": "Germany",
+   "emergency": [
+    {
+     "number": "112",
+     "for": "any emergency"
+    }
+   ],
+   "crisis": [
+    {
+     "name": "TelefonSeelsorge",
+     "phone": [
+      "0800 111 0 111",
+      "0800 111 0 222",
+      "116 123"
+     ],
+     "chat": "https://online.telefonseelsorge.de/",
+     "url": "https://www.telefonseelsorge.de/",
+     "hours": "Phone 24 hours, every day",
+     "languages": [
+      "German"
+     ],
+     "note": "The chat needs a free account"
+    },
+    {
+     "name": "krisenchat",
+     "chat": "https://chat.krisenchat.de/",
+     "url": "https://www.krisenchat.de/",
+     "hours": "24 hours, every day",
+     "languages": [
+      "German"
+     ],
+     "note": "For young people under 25"
+    }
+   ],
+   "photos": [],
+   "children": [
+    {
+     "name": "Nummer gegen Kummer",
+     "phone": [
+      "116 111"
+     ],
+     "url": "https://www.nummergegenkummer.de/",
+     "hours": "Mon to Sat, 14:00 to 20:00",
+     "languages": [
+      "German"
+     ]
+    }
+   ],
+   "police": [
+    {
+     "name": "Onlinewache",
+     "url": "https://portal.onlinewache.polizei.de/de/",
+     "languages": [
+      "German"
+     ]
+    }
+   ],
+   "websites": [
+    {
+     "name": "jugendschutz.net",
+     "url": "https://www.jugendschutz.net/en/make-a-report",
+     "link_required": true
+    }
+   ],
+   "notes": {
+    "websites": "Germany has two more hotlines for abuse material, eco (https://international.eco.de/eco-complaints-office/report-a-complaint/) and FSM (https://www.fsm.de/en/hotline)."
+   }
+  },
+  "DK": {
+   "name": "Denmark",
+   "emergency": [
+    {
+     "number": "112",
+     "for": "any emergency"
+    }
+   ],
+   "crisis": [
+    {
+     "name": "Livslinien",
+     "phone": [
+      "70 201 201"
+     ],
+     "chat": "https://www.livslinien.dk/raadgivning/chatraadgivning/start-chat",
+     "url": "https://www.livslinien.dk/",
+     "hours": "Every day, 9:00 to 5:00 the next morning",
+     "chat_hours": "Mon to Fri, 17:00 to 21:00. Sat and Sun, 13:00 to 17:00",
+     "languages": [
+      "Danish"
+     ]
+    },
+    {
+     "name": "Psykiatrifonden Rådgivning",
+     "phone": [
+      "39 25 25 25"
+     ],
+     "url": "https://psykiatrifonden.dk/hjaelp-raadgivning",
+     "hours": "Mon to Thu, 10:00 to 22:00. Fri to Sun, 10:00 to 18:00",
+     "languages": [
+      "Danish"
+     ]
+    }
+   ],
+   "photos": [],
+   "children": [
+    {
+     "name": "BørneTelefonen",
+     "phone": [
+      "116 111"
+     ],
+     "url": "https://bornetelefonen.dk/"
+    }
+   ],
+   "police": [
+    {
+     "name": "Report a digital sexual crime",
+     "url": "https://politi.dk/anmeld-kriminalitet/digitale-seksualforbrydelser",
+     "note": "Takes reports of sextortion, grooming and shared images"
+    }
+   ],
+   "websites": [
+    {
+     "name": "AnmeldDet (Red Barnet)",
+     "url": "https://redbarnet.dk/anmelddet/anmeld/",
+     "link_required": true
+    }
+   ],
+   "notes": {}
+  },
+  "EE": {
+   "name": "Estonia",
+   "emergency": [
+    {
+     "number": "112",
+     "for": "any emergency"
+    }
+   ],
+   "crisis": [
+    {
+     "name": "Kriisitoe telefon",
+     "phone": [
+      "116 006"
+     ],
+     "url": "https://www.kriis.ee/julgeolekuolukord-euroopas/info-ukraina-sojapogenikele/arstiabi-ravimid-vaimne-tervis",
+     "hours": "24 hours, every day",
+     "languages": [
+      "Estonian",
+      "Russian",
+      "English"
+     ]
+    },
+    {
+     "name": "Vaimse tervise tugi",
+     "phone": [
+      "116 123"
+     ],
+     "url": "https://enesetunne.ee/leia-abi/vaimse-tervise-abi/",
+     "hours": "Every day, 10:00 to midnight"
+    }
+   ],
+   "photos": [],
+   "children": [
+    {
+     "name": "Lasteabi",
+     "phone": [
+      "116 111"
+     ],
+     "url": "https://www.lasteabi.ee/et"
+    }
+   ],
+   "police": [
+    {
+     "name": "Report an online crime",
+     "url": "https://cyber.politsei.ee/",
+     "languages": [
+      "Estonian",
+      "English",
+      "Russian"
+     ]
+    }
+   ],
+   "websites": [
+    {
+     "name": "Vihjeliin",
+     "url": "https://vihjeliin.targaltinternetis.ee/en/illegal-content/",
+     "link_required": true
+    }
+   ],
+   "notes": {}
+  },
+  "ES": {
+   "name": "Spain",
+   "emergency": [
+    {
+     "number": "112",
+     "for": "any emergency"
+    }
+   ],
+   "crisis": [
+    {
+     "name": "Línea 024",
+     "phone": [
+      "024"
+     ],
+     "chat": "https://www2.cruzroja.es/web/cruzroja/chat-linea024",
+     "url": "https://www.sanidad.gob.es/linea024/home.htm",
+     "hours": "Phone 24 hours, every day",
+     "languages": [
+      "Spanish"
+     ]
+    }
+   ],
+   "photos": [
+    {
+     "name": "AEPD priority channel",
+     "url": "https://www.aepd.es/canalprioritario",
+     "note": "Ask for sexual or violent images shared without consent to be taken down fast"
+    }
+   ],
+   "children": [
+    {
+     "name": "Teléfono ANAR",
+     "phone": [
+      "900 20 20 10"
+     ],
+     "chat": "https://chatanar.es",
+     "url": "https://www.anar.org/que-hacemos/telefono-chat-anar/",
+     "languages": [
+      "Spanish"
+     ]
+    }
+   ],
+   "police": [],
+   "websites": [
+    {
+     "name": "INCIBE",
+     "url": "https://www.incibe.es/menores/hotline",
+     "link_required": true
+    }
+   ],
+   "notes": {
+    "children": "900 20 20 10 works nationwide; 116 111 only in some regions."
+   }
+  },
+  "FI": {
+   "name": "Finland",
+   "emergency": [
+    {
+     "number": "112",
+     "for": "any emergency"
+    }
+   ],
+   "crisis": [
+    {
+     "name": "Kriisipuhelin",
+     "phone": [
+      "09 2525 0111"
+     ],
+     "chat": "https://tukinet.fi/fi/palvelut/mieli-kriisichat",
+     "url": "https://mieli.fi/tukea-ja-apua/kriisipuhelin/",
+     "hours": "24 hours, every day",
+     "chat_hours": "Mon to Thu, 15:00 to 21:00",
+     "languages": [
+      "Finnish",
+      "Swedish"
+     ]
+    },
+    {
+     "name": "Sekasin-chat",
+     "chat": "https://sekasin.fi/",
+     "hours": "Mon to Fri, 9:00 to midnight. Sat and Sun, 15:00 to midnight",
+     "languages": [
+      "Finnish"
+     ],
+     "note": "For young people aged 12 to 29"
+    }
+   ],
+   "photos": [],
+   "children": [
+    {
+     "name": "Lasten ja nuorten puhelin",
+     "phone": [
+      "116 111"
+     ],
+     "url": "https://www.nuortennetti.fi/"
+    }
+   ],
+   "police": [
+    {
+     "name": "Report a crime online",
+     "url": "https://poliisi.fi/tee-rikosilmoitus"
+    }
+   ],
+   "websites": [
+    {
+     "name": "Nettivihje",
+     "url": "https://www.pelastakaalapset.fi/hae-tukea/nettivihje-palvelu/",
+     "link_required": false
+    }
+   ],
+   "notes": {}
+  },
+  "FR": {
+   "name": "France",
+   "emergency": [
+    {
+     "number": "112",
+     "for": "any emergency"
+    }
+   ],
+   "crisis": [
+    {
+     "name": "3114",
+     "phone": [
+      "3114"
+     ],
+     "url": "https://www.bourgogne-franche-comte.ars.sante.fr/le-3114-numero-national-de-prevention-du-suicide",
+     "hours": "24 hours, every day",
+     "languages": [
+      "French"
+     ]
+    },
+    {
+     "name": "Suicide Écoute",
+     "phone": [
+      "01 45 39 40 00"
+     ],
+     "url": "https://www.suicide-ecoute.fr/",
+     "hours": "24 hours, every day",
+     "languages": [
+      "French"
+     ],
+     "note": "Costs a local call"
+    }
+   ],
+   "photos": [
+    {
+     "name": "3018",
+     "phone": [
+      "3018"
+     ],
+     "url": "https://www.e-enfance.org/sextorsion/",
+     "hours": "Every day, 9:00 to 23:00",
+     "languages": [
+      "French"
+     ],
+     "note": "For young people facing sextortion or online harassment"
+    }
+   ],
+   "children": [
+    {
+     "name": "Allô Enfance en Danger",
+     "phone": [
+      "119"
+     ],
+     "url": "https://www.allo119.gouv.fr/"
+    }
+   ],
+   "police": [],
+   "websites": [
+    {
+     "name": "Point de Contact",
+     "url": "https://www.pointdecontact.net/signaler/",
+     "link_required": true
+    }
+   ],
+   "notes": {}
+  },
+  "GB": {
+   "name": "United Kingdom",
+   "emergency": [
+    {
+     "number": "999",
+     "for": "any emergency"
+    },
+    {
+     "number": "112",
+     "for": "any emergency"
+    }
+   ],
+   "crisis": [
+    {
+     "name": "Samaritans",
+     "phone": [
+      "116 123"
+     ],
+     "url": "https://www.samaritans.org/how-we-can-help/contact-samaritan/",
+     "hours": "24 hours, every day",
+     "languages": [
+      "English"
+     ]
+    },
+    {
+     "name": "Shout",
+     "phone": [
+      "85258 (text SHOUT)"
+     ],
+     "url": "https://giveusashout.org/get-help/",
+     "hours": "24 hours, every day",
+     "languages": [
+      "English"
+     ]
+    }
+   ],
+   "photos": [
+    {
+     "name": "Revenge Porn Helpline",
+     "phone": [
+      "0345 6000 459"
+     ],
+     "url": "https://revengepornhelpline.org.uk/",
+     "hours": "Mon to Fri, 10:00 to 16:00, except bank holidays",
+     "languages": [
+      "English"
+     ],
+     "note": "For adults in the UK whose intimate images are shared or threatened"
+    },
+    {
+     "name": "Report Remove",
+     "url": "https://www.childline.org.uk/info-advice/bullying-abuse-safety/online-mobile-safety/report-remove/",
+     "languages": [
+      "English"
+     ],
+     "note": "For under 18s in the UK. Report a nude image of yourself so it can be removed online."
+    }
+   ],
+   "children": [
+    {
+     "name": "Childline",
+     "phone": [
+      "0800 1111"
+     ],
+     "url": "https://www.childline.org.uk/",
+     "hours": "24 hours, every day",
+     "note": "For anyone under 19"
+    }
+   ],
+   "police": [
+    {
+     "name": "Report a crime online",
+     "url": "https://www.gov.uk/report-crime",
+     "note": "Links to your police force's online form"
+    }
+   ],
+   "websites": [
+    {
+     "name": "Internet Watch Foundation",
+     "url": "https://www.iwf.org.uk/en/uk-report/",
+     "link_required": true
+    }
+   ],
+   "notes": {}
+  },
+  "GE": {
+   "name": "Georgia",
+   "emergency": [
+    {
+     "number": "112",
+     "for": "any emergency"
+    }
+   ],
+   "crisis": [
+    {
+     "name": "Child Helpline 116 111",
+     "phone": [
+      "116 111"
+     ],
+     "url": "https://phf.org.ge/childrens-helpline/",
+     "hours": "Mon to Fri, 10:00 to 18:00",
+     "note": "For all ages"
+    }
+   ],
+   "photos": [],
+   "children": [
+    {
+     "name": "Child Helpline 116 111",
+     "phone": [
+      "116 111"
+     ],
+     "url": "https://phf.org.ge/childrens-helpline/",
+     "hours": "Mon to Fri, 10:00 to 18:00"
+    }
+   ],
+   "police": [],
+   "websites": [],
+   "notes": {}
+  },
+  "GR": {
+   "name": "Greece",
+   "emergency": [
+    {
+     "number": "112",
+     "for": "any emergency"
+    }
+   ],
+   "crisis": [
+    {
+     "name": "1018",
+     "phone": [
+      "1018"
+     ],
+     "url": "https://www.klimaka.org.gr/",
+     "hours": "24 hours, every day",
+     "languages": [
+      "Greek"
+     ],
+     "note": "Costs a local call"
+    }
+   ],
+   "photos": [],
+   "children": [
+    {
+     "name": "The Smile of the Child",
+     "phone": [
+      "116 111"
+     ],
+     "url": "https://www.hamogelo.gr/"
+    }
+   ],
+   "police": [
+    {
+     "name": "Cyber Crime Division",
+     "url": "https://cyberalert.gr/contact/",
+     "languages": [
+      "Greek"
+     ]
+    }
+   ],
+   "websites": [
+    {
+     "name": "SafeLine",
+     "url": "https://www.safeline.gr/en/make-a-report/",
+     "link_required": true
+    }
+   ],
+   "notes": {}
+  },
+  "HR": {
+   "name": "Croatia",
+   "emergency": [
+    {
+     "number": "112",
+     "for": "any emergency"
+    }
+   ],
+   "crisis": [
+    {
+     "name": "Plavi telefon",
+     "phone": [
+      "01 4833 888"
+     ],
+     "url": "https://www.plavi-telefon.hr/",
+     "hours": "Mon to Fri, 9:00 to 20:00",
+     "languages": [
+      "Croatian"
+     ]
+    }
+   ],
+   "photos": [],
+   "children": [
+    {
+     "name": "Hrabri telefon",
+     "phone": [
+      "116 111"
+     ],
+     "url": "https://hrabritelefon.hr/"
+    }
+   ],
+   "police": [
+    {
+     "name": "Red Button",
+     "url": "https://mup.gov.hr/ostalo/online-prijave/online-prijava-zlostavljanja-djeteta-red-button/281667",
+     "note": "For abuse of children, including online abuse and extortion. You can report anonymously."
+    }
+   ],
+   "websites": [
+    {
+     "name": "CNZD",
+     "url": "https://csi.hr/hotline/",
+     "link_required": true
+    }
+   ],
+   "notes": {}
+  },
+  "HU": {
+   "name": "Hungary",
+   "emergency": [
+    {
+     "number": "112",
+     "for": "any emergency"
+    }
+   ],
+   "crisis": [
+    {
+     "name": "Lelki elsősegély 116 123",
+     "phone": [
+      "116 123"
+     ],
+     "url": "https://sos116-123.hu/",
+     "hours": "24 hours, every day",
+     "languages": [
+      "Hungarian"
+     ]
+    }
+   ],
+   "photos": [],
+   "children": [
+    {
+     "name": "Kék Vonal",
+     "phone": [
+      "116 111"
+     ],
+     "url": "https://kek-vonal.hu/"
+    }
+   ],
+   "police": [],
+   "websites": [
+    {
+     "name": "Biztonsagosinternet",
+     "url": "https://www.biztonsagosinternet.hu/en/bejelentes",
+     "link_required": null
+    }
+   ],
+   "notes": {
+    "websites": "Hungary also has the NMHH Internet Hotline (https://ekapu.nmhh.hu/ugyLetrehozas/DO643120)."
+   }
+  },
+  "ID": {
+   "name": "Indonesia",
+   "emergency": [
+    {
+     "number": "112",
+     "for": "any emergency"
+    },
+    {
+     "number": "110",
+     "for": "police"
+    },
+    {
+     "number": "113",
+     "for": "fire"
+    },
+    {
+     "number": "119",
+     "for": "ambulance"
+    }
+   ],
+   "crisis": [
+    {
+     "name": "Healing119",
+     "phone": [
+      "119"
+     ],
+     "url": "https://healing119.id/",
+     "hours": "24 hours, every day",
+     "languages": [
+      "Indonesian"
+     ],
+     "note": "Call 119, then press 8"
+    }
+   ],
+   "photos": [],
+   "children": [
+    {
+     "name": "SAPA 129 (Ministry of Women's Empowerment and Child Protection)",
+     "phone": [
+      "129"
+     ]
+    }
+   ],
+   "police": [],
+   "websites": [],
+   "notes": {
+    "children": "SAPA 129 takes reports of violence against women and children."
+   }
+  },
+  "IE": {
+   "name": "Ireland",
+   "emergency": [
+    {
+     "number": "112",
+     "for": "any emergency"
+    }
+   ],
+   "crisis": [
+    {
+     "name": "Samaritans",
+     "phone": [
+      "116 123"
+     ],
+     "url": "https://www.samaritans.org/samaritans-ireland/",
+     "hours": "24 hours, every day",
+     "languages": [
+      "English"
+     ]
+    },
+    {
+     "name": "Pieta",
+     "phone": [
+      "1800 247 247",
+      "51444 (text HELP)"
+     ],
+     "url": "https://www.pieta.ie/how-we-can-help/helpline/",
+     "hours": "24 hours, every day",
+     "languages": [
+      "English"
+     ]
+    },
+    {
+     "name": "Text About It",
+     "phone": [
+      "50808 (text TALK)"
+     ],
+     "url": "https://www.textaboutit.ie/",
+     "hours": "24 hours, every day",
+     "languages": [
+      "English"
+     ]
+    }
+   ],
+   "photos": [
+    {
+     "name": "Hotline.ie",
+     "url": "https://hotline.ie/report/",
+     "languages": [
+      "English"
+     ],
+     "note": "Takes reports of intimate images shared or threatened without consent. It can act only on images posted publicly."
+    }
+   ],
+   "children": [
+    {
+     "name": "Childline",
+     "phone": [
+      "1800 66 66 66"
+     ],
+     "url": "https://www.childline.ie/",
+     "hours": "24 hours, every day",
+     "languages": [
+      "English"
+     ]
+    }
+   ],
+   "police": [],
+   "websites": [],
+   "notes": {}
+  },
+  "IL": {
+   "name": "Israel",
+   "emergency": [
+    {
+     "number": "100",
+     "for": "police"
+    },
+    {
+     "number": "101",
+     "for": "ambulance"
+    },
+    {
+     "number": "102",
+     "for": "fire"
+    }
+   ],
+   "crisis": [
+    {
+     "name": "ERAN 1201",
+     "phone": [
+      "1201",
+      "052-9993544 (text)"
+     ],
+     "url": "https://www.eran.org.il/",
+     "hours": "24 hours, every day"
+    }
+   ],
+   "photos": [],
+   "children": [
+    {
+     "name": "105 Hotline (National Child Online Protection Bureau)",
+     "phone": [
+      "105"
+     ]
+    }
+   ],
+   "police": [],
+   "websites": [],
+   "notes": {
+    "children": "105 is a government line for children harmed online, staffed by police."
+   }
+  },
+  "IN": {
+   "name": "India",
+   "emergency": [
+    {
+     "number": "112",
+     "for": "any emergency"
+    }
+   ],
+   "crisis": [
+    {
+     "name": "Tele-MANAS",
+     "phone": [
+      "14416",
+      "1-800-891-4416"
+     ],
+     "url": "https://telemanas.mohfw.gov.in/Home/Index",
+     "hours": "24 hours, every day"
+    },
+    {
+     "name": "Vandrevala Foundation",
+     "phone": [
+      "+91 9999 666 555"
+     ],
+     "url": "https://www.vandrevalafoundation.com/free-counseling",
+     "hours": "24 hours, every day"
+    },
+    {
+     "name": "Aasra",
+     "phone": [
+      "+91 98204 66726"
+     ],
+     "hours": "24 hours, every day"
+    }
+   ],
+   "photos": [],
+   "children": [
+    {
+     "name": "Child Helpline 1098 (Ministry of Women and Child Development)",
+     "phone": [
+      "1098"
+     ],
+     "url": "https://wcd.gov.in/"
+    }
+   ],
+   "police": [
+    {
+     "name": "National Cybercrime Reporting Portal",
+     "phone": [
+      "1930"
+     ],
+     "url": "https://www.cybercrime.gov.in/",
+     "note": "You can also call 1930, any time, about online harassment, identity theft or fraud"
+    }
+   ],
+   "websites": [],
+   "notes": {}
+  },
+  "IS": {
+   "name": "Iceland",
+   "emergency": [
+    {
+     "number": "112",
+     "for": "any emergency"
+    }
+   ],
+   "crisis": [
+    {
+     "name": "Hjálparsíminn 1717",
+     "phone": [
+      "1717"
+     ],
+     "chat": "https://www.1717.is",
+     "url": "https://www.raudikrossinn.is/verkefni/innanlandsverkefni/heilbrigdi-og-velferd/hjalparsiminn-1717-og-netspjallid/",
+     "hours": "Phone 24 hours, every day",
+     "languages": [
+      "Icelandic"
+     ],
+     "note": "For all ages"
+    },
+    {
+     "name": "Píeta",
+     "phone": [
+      "1799"
+     ],
+     "url": "https://pieta.is/",
+     "hours": "24 hours, every day",
+     "note": "For adults"
+    }
+   ],
+   "photos": [],
+   "children": [],
+   "police": [],
+   "websites": [
+    {
+     "name": "Barnaheill",
+     "url": "https://barnaheill.is/abendingalina/",
+     "link_required": false
+    }
+   ],
+   "notes": {}
+  },
+  "IT": {
+   "name": "Italy",
+   "emergency": [
+    {
+     "number": "112",
+     "for": "any emergency"
+    }
+   ],
+   "crisis": [
+    {
+     "name": "Telefono Amico",
+     "phone": [
+      "02 2327 2327"
+     ],
+     "url": "https://www.telefonoamico.it/",
+     "hours": "24 hours, every day",
+     "languages": [
+      "Italian"
+     ],
+     "note": "Costs a normal call"
+    }
+   ],
+   "photos": [
+    {
+     "name": "Garante Privacy",
+     "url": "https://www.garanteprivacy.it/revengeporn",
+     "note": "If you fear your intimate images will be shared, ask for them to be blocked. From age 14."
+    }
+   ],
+   "children": [
+    {
+     "name": "Telefono Azzurro",
+     "phone": [
+      "1 96 96"
+     ],
+     "url": "https://www.azzurro.it/",
+     "hours": "24 hours, every day"
+    }
+   ],
+   "police": [
+    {
+     "name": "Commissariato di PS Online",
+     "url": "https://www.commissariatodips.it/segnalazioni/segnala-online/index.html",
+     "languages": [
+      "Italian"
+     ],
+     "note": "Takes reports of online crime. A formal complaint still goes to a police station."
+    }
+   ],
+   "websites": [
+    {
+     "name": "Telefono Azzurro (Clicca e segnala)",
+     "url": "https://www.azzurro.it/clicca-e-segnala/",
+     "link_required": true
+    }
+   ],
+   "notes": {
+    "websites": "Italy also has Save the Children Italy (https://stop-it.savethechildren.it/)."
+   }
+  },
+  "JP": {
+   "name": "Japan",
+   "emergency": [
+    {
+     "number": "110",
+     "for": "police"
+    },
+    {
+     "number": "119",
+     "for": "fire and ambulance"
+    }
+   ],
+   "crisis": [
+    {
+     "name": "よりそいホットライン",
+     "phone": [
+      "0120-279-338",
+      "0120-279-226",
+      "050-3655-0279"
+     ],
+     "url": "https://www.since2011.net/yorisoi/",
+     "hours": "24 hours, every day",
+     "languages": [
+      "Japanese"
+     ],
+     "note": "From Fukushima Prefecture, call 0120-279-226. From a phone number that starts with 050, call 050-3655-0279."
+    },
+    {
+     "name": "いのちの電話",
+     "phone": [
+      "0120-783-556"
+     ],
+     "url": "https://www.inochinodenwa.org/",
+     "hours": "Every day, 16:00 to 21:00",
+     "languages": [
+      "Japanese"
+     ]
+    }
+   ],
+   "photos": [],
+   "children": [
+    {
+     "name": "Childline Japan",
+     "phone": [
+      "0120-99-7777"
+     ],
+     "url": "https://childline.or.jp/en"
+    }
+   ],
+   "police": [
+    {
+     "name": "Cyber crime consultation",
+     "url": "https://www.npa.go.jp/bureau/cyber/soudan.html"
+    }
+   ],
+   "websites": [
+    {
+     "name": "Internet Hotline Center Japan",
+     "url": "https://www.internethotline.jp/reports1/",
+     "link_required": true
+    }
+   ],
+   "notes": {}
+  },
+  "KH": {
+   "name": "Cambodia",
+   "emergency": [
+    {
+     "number": "117",
+     "for": "police"
+    },
+    {
+     "number": "118",
+     "for": "fire"
+    },
+    {
+     "number": "119",
+     "for": "ambulance"
+    }
+   ],
+   "crisis": [
+    {
+     "name": "TPO Cambodia counselling line",
+     "phone": [
+      "017 222 372"
+     ],
+     "hours": "Every day, 8:00 to 22:00"
+    }
+   ],
+   "photos": [],
+   "children": [
+    {
+     "name": "Child Helpline Cambodia",
+     "phone": [
+      "1280"
+     ],
+     "url": "https://childhelplinecambodia.org/",
+     "hours": "24 hours, every day"
+    }
+   ],
+   "police": [],
+   "websites": [
+    {
+     "name": "APLE",
+     "url": "https://aplecambodia.org/reporting-form-online-in-person-abuse/",
+     "link_required": true
+    }
+   ],
+   "notes": {}
+  },
+  "KR": {
+   "name": "South Korea",
+   "emergency": [
+    {
+     "number": "112",
+     "for": "police"
+    },
+    {
+     "number": "119",
+     "for": "fire and ambulance"
+    }
+   ],
+   "crisis": [
+    {
+     "name": "자살예방상담 109",
+     "phone": [
+      "109"
+     ],
+     "url": "https://www.129.go.kr/109",
+     "hours": "24 hours, every day",
+     "languages": [
+      "Korean"
+     ]
+    },
+    {
+     "name": "생명의 전화 1588-9191",
+     "phone": [
+      "1588-9191"
+     ],
+     "hours": "24 hours, every day",
+     "languages": [
+      "Korean"
+     ]
+    },
+    {
+     "name": "정신건강 상담전화 1577-0199",
+     "phone": [
+      "1577-0199"
+     ],
+     "hours": "24 hours, every day",
+     "languages": [
+      "Korean"
+     ]
+    }
+   ],
+   "photos": [
+    {
+     "name": "디지털성범죄 피해지원센터",
+     "phone": [
+      "1366"
+     ],
+     "url": "https://d4u.stop.or.kr/",
+     "hours": "24 hours, every day",
+     "languages": [
+      "Korean"
+     ],
+     "note": "For victims of digital sex crimes. It can help get videos removed fast."
+    }
+   ],
+   "children": [
+    {
+     "name": "Youth Hotline 1388",
+     "phone": [
+      "1388 (landline)"
+     ],
+     "url": "https://www.1388.go.kr/"
+    }
+   ],
+   "police": [
+    {
+     "name": "Cybercrime Report System",
+     "url": "https://ecrm.police.go.kr/"
+    }
+   ],
+   "websites": [
+    {
+     "name": "KCSC (Korea Communications Standards Commission)",
+     "url": "https://www.kocsc.or.kr/",
+     "link_required": true
+    }
+   ],
+   "notes": {
+    "children": "From a mobile, dial the local area code before 1388."
+   }
+  },
+  "LI": {
+   "name": "Liechtenstein",
+   "emergency": [
+    {
+     "number": "112",
+     "for": "any emergency"
+    },
+    {
+     "number": "117",
+     "for": "police"
+    },
+    {
+     "number": "118",
+     "for": "fire"
+    },
+    {
+     "number": "144",
+     "for": "ambulance"
+    }
+   ],
+   "crisis": [
+    {
+     "name": "Die Dargebotene Hand",
+     "phone": [
+      "143"
+     ],
+     "chat": "https://www.143.ch/chat-deutschschweiz/",
+     "url": "https://www.143.ch/",
+     "hours": "24 hours, every day",
+     "chat_hours": "Every day, 10:00 to 22:00",
+     "languages": [
+      "German",
+      "French",
+      "Italian"
+     ]
+    }
+   ],
+   "photos": [],
+   "children": [
+    {
+     "name": "Pro Juventute 147",
+     "phone": [
+      "147"
+     ],
+     "url": "https://www.147.ch/de/",
+     "hours": "24 hours, every day"
+    }
+   ],
+   "police": [],
+   "websites": [],
+   "notes": {}
+  },
+  "LT": {
+   "name": "Lithuania",
+   "emergency": [
+    {
+     "number": "112",
+     "for": "any emergency"
+    }
+   ],
+   "crisis": [
+    {
+     "name": "Vilties linija",
+     "phone": [
+      "116 123"
+     ],
+     "url": "https://viltieslinija.lt/",
+     "hours": "24 hours, every day",
+     "languages": [
+      "Lithuanian"
+     ],
+     "note": "For adults"
+    },
+    {
+     "name": "Jaunimo linija",
+     "phone": [
+      "0 800 28888"
+     ],
+     "chat": "https://jaunimolinija.lt/pasikalbekim/",
+     "url": "https://jaunimolinija.lt/",
+     "hours": "Phone 24 hours, every day",
+     "note": "For young people"
+    }
+   ],
+   "photos": [],
+   "children": [
+    {
+     "name": "Vaikų linija",
+     "phone": [
+      "116 111"
+     ],
+     "chat": "https://www.vaikulinija.lt/vaikams-paaugliams/pagalba-pokalbiais-internetu/#chat",
+     "url": "https://www.vaikulinija.lt/",
+     "hours": "Every day, 11:00 to 23:00",
+     "chat_hours": "Every day, 14:00 to 23:00"
+    }
+   ],
+   "police": [],
+   "websites": [
+    {
+     "name": "Svarus Internetas",
+     "url": "https://www.svarusinternetas.lt/index.php/pranesk/1",
+     "link_required": true
+    }
+   ],
+   "notes": {}
+  },
+  "LU": {
+   "name": "Luxembourg",
+   "emergency": [
+    {
+     "number": "112",
+     "for": "any emergency"
+    }
+   ],
+   "crisis": [
+    {
+     "name": "SOS Détresse",
+     "phone": [
+      "45 45 45"
+     ],
+     "chat": "https://454545.lu/en/our-offer/chat/",
+     "url": "https://454545.lu/",
+     "hours": "Every day, 11:00 to 23:00. Fri and Sat until 3:00",
+     "chat_hours": "Mon and Thu, 17:00 to 21:00",
+     "languages": [
+      "French",
+      "German",
+      "English"
+     ]
+    }
+   ],
+   "photos": [],
+   "children": [
+    {
+     "name": "KannerJugendTelefon",
+     "phone": [
+      "116 111"
+     ],
+     "chat": "https://www.kjt.lu/de/chatberodung/",
+     "url": "https://www.kjt.lu/de/",
+     "hours": "Mon, Wed and Fri, 17:00 to 22:00. Tue and Thu, 14:00 to 22:00. Sat, 14:00 to 20:00",
+     "chat_hours": "Tue, 18:00 to 21:00"
+    }
+   ],
+   "police": [],
+   "websites": [
+    {
+     "name": "BEE Secure Stopline",
+     "url": "https://stopline.bee-secure.lu/report/",
+     "link_required": true
+    }
+   ],
+   "notes": {}
+  },
+  "LV": {
+   "name": "Latvia",
+   "emergency": [
+    {
+     "number": "112",
+     "for": "any emergency"
+    }
+   ],
+   "crisis": [
+    {
+     "name": "Skalbes",
+     "phone": [
+      "116 123",
+      "67222922",
+      "27722292"
+     ],
+     "url": "https://www.skalbes.lv/en/get-help/",
+     "hours": "24 hours, every day"
+    }
+   ],
+   "photos": [],
+   "children": [
+    {
+     "name": "Uzticības tālrunis",
+     "phone": [
+      "116 111"
+     ],
+     "chat": "https://uzticibastalrunis.lv/psihologiska-palidziba/#1609078759566-2e475442-366b",
+     "url": "https://www.bac.gov.lv/lv/uzticibas-talrunis-116111",
+     "hours": "Phone 24 hours, every day"
+    }
+   ],
+   "police": [],
+   "websites": [
+    {
+     "name": "Drossinternets",
+     "url": "https://drossinternets.lv/lv/zinot",
+     "link_required": false
+    }
+   ],
+   "notes": {}
+  },
+  "MD": {
+   "name": "Moldova",
+   "emergency": [
+    {
+     "number": "112",
+     "for": "any emergency"
+    }
+   ],
+   "crisis": [],
+   "photos": [],
+   "children": [
+    {
+     "name": "Telefonul Copilului",
+     "phone": [
+      "116 111"
+     ],
+     "url": "https://telefonulcopilului.md/"
+    }
+   ],
+   "police": [],
+   "websites": [
+    {
+     "name": "La Strada (Siguronline)",
+     "url": "https://siguronline.md/raporteaza/",
+     "link_required": true
+    }
+   ],
+   "notes": {}
+  },
+  "ME": {
+   "name": "Montenegro",
+   "emergency": [
+    {
+     "number": "112",
+     "for": "any emergency"
+    },
+    {
+     "number": "122",
+     "for": "police"
+    },
+    {
+     "number": "123",
+     "for": "fire"
+    },
+    {
+     "number": "124",
+     "for": "ambulance"
+    }
+   ],
+   "crisis": [
+    {
+     "name": "SOS linija 116 111",
+     "phone": [
+      "116 111"
+     ],
+     "url": "https://116111.me/",
+     "hours": "24 hours, every day"
+    }
+   ],
+   "photos": [],
+   "children": [
+    {
+     "name": "SOS linija 116 111",
+     "phone": [
+      "116 111"
+     ],
+     "url": "https://116111.me/",
+     "hours": "24 hours, every day"
+    }
+   ],
+   "police": [],
+   "websites": [],
+   "notes": {}
+  },
+  "MT": {
+   "name": "Malta",
+   "emergency": [
+    {
+     "number": "112",
+     "for": "any emergency"
+    }
+   ],
+   "crisis": [
+    {
+     "name": "Richmond Helpline",
+     "phone": [
+      "1770"
+     ],
+     "chat": "https://olli.chat/",
+     "url": "https://www.richmond.org.mt/our-services/get-help-now/",
+     "hours": "Mon to Fri, 8:00 to 20:00. Sat, 8:00 to 16:00. Closed on public holidays"
+    },
+    {
+     "name": "Kellimni",
+     "chat": "https://kellimni.com",
+     "hours": "24 hours, every day"
+    }
+   ],
+   "photos": [],
+   "children": [
+    {
+     "name": "Supportline 179",
+     "phone": [
+      "179",
+      "116 111"
+     ],
+     "url": "https://fsws.gov.mt/",
+     "hours": "24 hours, every day"
+    }
+   ],
+   "police": [],
+   "websites": [
+    {
+     "name": "Be Smart Online",
+     "url": "https://childwebalert.gov.mt/en/Pages/report-abuse.aspx",
+     "link_required": false
+    }
+   ],
+   "notes": {}
+  },
+  "MX": {
+   "name": "Mexico",
+   "emergency": [
+    {
+     "number": "911",
+     "for": "any emergency"
+    }
+   ],
+   "crisis": [
+    {
+     "name": "Línea de la Vida",
+     "phone": [
+      "800 911 2000"
+     ],
+     "url": "https://www.gob.mx/conasama/articulos/linea-de-la-vida-800-911-2000",
+     "hours": "24 hours, every day",
+     "languages": [
+      "Spanish"
+     ]
+    },
+    {
+     "name": "SAPTEL",
+     "phone": [
+      "55 5259 8121"
+     ],
+     "url": "https://www.saptel.org.mx/",
+     "hours": "24 hours, every day",
+     "languages": [
+      "Spanish"
+     ]
+    }
+   ],
+   "photos": [],
+   "children": [],
+   "police": [],
+   "websites": [
+    {
+     "name": "Fundacion PAS (Te Protejo Mexico)",
+     "url": "https://teprotejomexico.org/reporta-material-de-abuso-sexual-infantil/",
+     "link_required": true
+    }
+   ],
+   "notes": {}
+  },
+  "NG": {
+   "name": "Nigeria",
+   "emergency": [
+    {
+     "number": "112",
+     "for": "any emergency"
+    }
+   ],
+   "crisis": [
+    {
+     "name": "Asido Foundation",
+     "phone": [
+      "+234 902 808 0416"
+     ],
+     "url": "https://asidofoundation.com/",
+     "hours": "24 hours, every day"
+    },
+    {
+     "name": "SURPIN",
+     "phone": [
+      "0800 078 7746"
+     ],
+     "url": "https://www.surpinng.com/",
+     "hours": "Mon to Fri, 8:00 to 20:00. Sat and Sun, 16:00 to 22:00"
+    },
+    {
+     "name": "MANI",
+     "phone": [
+      "0809 111 6264"
+     ],
+     "url": "https://mentallyaware.org/",
+     "hours": "Mon to Fri, 9:00 to 17:00"
+    }
+   ],
+   "photos": [],
+   "children": [
+    {
+     "name": "Cece Yara Child Helpline",
+     "phone": [
+      "0800 800 8001"
+     ],
+     "url": "https://ceceyara.org/"
+    }
+   ],
+   "police": [
+    {
+     "name": "Report a cybercrime",
+     "url": "https://nccc.npf.gov.ng/"
+    }
+   ],
+   "websites": [
+    {
+     "name": "ACSAI Nigeria",
+     "url": "https://acsaing.org/report.html",
+     "link_required": null
+    }
+   ],
+   "notes": {}
+  },
+  "NL": {
+   "name": "Netherlands",
+   "emergency": [
+    {
+     "number": "112",
+     "for": "any emergency"
+    }
+   ],
+   "crisis": [
+    {
+     "name": "113",
+     "phone": [
+      "0800-0113"
+     ],
+     "chat": "https://www.113.nl/i/hulp-chat",
+     "url": "https://www.113.nl/",
+     "hours": "24 hours, every day",
+     "languages": [
+      "Dutch"
+     ]
+    }
+   ],
+   "photos": [
+    {
+     "name": "Offlimits Hulplijn",
+     "phone": [
+      "0800-0033"
+     ],
+     "url": "https://hulplijn.offlimits.nl",
+     "hours": "Mon to Sat, 7:00 to 23:00. Sunday, 10:00 to 18:00",
+     "languages": [
+      "Dutch"
+     ],
+     "note": "For online abuse, including threats to share your nude photos"
+    }
+   ],
+   "children": [
+    {
+     "name": "De Kindertelefoon",
+     "phone": [
+      "0800-0432"
+     ],
+     "url": "https://www.kindertelefoon.nl/"
+    }
+   ],
+   "police": [],
+   "websites": [
+    {
+     "name": "Offlimits (Meldpunt Kinderporno)",
+     "url": "https://meldpunt.offlimits.nl/",
+     "link_required": true
+    }
+   ],
+   "notes": {
+    "websites": "Netherlands also has ATKM (https://www.atkm.nl/)."
+   }
+  },
+  "NO": {
+   "name": "Norway",
+   "emergency": [
+    {
+     "number": "112",
+     "for": "police"
+    },
+    {
+     "number": "110",
+     "for": "fire"
+    },
+    {
+     "number": "113",
+     "for": "ambulance"
+    }
+   ],
+   "crisis": [
+    {
+     "name": "Hjelpetelefonen 116 123",
+     "phone": [
+      "116 123"
+     ],
+     "chat": "https://mentalhelse.no/hjelpechat/",
+     "url": "https://mentalhelse.no/fa-hjelp/hjelpetelefonen/",
+     "hours": "24 hours, every day",
+     "languages": [
+      "Norwegian"
+     ]
+    },
+    {
+     "name": "Kirkens SOS",
+     "phone": [
+      "22 40 00 40"
+     ],
+     "chat": "https://www.kirkens-sos.no/chat",
+     "url": "https://www.kirkens-sos.no/",
+     "hours": "24 hours, every day",
+     "chat_hours": "Mon and Tue, 18:30 to 22:30. Wed to Fri, 18:30 to 1:30. Sat and Sun, 14:30 to 1:30",
+     "languages": [
+      "Norwegian"
+     ],
+     "note": "Costs a normal call"
+    }
+   ],
+   "photos": [],
+   "children": [
+    {
+     "name": "Alarmtelefonen",
+     "phone": [
+      "116 111",
+      "+47 417 16 111 (text)"
+     ],
+     "url": "https://www.116111.no/",
+     "hours": "24 hours, every day",
+     "languages": [
+      "Norwegian"
+     ],
+     "note": "For ages 7 to 18"
+    }
+   ],
+   "police": [],
+   "websites": [],
+   "notes": {}
+  },
+  "NZ": {
+   "name": "New Zealand",
+   "emergency": [
+    {
+     "number": "111",
+     "for": "any emergency"
+    }
+   ],
+   "crisis": [
+    {
+     "name": "1737",
+     "phone": [
+      "1737",
+      "1737 (text)"
+     ],
+     "url": "https://www.1737.org.nz/",
+     "hours": "24 hours, every day",
+     "languages": [
+      "English"
+     ]
+    }
+   ],
+   "photos": [],
+   "children": [
+    {
+     "name": "Youthline",
+     "phone": [
+      "0800 376 633",
+      "234 (text)"
+     ],
+     "url": "https://youthline.co.nz/"
+    }
+   ],
+   "police": [
+    {
+     "name": "Non-emergency report (105)",
+     "phone": [
+      "105"
+     ],
+     "url": "https://www.police.govt.nz/use-105",
+     "note": "Report online, or call 105 any time. It takes reports of sexual assault, harassment and threats."
+    }
+   ],
+   "websites": [
+    {
+     "name": "Netsafe",
+     "url": "https://netsafe.org.nz/report",
+     "link_required": false
+    }
+   ],
+   "notes": {}
+  },
+  "PH": {
+   "name": "Philippines",
+   "emergency": [
+    {
+     "number": "911",
+     "for": "any emergency"
+    }
+   ],
+   "crisis": [
+    {
+     "name": "NCMH Crisis Hotline",
+     "phone": [
+      "1553",
+      "0919 057 1553",
+      "0917 899 8727",
+      "0966 351 4518"
+     ],
+     "hours": "24 hours, every day"
+    },
+    {
+     "name": "In Touch Crisis Line",
+     "phone": [
+      "+63 2 8893 7603"
+     ],
+     "url": "https://www.in-touch.org/",
+     "hours": "24 hours, every day"
+    },
+    {
+     "name": "HOPELINE",
+     "phone": [
+      "02 8804 4673"
+     ],
+     "hours": "24 hours, every day"
+    }
+   ],
+   "photos": [],
+   "children": [
+    {
+     "name": "Bantay Bata 163",
+     "phone": [
+      "163"
+     ]
+    }
+   ],
+   "police": [],
+   "websites": [
+    {
+     "name": "ECPAT Philippines",
+     "url": "https://ecpat.org.ph/report/",
+     "link_required": true
+    }
+   ],
+   "notes": {}
+  },
+  "PL": {
+   "name": "Poland",
+   "emergency": [
+    {
+     "number": "112",
+     "for": "any emergency"
+    }
+   ],
+   "crisis": [
+    {
+     "name": "Telefon zaufania 116 123",
+     "phone": [
+      "116 123"
+     ],
+     "url": "https://116sos.pl",
+     "hours": "24 hours, every day",
+     "languages": [
+      "Polish"
+     ],
+     "note": "For adults"
+    },
+    {
+     "name": "Centrum Wsparcia",
+     "phone": [
+      "800 70 2222"
+     ],
+     "url": "https://centrumwsparcia.pl/centrum-wsparcia/",
+     "hours": "24 hours, every day",
+     "languages": [
+      "Polish"
+     ],
+     "note": "For adults"
+    }
+   ],
+   "photos": [
+    {
+     "name": "Dyżurnet.pl",
+     "url": "https://dyzurnet.pl/wsparcie",
+     "languages": [
+      "Polish"
+     ],
+     "note": "Help with sexual blackmail and nude photos shared without consent, for adults and children"
+    }
+   ],
+   "children": [
+    {
+     "name": "Telefon zaufania 116 111",
+     "phone": [
+      "116 111"
+     ],
+     "chat": "https://116111.pl/czatuj",
+     "url": "https://116111.pl/",
+     "hours": "24 hours, every day",
+     "languages": [
+      "Polish"
+     ]
+    }
+   ],
+   "police": [],
+   "websites": [
+    {
+     "name": "Dyżurnet.pl",
+     "url": "https://dyzurnet.pl/formularz-zgloszeniowy",
+     "link_required": true
+    }
+   ],
+   "notes": {}
+  },
+  "PT": {
+   "name": "Portugal",
+   "emergency": [
+    {
+     "number": "112",
+     "for": "any emergency"
+    }
+   ],
+   "crisis": [
+    {
+     "name": "Linha 1411",
+     "phone": [
+      "1411"
+     ],
+     "url": "https://www.sns24.gov.pt/servico/linha-nacional-de-prevencao-do-suicidio",
+     "hours": "24 hours, every day",
+     "languages": [
+      "Portuguese"
+     ]
+    },
+    {
+     "name": "SNS 24, aconselhamento psicológico",
+     "phone": [
+      "808 24 24 24"
+     ],
+     "url": "https://www.sns24.gov.pt/pt/servico/aconselhamento-psicologico-no-sns-24/",
+     "hours": "24 hours, every day",
+     "languages": [
+      "Portuguese",
+      "English"
+     ],
+     "note": "Press 4 for psychological support"
+    },
+    {
+     "name": "SOS Voz Amiga",
+     "phone": [
+      "213 544 545",
+      "912 802 669"
+     ],
+     "url": "https://www.sosvozamiga.org/",
+     "hours": "Every day, 15:30 to 0:30",
+     "languages": [
+      "Portuguese"
+     ]
+    }
+   ],
+   "photos": [],
+   "children": [
+    {
+     "name": "SOS Criança",
+     "phone": [
+      "116 111"
+     ],
+     "url": "https://iacrianca.pt/intervencao/sos-crianca/"
+    }
+   ],
+   "police": [
+    {
+     "name": "Queixa Eletrónica",
+     "url": "https://queixaselectronicas.mai.gov.pt/",
+     "note": "For people in Portugal. Extortion is on its list of crimes."
+    }
+   ],
+   "websites": [
+    {
+     "name": "Linha Internet Segura",
+     "url": "https://www.internetsegura.pt/lis/denunciar-conteudo-ilegal",
+     "link_required": true
+    }
+   ],
+   "notes": {}
+  },
+  "RO": {
+   "name": "Romania",
+   "emergency": [
+    {
+     "number": "112",
+     "for": "any emergency"
+    }
+   ],
+   "crisis": [
+    {
+     "name": "depreHUB",
+     "phone": [
+      "0374 456 420"
+     ],
+     "url": "https://deprehub.ro/obtine-suport/helpline/",
+     "hours": "24 hours, every day",
+     "languages": [
+      "Romanian"
+     ],
+     "note": "For adults"
+    }
+   ],
+   "photos": [],
+   "children": [
+    {
+     "name": "Telefonul Copilului",
+     "phone": [
+      "116 111"
+     ],
+     "url": "https://telefonulcopilului.ro/"
+    }
+   ],
+   "police": [],
+   "websites": [
+    {
+     "name": "Ora de Net",
+     "url": "https://oradenet.ro/linia-de-raportare/",
+     "link_required": false
+    }
+   ],
+   "notes": {}
+  },
+  "RS": {
+   "name": "Serbia",
+   "emergency": [
+    {
+     "number": "192",
+     "for": "police"
+    },
+    {
+     "number": "193",
+     "for": "fire"
+    },
+    {
+     "number": "194",
+     "for": "ambulance"
+    }
+   ],
+   "crisis": [
+    {
+     "name": "Centar Srce",
+     "phone": [
+      "0800 300 303"
+     ],
+     "url": "https://www.centarsrce.org/",
+     "hours": "Every day, 17:00 to 23:00",
+     "languages": [
+      "Serbian"
+     ]
+    }
+   ],
+   "photos": [],
+   "children": [
+    {
+     "name": "NADEL",
+     "phone": [
+      "116 111"
+     ],
+     "url": "https://www.116111.rs/"
+    }
+   ],
+   "police": [],
+   "websites": [
+    {
+     "name": "NetPatrola",
+     "url": "https://netpatrola.rs/prijavite-sadrzaj/",
+     "link_required": true
+    }
+   ],
+   "notes": {}
+  },
+  "RU": {
+   "name": "Russia",
+   "emergency": [
+    {
+     "number": "112",
+     "for": "any emergency"
+    },
+    {
+     "number": "101",
+     "for": "fire"
+    },
+    {
+     "number": "102",
+     "for": "police"
+    },
+    {
+     "number": "103",
+     "for": "ambulance"
+    }
+   ],
+   "crisis": [
+    {
+     "name": "МЧС России, психологическая помощь",
+     "phone": [
+      "+7 495 989-50-50"
+     ],
+     "url": "https://psi.mchs.gov.ru/",
+     "hours": "24 hours, every day"
+    },
+    {
+     "name": "Твоя территория",
+     "chat": "https://www.xn--b1agja1acmacmce7nj.xn--80asehdb/",
+     "hours": "Chat every day, 15:00 to 22:00",
+     "note": "For young people"
+    }
+   ],
+   "photos": [],
+   "children": [
+    {
+     "name": "Children's Helpline (Detsky telefon doveriya)",
+     "phone": [
+      "8-800-2000-122"
+     ],
+     "url": "https://telefon-doveria.ru/"
+    }
+   ],
+   "police": [],
+   "websites": [],
+   "notes": {}
+  },
+  "SE": {
+   "name": "Sweden",
+   "emergency": [
+    {
+     "number": "112",
+     "for": "any emergency"
+    }
+   ],
+   "crisis": [
+    {
+     "name": "Hjälplinjen",
+     "phone": [
+      "90390",
+      "0202-90390"
+     ],
+     "url": "https://hjalplinjen.se/",
+     "hours": "24 hours, every day",
+     "languages": [
+      "Swedish"
+     ],
+     "note": "For adults"
+    },
+    {
+     "name": "Självmordslinjen",
+     "phone": [
+      "90101"
+     ],
+     "chat": "https://mind.se/stod-kunskap/prata-eller-chatta-med-volontar/sjalvmordslinjen/chatt/",
+     "url": "https://mind.se/stod-kunskap/prata-eller-chatta-med-volontar/sjalvmordslinjen/",
+     "hours": "24 hours, every day",
+     "languages": [
+      "Swedish"
+     ]
+    }
+   ],
+   "photos": [],
+   "children": [
+    {
+     "name": "Bris",
+     "phone": [
+      "116 111",
+      "116 111 (text)"
+     ],
+     "chat": "https://www.bris.se/for-barn-och-unga/prata-med-oss/",
+     "url": "https://www.bris.se/",
+     "hours": "Phone 24 hours, every day",
+     "languages": [
+      "Swedish",
+      "English"
+     ],
+     "note": "For under 18s"
+    }
+   ],
+   "police": [],
+   "websites": [
+    {
+     "name": "ECPAT Sweden",
+     "url": "https://ecpat.se/hotline/",
+     "link_required": false
+    }
+   ],
+   "notes": {}
+  },
+  "SG": {
+   "name": "Singapore",
+   "emergency": [
+    {
+     "number": "999",
+     "for": "police"
+    },
+    {
+     "number": "995",
+     "for": "fire and ambulance"
+    }
+   ],
+   "crisis": [
+    {
+     "name": "Mindline 1771",
+     "phone": [
+      "1771"
+     ],
+     "chat": "https://mindline.sg/fsmh",
+     "url": "https://www.moh.gov.sg/newsroom/national-mindline-1771-to-provide--round-the-clock-support-for-mental-health/",
+     "hours": "Phone 24 hours, every day"
+    },
+    {
+     "name": "Samaritans of Singapore",
+     "phone": [
+      "1767"
+     ],
+     "url": "https://www.sos.org.sg/our-services/",
+     "hours": "24 hours, every day",
+     "note": "You can also message 9151 1767 on WhatsApp, any time"
+    }
+   ],
+   "photos": [],
+   "children": [
+    {
+     "name": "Tinkle Friend",
+     "phone": [
+      "1800 2744 788"
+     ],
+     "chat": "https://tinklefriend.sg/",
+     "hours": "Mon to Fri, 14:30 to 17:00",
+     "chat_hours": "Mon to Thu, 14:30 to 19:00. Fri, 14:30 to 17:00"
+    }
+   ],
+   "police": [],
+   "websites": [],
+   "notes": {}
+  },
+  "SI": {
+   "name": "Slovenia",
+   "emergency": [
+    {
+     "number": "112",
+     "for": "any emergency"
+    }
+   ],
+   "crisis": [
+    {
+     "name": "Samarijan 116 123",
+     "phone": [
+      "116 123"
+     ],
+     "url": "https://www.telefon-samarijan.si/",
+     "hours": "24 hours, every day",
+     "languages": [
+      "Slovenian"
+     ]
+    }
+   ],
+   "photos": [],
+   "children": [
+    {
+     "name": "TOM telefon",
+     "phone": [
+      "116 111"
+     ],
+     "chat": "https://www.e-tom.si/stopi-v-stik#klepetalnica",
+     "url": "https://www.e-tom.si/",
+     "hours": "Every day, 12:00 to 20:00",
+     "chat_hours": "Mon to Fri, between 14:00 and 21:00. The times change each week"
+    }
+   ],
+   "police": [
+    {
+     "name": "Anonymous report to the police",
+     "url": "https://e-uprava.gov.si/si/podrocja/drzava-druzba/kazniva-dejanja/anonimna-prijava-kaznivih-dejanj-ali-prekrskov-policiji.html?lang=si",
+     "note": "Takes reports of any crime. You don't have to give your name."
+    }
+   ],
+   "websites": [
+    {
+     "name": "Spletno oko",
+     "url": "https://www.spletno-oko.si/english",
+     "link_required": true
+    }
+   ],
+   "notes": {}
+  },
+  "SK": {
+   "name": "Slovakia",
+   "emergency": [
+    {
+     "number": "112",
+     "for": "any emergency"
+    }
+   ],
+   "crisis": [
+    {
+     "name": "Linka dôvery Nezábudka",
+     "phone": [
+      "0800 800 566"
+     ],
+     "url": "https://linkanezabudka.sk/",
+     "hours": "24 hours, every day",
+     "languages": [
+      "Slovak"
+     ],
+     "note": "For adults"
+    },
+    {
+     "name": "IPčko",
+     "phone": [
+      "0800 500 333"
+     ],
+     "chat": "https://ipcko.sk/co-robime/krizova-linka-pomoci-ipcko/chatova-poradna/",
+     "url": "https://ipcko.sk/",
+     "hours": "24 hours, every day",
+     "languages": [
+      "Slovak"
+     ]
+    }
+   ],
+   "photos": [],
+   "children": [
+    {
+     "name": "Linka detskej istoty",
+     "phone": [
+      "116 111"
+     ],
+     "chat": "https://ldi.sk/online-poradna/",
+     "url": "https://ldi.sk/",
+     "hours": "24 hours, every day",
+     "chat_hours": "Every day, 18:00 to 22:00",
+     "languages": [
+      "Slovak"
+     ]
+    }
+   ],
+   "police": [
+    {
+     "name": "Report to the prosecutor",
+     "url": "https://esluzby.genpro.gov.sk/trestne-oznamenie",
+     "note": "Run by the General Prosecutor's Office. You sign in with your eID card."
+    }
+   ],
+   "websites": [
+    {
+     "name": "Ochrán ma",
+     "url": "https://ochranma.sk/nahlas-to/",
+     "link_required": false
+    }
+   ],
+   "notes": {}
+  },
+  "TH": {
+   "name": "Thailand",
+   "emergency": [
+    {
+     "number": "191",
+     "for": "police"
+    },
+    {
+     "number": "1669",
+     "for": "ambulance"
+    },
+    {
+     "number": "199",
+     "for": "fire"
+    }
+   ],
+   "crisis": [
+    {
+     "name": "สายด่วนสุขภาพจิต 1323",
+     "phone": [
+      "1323"
+     ],
+     "url": "https://1323alltime.camri.go.th",
+     "hours": "24 hours, every day",
+     "languages": [
+      "Thai"
+     ]
+    },
+    {
+     "name": "The Samaritans of Thailand",
+     "phone": [
+      "02-113-6789"
+     ],
+     "url": "https://www.samaritansthai.com/",
+     "hours": "Every day, 12:00 to 22:00"
+    }
+   ],
+   "photos": [],
+   "children": [
+    {
+     "name": "Childline Thailand (Saidek 1387)",
+     "phone": [
+      "1387"
+     ],
+     "url": "https://www.childlinethailand.org/",
+     "hours": "24 hours, every day"
+    }
+   ],
+   "police": [],
+   "websites": [
+    {
+     "name": "Thai Hotline",
+     "url": "https://www.thaihotline.org/en/report/",
+     "link_required": null
+    }
+   ],
+   "notes": {}
+  },
+  "TR": {
+   "name": "Türkiye",
+   "emergency": [
+    {
+     "number": "112",
+     "for": "any emergency"
+    }
+   ],
+   "crisis": [],
+   "photos": [],
+   "children": [
+    {
+     "name": "ALO 183 (Ministry of Family and Social Services)",
+     "phone": [
+      "183"
+     ]
+    }
+   ],
+   "police": [],
+   "websites": [
+    {
+     "name": "İhbar Web",
+     "url": "https://www.ihbarweb.org.tr/?lang=en",
+     "link_required": true
+    }
+   ],
+   "notes": {
+    "children": "ALO 183 also takes child neglect and abuse reports."
+   }
+  },
+  "TW": {
+   "name": "Taiwan",
+   "emergency": [
+    {
+     "number": "110",
+     "for": "police"
+    },
+    {
+     "number": "119",
+     "for": "fire and ambulance"
+    }
+   ],
+   "crisis": [
+    {
+     "name": "1925 安心專線",
+     "phone": [
+      "1925"
+     ],
+     "url": "https://mohw.gov.tw/cp-16-57989-1.html",
+     "hours": "24 hours, every day",
+     "languages": [
+      "Chinese"
+     ]
+    }
+   ],
+   "photos": [],
+   "children": [
+    {
+     "name": "113 Protection Hotline (Ministry of Health and Welfare)",
+     "phone": [
+      "113"
+     ],
+     "url": "https://www.mohw.gov.tw/cp-88-233-1.html"
+    }
+   ],
+   "police": [],
+   "websites": [
+    {
+     "name": "Web547",
+     "url": "https://www.web547.org.tw/",
+     "link_required": null
+    }
+   ],
+   "notes": {
+    "children": "113 also covers domestic violence and abuse of adults."
+   }
+  },
+  "UA": {
+   "name": "Ukraine",
+   "emergency": [
+    {
+     "number": "112",
+     "for": "any emergency"
+    },
+    {
+     "number": "101",
+     "for": "fire"
+    },
+    {
+     "number": "102",
+     "for": "police"
+    },
+    {
+     "number": "103",
+     "for": "ambulance"
+    }
+   ],
+   "crisis": [
+    {
+     "name": "Lifeline Ukraine",
+     "phone": [
+      "7333"
+     ],
+     "url": "https://lifelineukraine.com/en",
+     "hours": "24 hours, every day",
+     "languages": [
+      "Ukrainian"
+     ]
+    },
+    {
+     "name": "Liniia 2345",
+     "phone": [
+      "2345"
+     ],
+     "url": "https://2345.help/",
+     "hours": "Every day, 14:00 to 6:00",
+     "languages": [
+      "Ukrainian"
+     ],
+     "note": "For men"
+    }
+   ],
+   "photos": [],
+   "children": [
+    {
+     "name": "La Strada children's line",
+     "phone": [
+      "116 111",
+      "0 800 500 225"
+     ],
+     "url": "https://la-strada.org.ua/garyachi-liniyi",
+     "note": "116 111 from a mobile. 0 800 500 225 from any phone."
+    }
+   ],
+   "police": [
+    {
+     "name": "Cyberpolice",
+     "url": "https://cyberpolice.gov.ua"
+    }
+   ],
+   "websites": [
+    {
+     "name": "StopCrime",
+     "url": "https://stopcrime.ua/net-crime",
+     "link_required": true
+    }
+   ],
+   "notes": {
+    "children": "Child helpline services are partly disrupted. 116 111 does not work from a Ukrainian SIM abroad."
+   }
+  },
+  "US": {
+   "name": "United States",
+   "emergency": [
+    {
+     "number": "911",
+     "for": "any emergency"
+    }
+   ],
+   "crisis": [
+    {
+     "name": "988 Suicide & Crisis Lifeline",
+     "phone": [
+      "988",
+      "988 (text)"
+     ],
+     "chat": "https://chat.988lifeline.org/",
+     "url": "https://988lifeline.org/",
+     "hours": "Phone 24 hours, every day",
+     "languages": [
+      "English",
+      "Spanish"
+     ]
+    },
+    {
+     "name": "Crisis Text Line",
+     "phone": [
+      "741741 (text HOME)"
+     ],
+     "url": "https://www.crisistextline.org/",
+     "hours": "24 hours, every day",
+     "languages": [
+      "English",
+      "Spanish"
+     ]
+    }
+   ],
+   "photos": [],
+   "children": [
+    {
+     "name": "Childhelp National Child Abuse Hotline",
+     "phone": [
+      "1-800-422-4453",
+      "1-800-422-4453 (text GO)"
+     ],
+     "url": "https://www.childhelphotline.org/",
+     "hours": "24 hours, every day",
+     "languages": [
+      "English",
+      "Spanish"
+     ]
+    }
+   ],
+   "police": [
+    {
+     "name": "FBI Internet Crime Complaint Center",
+     "url": "https://www.ic3.gov/",
+     "languages": [
+      "English"
+     ]
+    }
+   ],
+   "websites": [
+    {
+     "name": "NCMEC CyberTipline",
+     "url": "https://report.cybertip.org/",
+     "link_required": false
+    }
+   ],
+   "notes": {}
+  },
+  "ZA": {
+   "name": "South Africa",
+   "emergency": [
+    {
+     "number": "10111",
+     "for": "police"
+    },
+    {
+     "number": "10177",
+     "for": "fire and ambulance"
+    },
+    {
+     "number": "112",
+     "for": "any emergency"
+    }
+   ],
+   "crisis": [
+    {
+     "name": "SADAG",
+     "phone": [
+      "0800 567 567"
+     ],
+     "url": "https://www.sadag.org/",
+     "hours": "24 hours, every day"
+    }
+   ],
+   "photos": [],
+   "children": [
+    {
+     "name": "Childline South Africa",
+     "phone": [
+      "116"
+     ],
+     "url": "https://www.childlinesa.org.za/"
+    }
+   ],
+   "police": [],
+   "websites": [
+    {
+     "name": "Film and Publication Board hotline",
+     "url": "https://apps.fpb.org.za/hotline/",
+     "link_required": null
+    }
+   ],
+   "notes": {
+    "emergency": "112 works from mobiles only."
+   }
+  },
+  "ZM": {
+   "name": "Zambia",
+   "emergency": [
+    {
+     "number": "991",
+     "for": "police"
+    },
+    {
+     "number": "992",
+     "for": "ambulance"
+    },
+    {
+     "number": "993",
+     "for": "fire"
+    }
+   ],
+   "crisis": [
+    {
+     "name": "Lifeline 933",
+     "phone": [
+      "933"
+     ],
+     "url": "https://clzambia.org/",
+     "hours": "24 hours, every day",
+     "note": "For adults"
+    }
+   ],
+   "photos": [],
+   "children": [
+    {
+     "name": "Childline Zambia",
+     "phone": [
+      "116"
+     ]
+    }
+   ],
+   "police": [],
+   "websites": [],
+   "notes": {}
+  }
+ }
+}

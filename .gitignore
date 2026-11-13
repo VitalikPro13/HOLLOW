@@ -74,6 +74,7 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+/android/.kotlin/
 
 # iOS / Xcode build artifacts (ios/build holds ~20k generated files)
 ios/build/

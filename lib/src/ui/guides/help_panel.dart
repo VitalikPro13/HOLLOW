@@ -110,7 +110,7 @@ class _HelpResourceCenterState extends ConsumerState<HelpResourceCenter> {
           const SizedBox(width: HollowSpacing.sm),
           Expanded(
             child: Text(
-              'Help',
+              'App guides',
               style: HollowTypography.subheading
                   .copyWith(color: hollow.textPrimary),
             ),
@@ -143,7 +143,7 @@ class _HelpResourceCenterState extends ConsumerState<HelpResourceCenter> {
             _header(hollow),
             Expanded(
               child: HollowEmptyState(
-                title: "Help didn't load",
+                title: "The guides didn't load",
                 action: HollowButton.ghost(
                   onPressed: () => ref.invalidate(helpManifestProvider),
                   loading: manifestAsync.isLoading,

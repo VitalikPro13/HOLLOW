@@ -1170,7 +1170,7 @@ class _HelpButton extends ConsumerWidget {
     final open = ref.watch(helpPanelOpenProvider);
     return HollowIconButton(
       icon: LucideIcons.circleHelp,
-      label: 'Help',
+      label: 'App guides',
       selected: open,
       onPressed: () => ref.read(helpPanelOpenProvider.notifier).state = !open,
     );
