@@ -601,6 +601,14 @@ Two patterns are used:
 
 3. **Unread counting via autoincrement threshold** -- `count_unread_dm()` and `count_unread_channel()` find the autoincrement `id` of the last-seen `message_id`, then count rows with `id > threshold`. This avoids timestamp comparison issues and correctly handles same-millisecond messages.
 
+## Bumping rusqlite / SQLCipher
+
+`rusqlite` with `bundled-sqlcipher` compiles SQLCipher from `sqlcipher-src` (0.42 = SQLCipher 4.20.0 on SQLite 3.54.1, since 0.14; 0.40 shipped 4.14.0 on 3.51.3). The crypto provider is NOT that crate's bundled LibTomCrypt: `libsqlite3-sys`'s build script picks CommonCrypto on Apple and OpenSSL everywhere else (Windows needs `OPENSSL_DIR`), the same as before. We key with a raw 32-byte hex key (`x'..'`), so `kdf_iter` and the KDF never run; what must stay equal across a bump is page size 4096, HMAC on, HMAC_SHA512, no plaintext header (the SQLCipher 4 defaults; `PRAGMA cipher_settings` prints them). `rust/deny.toml` allows `blessing` and `WTFPL` for `sqlcipher-src` only.
+
+Before a bump, write the database fixture with the OLD build, then reopen it with the new one: `HOLLOW_DB_FIXTURES=<dir> cargo test --lib node::test_harness::dbfix_write_two_nodes -- --ignored --exact`, bump, then `... dbfix_reopen_after_upgrade -- --ignored --exact` (two harness nodes with a DM, an MLS server and a row left in the WAL; the reopen reads them through the lease, folds the CRDT log, reloads both MLS groups, then sends a new MLS message and Olm DMs over the reloaded state, and writes `reopen_results.txt` with the library version and cipher settings). The backup and link landings are covered by `zip_compat` (rust_archive.md). Do it on Windows too: the provider there differs.
+
+Since rusqlite 0.42 the SQLCipher source is no longer vendored by `libsqlite3-sys`: it comes from `sqlcipher-src`, a single-owner crate. On every bump, compare its amalgamation with the official tag: download `sqlcipher/sqlcipher` at the matching `v4.x.y` tag, then `python3 -I scripts/sqlcipher_amalgamation_diff.py <cargo registry>/sqlcipher-src-<ver>/sqlcipher/sqlcipher.c <official tree>`. Every remaining difference must be an amalgamation rewrite (include markers, dropped `extern`, `#if 0` C++ guards); `sqlcipher.c`, `crypto_cc.c` and `crypto_openssl.c` must match apart from whitespace. 4.20.0 (0.14): 134 sections compared, all clean; the 9 generated sections (fts5.c, ctime.c, keywordhash.h, parse/opcodes) are not in the tag tree and stay unchecked.
+
 ## Migration Strategy
 
 All schema migrations use `ALTER TABLE ADD COLUMN` wrapped in `.unwrap_or(())` -- the operation silently fails if the column already exists. This is safe because SQLite only supports adding nullable columns with ALTER TABLE. All migrated columns are nullable (no NOT NULL constraint).

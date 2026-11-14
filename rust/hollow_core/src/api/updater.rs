@@ -1470,7 +1470,7 @@ fn launch_host_shell_script(script_path: &str) -> Result<(), String> {
 /// backslash-separated names and marks directory entries with a TRAILING backslash,
 /// and treating those as files made `File::create` fail on every empty dir.
 #[allow(dead_code)] // only reachable on Windows outside of tests
-fn extract_zip_to(zip_path: &str, staging_dir: &std::path::Path) -> Result<(), String> {
+pub(crate) fn extract_zip_to(zip_path: &str, staging_dir: &std::path::Path) -> Result<(), String> {
     let zip_file = fs::File::open(zip_path)
         .map_err(|e| format!("Failed to open zip: {e}"))?;
     let mut archive = zip::ZipArchive::new(zip_file)

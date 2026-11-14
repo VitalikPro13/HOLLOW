@@ -420,6 +420,10 @@ archive.hollow-archive (Deflated ZIP)
 - **File integrity**: Included files have SHA-256 hashes stored in metadata and incorporated into the archive-level hash. Non-included files use `"placeholder"` in the hash, so their absence is accounted for.
 - **Tamper evidence**: Any modification to any JSON entry inside the ZIP invalidates the archive-level hash. Any modification to a message's text invalidates both the per-message signature and the archive-level hash.
 
+## Bumping the zip crate
+
+Every zip Hollow writes outlives the `zip` version that wrote it, and newer `zip` releases tend to read STRICTER. Before a bump, write one of each with the old build (`HOLLOW_ZIP_FIXTURES=<dir> cargo test --lib zip_compat::write_zip_fixtures -- --ignored --exact`: link snapshot, `.hollow` backup, channel and server archives, sticker pack, `.hollowpack`, shard bundle, two updater-style zips, plus a `hostile/` set); drop any real zip beside them (the last release's win64 zip is the updater's input). After the bump, `zip_compat::zip_fixtures_still_load` runs each through its real import path (landings open the database and read a row) and writes `results.txt`; `zip_compat::hostile_zip_answers` records every import path's answer to the hostile set in `hostile/answers.txt`, to diff against the old build's. 9.0.5 -> 9.5.1 (0.14): every fixture loads, and the only answer that changed is the wording for an unsupported compression method (the error now comes at read, not at open). Run it on Windows as well: a `C:\` entry is refused there and extracted as a plain folder name on Unix.
+
 ## Key Implementation Details
 
 - **Legacy message IDs**: Messages without a UUID get `"legacy-{sender}-{timestamp}"` as a synthetic ID. This ensures all messages have unique keys in the BTreeMap.

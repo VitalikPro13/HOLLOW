@@ -68892,3 +68892,165 @@ async fn w4_iospush_a_returning_phone_hears_when_its_relay_has_delivered() {
     .await;
     assert!(heard && first == Some(false), "the phone was told to show 18+ servers before the OFF made while away");
 }
+
+// t14-deps
+
+/// A database written by one build and opened by the next (`HOLLOW_DB_FIXTURES`): two
+/// nodes that are friends, share a DM and an MLS server, stopped with their WAL as it
+/// stood, so a SQLite/SQLCipher bump is proven on rows, Olm sessions and MLS state the
+/// older library wrote.
+fn dbfix_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(std::env::var("HOLLOW_DB_FIXTURES").expect("set HOLLOW_DB_FIXTURES to a folder"))
+}
+
+const DBFIX_O: u8 = 236;
+const DBFIX_J: u8 = 237;
+const DBFIX_FILES: [&str; 3] = ["messages.db", "messages.db-wal", "messages.db-shm"];
+
+async fn dbfix_stop(relay: &MockRelay, node: TestNode) -> String {
+    node.crdt_committed().await;
+    let device_id = node.device_id.clone();
+    relay.set_online(&device_id, false);
+    assert!(wait_until(10, async || !relay.online_devices().contains(&device_id)).await);
+    let (db_path, tmp) = node.into_storage();
+    assert!(wait_until(30, async || crate::storage::messages::open_connections::count(&db_path) == 0).await);
+    std::mem::forget(tmp);
+    db_path
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+#[ignore = "writes a database fixture for a SQLite/SQLCipher bump; HOLLOW_DB_FIXTURES=<dir>"]
+async fn dbfix_write_two_nodes() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(DBFIX_O)).peer_id();
+    let (mut o, mut j) = friend_pair(&relay, DBFIX_O, DBFIX_J).await;
+
+    send_dm_burst(&o, &j, "dbfix-dm", 3).await;
+    assert_eq!(read_dm_burst(&mut j, "dbfix-dm", 3, 15).await.0, 3, "the DMs arrive before the stop");
+
+    let server_id = create_server_and_wait(&mut o, "Upgrade").await;
+    let general = general_channel_of(&server_id);
+    j.cmd_tx
+        .send(NodeCommand::JoinServer {
+            server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None,
+            join_key: invite_key(&server_id),
+        })
+        .await
+        .unwrap();
+    let both = { let mut v = vec![o.device_id.clone(), j.device_id.clone()]; v.sort(); v };
+    assert!(wait_until(30, async || o.mls_members(&server_id).await == both && j.mls_members(&server_id).await == both).await);
+    o.cmd_tx
+        .send(NodeCommand::SendChannelMessage {
+            server_id: server_id.clone(), channel_id: general.clone(), text: "dbfix-ch-1".into(),
+            message_id: "dbfix-ch-1".into(), reply_to_mid: None, link_preview: None,
+        })
+        .await
+        .unwrap();
+    assert!(wait_until(15, async || j.channel_messages(&server_id, &general).iter().any(|m| m.text == "dbfix-ch-1")).await);
+    let epoch = o.mls_epoch(&server_id).await.unwrap();
+
+    let out = dbfix_dir();
+    let o_pass = o.passphrase.clone();
+    for (name, node) in [("o", o), ("j", j)] {
+        let db = dbfix_stop(&relay, node).await;
+        let dir = out.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        // A process killed mid-write leaves its last rows in the WAL: the copy is taken
+        // while a writer still holds them there.
+        let _held = (name == "o").then(|| {
+            let store = crate::storage::MessageStore::open(&db, &o_pass).unwrap();
+            store.save_setting("dbfix_in_wal", "yes").unwrap();
+            store
+        });
+        for f in DBFIX_FILES {
+            let src = std::path::Path::new(&db).with_file_name(f);
+            if src.exists() {
+                std::fs::copy(&src, dir.join(f)).unwrap();
+            }
+        }
+    }
+    let meta = serde_json::json!({ "server_id": server_id, "general": general, "o_master": o_master, "epoch": epoch });
+    std::fs::write(out.join("meta.json"), meta.to_string()).unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+#[ignore = "reopens a database fixture an older build wrote; HOLLOW_DB_FIXTURES=<dir>"]
+async fn dbfix_reopen_after_upgrade() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let fix = dbfix_dir();
+    let meta: serde_json::Value = serde_json::from_slice(&std::fs::read(fix.join("meta.json")).unwrap()).unwrap();
+    let (server_id, general) = (meta["server_id"].as_str().unwrap().to_string(), meta["general"].as_str().unwrap().to_string());
+    let o_master = meta["o_master"].as_str().unwrap().to_string();
+    let mut report = Vec::new();
+
+    let staged = |name: &str| {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        for f in DBFIX_FILES {
+            let src = fix.join(name).join(f);
+            if src.exists() {
+                std::fs::copy(&src, tmp.path().join(f)).unwrap();
+            }
+        }
+        let db = tmp.path().join("messages.db").to_str().unwrap().to_string();
+        (db, tmp)
+    };
+
+    // Plain reads through the pooled lease, before any node runs.
+    let (j_db, j_tmp) = staged("j");
+    let j_pass = passphrase_for(&NativeKeypair::from_secret_bytes(&seed_bytes(DBFIX_J)));
+    {
+        let lease = crate::storage::MessageStore::lease(&j_db, &j_pass).expect("lease opens the old database");
+        let dms = lease.load_all_dm_messages(&o_master).unwrap();
+        assert_eq!(dms.iter().filter(|m| m.text.starts_with("dbfix-dm-")).count(), 3, "the old DM rows read back");
+        report.push(format!("lease: {} DM rows", dms.len()));
+        let raw = rusqlite::Connection::open(&j_db).unwrap();
+        raw.execute_batch(&format!("PRAGMA key = \"x'{j_pass}'\";")).unwrap();
+        let cipher: String = raw.query_row("PRAGMA cipher_version", [], |r| r.get(0)).unwrap();
+        let sqlite: String = raw.query_row("SELECT sqlite_version()", [], |r| r.get(0)).unwrap();
+        let settings: Vec<String> = {
+            let mut q = raw.prepare("PRAGMA cipher_settings").unwrap();
+            q.query_map([], |r| r.get::<_, String>(0)).unwrap().map(Result::unwrap).collect()
+        };
+        report.push(format!("library: SQLCipher {cipher}, SQLite {sqlite}; settings {settings:?}"));
+    }
+
+    let relay = MockRelay::new();
+    let (o_db, o_tmp) = staged("o");
+    let mut o = spawn_node_on_db(&relay, DBFIX_O, DBFIX_O, &o_db, o_tmp).await;
+    let mut j = spawn_node_on_db(&relay, DBFIX_J, DBFIX_J, &j_db, j_tmp).await;
+    let both = { let mut v = vec![o.device_id.clone(), j.device_id.clone()]; v.sort(); v };
+    assert!(o.channel_messages(&server_id, &general).iter().any(|m| m.text == "dbfix-ch-1"), "the old channel row reads back");
+    assert!(o.server_state(&server_id).is_some(), "the CRDT state folds from the old op log");
+    assert_eq!(o.store().load_setting("dbfix_in_wal").unwrap().as_deref(), Some("yes"), "a row the old library left in its WAL survives");
+    assert_eq!(o.mls_members(&server_id).await, both, "the owner's MLS group loads from the old rows");
+    assert_eq!(j.mls_members(&server_id).await, both, "the joiner's MLS group loads from the old rows");
+    report.push(format!("mls epoch o={:?} j={:?} (written at {})", o.mls_epoch(&server_id).await, j.mls_epoch(&server_id).await, meta["epoch"]));
+
+    // New writes on the old files: an MLS frame and an Olm DM, each needing the
+    // reloaded key state, and each stored by the receiver.
+    expect_dm_pair_ready(&relay, &o, &j, 20).await;
+    o.cmd_tx
+        .send(NodeCommand::SendChannelMessage {
+            server_id: server_id.clone(), channel_id: general.clone(), text: "dbfix-ch-2".into(),
+            message_id: "dbfix-ch-2".into(), reply_to_mid: None, link_preview: None,
+        })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(20, async || j.channel_messages(&server_id, &general).iter().any(|m| m.text == "dbfix-ch-2")).await,
+        "an MLS message under the reloaded group reaches and is stored by the joiner",
+    );
+    drain_events(&mut j);
+    send_dm_burst(&o, &j, "dbfix-after", 2).await;
+    assert_eq!(read_dm_burst(&mut j, "dbfix-after", 2, 20).await.0, 2, "Olm DMs flow on the reloaded sessions");
+    drain_events(&mut o);
+    report.push("live: MLS channel message + 2 Olm DMs delivered and stored".into());
+    std::fs::write(fix.join("reopen_results.txt"), report.join("\n") + "\n").unwrap();
+}

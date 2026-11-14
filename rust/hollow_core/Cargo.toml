@@ -38,7 +38,7 @@ serde = { version = "1", features = ["derive"] }
 # author's signature over the exact payload bytes (crdt_resync).
 serde_json = { version = "1", features = ["raw_value"] }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time", "net", "io-util", "fs"] }
-rusqlite = { version = "0.40.2", features = ["bundled-sqlcipher", "backup"] }
+rusqlite = { version = "0.42.0", features = ["bundled-sqlcipher", "backup"] }
 hex = "0.4"
 sha2 = "0.10"
 bip39 = "2.2"

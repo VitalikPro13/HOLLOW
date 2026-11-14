@@ -58,6 +58,13 @@ allow = [
 confidence-threshold = 0.93
 unused-allowed-license = "allow"
 
+# The SQLCipher source crate bundles SQLite (public domain under the SQLite
+# blessing) and LibTomCrypt (WTFPL, offered alongside the Unlicense); both are
+# AGPL-compatible. Allowed for that crate only.
+[[licenses.exceptions]]
+crate = "sqlcipher-src"
+allow = ["blessing", "WTFPL"]
+
 [licenses.private]
 # Our own crates carry no `license` field: they are the repo, under LICENSE.
 ignore = true

@@ -483,3 +483,5 @@ mod storage;
 #[cfg(test)]
 mod test_tmp;
 mod vault;
+#[cfg(test)]
+mod zip_compat;
