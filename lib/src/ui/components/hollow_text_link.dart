@@ -8,11 +8,17 @@ import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 /// Where a ghost button's padding would pull an action off the left edge of
 /// the prose above it ("Read the post" under a teaser). An action that stands
 /// on its own in a toolbar or a row stays a [HollowButton].
+///
+/// [quiet] is for a run of links that are not the point of their surface
+/// (an artist's social links, the terms under an agreement): secondary text,
+/// always underlined so it still reads as a link.
 class HollowTextLink extends StatefulWidget {
   final String label;
   final VoidCallback onTap;
+  final bool quiet;
 
-  const HollowTextLink(this.label, {super.key, required this.onTap});
+  const HollowTextLink(this.label,
+      {super.key, required this.onTap, this.quiet = false});
 
   @override
   State<HollowTextLink> createState() => _HollowTextLinkState();
@@ -40,11 +46,20 @@ class _HollowTextLinkState extends State<HollowTextLink> {
             onTap: widget.onTap,
             child: Text(
               widget.label,
-              style: HollowTypography.label.copyWith(
-                color: hollow.accentText,
-                decoration: _hovered ? TextDecoration.underline : null,
-                decorationColor: hollow.accentText,
-              ),
+              style: widget.quiet
+                  ? HollowTypography.label.copyWith(
+                      color: _hovered
+                          ? hollow.textPrimary
+                          : hollow.textSecondary,
+                      decoration: TextDecoration.underline,
+                      decorationColor:
+                          _hovered ? hollow.accentText : hollow.textTertiary,
+                    )
+                  : HollowTypography.label.copyWith(
+                      color: hollow.accentText,
+                      decoration: _hovered ? TextDecoration.underline : null,
+                      decorationColor: hollow.accentText,
+                    ),
             ),
           ),
         ),

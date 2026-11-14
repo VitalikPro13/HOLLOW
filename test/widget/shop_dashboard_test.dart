@@ -34,6 +34,8 @@ const _artist = shop.ShopArtist(
   displayName: 'Ada',
   bio: 'Draws frames.',
   headerHash: '',
+  avatarHash: '',
+  links: [],
   url: 'https://shop.anonlisten.com/@ada',
 );
 
@@ -160,7 +162,7 @@ final _setListing = shop.ShopListing(
   bundle: true,
   wide: true,
   itemUrl: 'https://shop.anonlisten.com/i/winter-set',
-  buyUrl: '',
+  buyUrl: 'https://ko-fi.com/s/c3d4e5f6a7',
   credentialItem: _setItem,
 );
 
@@ -314,7 +316,9 @@ void main() {
     await tester.pump(const Duration(milliseconds: 400));
 
     expect(find.text('Wear it'), findsOneWidget);
-    expect(find.text('Buy'), findsNothing);
+    expect(find.textContaining('Buy'), findsNothing);
+    expect(find.text('Not on sale right now.'), findsNothing,
+        reason: 'a bought piece is not "not on sale"');
   });
 
   testWidgets('a set whose files are all in the library still sells', (tester) async {
@@ -329,7 +333,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 400));
 
     expect(find.text('Wear it'), findsNothing);
-    expect(find.text('Buy'), findsOneWidget);
+    expect(find.text('Buy on Ko-fi'), findsOneWidget);
   });
 
   testWidgets('each kind sits on its own shelf, at its own shape',

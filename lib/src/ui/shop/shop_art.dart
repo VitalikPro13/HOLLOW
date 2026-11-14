@@ -332,3 +332,28 @@ class ShopTryOnCard extends ConsumerWidget {
     );
   }
 }
+
+/// An artist's face from the shop, a [size] square with the card's corner. A
+/// plain tile stands in while it loads, when it fails and when there is none.
+class ShopArtistFace extends ConsumerWidget {
+  final String hash;
+  final double size;
+
+  const ShopArtistFace({super.key, required this.hash, required this.size});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final hollow = HollowTheme.of(context);
+    final bytes =
+        hash.isEmpty ? null : ref.watch(shop.shopArtProvider(hash)).valueOrNull;
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(hollow.radiusMd),
+      child: SizedBox.square(
+        dimension: size,
+        child: bytes == null || bytes.isEmpty
+            ? ColoredBox(color: hollow.hover)
+            : AnimatedGifImage(bytes: bytes, fit: BoxFit.cover, animate: true),
+      ),
+    );
+  }
+}

@@ -1,0 +1,259 @@
+{
+ "_": [
+  "t14-shopdlg: the shop item dialog against the LIVE catalog on a FRESH throwaway peer (read-only, never buys).",
+  "Shoots a piece unticked (Buy disabled), ticked (Buy enabled), the box asked again on reopen, a second artist's piece,",
+  "then a 620 px window (the dialog stacks: preview, buying, licence and artist last) scrolled to the artist card.",
+  "run: pwsh scripts/fleet.ps1 -Scenario shop_item_dialog -Peers a=<letter> -Relay hollowtest.duckdns.org"
+ ],
+ "peers": [
+  "a"
+ ],
+ "steps": [
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "provider": "connection",
+   "equals": "connected",
+   "timeout_ms": 120000
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 2000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Hollow Shop",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "type:_ShopCard",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 4000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "type:_ShopCard",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "text:I want my code right away, and I understand that I give up my 14-day right to cancel.",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 3000
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "dlg-01-unticked"
+  },
+  {
+   "peer": "a",
+   "op": "dump",
+   "name": "dlg-01-unticked"
+  },
+  {
+   "peer": "a",
+   "op": "expect_text",
+   "value": "See all their work"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:I want my code right away, and I understand that I give up my 14-day right to cancel.",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "dlg-02-ticked"
+  },
+  {
+   "peer": "a",
+   "op": "key",
+   "value": "escape"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "type:_ShopCard",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 2500
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "dlg-03-reopened-unticked"
+  },
+  {
+   "peer": "a",
+   "op": "key",
+   "value": "escape"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "type:_ShopCard",
+   "index": 1,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 3000
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "dlg-04-second-piece"
+  },
+  {
+   "peer": "a",
+   "op": "key",
+   "value": "escape"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "theme",
+   "value": "light"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "type:_ShopCard",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 2500
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "dlg-05-light"
+  },
+  {
+   "peer": "a",
+   "op": "key",
+   "value": "escape"
+  },
+  {
+   "peer": "a",
+   "op": "theme",
+   "value": "dark"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "view",
+   "width": 620,
+   "height": 900
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Hollow Shop",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "type:_ShopCard",
+   "timeout_ms": 15000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "type:_ShopCard",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 2500
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "dlg-06-narrow-top"
+  },
+  {
+   "peer": "a",
+   "op": "reveal",
+   "target": "text:See all their work"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "dlg-07-narrow-bottom"
+  },
+  {
+   "peer": "a",
+   "op": "key",
+   "value": "escape"
+  },
+  {
+   "peer": "a",
+   "op": "view",
+   "reset": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 600
+  }
+ ]
+}

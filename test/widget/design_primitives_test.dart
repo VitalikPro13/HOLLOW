@@ -7,6 +7,7 @@ import 'package:hollow/src/theme/hollow_theme_data.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_badge.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
+import 'package:hollow/src/ui/components/hollow_checkbox.dart';
 import 'package:hollow/src/ui/components/hollow_chip.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_divider.dart';
@@ -874,6 +875,105 @@ void main() {
 
       expect(tester.getSize(find.byType(HollowToggle)), const Size(36, 20));
       expect(find.bySemanticsLabel('Dark mode'), findsOneWidget);
+      debugDefaultTargetPlatformOverride = null;
+    });
+  });
+
+  group('HollowCheckbox', () {
+    Widget box(bool value, ValueChanged<bool>? onChanged) => SizedBox(
+          width: 300,
+          child: HollowCheckbox(
+            value: value,
+            onChanged: onChanged,
+            label: 'I agree to give up the thing',
+            footer: const Text('Terms'),
+          ),
+        );
+
+    testWidgets('the sentence is the target and announces its state',
+        (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      var value = false;
+      await _pump(
+        tester,
+        StatefulBuilder(
+          builder: (context, setState) =>
+              box(value, (v) => setState(() => value = v)),
+        ),
+      );
+      await tester.tap(find.text('I agree to give up the thing'));
+      await tester.pump();
+      expect(value, isTrue);
+      expect(
+        tester.getSemantics(find.bySemanticsLabel('I agree to give up the thing')),
+        matchesSemantics(
+          label: 'I agree to give up the thing',
+          hasCheckedState: true,
+          isChecked: true,
+          hasEnabledState: true,
+          isEnabled: true,
+          hasTapAction: true,
+        ),
+      );
+      // The footer explains; tapping it agrees to nothing.
+      await tester.tap(find.text('Terms'));
+      await tester.pump();
+      expect(value, isTrue);
+      debugDefaultTargetPlatformOverride = null;
+    });
+
+    for (final scale in [1.0, 1.5, 2.0]) {
+      testWidgets('the box sits on the first line at text scale $scale',
+          (tester) async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+        await tester.pumpWidget(
+          MaterialApp(
+            theme: HollowThemeData.dark(),
+            home: MediaQuery(
+              data: MediaQueryData(textScaler: TextScaler.linear(scale)),
+              child: Scaffold(
+                body: Center(
+                  child: SizedBox(
+                    width: 600,
+                    child: HollowCheckbox(
+                      value: false,
+                      onChanged: (_) {},
+                      label: 'One short line',
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+        final box = tester.getRect(find
+            .descendant(
+                of: find.byType(HollowCheckbox),
+                matching: find.byWidgetPredicate(
+                    (w) => w is Container && w.constraints?.maxWidth == 16))
+            .first);
+        final line = tester.getRect(find.text('One short line'));
+        expect((box.center.dy - line.center.dy).abs(), lessThan(1.0),
+            reason:
+                'box centre ${box.center.dy} vs line centre ${line.center.dy}');
+        debugDefaultTargetPlatformOverride = null;
+      });
+    }
+
+    testWidgets('a finger gets 44 px and a null handler changes nothing',
+        (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+      await _pump(tester, box(false, null));
+      expect(
+          tester
+              .getSize(find.descendant(
+                  of: find.byType(HollowCheckbox),
+                  matching: find.byType(GestureDetector)))
+              .height,
+          greaterThanOrEqualTo(44));
+      await tester.tap(find.text('I agree to give up the thing'));
+      await tester.pump();
+      expect(tester.takeException(), isNull);
       debugDefaultTargetPlatformOverride = null;
     });
   });

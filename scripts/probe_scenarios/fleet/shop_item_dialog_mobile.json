@@ -1,0 +1,146 @@
+{
+ "_": [
+  "t14-shopdlg: the shop item SHEET on a phone against the LIVE catalog, FRESH throwaway peer (read-only, never buys).",
+  "Android (sideload = shop on): Settings, Hollow Shop, a piece unticked, ticked, then scrolled to the licence and artist card (last).",
+  "run (Mac mini): FLEET_BACKEND=android pwsh scripts/fleet.ps1 -Scenario shop_item_dialog_mobile -Peers a=<letter> -Relay hollowtest.duckdns.org"
+ ],
+ "peers": [
+  "a"
+ ],
+ "steps": [
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "provider": "connection",
+   "equals": "connected",
+   "timeout_ms": 120000
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 2000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Settings",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "a",
+   "op": "scroll",
+   "target": "text:Files & storage",
+   "dy": -1500
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "reveal",
+   "target": "text:Hollow Shop"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Hollow Shop",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "type:_ShopCard",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 4000
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "sheet-00-shop"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "type:_ShopCard",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "text:I want my code right away, and I understand that I give up my 14-day right to cancel.",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 3000
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "sheet-01-top"
+  },
+  {
+   "peer": "a",
+   "op": "reveal",
+   "target": "text:Buy on Ko-fi"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "sheet-02-unticked"
+  },
+  {
+   "peer": "a",
+   "op": "dump",
+   "name": "sheet-02-unticked"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:I want my code right away, and I understand that I give up my 14-day right to cancel.",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "sheet-03-ticked"
+  },
+  {
+   "peer": "a",
+   "op": "reveal",
+   "target": "text:See all their work"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "sheet-04-artist"
+  }
+ ]
+}

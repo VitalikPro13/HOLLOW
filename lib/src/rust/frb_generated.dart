@@ -19131,6 +19131,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  List<ShopLink> dco_decode_list_shop_link(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>).map(dco_decode_shop_link).toList();
+  }
+
+  @protected
   List<ShopListing> dco_decode_list_shop_listing(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return (raw as List<dynamic>).map(dco_decode_shop_listing).toList();
@@ -21026,14 +21032,16 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ShopArtist dco_decode_shop_artist(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 5)
-      throw Exception('unexpected arr length: expect 5 but see ${arr.length}');
+    if (arr.length != 7)
+      throw Exception('unexpected arr length: expect 7 but see ${arr.length}');
     return ShopArtist(
       slug: dco_decode_String(arr[0]),
       displayName: dco_decode_String(arr[1]),
       bio: dco_decode_String(arr[2]),
       headerHash: dco_decode_String(arr[3]),
-      url: dco_decode_String(arr[4]),
+      avatarHash: dco_decode_String(arr[4]),
+      links: dco_decode_list_shop_link(arr[5]),
+      url: dco_decode_String(arr[6]),
     );
   }
 
@@ -21063,6 +21071,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       w: dco_decode_u_32(arr[3]),
       h: dco_decode_u_32(arr[4]),
       animated: dco_decode_bool(arr[5]),
+    );
+  }
+
+  @protected
+  ShopLink dco_decode_shop_link(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 2)
+      throw Exception('unexpected arr length: expect 2 but see ${arr.length}');
+    return ShopLink(
+      label: dco_decode_String(arr[0]),
+      url: dco_decode_String(arr[1]),
     );
   }
 
@@ -23281,6 +23301,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var ans_ = <ShopFile>[];
     for (var idx_ = 0; idx_ < len_; ++idx_) {
       ans_.add(sse_decode_shop_file(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
+  List<ShopLink> sse_decode_list_shop_link(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <ShopLink>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_shop_link(deserializer));
     }
     return ans_;
   }
@@ -25863,12 +25895,16 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_displayName = sse_decode_String(deserializer);
     var var_bio = sse_decode_String(deserializer);
     var var_headerHash = sse_decode_String(deserializer);
+    var var_avatarHash = sse_decode_String(deserializer);
+    var var_links = sse_decode_list_shop_link(deserializer);
     var var_url = sse_decode_String(deserializer);
     return ShopArtist(
       slug: var_slug,
       displayName: var_displayName,
       bio: var_bio,
       headerHash: var_headerHash,
+      avatarHash: var_avatarHash,
+      links: var_links,
       url: var_url,
     );
   }
@@ -25903,6 +25939,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       h: var_h,
       animated: var_animated,
     );
+  }
+
+  @protected
+  ShopLink sse_decode_shop_link(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_label = sse_decode_String(deserializer);
+    var var_url = sse_decode_String(deserializer);
+    return ShopLink(label: var_label, url: var_url);
   }
 
   @protected
@@ -27954,6 +27998,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_i_32(self.length, serializer);
     for (final item in self) {
       sse_encode_shop_file(item, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_list_shop_link(
+    List<ShopLink> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_shop_link(item, serializer);
     }
   }
 
@@ -30268,6 +30324,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_String(self.displayName, serializer);
     sse_encode_String(self.bio, serializer);
     sse_encode_String(self.headerHash, serializer);
+    sse_encode_String(self.avatarHash, serializer);
+    sse_encode_list_shop_link(self.links, serializer);
     sse_encode_String(self.url, serializer);
   }
 
@@ -30288,6 +30346,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_u_32(self.w, serializer);
     sse_encode_u_32(self.h, serializer);
     sse_encode_bool(self.animated, serializer);
+  }
+
+  @protected
+  void sse_encode_shop_link(ShopLink self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.label, serializer);
+    sse_encode_String(self.url, serializer);
   }
 
   @protected

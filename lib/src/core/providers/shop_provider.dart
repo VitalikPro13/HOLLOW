@@ -16,6 +16,7 @@ export 'package:hollow/src/rust/api/shop.dart'
         ShopArtist,
         ShopCatalog,
         ShopFile,
+        ShopLink,
         ShopListing,
         forgetRedeemCode,
         keepRedeemCode,

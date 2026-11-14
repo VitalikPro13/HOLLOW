@@ -38,6 +38,21 @@ const MAX_CATALOG_BYTES: usize = 4 * 1024 * 1024;
 /// `hollow://redeem/…` link farm has this many and then nothing.
 const MAX_KEPT_REDEEM_CODES: u32 = 64;
 
+/// Caps on what an artist types into their shop profile. The catalog is ours, the
+/// words in it are theirs.
+const MAX_ARTIST_LINKS: usize = 8;
+const MAX_LINK_LABEL_CHARS: usize = 32;
+const MAX_LINK_URL_BYTES: usize = 512;
+const MAX_ARTIST_NAME_CHARS: usize = 80;
+const MAX_ARTIST_BIO_CHARS: usize = 1000;
+const MAX_DESCRIPTION_LINES: usize = 60;
+/// Last labels that name this machine or its local network (RFC 6761, 6762,
+/// 8375, 7686 and the common private ones): a tap there never leaves the house.
+const SPECIAL_USE_TLDS: [&str; 11] =
+    ["localhost", "localdomain", "local", "internal", "arpa", "test", "invalid", "example", "onion", "lan", "home"];
+const MAX_BIO_LINES: usize = 20;
+const MAX_LICENCE_LINES: usize = 12;
+
 /// The shop origin.
 ///
 /// In DEBUG builds only, `HOLLOW_SHOP_ORIGIN` overrides it, which is how the local
@@ -82,8 +97,21 @@ pub struct ShopArtist {
     pub bio: String,
     /// Hash of the artist page's header art, `""` when there is none.
     pub header_hash: String,
+    /// Hash of the artist's face, `""` when there is none.
+    pub avatar_hash: String,
+    /// The artist's own links: https to a named host, labelled, at most
+    /// [`MAX_ARTIST_LINKS`].
+    pub links: Vec<ShopLink>,
     /// `{origin}/@{slug}`, or `""` when the slug is not a shape we will build
     /// a URL out of.
+    pub url: String,
+}
+
+/// One of an artist's own links.
+#[derive(Debug, Clone)]
+pub struct ShopLink {
+    pub label: String,
+    /// Rebuilt from its parsed form, never the string the artist typed.
     pub url: String,
 }
 
@@ -230,6 +258,19 @@ struct RawArtist {
     bio: String,
     #[serde(default, deserialize_with = "lenient")]
     header_hash: Option<String>,
+    #[serde(default, deserialize_with = "lenient")]
+    avatar_hash: Option<String>,
+    #[serde(default, deserialize_with = "lenient_vec")]
+    links: Vec<RawLink>,
+}
+
+#[frb(ignore)]
+#[derive(Debug, Default, Deserialize)]
+struct RawLink {
+    #[serde(default, deserialize_with = "lenient")]
+    label: String,
+    #[serde(default, deserialize_with = "lenient")]
+    url: String,
 }
 
 #[frb(ignore)]
@@ -373,6 +414,113 @@ fn clamp(s: &str, max: usize) -> String {
     t.chars().take(max).collect()
 }
 
+/// Embedding, override and isolate controls and the direction marks: an artist's
+/// string must never reorder the text drawn around it.
+fn is_bidi_control(c: char) -> bool {
+    matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200E}' | '\u{200F}' | '\u{061C}')
+}
+
+/// Format characters (general category Cf) draw nothing, so a name made of them is a
+/// blank name and a line made of them a blank line. The zero-width joiner stays:
+/// emoji sequences need it.
+fn is_invisible_format(c: char) -> bool {
+    matches!(c,
+        '\u{00AD}' | '\u{0600}'..='\u{0605}' | '\u{061C}' | '\u{06DD}' | '\u{070F}'
+        | '\u{0890}'..='\u{0891}' | '\u{08E2}' | '\u{180E}' | '\u{200B}'..='\u{200C}'
+        | '\u{200E}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2064}'
+        | '\u{2066}'..='\u{206F}' | '\u{FEFF}' | '\u{FFF9}'..='\u{FFFB}' | '\u{110BD}'
+        | '\u{110CD}' | '\u{13430}'..='\u{1343F}' | '\u{1BCA0}'..='\u{1BCA3}'
+        | '\u{1D173}'..='\u{1D17A}' | '\u{E0001}' | '\u{E0020}'..='\u{E007F}')
+}
+
+/// What no artist string keeps: controls, direction controls, invisible format
+/// characters.
+fn is_dropped(c: char) -> bool {
+    c.is_control() || is_bidi_control(c) || is_invisible_format(c)
+}
+
+/// One line of an artist's text: every line break or tab a space, dropped characters
+/// gone, capped at `max` characters. Callers judge emptiness on the result.
+fn clean_line(s: &str, max: usize) -> String {
+    let flat: String = s
+        .chars()
+        .map(|c| if matches!(c, '\n' | '\r' | '\t' | '\u{2028}' | '\u{2029}') { ' ' } else { c })
+        .filter(|c| !is_dropped(*c))
+        .collect();
+    clamp(&flat, max)
+}
+
+/// A block of an artist's text: dropped characters gone, at most `max_lines` lines,
+/// never two blank lines in a row, capped at `max` characters. A line is blank when
+/// nothing visible is left on it, whatever spaces it held.
+fn clean_block(s: &str, max: usize, max_lines: usize) -> String {
+    let unified = s.replace("\r\n", "\n");
+    let mut lines: Vec<String> = Vec::new();
+    for raw in unified.split(['\n', '\r', '\u{2028}', '\u{2029}']) {
+        let kept: String = raw
+            .chars()
+            .map(|c| if c == '\t' { ' ' } else { c })
+            .filter(|c| !is_dropped(*c))
+            .collect();
+        // Trimming takes every space kind, so a line of spaces is a blank line.
+        let line = kept.trim_end().to_string();
+        if line.is_empty() && lines.last().is_none_or(|l| l.is_empty()) {
+            continue;
+        }
+        lines.push(line);
+    }
+    lines.truncate(max_lines);
+    clamp(&lines.join("\n"), max)
+}
+
+/// The host of an https link an artist typed, or None when it is not a name a
+/// person could read: no address literal, no port, no credentials.
+fn link_host(url: &reqwest::Url) -> Option<&str> {
+    if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some() || url.port().is_some() {
+        return None;
+    }
+    let host = url.host_str()?;
+    let labels: Vec<&str> = host.split('.').collect();
+    let named = host.len() <= 253
+        && labels.len() >= 2
+        && labels.iter().all(|l| {
+            !l.is_empty()
+                && l.len() <= 63
+                && l.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        })
+        // An all-digit last label is an address in disguise, never a name, and a
+        // special-use one names this machine or its network.
+        && labels
+            .last()
+            .is_some_and(|tld| tld.bytes().any(|b| b.is_ascii_lowercase()) && !SPECIAL_USE_TLDS.contains(tld));
+    named.then_some(host)
+}
+
+/// One of an artist's links, or None. A typed URL with a control, space, direction
+/// control or backslash is refused; anything else the parser normalises, and Dart
+/// only ever sees that parsed form.
+fn sanitize_link(raw: RawLink) -> Option<ShopLink> {
+    let typed = raw.url.trim();
+    if typed.is_empty()
+        || typed.len() > MAX_LINK_URL_BYTES
+        || typed.chars().any(|c| c.is_control() || c.is_whitespace() || is_bidi_control(c) || c == '\\')
+    {
+        return None;
+    }
+    let parsed = reqwest::Url::parse(typed).ok()?;
+    let host = link_host(&parsed)?;
+    let url = parsed.as_str().to_string();
+    if url.len() > MAX_LINK_URL_BYTES {
+        return None;
+    }
+    let mut label = clean_line(&raw.label, MAX_LINK_LABEL_CHARS);
+    if label.is_empty() {
+        // A link with no label is named by its host, as the shop names it.
+        label = clamp(host.strip_prefix("www.").unwrap_or(host), MAX_LINK_LABEL_CHARS);
+    }
+    Some(ShopLink { label, url })
+}
+
 fn sanitize_file(raw: RawFile) -> Option<ShopFile> {
     let sha256 = raw.sha256.trim().to_string();
     if !valid_emote_hash(&sha256) {
@@ -406,7 +554,7 @@ fn sanitize_listing(raw: RawListing, origin: &str) -> Option<ShopListing> {
     if !valid_slug(&slug) {
         return None;
     }
-    let title = clamp(&raw.title, 200);
+    let title = clean_line(&raw.title, 200);
     if title.is_empty() {
         return None;
     }
@@ -470,14 +618,27 @@ fn sanitize_listing(raw: RawListing, origin: &str) -> Option<ShopListing> {
             String::new()
         },
         slug: artist_slug,
-        display_name: clamp(&raw.artist.display_name, 200),
-        bio: clamp(&raw.artist.bio, 4000),
+        display_name: clean_line(&raw.artist.display_name, MAX_ARTIST_NAME_CHARS),
+        bio: clean_block(&raw.artist.bio, MAX_ARTIST_BIO_CHARS, MAX_BIO_LINES),
         header_hash: raw
             .artist
             .header_hash
             .map(|h| h.trim().to_string())
             .filter(|h| valid_emote_hash(h))
             .unwrap_or_default(),
+        avatar_hash: raw
+            .artist
+            .avatar_hash
+            .map(|h| h.trim().to_string())
+            .filter(|h| valid_emote_hash(h))
+            .unwrap_or_default(),
+        links: raw
+            .artist
+            .links
+            .into_iter()
+            .filter_map(sanitize_link)
+            .take(MAX_ARTIST_LINKS)
+            .collect(),
     };
 
     Some(ShopListing {
@@ -493,13 +654,13 @@ fn sanitize_listing(raw: RawListing, origin: &str) -> Option<ShopListing> {
         bundle: kinds.len() >= 2,
         slug,
         title,
-        description: clamp(&raw.description, 4000),
+        description: clean_block(&raw.description, 4000, MAX_DESCRIPTION_LINES),
         kinds,
         price_cents,
         price_label: price_label(price_cents),
         was_cents,
         was_label: if was_cents > 0 { price_label(was_cents) } else { String::new() },
-        license: clamp(&raw.license, 1000),
+        license: clean_block(&raw.license, 1000, MAX_LICENCE_LINES),
         created_at: clamp(&raw.created_at, 64),
         artist,
         files,
@@ -1983,6 +2144,217 @@ mod tests {
         assert_eq!((derived.was_cents, derived.was_label.as_str()), (0, ""), "no sale, no was");
     }
 
+    /// One listing whose artist is `artist` (a JSON object), parsed.
+    fn artist_of(artist: serde_json::Value) -> ShopArtist {
+        artist_listing(artist, serde_json::json!({})).artist
+    }
+
+    /// One listing with `artist` and the listing fields in `extra` laid over a
+    /// minimal valid listing.
+    fn artist_listing(artist: serde_json::Value, extra: serde_json::Value) -> ShopListing {
+        let mut listing = serde_json::json!({
+            "slug": "piece",
+            "title": "Piece",
+            "kinds": ["avatar"],
+            "price_cents": 100,
+            "artist": artist,
+            "files": [{ "role": "avatar", "sha256": h("ab"), "bytes": 9, "w": 8, "h": 8 }],
+        });
+        for (k, v) in extra.as_object().unwrap() {
+            listing[k] = v.clone();
+        }
+        let body = serde_json::json!({ "listings": [listing] }).to_string();
+        let mut cat = parse_catalog(body.as_bytes(), "https://shop.example").expect("parses");
+        assert_eq!(cat.listings.len(), 1);
+        cat.listings.remove(0)
+    }
+
+    #[test]
+    fn an_old_catalog_artist_has_no_face_and_no_links() {
+        let a = artist_of(serde_json::json!({ "slug": "nadia", "display_name": "Nadia", "bio": "" }));
+        assert_eq!(a.avatar_hash, "");
+        assert!(a.links.is_empty());
+        let wrong_types = artist_of(serde_json::json!({
+            "slug": "nadia", "display_name": "Nadia", "avatar_hash": 7, "links": { "not": "a list" }
+        }));
+        assert_eq!(wrong_types.avatar_hash, "", "a wrong type narrows the field, never the listing");
+        assert!(wrong_types.links.is_empty());
+    }
+
+    #[test]
+    fn artist_face_is_kept_only_as_a_hash() {
+        let face = h("c4");
+        let a = artist_of(serde_json::json!({ "slug": "nadia", "avatar_hash": format!(" {face} ") }));
+        assert_eq!(a.avatar_hash, face);
+        for bad in ["", "../../etc/passwd", "ABCDEF", "https://evil.example/a.webp"] {
+            let a = artist_of(serde_json::json!({ "slug": "nadia", "avatar_hash": bad }));
+            assert_eq!(a.avatar_hash, "", "{bad} is not a shop art address");
+        }
+    }
+
+    #[test]
+    fn artist_links_are_sane_https_only() {
+        let link = |label: &str, url: &str| serde_json::json!({ "label": label, "url": url });
+        let a = artist_of(serde_json::json!({
+            "slug": "nadia",
+            "links": [
+                link("VGen", "https://vgen.co/Nian11"),
+                link("", "https://www.instagram.com/faronee_"),
+                link("Face\u{202E}koob", "https://www.facebook.com/profile.php?id=1&x=y"),
+                link("http", "http://example.com/"),
+                link("script", "javascript:alert(1)"),
+                link("file", "file:///C:/Windows/System32/calc.exe"),
+                link("creds", "https://user:pw@example.com/"),
+                link("ip", "https://127.0.0.1/"),
+                link("ip6", "https://[::1]/"),
+                link("hex ip", "https://0x7f.1/"),
+                link("no dot", "https://localhost/"),
+                link("port", "https://example.com:8443/"),
+                link("space", "https://example.com/a b"),
+                link("newline", "https://example.com/\nx"),
+                link("bidi", "https://example.com/\u{202E}gpj.exe"),
+                link("backslash", "https:\\\\example.com\\x"),
+                link("long", &format!("https://example.com/{}", "a".repeat(600))),
+                serde_json::json!("https://not-an-object.example/"),
+                serde_json::json!({ "label": 5, "url": "https://number-label.example.org/" }),
+            ]
+        }));
+        let got: Vec<(&str, &str)> = a.links.iter().map(|l| (l.label.as_str(), l.url.as_str())).collect();
+        assert_eq!(
+            got,
+            vec![
+                ("VGen", "https://vgen.co/Nian11"),
+                ("instagram.com", "https://www.instagram.com/faronee_"),
+                ("Facekoob", "https://www.facebook.com/profile.php?id=1&x=y"),
+                ("number-label.example.org", "https://number-label.example.org/"),
+            ],
+            "only https to a named host survives, a missing label is the host, bidi controls go"
+        );
+
+        let many: Vec<_> = (0..20).map(|i| link(&format!("L{i}"), &format!("https://e{i}.example.org/"))).collect();
+        let a = artist_of(serde_json::json!({ "slug": "nadia", "links": many }));
+        assert_eq!(a.links.len(), MAX_ARTIST_LINKS);
+        assert_eq!(a.links[0].label, "L0", "the cap keeps the artist's own order");
+
+        let a = artist_of(serde_json::json!({ "slug": "nadia", "links": [link(&"x".repeat(200), "https://e.example.org/")] }));
+        assert_eq!(a.links[0].label.chars().count(), MAX_LINK_LABEL_CHARS);
+    }
+
+    #[test]
+    fn artist_and_listing_text_is_plain_and_capped() {
+        let l = artist_listing(
+            serde_json::json!({
+                "slug": "nadia",
+                "display_name": "Na\u{202E}dia\u{2066}\nX\u{0007}",
+                "bio": "line one\r\nline two\u{200F}\u{0000}",
+            }),
+            serde_json::json!({
+                "title": "Sua\u{202E}\u{2069} piece\r\n",
+                "description": "School Sua.\r\n\r\n\r\n\r\nUnofficial \u{202D}fanart.\u{001B}[31m",
+                "license": "Personal\u{2067} licence.",
+            }),
+        );
+        assert_eq!(l.artist.display_name, "Nadia X", "a name is one line with no controls");
+        assert_eq!(l.artist.bio, "line one\nline two");
+        assert_eq!(l.title, "Sua piece");
+        assert_eq!(l.description, "School Sua.\n\nUnofficial fanart.[31m", "line breaks stay, at most one blank line");
+        assert_eq!(l.license, "Personal licence.");
+
+        let long = artist_listing(
+            serde_json::json!({ "slug": "nadia", "display_name": "n".repeat(500), "bio": "b".repeat(5000) }),
+            serde_json::json!({}),
+        );
+        assert_eq!(long.artist.display_name.chars().count(), MAX_ARTIST_NAME_CHARS);
+        assert_eq!(long.artist.bio.chars().count(), MAX_ARTIST_BIO_CHARS);
+        // An emoji sequence keeps its joiner: only direction controls go.
+        let emoji = artist_of(serde_json::json!({ "slug": "nadia", "display_name": "Ana \u{1F469}\u{200D}\u{1F3A8}" }));
+        assert_eq!(emoji.display_name, "Ana \u{1F469}\u{200D}\u{1F3A8}");
+    }
+
+    #[test]
+    fn artist_text_blank_lines_hold_with_whitespace_only_lines() {
+        for filler in [" \n", "\n\u{200B}", "\t\u{FEFF} \r\n", "\n\u{00A0}"] {
+            let l = artist_listing(
+                serde_json::json!({ "slug": "nadia", "bio": format!("Hi.{}there", filler.repeat(400)) }),
+                serde_json::json!({
+                    "description": format!("Top.{}End.", filler.repeat(400)),
+                    "license": format!("Personal.{}", filler.repeat(400)),
+                }),
+            );
+            for (what, text) in [("bio", &l.artist.bio), ("description", &l.description), ("licence", &l.license)] {
+                assert!(
+                    !text.contains("\n\n\n"),
+                    "{what} holds at most one blank line with {filler:?} filler: {text:?}"
+                );
+                assert!(text.lines().all(|line| line == line.trim_end()), "{what} keeps no trailing spaces");
+            }
+            assert_eq!(l.license, "Personal.", "trailing blank lines go");
+        }
+        // Every block has a line bound too, blank or not.
+        let many = (0..500).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let l = artist_listing(
+            serde_json::json!({ "slug": "nadia", "bio": many }),
+            serde_json::json!({ "description": many, "license": many }),
+        );
+        assert_eq!(l.description.lines().count(), MAX_DESCRIPTION_LINES);
+        assert_eq!(l.artist.bio.lines().count(), MAX_BIO_LINES);
+        assert_eq!(l.license.lines().count(), MAX_LICENCE_LINES);
+    }
+
+    #[test]
+    fn artist_text_drops_invisible_format_characters() {
+        let hidden = "\u{200B}\u{2060}\u{2061}\u{2064}\u{FEFF}\u{00AD}\u{206A}\u{FFF9}\u{E0001}\u{E0041}\u{180E}";
+        let a = artist_of(serde_json::json!({
+            "slug": "nadia",
+            "display_name": format!("Na{hidden}dia"),
+            "bio": format!("soft{hidden} colours"),
+            "links": [{ "label": hidden, "url": "https://vgen.co/nadia" }],
+        }));
+        assert_eq!(a.display_name, "Nadia");
+        assert_eq!(a.bio, "soft colours");
+        assert_eq!(a.links[0].label, "vgen.co", "an invisible label is no label: the host names it");
+
+        let body = serde_json::json!({ "listings": [{
+            "slug": "blank", "title": "\u{FEFF}\u{200B}", "kinds": ["avatar"], "price_cents": 100,
+            "artist": { "slug": "nadia" },
+            "files": [{ "role": "avatar", "sha256": h("ab"), "bytes": 9, "w": 8, "h": 8 }],
+        }]})
+        .to_string();
+        let cat = parse_catalog(body.as_bytes(), "https://shop.example").expect("parses");
+        assert!(cat.listings.is_empty(), "a title of nothing visible drops the listing");
+
+        // The joiner stays: emoji sequences need it.
+        let a = artist_of(serde_json::json!({ "slug": "nadia", "display_name": "Ana \u{1F469}\u{200D}\u{1F3A8}" }));
+        assert_eq!(a.display_name, "Ana \u{1F469}\u{200D}\u{1F3A8}");
+    }
+
+    #[test]
+    fn artist_links_refuse_special_use_names() {
+        let link = |url: &str| serde_json::json!({ "label": "L", "url": url });
+        let bad = [
+            "https://foo.localhost/",
+            "https://localhost.localdomain/",
+            "https://printer.local/",
+            "https://db.internal/",
+            "https://router.home.arpa/",
+            "https://1.0.0.127.in-addr.arpa/",
+            "https://a.test/",
+            "https://a.invalid/",
+            "https://a.example/",
+            "https://abcdefabcdefabcd.onion/",
+            "https://nas.lan/",
+            "https://nas.home/",
+            "https://FOO.LOCALHOST./",
+            "https://intranet/",
+        ];
+        let a = artist_of(serde_json::json!({
+            "slug": "nadia",
+            "links": bad.iter().map(|u| link(u)).chain([link("https://vgen.co/nadia")]).collect::<Vec<_>>(),
+        }));
+        let got: Vec<&str> = a.links.iter().map(|l| l.url.as_str()).collect();
+        assert_eq!(got, vec!["https://vgen.co/nadia"], "special-use names never reach a tap");
+    }
+
     #[test]
     fn display_hash_follows_the_site_rule() {
         // (a) A bundle with a banner and a frame leads with the banner.
@@ -2824,6 +3196,11 @@ mod tests {
             cat.listings.len()
         );
         for l in &cat.listings {
+            println!(
+                "    artist face={} links={:?}",
+                !l.artist.avatar_hash.is_empty(),
+                l.artist.links.iter().map(|k| (&k.label, &k.url)).collect::<Vec<_>>()
+            );
             println!(
                 "  {} by {} — {} {:?} display={} still={:?} wide={} bundle={}",
                 l.title,

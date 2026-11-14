@@ -165,6 +165,54 @@ void main() {
     debugDefaultTargetPlatformOverride = null;
   });
 
+  Future<void> openItem(WidgetTester tester, String title) async {
+    await tester.scrollUntilVisible(find.text(title).first, 300,
+        scrollable: find.byType(Scrollable).first);
+    await tester.pump();
+    await tester.tap(find.text(title).first);
+    await settleImages(tester);
+  }
+
+  Future<void> tick(WidgetTester tester) async {
+    final consent = find.textContaining('right to cancel');
+    if (consent.evaluate().isEmpty) return;
+    await tester.tap(consent);
+    await settleImages(tester);
+  }
+
+  testWidgets('desktop item dialog, single avatar, ticked', (tester) async {
+    await pumpShop(tester, const Size(1280, 900), phone: false);
+    await openItem(tester, 'Listening');
+    await tick(tester);
+    await capture(tester, 'shop-desktop-item-avatar-ticked');
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets('desktop item dialog, 900 wide', (tester) async {
+    await pumpShop(tester, const Size(900, 700), phone: false);
+    await openItem(tester, 'Listening');
+    await capture(tester, 'shop-desktop-item-900');
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  testWidgets('desktop item dialog, 620 wide (stacked)', (tester) async {
+    await pumpShop(tester, const Size(620, 900), phone: false);
+    await tester.tap(find.text('Night shift').first);
+    await settleImages(tester);
+    await capture(tester, 'shop-desktop-item-620');
+    debugDefaultTargetPlatformOverride = null;
+  });
+
+  for (final width in [375.0, 320.0]) {
+    testWidgets('phone item sheet, whole, $width wide', (tester) async {
+      await pumpShop(tester, Size(width, 1700), phone: true);
+      await tester.tap(find.text('Listening').first);
+      await settleImages(tester);
+      await capture(tester, 'shop-phone-item-${width.toInt()}-whole');
+      debugDefaultTargetPlatformOverride = null;
+    });
+  }
+
   testWidgets('phone shelves', (tester) async {
     await pumpShop(tester, const Size(390, 1500), phone: true);
     await capture(tester, 'shop-phone-all');
@@ -201,6 +249,7 @@ final _hCircuit = _h('5');
 final _hLaurel = _h('6');
 final _hSakura = _h('7');
 final _hBanner = _h('8');
+final _hFace = _h('9');
 
 final _files = {
   _hMe: 'avatar_v13.jpg',
@@ -212,13 +261,21 @@ final _files = {
   _hLaurel: 'frame_laurel.png',
   _hSakura: 'frame_sakura.png',
   _hBanner: 'banner_1200x480.png',
+  _hFace: 'artist_face.webp',
 };
 
-const _artist = shop.ShopArtist(
+final _artist = shop.ShopArtist(
   slug: 'mira',
   displayName: 'Mira K.',
-  bio: '',
+  bio: 'Hi, Mira here. I draw soft, small portraits and frames, and nothing '
+      'makes me happier than seeing people wear them. Commissions are open '
+      'twice a year.',
   headerHash: '',
+  avatarHash: _hFace,
+  links: const [
+    shop.ShopLink(label: 'VGen', url: 'https://vgen.co/mira'),
+    shop.ShopLink(label: 'Instagram', url: 'https://www.instagram.com/mira'),
+  ],
   url: 'https://shop.anonlisten.com/@mira',
 );
 

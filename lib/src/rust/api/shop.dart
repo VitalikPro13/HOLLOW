@@ -8,9 +8,9 @@ import 'network.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 // These functions are ignored because they are not marked as `pub`: `announce_support_creds`, `apply_hidden`, `badge_on`, `by_role`, `check_art_bytes`, `clamp`, `display_file_for`, `drop_other_twitch_owner_creds`, `fetch_bounded`, `fetch_pack`, `file_for_kind`, `forget_own_cred`, `forget_twitch_owner_creds`, `hidden_on`, `http`, `keep_own_cred_row`, `keep_own_credential`, `kind_of_role`, `kind_roles`, `kofi_buy_url`, `lenient_vec`, `lenient`, `lookup_refusal`, `lookup_remote`, `lookup_status_is_dead`, `mint_twitch_credential`, `my_master_peer_id`, `own_credential_union`, `own_twitch_owner_entry`, `parse_catalog`, `post_json_bounded`, `price_label`, `primary_kind_of`, `published_creds_json`, `read_bounded`, `redeem_remote`, `removed_items`, `republish_support_creds`, `republish_to_row`, `sanitize_file`, `sanitize_listing`, `save_removed_items`, `shop_art_from`, `shop_client`, `shop_refusal`, `support_badge_preference`, `twitch_post`, `twitch_refusal`, `twitch_request_body`, `union_json`, `valid_redeem_code`, `valid_slug`, `verify_twitch_owner_with`
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `RawArtist`, `RawCatalog`, `RawFile`, `RawListing`, `RawLookupListing`, `RawLookup`, `RawRedeem`, `RawTwitchKey`, `TwitchVerifier`, `UnionEntry`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
-// These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`, `default`, `default`, `default`, `default`, `default`, `default`, `default`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `RawArtist`, `RawCatalog`, `RawFile`, `RawLink`, `RawListing`, `RawLookupListing`, `RawLookup`, `RawRedeem`, `RawTwitchKey`, `TwitchVerifier`, `UnionEntry`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These functions are ignored (category: IgnoreBecauseOwnerTyShouldIgnore): `default`, `default`, `default`, `default`, `default`, `default`, `default`, `default`, `default`
 
 /// The shop origin.
 ///
@@ -308,6 +308,13 @@ class ShopArtist {
   /// Hash of the artist page's header art, `""` when there is none.
   final String headerHash;
 
+  /// Hash of the artist's face, `""` when there is none.
+  final String avatarHash;
+
+  /// The artist's own links: https to a named host, labelled, at most
+  /// [`MAX_ARTIST_LINKS`].
+  final List<ShopLink> links;
+
   /// `{origin}/@{slug}`, or `""` when the slug is not a shape we will build
   /// a URL out of.
   final String url;
@@ -317,6 +324,8 @@ class ShopArtist {
     required this.displayName,
     required this.bio,
     required this.headerHash,
+    required this.avatarHash,
+    required this.links,
     required this.url,
   });
 
@@ -326,6 +335,8 @@ class ShopArtist {
       displayName.hashCode ^
       bio.hashCode ^
       headerHash.hashCode ^
+      avatarHash.hashCode ^
+      links.hashCode ^
       url.hashCode;
 
   @override
@@ -337,6 +348,8 @@ class ShopArtist {
           displayName == other.displayName &&
           bio == other.bio &&
           headerHash == other.headerHash &&
+          avatarHash == other.avatarHash &&
+          links == other.links &&
           url == other.url;
 }
 
@@ -412,6 +425,27 @@ class ShopFile {
           w == other.w &&
           h == other.h &&
           animated == other.animated;
+}
+
+/// One of an artist's own links.
+class ShopLink {
+  final String label;
+
+  /// Rebuilt from its parsed form, never the string the artist typed.
+  final String url;
+
+  const ShopLink({required this.label, required this.url});
+
+  @override
+  int get hashCode => label.hashCode ^ url.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ShopLink &&
+          runtimeType == other.runtimeType &&
+          label == other.label &&
+          url == other.url;
 }
 
 /// One thing for sale, already reduced to what a card needs to draw.

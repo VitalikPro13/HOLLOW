@@ -121,7 +121,7 @@ const _allowed = <String, (int, String)>{
   'lib/src/ui/shop/owned_art_panel.dart':
       (3, 'gated: owned art and seeded frames via get_emote_bytes'),
   'lib/src/ui/shop/shop_art.dart':
-      (5, 'gated: shop art and its seeded frame via fetch_shop_art (image_shown) and our banner'),
+      (6, 'gated: shop art, its seeded frame and the artist face via fetch_shop_art (image_shown) and our banner'),
 };
 
 /// Raw-decode sites in [source], comment lines left out; a call may span lines.

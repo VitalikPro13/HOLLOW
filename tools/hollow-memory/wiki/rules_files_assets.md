@@ -66,6 +66,11 @@ stay in CLAUDE.md. Wiki `rust_file_handler`, `emotes`, `hollowpack`.
   `feedback_antialiased_seam_bleed`.
 - Shop UI ONLY behind `shopAvailableProvider` (the store verdict, always on elsewhere
   since 0.12). CLI for packs: `rust/hollow_art`. `project_shop_app_client`.
+- The item dialog mirrors the website's item sheet (same content, same order; change both).
+  Buy on Ko-fi stays DISABLED until the right-to-cancel box is ticked, unticked on every
+  open (EU consent before paying; the app's Buy skips the shop's own page). Artist links,
+  face, name, bio come from Rust already cleaned (`sanitize_link`, `clean_line`/`clean_block`)
+  and open only via `openUntrustedUrl`. Wiki `hollowpack`, `security_write_gates` §72.
 - A thumbnail from a peer (file-card blur, video poster, link-card thumb) reaches Dart
   ONLY via `image_convert::peer_thumb_for_display` (pure-Rust decode + our own re-encode,
   or dropped); never change the stored bytes, they sit inside the author's signature.

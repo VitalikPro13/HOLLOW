@@ -18759,6 +18759,18 @@ impl SseDecode for Vec<crate::api::shop::ShopFile> {
     }
 }
 
+impl SseDecode for Vec<crate::api::shop::ShopLink> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = vec![];
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::shop::ShopLink>::sse_decode(deserializer));
+        }
+        return ans_;
+    }
+}
+
 impl SseDecode for Vec<crate::api::shop::ShopListing> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -21691,12 +21703,16 @@ impl SseDecode for crate::api::shop::ShopArtist {
         let mut var_displayName = <String>::sse_decode(deserializer);
         let mut var_bio = <String>::sse_decode(deserializer);
         let mut var_headerHash = <String>::sse_decode(deserializer);
+        let mut var_avatarHash = <String>::sse_decode(deserializer);
+        let mut var_links = <Vec<crate::api::shop::ShopLink>>::sse_decode(deserializer);
         let mut var_url = <String>::sse_decode(deserializer);
         return crate::api::shop::ShopArtist {
             slug: var_slug,
             display_name: var_displayName,
             bio: var_bio,
             header_hash: var_headerHash,
+            avatar_hash: var_avatarHash,
+            links: var_links,
             url: var_url,
         };
     }
@@ -21732,6 +21748,18 @@ impl SseDecode for crate::api::shop::ShopFile {
             w: var_w,
             h: var_h,
             animated: var_animated,
+        };
+    }
+}
+
+impl SseDecode for crate::api::shop::ShopLink {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_label = <String>::sse_decode(deserializer);
+        let mut var_url = <String>::sse_decode(deserializer);
+        return crate::api::shop::ShopLink {
+            label: var_label,
+            url: var_url,
         };
     }
 }
@@ -27385,6 +27413,8 @@ impl flutter_rust_bridge::IntoDart for crate::api::shop::ShopArtist {
             self.display_name.into_into_dart().into_dart(),
             self.bio.into_into_dart().into_dart(),
             self.header_hash.into_into_dart().into_dart(),
+            self.avatar_hash.into_into_dart().into_dart(),
+            self.links.into_into_dart().into_dart(),
             self.url.into_into_dart().into_dart(),
         ]
         .into_dart()
@@ -27434,6 +27464,22 @@ impl flutter_rust_bridge::IntoDart for crate::api::shop::ShopFile {
 impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::shop::ShopFile {}
 impl flutter_rust_bridge::IntoIntoDart<crate::api::shop::ShopFile> for crate::api::shop::ShopFile {
     fn into_into_dart(self) -> crate::api::shop::ShopFile {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::shop::ShopLink {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.label.into_into_dart().into_dart(),
+            self.url.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::shop::ShopLink {}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::shop::ShopLink> for crate::api::shop::ShopLink {
+    fn into_into_dart(self) -> crate::api::shop::ShopLink {
         self
     }
 }
@@ -29179,6 +29225,16 @@ impl SseEncode for Vec<crate::api::shop::ShopFile> {
         <i32>::sse_encode(self.len() as _, serializer);
         for item in self {
             <crate::api::shop::ShopFile>::sse_encode(item, serializer);
+        }
+    }
+}
+
+impl SseEncode for Vec<crate::api::shop::ShopLink> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::shop::ShopLink>::sse_encode(item, serializer);
         }
     }
 }
@@ -31541,6 +31597,8 @@ impl SseEncode for crate::api::shop::ShopArtist {
         <String>::sse_encode(self.display_name, serializer);
         <String>::sse_encode(self.bio, serializer);
         <String>::sse_encode(self.header_hash, serializer);
+        <String>::sse_encode(self.avatar_hash, serializer);
+        <Vec<crate::api::shop::ShopLink>>::sse_encode(self.links, serializer);
         <String>::sse_encode(self.url, serializer);
     }
 }
@@ -31563,6 +31621,14 @@ impl SseEncode for crate::api::shop::ShopFile {
         <u32>::sse_encode(self.w, serializer);
         <u32>::sse_encode(self.h, serializer);
         <bool>::sse_encode(self.animated, serializer);
+    }
+}
+
+impl SseEncode for crate::api::shop::ShopLink {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.label, serializer);
+        <String>::sse_encode(self.url, serializer);
     }
 }
 

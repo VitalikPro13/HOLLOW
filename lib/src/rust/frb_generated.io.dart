@@ -456,6 +456,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<ShopFile> dco_decode_list_shop_file(dynamic raw);
 
   @protected
+  List<ShopLink> dco_decode_list_shop_link(dynamic raw);
+
+  @protected
   List<ShopListing> dco_decode_list_shop_listing(dynamic raw);
 
   @protected
@@ -741,6 +744,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ShopFile dco_decode_shop_file(dynamic raw);
+
+  @protected
+  ShopLink dco_decode_shop_link(dynamic raw);
 
   @protected
   ShopListing dco_decode_shop_listing(dynamic raw);
@@ -1351,6 +1357,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<ShopFile> sse_decode_list_shop_file(SseDeserializer deserializer);
 
   @protected
+  List<ShopLink> sse_decode_list_shop_link(SseDeserializer deserializer);
+
+  @protected
   List<ShopListing> sse_decode_list_shop_listing(SseDeserializer deserializer);
 
   @protected
@@ -1700,6 +1709,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ShopFile sse_decode_shop_file(SseDeserializer deserializer);
+
+  @protected
+  ShopLink sse_decode_shop_link(SseDeserializer deserializer);
 
   @protected
   ShopListing sse_decode_shop_listing(SseDeserializer deserializer);
@@ -2504,6 +2516,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_list_shop_file(List<ShopFile> self, SseSerializer serializer);
 
   @protected
+  void sse_encode_list_shop_link(List<ShopLink> self, SseSerializer serializer);
+
+  @protected
   void sse_encode_list_shop_listing(
     List<ShopListing> self,
     SseSerializer serializer,
@@ -2964,6 +2979,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_shop_file(ShopFile self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_shop_link(ShopLink self, SseSerializer serializer);
 
   @protected
   void sse_encode_shop_listing(ShopListing self, SseSerializer serializer);

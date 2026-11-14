@@ -1,0 +1,65 @@
+{
+ "_": [
+  "t14-shopdlg: a store-like iPhone build has NO shop surface (unchanged): Settings shows no Hollow Shop tile.",
+  "run (Mac mini): FLEET_BACKEND=macos pwsh scripts/fleet.ps1 -Scenario shop_hidden_ios -Peers a=ios:<letter> -Relay hollowtest.duckdns.org"
+ ],
+ "peers": [
+  "a"
+ ],
+ "steps": [
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "provider": "connection",
+   "equals": "connected",
+   "timeout_ms": 120000
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 2000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Settings",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 2000
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "ios-01-settings"
+  },
+  {
+   "peer": "a",
+   "op": "scroll",
+   "target": "text:Appearance",
+   "dy": -1500
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "ios-02-settings-bottom"
+  },
+  {
+   "peer": "a",
+   "op": "expect_no_text",
+   "value": "Hollow Shop"
+  },
+  {
+   "peer": "a",
+   "op": "expect_no_text",
+   "value": "Ko-fi"
+  }
+ ]
+}
