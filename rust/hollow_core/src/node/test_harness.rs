@@ -60934,6 +60934,10 @@ async fn t14l_owner_with_two_devices(relay: &MockRelay, master: u8, first: u8, s
         wait_until(20, async || !relay.lock_chain(&server_id, &b.master_id).is_empty()).await,
         "the owner's first lock reaches the relay",
     );
+    assert!(
+        wait_until(20, async || c.live_server_state(&server_id).await.is_some()).await,
+        "the second owner device holds the server",
+    );
     (b, c, server_id)
 }
 
