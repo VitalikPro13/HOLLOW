@@ -125,7 +125,7 @@ class _FakeSource extends CallStageSource {
   @override
   CallBarModel? watchBar(BuildContext context, WidgetRef ref,
           CallStageData data,
-          {required bool fullscreen, required VoidCallback onFullscreen}) =>
+          {required bool fullscreen, required VoidCallback? onFullscreen}) =>
       _bar();
 }
 

@@ -767,7 +767,8 @@ class MobileOwnShare extends ConsumerWidget {
 
 /// A watched share at the top of the phone's call screen: 16:9, its name and
 /// Stop watching on it, Full screen in its corner. A tap opens it full screen
-/// too, the way clicking a focused share does on the desktop.
+/// too, the way clicking a focused share does on the desktop. Our own share
+/// never does: it would film itself.
 class MobileLiveShare extends StatelessWidget {
   final CallShare share;
   final VoidCallback? onStopWatching;
@@ -784,7 +785,7 @@ class MobileLiveShare extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final fullscreen = onFullscreen;
+    final fullscreen = share.isMine ? null : onFullscreen;
     return AspectRatio(
       aspectRatio: 16 / 9,
       child: Stack(

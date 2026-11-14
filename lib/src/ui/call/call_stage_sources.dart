@@ -210,7 +210,7 @@ class DmCallStageSource extends CallStageSource {
     WidgetRef ref,
     CallStageData data, {
     required bool fullscreen,
-    required VoidCallback onFullscreen,
+    required VoidCallback? onFullscreen,
   }) {
     final call = ref.watch(callProvider);
     final calls = ref.read(callProvider.notifier);
@@ -499,7 +499,7 @@ class VcCallStageSource extends CallStageSource {
     WidgetRef ref,
     CallStageData data, {
     required bool fullscreen,
-    required VoidCallback onFullscreen,
+    required VoidCallback? onFullscreen,
   }) {
     final vc = ref.watch(voiceChannelProvider);
     final notifier = ref.read(voiceChannelProvider.notifier);

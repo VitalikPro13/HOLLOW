@@ -61,7 +61,7 @@ class _Source extends CallStageSource {
   @override
   CallBarModel? watchBar(BuildContext context, WidgetRef ref,
           CallStageData data,
-          {required bool fullscreen, required VoidCallback onFullscreen}) =>
+          {required bool fullscreen, required VoidCallback? onFullscreen}) =>
       CallBarModel(
         startedAt: DateTime.now(),
         muted: false,

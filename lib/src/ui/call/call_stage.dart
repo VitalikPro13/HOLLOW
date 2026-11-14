@@ -36,7 +36,7 @@ abstract class CallStageSource {
     WidgetRef ref,
     CallStageData data, {
     required bool fullscreen,
-    required VoidCallback onFullscreen,
+    required VoidCallback? onFullscreen,
   });
 }
 
@@ -183,12 +183,18 @@ class _CallStageState extends ConsumerState<CallStage> {
       }
       return const SizedBox.shrink();
     }
+    // A full screen of our own share films the screen showing it.
+    final ownShareFocused = _ownShareFocused(data);
+    if (widget.fullscreen && ownShareFocused) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _close());
+      return const ColoredBox(color: HollowColors.mediaBlack);
+    }
     final bar = widget.source.watchBar(
       context,
       ref,
       data,
       fullscreen: widget.fullscreen,
-      onFullscreen: _toggleFullscreen,
+      onFullscreen: ownShareFocused ? null : _toggleFullscreen,
     );
     return widget.fullscreen
         ? _fullscreenStage(hollow, data, bar)
@@ -309,23 +315,49 @@ class _CallStageState extends ConsumerState<CallStage> {
 
   // --- layouts ------------------------------------------------------------------
 
+  bool _ownShareFocused(CallStageData data) {
+    final focus = data.layoutFocus;
+    return focus != null && (data.shareFor(focus)?.isMine ?? false);
+  }
+
+  /// Clicking a share focuses it, except our own inside the full screen.
+  VoidCallback? _focusTap(CallStageData data, CallShare share) =>
+      widget.fullscreen && share.isMine
+          ? null
+          : () => data.onFocus(share.source);
+
+  /// Our own share inside the full screen draws its placeholder: a live
+  /// preview there films the full screen showing it.
+  CallShare _withoutPreview(CallShare share) => CallShare(
+        owner: share.owner,
+        master: share.master,
+        isMine: share.isMine,
+        name: share.name,
+        watched: share.watched,
+        quality: share.quality,
+        watchers: share.watchers,
+        route: share.route,
+      );
+
   /// Offers first, then live shares, then people, you first.
   List<Widget> _gridTiles(CallStageData data) => [
         for (final s in data.shares)
-          if (s.isOffer) _shareTile(data, s, CallTileSize.large),
+          if (s.isOffer)
+            _shareTile(data, s, CallTileSize.large, onTap: _focusTap(data, s)),
         for (final s in data.shares)
-          if (!s.isOffer) _shareTile(data, s, CallTileSize.large),
+          if (!s.isOffer)
+            _shareTile(data, s, CallTileSize.large, onTap: _focusTap(data, s)),
         for (final p in data.people) _personTile(data, p, CallTileSize.large),
       ];
 
   Widget _shareTile(CallStageData data, CallShare share, CallTileSize size,
-      {VoidCallback? onTap, bool chrome = true}) {
+      {required VoidCallback? onTap, bool chrome = true}) {
     return ShareTile(
       key: ValueKey('share:${share.owner}'),
-      share: share,
+      share: widget.fullscreen && share.isMine ? _withoutPreview(share) : share,
       size: size,
       chromeVisible: chrome,
-      onTap: onTap ?? () => data.onFocus(share.source),
+      onTap: onTap,
       onWatch: () => data.onWatch(share.owner),
       onStopWatching: () => data.onStopWatching(share.owner),
       onRetryWatch: data.onRetryWatch == null
@@ -354,7 +386,9 @@ class _CallStageState extends ConsumerState<CallStage> {
         );
     return [
       for (final s in data.shares)
-        if (s.source != focus) sized(_shareTile(data, s, CallTileSize.strip)),
+        if (s.source != focus)
+          sized(_shareTile(data, s, CallTileSize.strip,
+              onTap: _focusTap(data, s))),
       for (final p in data.people)
         if (!(focus.kind == CallSourceKind.camera && focus.owner == p.id))
           sized(_personTile(data, p, CallTileSize.strip)),
@@ -377,7 +411,9 @@ class _CallStageState extends ConsumerState<CallStage> {
         share,
         CallTileSize.large,
         chrome: chrome,
-        onTap: fullscreen ? _showChrome : _toggleFullscreen,
+        onTap: fullscreen
+            ? _showChrome
+            : (share.isMine ? null : _toggleFullscreen),
       );
     }
     final person = data.cameraFor(focus);
