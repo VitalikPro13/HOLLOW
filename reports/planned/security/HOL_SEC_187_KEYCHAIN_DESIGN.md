@@ -247,6 +247,21 @@ HOL-SEC-187 there; it is lost at the team change.
 | After the move | no keychain item: the legacy items are gone, the new one is outside every group it has (U2), and it cannot get its code into 0.14 (2.5). It gets `keychain_key_missing` |
 | After the old team's certificate is revoked | nothing: it does not launch where revocation is checked (U10) |
 
+"Gone" needs two answers: the delete removed an item (status 0), and a new read of the
+name in the file-based keychain then finds nothing. Never a check by the reference the
+delete used: on the first notarized 0.14 build (2026-11-14) the delete and a check by
+the same persistent reference agreed on "gone" while 0.13's login item stayed, so 0.13
+kept opening silently and every 0.14 start logged "1 moved". A persistent reference to a
+file-based item also resolves by service and account, so the delete takes the item
+object the read returned (`kSecValueRef`; the file-based keychain then ignores the name
+beside it, so the object alone picks the item), and every file-based query sets
+`kSecUseDataProtectionKeychain` false so it cannot reach the protected copy. A read in
+the same process can miss what another process just wrote (an in-place update by 0.13
+reads as nothing here while a new process reads the new key), so a delete that answers
+"not found" counts as kept, never moved. The unsigned tests prove the file-keychain
+calls; only the signed run (`scripts/macos_keychain_check.sh`, stage 1b replays this
+field case) proves what an entitled process's queries reach.
+
 Deleting the old item is enough for the keychain when: every legacy item of ours is moved
 (all profiles); no build writes the file-based keychain again (source guard); an old build
 cannot recreate a useful item (writing one needs the key). If the PERSON downgrades and
@@ -376,20 +391,24 @@ service is left alone, never moved, never deleted (review F10). For each, prompt
 
 | Step | Action | If it fails or the process dies here |
 |---|---|---|
-| 1 | Quiet read of bytes L and the item's persistent reference R. An item that would prompt is skipped. | nothing changed |
+| 1 | Quiet read of bytes L and the item I it came from: in the file-based keychain the item OBJECT (`kSecReturnRef`, a `SecKeychainItem`), never its persistent reference, which resolves by service and account and so names whatever holds the name later; in the protected keychain the persistent reference (a row id a rewrite never reuses). Every file-based query sets `kSecUseDataProtectionKeychain` false. An item that would prompt, is gone by the read, or is not 32 bytes is skipped and logged (status only). | nothing changed |
 | 2 | In the target group: A absent, add A = L (an `errSecDuplicateItem` from a concurrent mover = present). A present and equal, go to 4. A present and different, add `A.m.<16 hex of SHA-256(L)>` = L instead, never touching A. | legacy untouched; retried next launch |
 | 3 | Fresh read of what step 2 wrote; it must equal L byte for byte. | legacy untouched; the copy is harmless |
-| 4 | Delete by R, the exact item read in step 1 (review F4). A rewrite in between made a new item, so R misses it and the newer key stays. | both hold L; the next launch sees "equal" and deletes |
-| 5 | Attribute list; the item behind R must be gone. | logged; retried next launch |
+| 4 | Delete exactly I (review F4): `kSecValueRef` = the object in the file-based keychain, which then ignores the name beside it; the persistent reference plus its group, service and account in the protected keychain. A rewrite by another process in between, by delete+add (a new item) or by an in-place update (the same item, rewritten), makes this delete answer "not found" and the newer key stays. "Not found" = kept and logged: this process's view can be stale, so its own re-read is no proof the name is empty. | both hold L (or the newer key stays); the next launch sees "equal" and deletes, or keeps the newer key as a conflict copy |
+| 5 | Only after a delete that answered 0: a new read of the name must find nothing. Still L there, a newer key there, or an error = kept and logged. Never a check by I: a delete and a check that share one lookup agree on "gone" when that lookup misses the item. The next start's read is the real check (it finds the item again, or nothing). | logged; retried next launch |
 
-Neither store is ever without L, a key written by another process during the move is never
-deleted, and no identity file is rewritten, so the identity always opens from at least one
-store. The key is not rotated: rotation adds a file rewrite window and buys nothing against
+An in-place update in THIS process between steps 1 and 4 would be deleted (the item is the
+same), but no build writes the file-based keychain any more, so only another process can
+rewrite it. Neither store is ever without L, a key written by another process during the
+move is never deleted, and no identity file is rewritten, so the identity always opens
+from at least one store. The key is not rotated: rotation adds a file rewrite window and buys nothing against
 an attacker who already read it (the master secret is unchanged), nor against a Time
 Machine copy (which carries the matching old file).
 
 **b. App-ID group to the keys group (review F7).** Same steps, both ends in the protected
-keychain, delete by reference, every launch while any of our accounts sits in the app-ID
+keychain, delete by persistent reference inside the source group, service and account
+(only a signed build can show the protected keychain matches them together; a mismatch
+would keep the item, logged, never lose it), every launch while any of our accounts sits in the app-ID
 group and the keys group is writable. It lets a Mac that refused the keys group (or a later
 macOS that starts accepting it) promote its items before the transfer. In 0.14, so the
 frozen tag carries it.

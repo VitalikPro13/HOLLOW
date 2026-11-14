@@ -175,21 +175,94 @@ fn a_protected_copy_that_does_not_read_back_keeps_the_legacy_key() {
 }
 
 /// Step 5: a delete that answers success but leaves the item counts as kept, and
-/// the next start finishes it.
+/// the next start finishes it, in both movers.
 #[test]
 fn a_delete_that_does_not_take_is_never_counted_as_moved() {
+    for from in [Store::Legacy, Store::AppId] {
+        mac();
+        let r = root(&format!("delete-stays-{from:?}"));
+        let slot = profile_slot_name(&r);
+        match from {
+            Store::Legacy => old_build_writes(&slot, &[0x32; 32]),
+            _ => plant(from, &slot, &[0x32; 32]),
+        }
+        let _ = protected_writable();
+        inject(Fault::DeleteRefLeaves);
+        let moved = settle_move(&r);
+        clear_faults();
+        assert_eq!(moved, Moved { moved: 0, kept: 1, skipped: 0 }, "{from:?}: a delete that did not take was counted");
+        assert_eq!(held(from, &slot), Some(vec![0x32; 32]));
+        assert_eq!(settle_move(&r), Moved { moved: 1, kept: 0, skipped: 0 }, "{from:?}: the next start did not finish it");
+        assert!(held(from, &slot).is_none());
+        fake_remove(Store::Keys, &slot);
+    }
+}
+
+/// A failed copy says which call failed and how, for the start's log.
+#[test]
+fn a_copy_that_cannot_be_made_says_why() {
     mac();
-    let r = root("delete-stays");
-    let slot = profile_slot_name(&r);
-    old_build_writes(&slot, &[0x32; 32]);
     let _ = protected_writable();
-    inject(Fault::DeleteRefLeaves);
-    let moved = settle_move(&r);
+    inject(Fault::StoreFails);
+    assert_eq!(place_copy(Store::Keys, "wrapping_key", &[0x35; 32]), Err("add Other(-1)".to_string()));
     clear_faults();
-    assert_eq!(moved, Moved { moved: 0, kept: 1, skipped: 0 }, "a delete that did not take was counted");
-    assert_eq!(held(Store::Legacy, &slot), Some(vec![0x32; 32]));
-    assert_eq!(settle_move(&r), Moved { moved: 1, kept: 0, skipped: 0 }, "the next start did not finish it");
+    inject(Fault::KeysRefused);
+    assert_eq!(place_copy(Store::Keys, "wrapping_key", &[0x35; 32]), Err("read Refused".to_string()));
+}
+
+/// Field report (signed 0.14, macOS 26): a reference lookup that misses file-based
+/// items made the delete and its check agree on "gone" while the login item stayed,
+/// so every start said "1 moved" and the old build kept opening.
+#[test]
+fn a_login_item_the_delete_missed_is_never_counted_as_moved() {
+    mac();
+    let r = root("refs-miss");
+    let slot = profile_slot_name(&r);
+    old_build_writes(&slot, &[0x34; 32]);
+    let _ = protected_writable();
+    inject(Fault::LegacyRefsMiss);
+    let first = settle_move(&r);
+    assert!(held(Store::Legacy, &slot).is_none() || first.moved == 0, "counted as moved while the login item stayed: {first:?}");
+    assert!(held(Store::Legacy, &slot).is_none(), "the login item the move read was not deleted");
+    assert_eq!(first, Moved { moved: 1, kept: 0, skipped: 0 });
+    assert_eq!(settle_move(&r), Moved::default(), "the next start found the item again");
+    clear_faults();
+    assert_eq!(held(Store::Keys, &slot), Some(vec![0x34; 32]));
+}
+
+/// Another process rewrote the login item after the read: the delete answers "not
+/// found" while this process's read misses the new key. Counted as kept, never moved,
+/// and the next start finishes it.
+#[test]
+fn a_delete_that_found_nothing_is_never_counted_as_moved() {
+    mac();
+    let r = root("delete-not-found");
+    let slot = profile_slot_name(&r);
+    old_build_writes(&slot, &[0x36; 32]);
+    let _ = protected_writable();
+    inject(Fault::LegacyStaleAfterMiss);
+    let first = settle_move(&r);
+    clear_faults();
+    assert_eq!(first, Moved { moved: 0, kept: 1, skipped: 0 }, "a delete that removed nothing was counted as a move");
+    assert_eq!(held(Store::Legacy, &slot), Some(vec![0x36; 32]));
+    assert_eq!(settle_move(&r), Moved { moved: 1, kept: 0, skipped: 0 });
     assert!(held(Store::Legacy, &slot).is_none());
+    assert_eq!(held(Store::Keys, &slot), Some(vec![0x36; 32]));
+}
+
+/// The protected delete names the item's group, service and account besides its
+/// reference. Only a signed build can show the data-protection keychain honours them
+/// together; an unsigned test binary is refused that keychain.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_protected_delete_by_reference_stays_inside_its_name() {
+    assert!(bundle::mark_checked(bundle::KEYS_GROUP, "ABCDE12345.com.anonlisten.hollow"));
+    let names = mac::delete_query_names(Store::AppId, "wrapping_key", &Item::Persistent(vec![1, 2, 3])).expect("a query");
+    for attr in ["acct", "agrp", "class", "nleg", "svce", "v_PersistentRef"] {
+        assert!(names.iter().any(|n| n == attr), "the delete does not name {attr}: {names:?}");
+    }
+    let file = mac::delete_query_names(Store::Legacy, "wrapping_key", &Item::Persistent(vec![1])).is_none();
+    assert!(file, "a file-based delete by persistent reference was built");
 }
 
 /// An old build rewrites the item between the read and the delete: the delete
@@ -207,14 +280,39 @@ fn a_legacy_key_rewritten_during_the_move_is_never_deleted() {
         }
         true
     });
-    let _ = settle_move(&r);
+    let first = settle_move(&r);
     clear_hook();
+    assert_eq!(first, Moved { moved: 0, kept: 1, skipped: 0 }, "a name that still holds a key was counted as moved");
     assert_eq!(held(Store::Legacy, &slot), Some(vec![0x42; 32]), "the rewritten key was deleted");
     assert_eq!(held(Store::Keys, &slot), Some(vec![0x41; 32]));
     let _ = settle_move(&r);
     assert!(held(Store::Legacy, &slot).is_none());
     assert_eq!(held(Store::Keys, &slot), Some(vec![0x41; 32]), "the protected key was overwritten");
     assert_eq!(held(Store::Keys, &copy_name(&slot, &[0x42; 32])), Some(vec![0x42; 32]), "the newer key was lost");
+}
+
+/// An old build writes a new key just after the delete: the re-read finds it, so the
+/// move counts it kept, never moved, and the next start keeps both keys.
+#[test]
+fn a_legacy_key_written_after_the_delete_is_never_counted_as_moved() {
+    mac();
+    let r = root("after-delete");
+    let slot = profile_slot_name(&r);
+    old_build_writes(&slot, &[0x44; 32]);
+    let rewrite = slot.clone();
+    set_hook(move |at, name| {
+        if at == Step::Deleted && name == rewrite {
+            old_build_writes(&rewrite, &[0x45; 32]);
+        }
+        true
+    });
+    let first = settle_move(&r);
+    clear_hook();
+    assert_eq!(first, Moved { moved: 0, kept: 1, skipped: 0 }, "a name that holds a new key was counted as moved");
+    assert_eq!(held(Store::Legacy, &slot), Some(vec![0x45; 32]));
+    assert_eq!(settle_move(&r), Moved { moved: 1, kept: 0, skipped: 0 });
+    assert_eq!(held(Store::Keys, &slot), Some(vec![0x44; 32]));
+    assert_eq!(held(Store::Keys, &copy_name(&slot, &[0x45; 32])), Some(vec![0x45; 32]), "the newer key was lost");
 }
 
 #[test]
@@ -561,4 +659,190 @@ fn only_our_groups_open_the_keychain() {
     }
     assert!(!bundle::mark_checked("group.com.anonlisten.hollow", "NWPBHZX7DT.com.anonlisten.hollow"));
     assert!(!bundle::mark_checked(bundle::KEYS_GROUP, "group.com.anonlisten.hollow.keys"));
+}
+
+/// The move's file-keychain half against the real login keychain, in the test
+/// service only, on items this test writes the way 0.13 did. Where no login keychain
+/// is usable without asking (an ssh session) these FAIL, never pass on nothing;
+/// `HOLLOW_SKIP_LOGIN_KEYCHAIN=1` skips them knowingly. They prove the file-keychain
+/// calls only: the protected half needs the signed build (`scripts/macos_keychain_check.sh`).
+#[cfg(target_os = "macos")]
+mod file_keychain {
+    use super::*;
+    use security_framework::os::macos::keychain::SecKeychain;
+    use security_framework::passwords::{delete_generic_password, get_generic_password, set_generic_password};
+
+    const SERVICE: &str = "com.hollow.test.identity";
+    /// The test that plays the other process, by its full name.
+    const OTHER: &str = "identity::platform_keystore::tests::file_keychain::other_process";
+    const JOB: &str = "HOLLOW_KEYCHAIN_TEST_JOB";
+    /// The cross-process rewrite runs in a process of its own: afterwards that
+    /// process's view of the login keychain is stale (a listing misses new items).
+    const SCENARIO: &str = "identity::platform_keystore::tests::file_keychain::rewritten_in_another_process";
+    const SCENARIO_JOB: &str = "HOLLOW_KEYCHAIN_TEST_SCENARIO";
+
+    /// Runs the ignored test `test` in a new process of this test binary.
+    fn in_new_process(test: &str, key: &str, job: &str) {
+        let out = std::process::Command::new(std::env::current_exe().expect("the test binary"))
+            .args([test, "--exact", "--ignored", "--test-threads=1"])
+            .env(key, job)
+            .output()
+            .expect("a new process");
+        let said = String::from_utf8_lossy(&out.stdout);
+        assert!(out.status.success() && said.contains("1 passed"), "the new process ({job}) failed: {said}");
+    }
+
+    /// One 0.13-style item under a fresh slot name, deleted on drop.
+    struct Planted(String);
+
+    impl Planted {
+        fn new(value: &[u8]) -> Option<Self> {
+            let mut tag = [0u8; 8];
+            getrandom::fill(&mut tag).expect("random");
+            let name = format!("{MAC_BASE}.{}", hex::encode(tag));
+            match without_prompts(|| set_generic_password(SERVICE, &name, value)) {
+                Ok(()) => Some(Self(name)),
+                Err(_) if std::env::var("HOLLOW_SKIP_LOGIN_KEYCHAIN").as_deref() == Ok("1") => None,
+                Err(e) => panic!(
+                    "no login keychain usable without asking ({}); run from a desktop session, or set HOLLOW_SKIP_LOGIN_KEYCHAIN=1 to skip",
+                    e.code()
+                ),
+            }
+        }
+
+        fn now(&self) -> Option<Vec<u8>> {
+            without_prompts(|| get_generic_password(SERVICE, &self.0)).ok()
+        }
+
+        /// What 0.13 did on every store: delete, then add a new item.
+        fn rewrite(&self, value: &[u8]) {
+            without_prompts(|| {
+                let _ = delete_generic_password(SERVICE, &self.0);
+                set_generic_password(SERVICE, &self.0, value).expect("rewrite");
+            });
+        }
+
+        /// Runs `job` on this item in a new process of this test binary.
+        fn in_other_process(&self, job: &str, byte: u8) {
+            in_new_process(OTHER, JOB, &format!("{job}:{}:{byte}", self.0));
+        }
+    }
+
+    impl Drop for Planted {
+        fn drop(&mut self) {
+            let _ = without_prompts(|| delete_generic_password(SERVICE, &self.0));
+        }
+    }
+
+    /// The other process of the cross-process tests; does nothing unless one spawned it.
+    #[test]
+    #[ignore = "run only by the cross-process tests, as another process"]
+    fn other_process() {
+        let Ok(job) = std::env::var(JOB) else { return };
+        let mut parts = job.splitn(3, ':');
+        let (Some(what), Some(name), Some(byte)) = (parts.next(), parts.next(), parts.next()) else { panic!("job {job}") };
+        assert!(name.starts_with(MAC_BASE) && SERVICE.contains(".test."));
+        let byte: u8 = byte.parse().expect("byte");
+        let _quiet = SecKeychain::disable_user_interaction().ok();
+        match what {
+            "rewrite" => {
+                let _ = delete_generic_password(SERVICE, name);
+                set_generic_password(SERVICE, name, &[byte; 32]).expect("add");
+            }
+            // An existing item: the add answers duplicate and the call updates it in place.
+            "update" => set_generic_password(SERVICE, name, &[byte; 32]).expect("update"),
+            "holds" => assert_eq!(get_generic_password(SERVICE, name).ok(), Some(vec![byte; 32]), "a new process reads"),
+            "gone" => assert!(get_generic_password(SERVICE, name).is_err(), "a new process still reads the item"),
+            other => panic!("job {other}"),
+        }
+    }
+
+    #[test]
+    fn the_test_service_is_not_the_real_one() {
+        assert!(SERVICE.contains(".test."));
+    }
+
+    /// Without the flag set false, a signed build's query for the login keychain can
+    /// answer with the protected copy, and a delete can take it. This checks the
+    /// query only; the signed run checks what the keychain does with it.
+    #[test]
+    fn a_file_keychain_query_never_reaches_the_protected_keychain() {
+        assert_eq!(mac::file_query_flag(), Some(false));
+    }
+
+    #[test]
+    fn the_real_file_keychain_item_a_move_read_is_really_deleted() {
+        let _real = RealKeystore::enter_file_keychain();
+        let Some(planted) = Planted::new(&[0x4a; 32]) else { return };
+        let (value, item) = without_prompts(|| read_ref(Store::Legacy, &planted.0)).unwrap().expect("the planted item reads");
+        assert_eq!(value, vec![0x4a; 32]);
+        assert!(matches!(item, Item::Object(_)), "a file-based read handed back a persistent reference");
+        assert_eq!(without_prompts(|| take_source(Store::Legacy, &planted.0, &value, &item)), Outcome::Moved);
+        assert_eq!(planted.now(), None, "the login keychain item is still there");
+        planted.in_other_process("gone", 0);
+    }
+
+    /// A persistent reference to a file-based item finds whatever holds its name, so
+    /// a delete by one took the key 0.13 wrote after the read.
+    #[test]
+    fn the_real_file_keychain_item_rewritten_after_the_read_stays() {
+        let _real = RealKeystore::enter_file_keychain();
+        let Some(planted) = Planted::new(&[0x4b; 32]) else { return };
+        let (value, item) = without_prompts(|| read_ref(Store::Legacy, &planted.0)).unwrap().expect("the planted item reads");
+        planted.rewrite(&[0x4c; 32]);
+        assert_eq!(without_prompts(|| take_source(Store::Legacy, &planted.0, &value, &item)), Outcome::Kept);
+        assert_eq!(planted.now(), Some(vec![0x4c; 32]), "the key written after the read was deleted");
+    }
+
+    /// 0.13 in another process rewrites the item between the read and the delete,
+    /// by delete+add and by an in-place update. This process's read can miss the new
+    /// key afterwards, so the move must never count it as moved, and a new process
+    /// must still read the new key.
+    #[test]
+    fn a_login_item_another_process_rewrote_after_the_read_stays() {
+        let Some(usable) = Planted::new(&[0x4e; 32]) else { return };
+        drop(usable);
+        for job in ["rewrite", "update"] {
+            in_new_process(SCENARIO, SCENARIO_JOB, job);
+        }
+    }
+
+    #[test]
+    #[ignore = "run only by a_login_item_another_process_rewrote_after_the_read_stays, in a process of its own"]
+    fn rewritten_in_another_process() {
+        let Ok(job) = std::env::var(SCENARIO_JOB) else { return };
+        let _real = RealKeystore::enter_file_keychain();
+        let planted = Planted::new(&[0x4e; 32]).expect("the login keychain");
+        let (value, item) = without_prompts(|| read_ref(Store::Legacy, &planted.0)).unwrap().expect("the planted item reads");
+        planted.in_other_process(&job, 0x4f);
+        let outcome = without_prompts(|| take_source(Store::Legacy, &planted.0, &value, &item));
+        assert_eq!(outcome, Outcome::Kept, "{job}: a login item another process rewrote was counted as {outcome:?}");
+        planted.in_other_process("holds", 0x4f);
+    }
+
+    /// The file-based keychain deletes by the item object alone and ignores the name
+    /// beside it (macOS 26): the object decides which item goes, so it must be the one
+    /// the read returned, and a delete by name would take another item.
+    #[test]
+    fn a_file_keychain_delete_takes_exactly_the_item_object() {
+        let _real = RealKeystore::enter_file_keychain();
+        let Some(a) = Planted::new(&[0x50; 32]) else { return };
+        let Some(b) = Planted::new(&[0x51; 32]) else { return };
+        let (_, item) = without_prompts(|| read_ref(Store::Legacy, &a.0)).unwrap().expect("the planted item reads");
+        assert_eq!(without_prompts(|| delete_item(Store::Legacy, &b.0, &item)), Ok(Deleted::Took));
+        assert_eq!(a.now(), None, "the item the object names stayed");
+        assert_eq!(b.now(), Some(vec![0x51; 32]), "a delete by an item object took another item by its name");
+    }
+
+    /// The file-keychain half alone: a listing and a read of the test service see
+    /// exactly the planted item, and a delete by name takes it.
+    #[test]
+    fn the_real_file_keychain_lists_reads_and_forgets_in_the_test_service() {
+        let _real = RealKeystore::enter_file_keychain();
+        let Some(planted) = Planted::new(&[0x4d; 32]) else { return };
+        assert!(without_prompts(|| list(Store::Legacy, MAC_BASE)).contains(&planted.0));
+        assert_eq!(without_prompts(|| read(Store::Legacy, &planted.0)), Ok(Some(vec![0x4d; 32])));
+        without_prompts(|| delete(Store::Legacy, &planted.0)).unwrap();
+        assert_eq!(planted.now(), None);
+    }
 }

@@ -12,9 +12,10 @@
 //! app group (the app-ID group where a Mac refuses it), this device only. Builds
 //! before 0.14 wrote the file-based login keychain under a requirement every build
 //! the team ever signed meets, so an old build with a planted library could read
-//! them. `settle_move` copies those items across, reads each copy back, then deletes
-//! exactly the item it read. Nothing writes the file-based keychain any more, and no
-//! macOS keychain call runs before the app's bundle self-check passed.
+//! them. `settle_move` copies those items across, reads each copy back, deletes
+//! exactly the item it read, then reads the name again to see it gone. Nothing writes
+//! the file-based keychain any more, and no macOS keychain call runs before the app's
+//! bundle self-check passed.
 
 use std::path::{Path, PathBuf};
 
@@ -58,8 +59,35 @@ pub(crate) enum Failure {
     Other(i32),
 }
 
-/// A value and the persistent reference of the item it was read from.
-type Found = Option<(Vec<u8>, Vec<u8>)>;
+/// A value and the item it was read from.
+type Found = Option<(Vec<u8>, Item)>;
+
+/// The item a read found, so a delete takes that item and never one another process
+/// wrote under the same name since.
+#[cfg_attr(not(any(test, target_os = "macos")), allow(dead_code))]
+pub(crate) enum Item {
+    /// A data-protection keychain persistent reference: a row id a rewrite never reuses.
+    Persistent(Vec<u8>),
+    /// A file-based keychain item. Its persistent references resolve by service and
+    /// account, so a delete by one takes whatever item holds the name by then.
+    #[cfg(target_os = "macos")]
+    Object(core_foundation::base::CFType),
+    /// The fake file-based keychain's item.
+    #[cfg(test)]
+    FakeObject(Vec<u8>),
+}
+
+/// What a delete of one item answered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) enum Deleted {
+    /// The keychain removed an item.
+    Took,
+    /// The keychain found nothing to remove. In the file-based keychain that is also
+    /// the answer when another process rewrote the item, even while a read here still
+    /// misses the new one.
+    NotFound,
+}
 
 /// What an add found.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -293,14 +321,10 @@ fn delete(store: Store, name: &str) -> Result<(), Failure> {
     backend::delete(store, name)
 }
 
-fn delete_ref(store: Store, item: &[u8]) -> Result<(), Failure> {
+/// Deletes exactly `item` (read under `name`).
+fn delete_item(store: Store, name: &str, item: &Item) -> Result<Deleted, Failure> {
     gate(store)?;
-    backend::delete_ref(store, item)
-}
-
-fn ref_present(store: Store, item: &[u8]) -> Result<bool, Failure> {
-    gate(store)?;
-    backend::ref_present(store, item)
+    backend::delete_item(store, name, item)
 }
 
 fn same(a: &[u8], b: &[u8]) -> bool {
@@ -557,10 +581,11 @@ mod win {
 mod mac {
     //! SecItem calls by store. The protected stores always carry
     //! `kSecUseDataProtectionKeychain` and the group; the file-based keychain is
-    //! reached only to read, list and delete.
+    //! reached only to read, list and delete, with the flag set false so a query for
+    //! it never answers with (or deletes) a protected item.
 
     use core_foundation::array::CFArray;
-    use core_foundation::base::{CFType, CFTypeRef, OSStatus, TCFType};
+    use core_foundation::base::{CFType, CFTypeID, CFTypeRef, OSStatus, TCFType};
     use core_foundation::boolean::CFBoolean;
     use core_foundation::data::CFData;
     use core_foundation::dictionary::{CFDictionary, CFDictionaryRef, CFMutableDictionary};
@@ -594,6 +619,8 @@ mod mac {
         static kSecReturnData: CFStringRef;
         static kSecReturnAttributes: CFStringRef;
         static kSecReturnPersistentRef: CFStringRef;
+        static kSecReturnRef: CFStringRef;
+        static kSecValueRef: CFStringRef;
         static kSecMatchLimit: CFStringRef;
         static kSecMatchLimitOne: CFStringRef;
         static kSecMatchLimitAll: CFStringRef;
@@ -601,6 +628,7 @@ mod mac {
         fn SecItemCopyMatching(query: CFDictionaryRef, result: *mut CFTypeRef) -> OSStatus;
         fn SecItemUpdate(query: CFDictionaryRef, update: CFDictionaryRef) -> OSStatus;
         fn SecItemDelete(query: CFDictionaryRef) -> OSStatus;
+        fn SecKeychainItemGetTypeID() -> CFTypeID;
     }
 
     type Query = CFMutableDictionary<CFString, CFType>;
@@ -629,7 +657,9 @@ mod mac {
                 q.set(k(kSecAttrAccount), CFString::new(account).into_CFType());
             }
             match store {
-                Store::Legacy => {}
+                Store::Legacy => {
+                    q.set(k(kSecUseDataProtectionKeychain), CFBoolean::false_value().into_CFType());
+                }
                 Store::Keys | Store::AppId => {
                     let groups = super::bundle::groups().ok_or(Failure::Unchecked)?;
                     let group = if store == Store::Keys { &groups.keys } else { &groups.app_id };
@@ -642,22 +672,37 @@ mod mac {
         Ok(q)
     }
 
-    fn by_ref(store: Store, item: &[u8]) -> Result<Query, Failure> {
-        let mut q = Query::new();
-        // SAFETY: reading Security framework constants.
-        unsafe {
-            q.set(k(kSecClass), k(kSecClassGenericPassword).into_CFType());
-            q.set(k(kSecValuePersistentRef), CFData::from_buffer(item).into_CFType());
-            match store {
-                Store::Legacy => {}
-                Store::Keys | Store::AppId => {
-                    super::bundle::groups().ok_or(Failure::Unchecked)?;
-                    q.set(k(kSecUseDataProtectionKeychain), CFBoolean::true_value().into_CFType());
-                }
-                Store::Flat => return Err(Failure::Other(-4)),
-            }
+    /// What a file-based query sets `kSecUseDataProtectionKeychain` to.
+    #[cfg(test)]
+    pub(super) fn file_query_flag() -> Option<bool> {
+        let q = query(Store::Legacy, None).ok()?;
+        // SAFETY: reading a Security framework constant.
+        let flag = unsafe { k(kSecUseDataProtectionKeychain) };
+        q.find(&flag)?.downcast::<CFBoolean>().map(bool::from)
+    }
+
+    /// A protected item by its persistent reference, naming its group, service and
+    /// account too; only a signed build shows the protected keychain matches them all.
+    fn by_ref(store: Store, account: &str, item: &[u8]) -> Result<Query, Failure> {
+        if !matches!(store, Store::Keys | Store::AppId) {
+            return Err(Failure::Other(-4));
         }
+        let mut q = query(store, Some(account))?;
+        // SAFETY: reading a Security framework constant.
+        unsafe { q.set(k(kSecValuePersistentRef), CFData::from_buffer(item).into_CFType()) };
         Ok(q)
+    }
+
+    /// The attributes a delete of `item` under `account` names, for the tests.
+    #[cfg(test)]
+    pub(super) fn delete_query_names(store: Store, account: &str, item: &super::Item) -> Option<Vec<String>> {
+        let q = delete_query(store, account, item).ok()?;
+        let (keys, _) = q.get_keys_and_values();
+        // SAFETY: every key of a query is a CFString this module set.
+        let mut names: Vec<String> =
+            keys.into_iter().map(|key| unsafe { CFString::wrap_under_get_rule(key as CFStringRef) }.to_string()).collect();
+        names.sort();
+        Some(names)
     }
 
     fn copy_matching(q: &Query) -> Result<Option<CFType>, Failure> {
@@ -688,22 +733,38 @@ mod mac {
         Ok(copy_matching(&q)?.and_then(|v| v.downcast::<CFData>()).map(|d| d.bytes().to_vec()))
     }
 
+    /// The value and its item: the item object in the file-based keychain, a
+    /// persistent reference in the protected stores.
     pub(super) fn read_ref(store: Store, account: &str) -> Result<super::Found, Failure> {
+        let file_based = store == Store::Legacy;
         let mut q = query(store, Some(account))?;
         // SAFETY: reading Security framework constants.
         let (data_key, ref_key) = unsafe {
             q.set(k(kSecReturnData), CFBoolean::true_value().into_CFType());
-            q.set(k(kSecReturnPersistentRef), CFBoolean::true_value().into_CFType());
+            let (ask, answer) = if file_based {
+                (kSecReturnRef, kSecValueRef)
+            } else {
+                (kSecReturnPersistentRef, kSecValuePersistentRef)
+            };
+            q.set(k(ask), CFBoolean::true_value().into_CFType());
             q.set(k(kSecMatchLimit), k(kSecMatchLimitOne).into_CFType());
-            (k(kSecValueData), k(kSecValuePersistentRef))
+            (k(kSecValueData), k(answer))
         };
         let Some(found) = copy_matching(&q)? else { return Ok(None) };
         let Some(dict) = found.downcast::<CFDictionary>() else { return Err(Failure::Other(-1)) };
         // SAFETY: SecItemCopyMatching answers a dictionary of CFString keys.
         let dict: CFDictionary<CFString, CFType> = unsafe { CFDictionary::wrap_under_get_rule(dict.as_concrete_TypeRef()) };
-        match (data_of(dict.find(&data_key)), data_of(dict.find(&ref_key))) {
-            (Some(value), Some(item)) => Ok(Some((value, item))),
-            _ => Err(Failure::Other(-1)),
+        let Some(value) = data_of(dict.find(&data_key)) else { return Err(Failure::Other(-1)) };
+        let item = if file_based {
+            // SAFETY: a type-id lookup with no arguments.
+            let keychain_item = unsafe { SecKeychainItemGetTypeID() };
+            dict.find(&ref_key).filter(|r| r.type_of() == keychain_item).map(|r| super::Item::Object((*r).clone()))
+        } else {
+            data_of(dict.find(&ref_key)).map(super::Item::Persistent)
+        };
+        match item {
+            Some(item) => Ok(Some((value, item))),
+            None => Err(Failure::Other(-2)),
         }
     }
 
@@ -786,25 +847,32 @@ mod mac {
         }
     }
 
-    /// Deletes exactly the item a read returned: a rewrite since made a new item,
-    /// which this misses.
-    pub(super) fn delete_ref(store: Store, item: &[u8]) -> Result<(), Failure> {
-        let q = by_ref(store, item)?;
-        // SAFETY: a valid dictionary.
-        match unsafe { SecItemDelete(q.as_concrete_TypeRef() as CFDictionaryRef) } {
-            0 | NOT_FOUND => Ok(()),
-            other => Err(failure(other)),
+    /// The item object in the file-based keychain (which then ignores the service and
+    /// account beside it, so the object alone picks the item), the persistent
+    /// reference inside its group, service and account in the protected stores.
+    fn delete_query(store: Store, account: &str, item: &super::Item) -> Result<Query, Failure> {
+        match (store, item) {
+            (Store::Legacy, super::Item::Object(found)) => {
+                let mut q = query(store, Some(account))?;
+                // SAFETY: reading a Security framework constant.
+                unsafe { q.set(k(kSecValueRef), found.clone()) };
+                Ok(q)
+            }
+            (Store::Keys | Store::AppId, super::Item::Persistent(found)) => by_ref(store, account, found),
+            _ => Err(Failure::Other(-4)),
         }
     }
 
-    pub(super) fn ref_present(store: Store, item: &[u8]) -> Result<bool, Failure> {
-        let mut q = by_ref(store, item)?;
-        // SAFETY: reading Security framework constants.
-        unsafe {
-            q.set(k(kSecReturnAttributes), CFBoolean::true_value().into_CFType());
-            q.set(k(kSecMatchLimit), k(kSecMatchLimitOne).into_CFType());
+    /// Deletes exactly the item a read returned. A rewrite since (a new item, or the
+    /// same one updated by another process) answers "not found" and stays.
+    pub(super) fn delete_item(store: Store, account: &str, item: &super::Item) -> Result<super::Deleted, Failure> {
+        let q = delete_query(store, account, item)?;
+        // SAFETY: a valid dictionary.
+        match unsafe { SecItemDelete(q.as_concrete_TypeRef() as CFDictionaryRef) } {
+            0 => Ok(super::Deleted::Took),
+            NOT_FOUND => Ok(super::Deleted::NotFound),
+            other => Err(failure(other)),
         }
-        Ok(copy_matching(&q)?.is_some())
     }
 }
 
@@ -883,18 +951,14 @@ mod real {
         Ok(())
     }
 
-    pub(super) fn delete_ref(store: Store, item: &[u8]) -> Result<(), Failure> {
+    pub(super) fn delete_item(store: Store, name: &str, item: &super::Item) -> Result<super::Deleted, Failure> {
         #[cfg(target_os = "macos")]
-        return super::mac::delete_ref(store, item);
+        return super::mac::delete_item(store, name, item);
         #[cfg(not(target_os = "macos"))]
-        Err(Failure::Other(-4))
-    }
-
-    pub(super) fn ref_present(store: Store, item: &[u8]) -> Result<bool, Failure> {
-        #[cfg(target_os = "macos")]
-        return super::mac::ref_present(store, item);
-        #[cfg(not(target_os = "macos"))]
-        Err(Failure::Other(-4))
+        {
+            let _ = (store, name, item);
+            Err(Failure::Other(-4))
+        }
     }
 
     pub(super) fn protect(data: &[u8]) -> Result<Vec<u8>, String> {
@@ -927,7 +991,7 @@ use real as backend;
 #[cfg(test)]
 mod backend {
     use super::test_support::{self as t, fault, mode, Fault, Mode};
-    use super::{Added, Failure, Store};
+    use super::{Added, Deleted, Failure, Item, Store};
 
     pub(super) fn flat_available() -> bool {
         match mode() {
@@ -944,17 +1008,25 @@ mod backend {
     }
 
     pub(super) fn read(store: Store, name: &str) -> Result<Option<Vec<u8>>, Failure> {
-        Ok(read_ref(store, name)?.map(|(value, _)| value))
+        Ok(found(store, name, false)?.map(|(value, _)| value))
     }
 
     pub(super) fn read_ref(store: Store, name: &str) -> Result<super::Found, Failure> {
+        found(store, name, true)
+    }
+
+    fn found(store: Store, name: &str, with_item: bool) -> Result<super::Found, Failure> {
         t::note_read(store, name);
         let found = match mode() {
             Mode::Fake => {
                 t::refusal(store, true)?;
-                t::fake_item(store, name)
+                if store == Store::Legacy && t::stale_after_a_miss() {
+                    return Ok(None);
+                }
+                t::fake_item(store, name).map(|(value, id)| (value, t::fake_handle(store, id)))
             }
-            Mode::Real => super::real::read(store, name)?.map(|v| (v, Vec::new())),
+            Mode::Real if with_item => super::real::read_ref(store, name)?,
+            Mode::Real => super::real::read(store, name)?.map(|v| (v, Item::Persistent(Vec::new()))),
         };
         let after_a_write = t::wrote_since_injected();
         Ok(found.map(|(value, item)| {
@@ -1035,26 +1107,29 @@ mod backend {
         }
     }
 
-    pub(super) fn delete_ref(store: Store, item: &[u8]) -> Result<(), Failure> {
+    pub(super) fn delete_item(store: Store, name: &str, item: &Item) -> Result<Deleted, Failure> {
         if fault(Fault::DeleteRefFails) {
             return Err(Failure::Other(-1));
         }
         match mode() {
             Mode::Fake => {
                 t::refusal(store, false)?;
-                if !fault(Fault::DeleteRefLeaves) {
-                    t::fake_remove_ref(store, item);
+                let id = match item {
+                    Item::Persistent(_) if store == Store::Legacy && fault(Fault::LegacyRefsMiss) => return Ok(Deleted::NotFound),
+                    Item::Persistent(id) | Item::FakeObject(id) => id,
+                    #[cfg(target_os = "macos")]
+                    Item::Object(_) => return Err(Failure::Other(-4)),
+                };
+                if store == Store::Legacy && fault(Fault::LegacyStaleAfterMiss) {
+                    t::miss_and_go_stale();
+                    return Ok(Deleted::NotFound);
                 }
-                Ok(())
+                if fault(Fault::DeleteRefLeaves) {
+                    return Ok(Deleted::Took);
+                }
+                Ok(if t::fake_remove_ref(store, id) { Deleted::Took } else { Deleted::NotFound })
             }
-            Mode::Real => super::real::delete_ref(store, item),
-        }
-    }
-
-    pub(super) fn ref_present(store: Store, item: &[u8]) -> Result<bool, Failure> {
-        match mode() {
-            Mode::Fake => Ok(t::fake_ref_present(store, item)),
-            Mode::Real => super::real::ref_present(store, item),
+            Mode::Real => super::real::delete_item(store, name, item),
         }
     }
 
@@ -1369,6 +1444,7 @@ pub(crate) struct Moved {
     pub(crate) skipped: usize,
 }
 
+#[derive(Debug, PartialEq, Eq)]
 enum Outcome {
     Moved,
     Kept,
@@ -1381,7 +1457,8 @@ enum Outcome {
 /// every key still in the app-ID group moves into it. Each item is copied, the copy
 /// read back byte for byte, and only then is exactly the item that was read
 /// deleted, so no store is ever without the key and a key another process wrote
-/// meanwhile stays. Runs only where the keystore answered a definite yes.
+/// meanwhile stays. An item counts as moved only once a new read of its name finds
+/// nothing. Runs only where the keystore answered a definite yes.
 pub(crate) fn settle_move(root: &Path) -> Moved {
     let mut done = Moved::default();
     if !mac_layout() {
@@ -1415,57 +1492,102 @@ fn move_store(from: Store, to: Store, first: &[String], ours: fn(&str) -> bool, 
 }
 
 fn move_one(from: Store, to: Store, name: &str) -> Outcome {
-    let Ok(Some((value, item))) = read_ref(from, name) else { return Outcome::Skipped };
+    let (value, item) = match read_ref(from, name) {
+        Ok(Some(found)) => found,
+        Ok(None) => {
+            crate::hollow_log!("[HOLLOW-ID] Keychain move: a listed item was gone by its read; it is left alone");
+            return Outcome::Skipped;
+        }
+        Err(f) => {
+            crate::hollow_log!("[HOLLOW-ID] Keychain move: an item did not read ({f:?}); it is left alone");
+            return Outcome::Skipped;
+        }
+    };
     let value = zeroize::Zeroizing::new(value);
     if value.len() != 32 {
+        crate::hollow_log!("[HOLLOW-ID] Keychain move: an item under our name is not a 32-byte key; it is left alone");
         return Outcome::Skipped;
     }
     if !step(Step::Read, name) {
         return Outcome::Died;
     }
-    let Some(target) = place_copy(to, name, &value) else { return Outcome::Kept };
+    let target = match place_copy(to, name, &value) {
+        Ok(target) => target,
+        Err(why) => {
+            crate::hollow_log!("[HOLLOW-ID] Keychain move: no protected copy could be made ({why}); the old item stays");
+            return Outcome::Kept;
+        }
+    };
     if !step(Step::Copied, name) {
         return Outcome::Died;
     }
-    if !matches!(read(to, &target), Ok(Some(back)) if same(&back, &value)) {
+    if !matches!(read(to, &target).map(|v| v.map(zeroize::Zeroizing::new)), Ok(Some(back)) if same(&back, &value)) {
         crate::hollow_log!("[HOLLOW-ID] A moved keychain item did not read back; the old one stays");
         return Outcome::Kept;
     }
     if !step(Step::ReadBack, name) {
         return Outcome::Died;
     }
-    if delete_ref(from, &item).is_err() {
-        return Outcome::Kept;
-    }
+    take_source(from, name, &value, &item)
+}
+
+/// Deletes exactly the item the move read. Moved only when the delete removed an
+/// item AND a new read of the name finds nothing: a delete and a check that share one
+/// lookup agree on "gone" when that lookup misses the item, and after another
+/// process's rewrite this process's read can miss the new key while it stands.
+fn take_source(from: Store, name: &str, value: &[u8], item: &Item) -> Outcome {
+    let took = match delete_item(from, name, item) {
+        Ok(took) => took,
+        Err(f) => {
+            crate::hollow_log!("[HOLLOW-ID] Keychain move: the old item was not deleted ({f:?}); it stays for the next start");
+            return Outcome::Kept;
+        }
+    };
     if !step(Step::Deleted, name) {
         return Outcome::Died;
     }
-    // A delete that answered yes (or "not found") but left the item moved nothing.
-    if !matches!(ref_present(from, &item), Ok(false)) {
-        crate::hollow_log!("[HOLLOW-ID] A moved keychain item is still listed where it was; the next start retries");
+    if took == Deleted::NotFound {
+        crate::hollow_log!("[HOLLOW-ID] Keychain move: the delete found no item (another process rewrote or took it); what is there stays for the next start");
         return Outcome::Kept;
     }
-    Outcome::Moved
+    match read(from, name).map(|v| v.map(zeroize::Zeroizing::new)) {
+        Ok(None) => Outcome::Moved,
+        Ok(Some(left)) if same(&left, value) => {
+            crate::hollow_log!("[HOLLOW-ID] Keychain move: the old item is still there after its delete; it stays for the next start");
+            Outcome::Kept
+        }
+        // Another process wrote a new key under the name since: it stays, for the next start to move.
+        Ok(Some(_)) => Outcome::Kept,
+        Err(f) => {
+            crate::hollow_log!("[HOLLOW-ID] Keychain move: the old item did not read after its delete ({f:?}); it stays for the next start");
+            Outcome::Kept
+        }
+    }
 }
 
 /// Puts `value` under `name` in `to`, or under its conflict copy when `name` holds
-/// another key there; never overwrites a key. `None` when neither can be had.
-fn place_copy(to: Store, name: &str, value: &[u8]) -> Option<String> {
+/// another key there; never overwrites a key. The error says which call failed and
+/// how, without the value.
+fn place_copy(to: Store, name: &str, value: &[u8]) -> Result<String, String> {
     for target in [name.to_string(), copy_name(name, value)] {
-        let held = match read(to, &target) {
+        let held = match read(to, &target).map(|v| v.map(zeroize::Zeroizing::new)) {
             Ok(None) => match add(to, &target, value) {
-                Ok(Added::New) => return Some(target),
-                Ok(Added::Present) => read(to, &target).ok()??,
-                Err(_) => return None,
+                Ok(Added::New) => return Ok(target),
+                Ok(Added::Present) => match read(to, &target) {
+                    Ok(Some(held)) => zeroize::Zeroizing::new(held),
+                    Ok(None) => return Err("add found the name taken, a read found nothing".into()),
+                    Err(f) => return Err(format!("read after a taken add {f:?}")),
+                },
+                Err(f) => return Err(format!("add {f:?}")),
             },
             Ok(Some(held)) => held,
-            Err(_) => return None,
+            Err(f) => return Err(format!("read {f:?}")),
         };
         if same(&held, value) {
-            return Some(target);
+            return Ok(target);
         }
     }
-    None
+    Err("the slot and its copy hold other keys".into())
 }
 
 #[cfg(test)]
@@ -1501,6 +1623,12 @@ pub(crate) mod test_support {
         DeleteRefFails,
         /// A delete by reference answers success but the item stays.
         DeleteRefLeaves,
+        /// A persistent reference finds nothing in the file-based keychain: a delete
+        /// by one answers "not found" and the item stays.
+        LegacyRefsMiss,
+        /// Another process rewrote the file-based item: the delete answers "not
+        /// found", the item stays, and this process's reads miss it from then on.
+        LegacyStaleAfterMiss,
     }
 
     type Hook = Box<dyn FnMut(Step, &str) -> bool>;
@@ -1524,6 +1652,7 @@ pub(crate) mod test_support {
         static WRITABLE: Cell<u8> = const { Cell::new(0) };
         static PROBES: Cell<u32> = const { Cell::new(0) };
         static HOOK: RefCell<Option<Hook>> = const { RefCell::new(None) };
+        static STALE: Cell<bool> = const { Cell::new(false) };
     }
 
     /// Runs the code under the macOS layout (`true`) or the flat one, whatever the
@@ -1676,6 +1805,16 @@ pub(crate) mod test_support {
 
     pub(crate) fn clear_faults() {
         FAULTS.with(|v| v.borrow_mut().clear());
+        STALE.with(|s| s.set(false));
+    }
+
+    pub(crate) fn miss_and_go_stale() {
+        STALE.with(|s| s.set(true));
+    }
+
+    /// Reads of the file-based keychain miss its items (`Fault::LegacyStaleAfterMiss`).
+    pub(crate) fn stale_after_a_miss() -> bool {
+        STALE.with(Cell::get) && fault(Fault::LegacyStaleAfterMiss)
     }
 
     /// What the fake store answers before touching `store`.
@@ -1716,12 +1855,20 @@ pub(crate) mod test_support {
         FAKE.with(|m| m.borrow_mut().remove(&(store, name.to_string())));
     }
 
-    pub(crate) fn fake_remove_ref(store: Store, item: &[u8]) {
-        FAKE.with(|m| m.borrow_mut().retain(|(s, _), (_, id)| !(*s == store && id.to_le_bytes() == item)));
+    /// True when an item went.
+    pub(crate) fn fake_remove_ref(store: Store, item: &[u8]) -> bool {
+        FAKE.with(|m| {
+            let mut m = m.borrow_mut();
+            let before = m.len();
+            m.retain(|(s, _), (_, id)| !(*s == store && id.to_le_bytes() == item));
+            m.len() < before
+        })
     }
 
-    pub(crate) fn fake_ref_present(store: Store, item: &[u8]) -> bool {
-        FAKE.with(|m| m.borrow().iter().any(|((s, _), (_, id))| *s == store && id.to_le_bytes() == item))
+    /// What a fake read hands back to delete with: an item object in the
+    /// file-based keychain, a persistent reference in the protected stores.
+    pub(crate) fn fake_handle(store: Store, id: Vec<u8>) -> super::Item {
+        if store == Store::Legacy { super::Item::FakeObject(id) } else { super::Item::Persistent(id) }
     }
 
     pub(crate) fn fake_names(store: Store, prefix: &str) -> Vec<String> {
@@ -1806,6 +1953,14 @@ pub(crate) mod test_support {
     }
 
     impl RealKeystore {
+        /// The macOS file-based keychain, in the test namespace, for the move's
+        /// file-keychain half: the protected stores refuse an unsigned test binary.
+        #[cfg(target_os = "macos")]
+        pub(crate) fn enter_file_keychain() -> Self {
+            MODE.with(|m| m.set(Mode::Real));
+            Self { _private: () }
+        }
+
         pub(crate) fn enter() -> Option<Self> {
             if !super::real::flat_available() || super::mac_layout() {
                 return None;

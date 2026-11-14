@@ -10,7 +10,10 @@
 # it seeds an identity whose key sits in the login keychain the way 0.13 wrote it, then:
 #   1. 0.14 starts with entitlements validated, its seal passes, it moves the key into
 #      the data-protection keychain and deletes the login keychain item, and opens
-#   2. 0.14 again: nothing left to move, still opens
+#   1b. the field case: the same key back in the login keychain beside its protected
+#      copy; 0.14 deletes the login item (exactly "1 moved, 0 kept") and still opens,
+#      so the protected copy survived the delete
+#   2. 0.14 again: nothing left to move (no "Keychain move:" line at all), still opens
 #   3. 0.13 cannot open it (key missing), and a library planted into 0.13 the HOL-SEC-187
 #      way gets errSecMissingEntitlement for the keys group and finds no login item
 #   4. 0.14 with one framework swapped for 0.13's, with its Info.plist edited after
@@ -160,7 +163,21 @@ expect "the login keychain item is gone" '! login_item'
 expect "0.14 opens the identity" '! grep -q "did not unlock at launch" "$W/run.log"'
 grep -h "start check took" "$W/seal.log" | sed 's/^/     U14 /' || true
 
-# 2. Again: nothing to move, still opens.
+# 1b. The field case (a Mac where 0.13 kept its login item after an earlier 0.14 start):
+# the same key goes back into the login keychain the way stage 1 seeded it, beside the
+# protected copy. A file-based delete that reached the protected copy would leave the
+# identity unopenable; a delete that missed the login item would leave it, or count it.
+security add-generic-password -s com.hollow.identity -a "$SLOT" -X "$(cat "$W/seed/key.hex")" \
+  -T "$NEW_APP" -T "$OLD_APP" "$LOGIN"
+expect "(the login item is back beside the protected copy)" login_item
+run_app "$NEW_APP" 20
+expect "0.14 moves exactly that item, none kept" \
+  'grep -q "Keychain move: 1 moved, 0 kept for the next start, 0 left alone" "$W/run.log"'
+expect "no item logged as kept or left alone" '[ "$(grep -c "Keychain move:" "$W/run.log")" = 1 ]'
+expect "the login keychain item is gone again" '! login_item'
+expect "0.14 still opens: the protected copy survived the delete" '! grep -q "did not unlock at launch" "$W/run.log"'
+
+# 2. Again: nothing to move (stage 1b's next start), still opens.
 run_app "$NEW_APP" 20
 expect "a second start moves nothing" '! grep -q "Keychain move:" "$W/run.log"'
 expect "and still opens" '! grep -q "did not unlock at launch" "$W/run.log"'
