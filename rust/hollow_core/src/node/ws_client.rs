@@ -2977,15 +2977,39 @@ async fn dial_websocket(url: &str) -> Result<(WsStream, Option<(SocketAddr, Sock
         })
         .ok_or_else(|| format!("Bad relay URL: {url}"))?;
     let addr = dial_override().unwrap_or_else(|| format!("{host}:{port}"));
-    let tcp = tokio::net::TcpStream::connect(addr)
-        .await
-        .map_err(|e| format!("WebSocket connect failed: {e}"))?;
+    let tcp = connect_relay(&host, &addr).await?;
     limit_unacked_send_time(&tcp);
     let path = tcp.local_addr().ok().zip(tcp.peer_addr().ok());
     let (stream, _response) = tokio_tungstenite::client_async_tls_with_config(request, tcp, None, extra_trust())
         .await
         .map_err(|e| format!("WebSocket connect failed: {e}"))?;
     Ok((stream, path))
+}
+
+/// Debug builds only: under the fleet's relay guard marker the dial goes to the
+/// addresses `fleet_relay_guard::vetted` judged, never the official relay's.
+#[cfg(debug_assertions)]
+async fn connect_relay(host: &str, addr: &str) -> Result<tokio::net::TcpStream, String> {
+    connect_relay_in(crate::identity::data_dir().ok().as_deref(), host, addr).await
+}
+
+#[cfg(debug_assertions)]
+async fn connect_relay_in(dir: Option<&std::path::Path>, host: &str, addr: &str) -> Result<tokio::net::TcpStream, String> {
+    let guarded = dir.is_some_and(crate::node::fleet_relay_guard::armed_in);
+    let tcp = if guarded {
+        let vetted = crate::node::fleet_relay_guard::vetted(host, addr)
+            .await
+            .inspect_err(|e| hollow_log!("[HOLLOW-WS] {e}"))?;
+        tokio::net::TcpStream::connect(&vetted[..]).await
+    } else {
+        tokio::net::TcpStream::connect(addr).await
+    };
+    tcp.map_err(|e| format!("WebSocket connect failed: {e}"))
+}
+
+#[cfg(not(debug_assertions))]
+async fn connect_relay(_host: &str, addr: &str) -> Result<tokio::net::TcpStream, String> {
+    tokio::net::TcpStream::connect(addr).await.map_err(|e| format!("WebSocket connect failed: {e}"))
 }
 
 /// Debug builds only: a `relay_connect` file in the data dir (one `ip:port` line) is
@@ -4108,6 +4132,21 @@ mod tests {
             std::fs::write(dir.path().join("relay_connect"), junk).unwrap();
             assert_eq!(dial_override_in(dir.path()), None, "{junk:?} is not one address");
         }
+    }
+
+    /// Under the fleet's marker a dial to the official relay's name is refused before any
+    /// connect, and the same dial without the marker goes ahead as before.
+    #[tokio::test]
+    #[cfg(debug_assertions)]
+    async fn the_fleet_marker_refuses_a_dial_to_the_official_relay() {
+        let dir = crate::test_tmp::tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        assert!(connect_relay_in(Some(dir.path()), "relay.anonlisten.com", &addr).await.is_ok(), "no marker, no judgement");
+        std::fs::write(dir.path().join(crate::node::fleet_relay_guard::MARKER), "on\n").unwrap();
+        let refused = connect_relay_in(Some(dir.path()), "relay.anonlisten.com", &addr).await;
+        assert!(refused.as_ref().is_err_and(|e| e.contains("PRODUCTION RELAY GUARD")), "{:?}", refused.map(|_| ()));
+        assert!(connect_relay_in(Some(dir.path()), "hollowtest.example", &addr).await.is_ok(), "a test relay still dials");
     }
 
     /// The fleet's extra trust anchor: only a PEM certificate file adds one.

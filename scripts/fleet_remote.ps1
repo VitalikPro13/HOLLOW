@@ -138,6 +138,58 @@ function Get-PeerLogMatches($peer, $pattern) {
     return @($lines | Where-Object { "$_".Contains($pattern) } | ForEach-Object { "$_" })
 }
 
+function Get-PeerAppLogPath($peer) {
+    if (Test-WindowsBackend) { return Join-Path (Join-Path $script:FleetStageRoot $peer) 'hollow_debug.log' }
+    return Join-Path (Get-FleetPeerDataDir $peer) 'hollow_debug.log'
+}
+
+# The app log's size now, so a later read sees only what this launch wrote.
+function Get-PeerAppLogLength($peer) {
+    try {
+        if (Test-AndroidBackend $peer) {
+            if ($peer -notmatch '^[a-z]$' -or -not (Test-AndroidDeviceUp $peer)) { return 0 }
+            $size = "$(Invoke-AppShell $peer "stat -c %s $($script:AndroidDocs)/hollow/hollow_debug.log 2>/dev/null || echo 0")".Trim()
+            if ($size -match '^\d+$') { return [int64]$size }
+            return 0
+        }
+        $log = Get-PeerAppLogPath $peer
+        if (Test-Path -LiteralPath $log) { return (Get-Item -LiteralPath $log).Length }
+    } catch { }
+    return 0
+}
+
+# The app log's lines after $offset bytes (all of it when the log restarted shorter).
+function Get-PeerAppLogSince($peer, [int64]$offset) {
+    if (Test-AndroidBackend $peer) {
+        if ($peer -notmatch '^[a-z]$' -or -not (Test-AndroidDeviceUp $peer)) { return @() }
+        $now = Get-PeerAppLogLength $peer
+        if ($now -lt $offset) { $offset = 0 }
+        return @(Invoke-AppShell $peer "tail -c +$($offset + 1) $($script:AndroidDocs)/hollow/hollow_debug.log 2>/dev/null")
+    }
+    $log = Get-PeerAppLogPath $peer
+    if (-not (Test-Path -LiteralPath $log)) { return @() }
+    $stream = [System.IO.File]::Open($log, 'Open', 'Read', 'ReadWrite')
+    try {
+        if ($stream.Length -lt $offset) { $offset = 0 }
+        [void]$stream.Seek($offset, 'Begin')
+        $reader = New-Object System.IO.StreamReader($stream, (New-Object System.Text.UTF8Encoding($false)))
+        return @($reader.ReadToEnd() -split "`r?`n")
+    } finally { $stream.Dispose() }
+}
+
+# The probe's relay guard marker (relay_guard.json), $null when there is none.
+function Get-PeerRelayGuard($peer) {
+    try {
+        if (Test-AndroidBackend $peer) {
+            if ($peer -notmatch '^[a-z]$' -or -not (Test-AndroidDeviceUp $peer)) { return $null }
+            return (ConvertFrom-FleetRelayGuardMarker "$(Invoke-AppShell $peer "cat $($script:AndroidDocs)/probe_out/$($script:FleetRelayGuardMarker) 2>/dev/null")")
+        }
+        $file = Join-Path (Join-Path $script:FleetOutRoot $peer) $script:FleetRelayGuardMarker
+        if (-not (Test-Path -LiteralPath $file)) { return $null }
+        return (ConvertFrom-FleetRelayGuardMarker ([System.IO.File]::ReadAllText($file)))
+    } catch { return $null }
+}
+
 # One per-peer command; the same vocabulary for a local peer and for an agent.
 #   step        peer, step, timeout     a probe step or a host op; the answer
 #   fleet       args                    fleet.ps1 as a child (its -Peers restart from line 0)
@@ -149,7 +201,7 @@ function Get-PeerLogMatches($peer, $pattern) {
 #   sync_out    peer                    pull a phone's out dir to the host
 #   log_grep    peer, pattern           the app log's lines containing pattern
 #   logcat      peer, pattern, clear    an Android peer's logcat lines containing pattern; clear empties it
-#   proxy       peers                   start this machine's zombie proxy with a route per peer
+#   proxy       peers, relay            start this machine's zombie proxy with a route per peer to relay
 #   proxy_stop                          stop it
 function Invoke-FleetPeerCommand($request) {
     $peer = "$($request.peer)"
@@ -185,7 +237,7 @@ function Invoke-FleetPeerCommand($request) {
             if ($request.clear -and (Test-AndroidBackend $peer)) { Invoke-Adb $peer 'logcat' '-c' 2>$null | Out-Null; return @{ lines = @() } }
             return @{ lines = @(Get-PeerLogcat $peer | Where-Object { "$_".Contains("$($request.pattern)") }) }
         }
-        'proxy' { $null = Start-FleetProxy @($request.peers | ForEach-Object { "$_" }); return @{ done = $true } }
+        'proxy' { $null = Start-FleetProxy @($request.peers | ForEach-Object { "$_" }) "$($request.relay)"; return @{ done = $true } }
         'proxy_stop' { Stop-FleetProxy; return @{ done = $true } }
         default { throw "unknown fleet peer command '$($request.cmd)'" }
     }
@@ -442,7 +494,7 @@ function Invoke-PeerFleet($peers, $fleetArgs, $timeoutSeconds = 900) {
         $groups[$where] += $letter
     }
     foreach ($where in $groups.Keys) {
-        $all = @($fleetArgs) + @('-Peers', ($groups[$where] -join ','))
+        $all = Add-FleetRelayArgs (@($fleetArgs) + @('-Peers', ($groups[$where] -join ','))) (Get-FleetExpectedRelay '')
         if ($where -eq 'local') {
             Invoke-FleetPeerCommand ([pscustomobject]@{ cmd = 'fleet'; args = $all }) | Out-Null
         } else {

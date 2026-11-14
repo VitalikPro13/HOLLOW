@@ -339,16 +339,49 @@ function Test-FleetProxyUp {
 }
 
 # Starts the proxy with a route per peer to the relay, unless it is up. The app
-# reaches it only once the client honours a connect override: `relay_connect` in
-# the peer's data directory, one `host:port` line, read by debug builds only and
-# dialled instead of the relay's address while TLS and the auth domain stay the
-# relay's. No client honours it yet (a wave 1 request); Set-PeerRelayConnect
-# writes it so a peer is ready the day one does.
+# dials it through `relay_connect` in the peer's data directory (one `host:port`
+# line, debug builds only) instead of the relay's address, while TLS and the auth
+# domain stay the relay's.
+# The upstream is the relay these peers carry (FLEET_RELAY_CONNECT names another
+# listener of it), never a default, and never the official relay unless the run
+# allows production; the proxy itself refuses it too (zombie_proxy.py).
+# The relay and host:port the proxy's routes go to, judged by the relay guard.
+function Resolve-FleetProxyUpstream([string]$relayHost) {
+    $relayHost = ConvertTo-FleetRelayHostPort $relayHost
+    if (-not $relayHost) {
+        Assert-FleetGuardVerdict 'the zombie proxy has no relay to route to' 'name it with -Relay or FLEET_RELAY, or onboard the peers with -Relay'
+        $relayHost = 'relay.anonlisten.com'
+    }
+    $upstream = if ($relayHost -match ':\d+$') { $relayHost } else { "${relayHost}:443" }
+    # FLEET_RELAY_CONNECT (host:port) sends the routes to another listener of the same
+    # relay, such as a LAN address, while the app keeps the relay's TLS name and auth domain.
+    if ($env:FLEET_RELAY_CONNECT) { $upstream = ConvertTo-FleetRelayHostPort "$env:FLEET_RELAY_CONNECT" }
+    Assert-FleetNotProduction 'the zombie proxy relay' $relayHost
+    Assert-FleetNotProduction 'the zombie proxy upstream' $upstream
+    Assert-FleetTlsNotProduction 'the zombie proxy upstream' $upstream $relayHost
+    return [pscustomobject]@{ relay = $relayHost; upstream = $upstream }
+}
+
 # Returns the peers it routes; a peer outside them must dial the relay itself.
-function Start-FleetProxy($peers, $relayHost = 'relay.anonlisten.com') {
+function Start-FleetProxy($peers, [string]$relayHost) {
+    $route = Resolve-FleetProxyUpstream $relayHost
+    $relayHost = $route.relay
+    $upstream = $route.upstream
     if (Test-FleetProxyUp) {
         # Another run's proxy (the desktop side's, beside a phone agent's run) routes only
         # the peers it started with: a peer sent to a route it lacks never connects.
+        $info = $null
+        if (Test-Path (Get-FleetProxyFile)) { $info = Get-Content (Get-FleetProxyFile) -Raw | ConvertFrom-Json }
+        $theirs = if ($info -and $info.upstream) { "$($info.upstream)" } else { '' }
+        if (-not $theirs) {
+            Write-Host '[fleet] the running proxy does not say where it routes (started before the relay guard): stop it with fleet.ps1 -Stop; these peers dial the relay directly' -ForegroundColor Yellow
+            return @()
+        }
+        Assert-FleetNotProduction 'the running zombie proxy upstream' $theirs
+        if ($theirs -ne $upstream) {
+            Write-Host "[fleet] the running proxy routes to $theirs, not $upstream`: these peers dial the relay directly" -ForegroundColor Yellow
+            return @()
+        }
         $routed = @((Invoke-FleetProxy 'stats').routes.PSObject.Properties.Name)
         $missing = @(@($peers) | Where-Object { $routed -notcontains "$_" })
         if ($missing.Count -gt 0) {
@@ -362,10 +395,7 @@ function Start-FleetProxy($peers, $relayHost = 'relay.anonlisten.com') {
     Remove-Item $ready -ErrorAction SilentlyContinue
     $arguments = @($proxy, 'serve', '--control', "127.0.0.1:$(Get-FleetProxyControlPort)", '--ready-file', $ready,
         '--log', (Join-Path $script:FleetOutRoot '_proxy.log'))
-    # FLEET_RELAY_CONNECT (host:port) sends the routes to another listener of the same
-    # relay, such as a canary, while the app keeps the relay's TLS name and auth domain.
-    $upstream = "${relayHost}:443"
-    if ($env:FLEET_RELAY_CONNECT) { $upstream = $env:FLEET_RELAY_CONNECT }
+    if (Test-FleetProductionAllowed) { $arguments += '--allow-production' }
     foreach ($peer in @($peers)) {
         $arguments += @('--route', "$peer=127.0.0.1:$(Get-FleetProxyPort $peer)=$upstream")
     }
@@ -378,9 +408,16 @@ function Start-FleetProxy($peers, $relayHost = 'relay.anonlisten.com') {
         $start['RedirectStandardError'] = Join-Path $script:FleetOutRoot '_proxy.stderr'
     }
     $process = Start-Process @start
-    if (-not (Wait-Condition { Test-Path $ready } 15 200)) { throw 'the zombie proxy never became ready' }
+    if (-not (Wait-Condition { (Test-Path $ready) -or $process.HasExited } 15 200) -or -not (Test-Path $ready)) {
+        $said = ''
+        foreach ($f in @('_proxy.stderr', '_proxy.log')) {
+            $path = Join-Path $script:FleetOutRoot $f
+            if (Test-Path $path) { $said += (Get-Content $path -Tail 5 -ErrorAction SilentlyContinue) -join ' ' }
+        }
+        throw "the zombie proxy never became ready $said"
+    }
     [System.IO.File]::WriteAllText((Get-FleetProxyFile),
-        (@{ pid = $process.Id; relay = $relayHost; peers = @($peers) } | ConvertTo-Json -Compress))
+        (@{ pid = $process.Id; relay = $relayHost; upstream = $upstream; peers = @($peers) } | ConvertTo-Json -Compress))
     Write-Host "[fleet] zombie proxy up (pid $($process.Id)), routes $(@($peers) -join ',') -> $upstream" -ForegroundColor Cyan
     return @($peers)
 }
@@ -403,7 +440,9 @@ function Set-PeerRelayConnect($peer, $dataDir) {
     New-Item -ItemType Directory -Path $dataDir -Force | Out-Null
     [System.IO.File]::WriteAllText((Join-Path $dataDir 'relay_connect'), "127.0.0.1:$(Get-FleetProxyPort $peer)`n")
     # FLEET_RELAY_CA (a PEM file) is trusted beside the public roots by debug builds, for a
-    # test relay that answers under the relay's own name behind FLEET_RELAY_CONNECT.
+    # relay that answers under another relay's name behind FLEET_RELAY_CONNECT. When that
+    # name is the official relay's, the peer's relay IS production to the guard: the run
+    # needs -AllowProduction, since a fallback route would sign in to the official relay.
     $ca = Join-Path $dataDir 'relay_ca.pem'
     if ($env:FLEET_RELAY_CA) { Copy-Item -LiteralPath $env:FLEET_RELAY_CA -Destination $ca -Force }
     else { Remove-Item -LiteralPath $ca -ErrorAction SilentlyContinue }
@@ -505,8 +544,6 @@ function Restore-FleetPeer($peer) {
 # the host must present the pinned test-relay key (an address moves with DHCP, the key
 # does not). FLEET_TEST_RELAY_HOSTKEY replaces the pin for another test VM.
 $script:FleetTestRelayHostKey = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBX3OriExIfsblnOZ28pcgv3h8yppm2QYFPXLxm2f+5W'
-$script:FleetProdRelayNames = @('relay.anonlisten.com', 'anonlisten.com')
-$script:FleetProdRelayAddrs = @('141.227.186.209')
 
 function Test-FleetPrivateAddress([System.Net.IPAddress]$ip) {
     if ($ip.IsIPv4MappedToIPv6) { $ip = $ip.MapToIPv4() }
@@ -515,12 +552,6 @@ function Test-FleetPrivateAddress([System.Net.IPAddress]$ip) {
         return ($b[0] -eq 10) -or ($b[0] -eq 172 -and $b[1] -ge 16 -and $b[1] -le 31) -or ($b[0] -eq 192 -and $b[1] -eq 168)
     }
     return (($b[0] -band 0xfe) -eq 0xfc) -or ($b[0] -eq 0xfe -and ($b[1] -band 0xc0) -eq 0x80)
-}
-
-function Get-FleetAddresses([string]$name) {
-    $ip = $null
-    if ([System.Net.IPAddress]::TryParse($name, [ref]$ip)) { return @($ip) }
-    try { return @([System.Net.Dns]::GetHostAddresses($name)) } catch { return @() }
 }
 
 # The ssh arguments that reach the test relay and only it, or why not.
@@ -566,6 +597,20 @@ function Resolve-FleetRelayDenyTarget([string]$target, [string]$optsText) {
     $sshArgs = @('-o', 'HostKeyAlias=fleet-test-relay', '-o', "UserKnownHostsFile=$known", '-o', "GlobalKnownHostsFile=$empty",
         '-o', 'StrictHostKeyChecking=yes', '-o', 'UpdateHostKeys=no', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10') + $opts
     return [pscustomobject]@{ ok = $true; why = $hostName; args = $sshArgs; files = @($known, $empty) }
+}
+
+# The ssh arguments for a journey that runs sudo on a relay box: the test relay's, as
+# Resolve-FleetRelayDenyTarget vets them, or with the opt-in plain ones to the box named.
+# No target is refused either way: production is never a default.
+function Resolve-FleetRelaySshTarget([string]$what, [string]$target, [string]$optsText) {
+    if (-not $target) {
+        Assert-FleetGuardVerdict "$what with no relay box to ssh to" 'name the test relay box with FLEET_RELAY_SSH (or -RelayHost)'
+        throw "$what needs the relay box to ssh to: set FLEET_RELAY_SSH or pass -RelayHost"
+    }
+    $reach = Resolve-FleetRelayDenyTarget $target $optsText
+    if ($reach.ok) { return $reach }
+    Assert-FleetGuardVerdict "$what over ssh to $target" $reach.why
+    return [pscustomobject]@{ ok = $true; why = $target; args = @('-o', 'BatchMode=yes', '-o', 'ConnectTimeout=20'); files = @() }
 }
 
 function Invoke-FleetRelayDeny($step) {

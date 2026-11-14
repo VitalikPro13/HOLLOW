@@ -119,29 +119,7 @@ function Stop-Peer($peer) {
 
 # Launches a peer on $dataDir with this script's (sandboxed) environment.
 function Start-PeerProcess($peer, $dataDir) {
-    $dest = Join-Path $script:FleetStageRoot $peer
-    $out = Join-Path $script:FleetOutRoot $peer
-    if (Test-Path $out) { Remove-Item $out -Recurse -Force }
-    New-Item -ItemType Directory -Path $out -Force | Out-Null
-    New-Item -ItemType Directory -Path $dataDir -Force | Out-Null
-    $script:FleetConsumed[$peer] = 0
-    $env:HOLLOW_DATA_DIR = $dataDir
-    $env:UI_PROBE_OUT = $out
-    $env:UI_PROBE_MODE = 'live'
-    $env:UI_PROBE_PEER = $peer
-    $env:UI_PROBE_IDLE_MINUTES = '40'
-    $env:UI_PROBE_SCENARIO_FILE = ''
-    $env:UI_PROBE_STEPS = ''
-    Wait-FleetLaunchSlot $peer
-    $proc = Start-Process -FilePath (Join-Path $dest 'hollow.exe') -WorkingDirectory $dest -PassThru
-    Say "launched $peer (pid $($proc.Id)) on $dataDir"
-    $deadline = (Get-Date).AddSeconds($BootTimeoutSeconds)
-    while ((Get-Date) -lt $deadline) {
-        if (Test-PeerLive $peer) { return $proc.Id }
-        if ($proc.HasExited) { throw "peer $peer died on launch.`n" + (Get-CrashTail $peer) }
-        Start-Sleep -Milliseconds 300
-    }
-    throw "peer $peer never came live.`n" + (Get-CrashTail $peer)
+    return (Start-FleetJourneyPeer -Peer $peer -DataDir $dataDir -BootTimeoutSeconds $BootTimeoutSeconds).Id
 }
 
 # Only ever on a peer about to die: the live loop keeps its read position in memory.
@@ -271,6 +249,8 @@ function Invoke-Link($label) {
     Open-SettingsDevices p
     $code = Get-LinkCode p
     Step q @{ op = 'wait_for'; target = 'text:Agree and continue'; timeout_ms = 90000 }
+    # The relay this run is on (FLEET_RELAY), typed before an identity exists.
+    foreach ($s in @(Get-RelayWelcomeSteps '')) { Step q $s }
     Step q @{ op = 'tap'; target = 'text:Agree and continue'; index = 0 }
     Step q @{ op = 'wait_for'; target = 'text:Create an identity'; timeout_ms = 20000 }
     Step q @{ op = 'tap'; target = 'text:Link a device'; index = 0 }
@@ -584,5 +564,6 @@ try {
     foreach ($n in $script:Notes) { Write-Host "  note: $n" -ForegroundColor DarkCyan }
     Write-Host "  evidence: $evidence"
 }
+if (Get-FleetJourneyRelayVoid) { $script:Gates['V  no peer dialled the official relay'] = 'FAIL' }
 $failed = @($script:Gates.Values | Where-Object { $_ -eq 'FAIL' }).Count
 if ($failed -gt 0) { exit 1 }

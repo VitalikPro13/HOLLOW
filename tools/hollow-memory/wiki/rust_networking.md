@@ -332,6 +332,16 @@ The node drops its command sender -> `shutdown()`: on a session socket `{"type":
 after the grace; then the task returns. Without the exit the socket would ping and reconnect forever,
 one leaked task per node restart.
 
+### Fleet production relay guard (debug builds only)
+
+`node/fleet_relay_guard.rs`, compiled only with `debug_assertions`: a `relay_guard` file in the data
+dir (the fleet writes it; contents ignored) arms it. `connect_relay` then resolves the dial target
+(`relay_connect` override or `host:port`), refuses a name under `anonlisten.com` or any address of
+the official relay (`141.227.186.209`, `2001:41d0:ab01::4:0:d`, v4-mapped too), and dials exactly the
+addresses it judged. `run_fetch` refuses an official relay when the marker sits beside its database
+(the push fetch node runs outside the probe's guard). Release builds dial as before. Tests
+`node::fleet_relay_guard::tests`; the tooling half is `scripts/fleet_relay_guard.ps1`.
+
 ### Fleet dial override (debug builds only)
 
 `dial_override()`: a `relay_connect` file in the data dir holding one `ip:port` (it must parse as a

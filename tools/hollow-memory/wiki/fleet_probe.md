@@ -547,8 +547,8 @@ the staged exe (`build\fleet\<peer>`), not in the data dir, and `-Build`'s roboc
 copies the build dir's own stale `runner\Debug\hollow_debug.log` into every peer, so a fresh
 peer's log starts with thousands of lines that are not its own: take a line mark before
 reading one (session 31). Opt-in only (`-Only`):
-`fleet_relay_restart` (restarts PRODUCTION), `fleet_relay_switch` (needs a self-hosted
-relay), `fleet_at_rest` (seeds from an older build). Items take `args` (`-Keep`, `-Attach`)
+`fleet_relay_restart` (restarts the TEST relay box: `FLEET_RELAY_SSH` + `FLEET_RELAY`, both
+refused when official), `fleet_relay_switch` (needs a second test relay, `-HomeRelay`), `fleet_at_rest` (seeds from an older build). Items take `args` (`-Keep`, `-Attach`)
 and `keepUp` so `calls_after_vc` attaches to `calls_after`'s fleet. About 75 minutes for all.
 Since session 24 each item also writes `all\<item>-<peer>.log` (that peer's app lines stamped
 after the item began; the app never rotates to `.log.1`, it trims `hollow_debug.log` to its
@@ -1129,9 +1129,11 @@ powershell -File scripts\fleet.ps1 -Onboard -Fresh -Peers b,c
 powershell -File scripts\fleet.ps1 -Live -Peers a,b,c
 ```
 
-`-Relay` without `-Onboard` throws: the welcome dialog only exists while there is no identity, so it
-would otherwise silently leave every peer where it was. `fleet_device_link.ps1 -EdgeGates` already
-used this field by hand for its offline refusal; both now go through one builder.
+`-Relay` without `-Onboard` never moves a peer (the welcome dialog only exists while there is no
+identity): it names the relay the run EXPECTS, which the production relay guard holds every peer
+to, the proxy routes to and remote machines are told (`FLEET_RELAY` stands in for it; section
+"Keeping fleets off the production relay"). `fleet_device_link.ps1 -EdgeGates` already used this
+field by hand for its offline refusal; both now go through one builder.
 
 **What the journey proves** (`scripts\fleet_relay_switch.ps1 -RelayHost <host>`, peers a on the
 self-hosted relay, b and c on the official one): G1 the invite a creates carries `relay=` and the
@@ -1311,9 +1313,11 @@ Linux and the macOS desktop: pause/resume (`kill`) and the proxy route only; bac
   freezes that peer's route on the zombie proxy (`tools/zombie_proxy`, `fleet.ps1 -NetProxy`,
   port 18500 + letter index, control 18549). The app reaches the proxy through `relay_connect`
   (one `host:port` line in the data dir, debug builds; the fleet writes it). The proxy's
-  upstream is `relay.anonlisten.com:443` unless `FLEET_RELAY_CONNECT=host:port` names another
-  listener of the same relay (a canary such as `141.227.186.209:8443`): the app keeps the
-  relay's TLS name and auth domain either way. On thaw the proxy dials upstream only for held
+  upstream is the relay the proxied peers carry (`-Relay`, `FLEET_RELAY` or their fixtures'
+  stamp; none known = refused), unless `FLEET_RELAY_CONNECT=host:port` names another listener
+  of the same relay (a LAN address): the app keeps the relay's TLS name and auth domain either
+  way. A canary on the production box (`141.227.186.209:8443`) is the official relay to the
+  guard and needs `-AllowProduction`. On thaw the proxy dials upstream only for held
   connections whose client is still there, so abandoned attempts never spend the relay's
   10-new-sockets-a-minute budget.
 
@@ -1627,29 +1631,107 @@ operator's denylist (`relay-uws/src/deny_list.h`) on real peers. They need a THR
   (`deny_lift`, 2026-11-12). A lift scenario waits 40 s before the lift: a sync ask still resending
   (5 s, then 10 s) would otherwise fetch the change and hide a missing catch-up.
 
-## Keeping 0.14 fleets off the production relay (2026-11-12/14, OPEN pre-freeze item)
+## Keeping fleets off the production relay (the production relay guard, 2026-11-14)
 
-Every fleet default still points at PRODUCTION (`relay.anonlisten.com`): an onboarding without
-`-Relay` leaves the welcome dialog's relay field empty (`Get-RelayWelcomeSteps` writes no steps, so
-the fixture is stamped with the official relay), and `Start-FleetProxy`'s upstream defaults to
-`relay.anonlisten.com:443` unless `FLEET_RELAY_CONNECT` is set. Only the `relay_deny` op refuses
-production by itself (`Resolve-FleetRelayDenyTarget`, above). A hard guard in the fleet tooling
-(refuse production unless an explicit flag says so) is a PRE-FREEZE item for 0.14 and not built yet;
-until it lands:
+Fleet and probe peers live on a TEST relay (hollowsrv, `hollowtest.duckdns.org`, memory
+`reference_test_relay_vm_hollowsrv`). Twice on 11-12 throwaway identities reached production
+(rostercheck try 3 onboarded r, s, u without `-Relay`; another try's proxy defaulted its upstream
+to `relay.anonlisten.com:443`), and on 11-14 a mixed `-Peers a=d,b=linux:q` run from the mini sent
+`-NetProxy` to the VM agent, whose proxy then routed the VM peer to production (only the TLS name
+check stopped it). A 0.14 client on the 0.13 production relay also hammers it (2,985 join locks in
+2 min on 11-05). The guard makes every one of those paths refuse, fail closed, unless the run says
+**`-AllowProduction`** (or `UI_PROBE_ALLOW_PRODUCTION=1` in the env when a script STARTS: the
+opt-in is read once at load, so an env var some earlier script left in the same shell lifts
+nothing; fleet.ps1 restores the env it hands its launches however they end, and `ui_probe.ps1`
+sets it for `flutter drive` alone), which prints a red banner on every judgement. Opted in, a
+probe whose data dir names no relay boots on the official relay, as the real app does. "Production" = a name under `anonlisten.com`, or an address of the official relay
+(pinned `141.227.186.209`, `2001:41d0:ab01::4:0:d`, plus what `relay.anonlisten.com` and
+`anonlisten.com` resolve to now).
 
-- **Onboard every 0.14 identity with `-Relay <test relay>`** (hollowsrv / `hollowtest.duckdns.org`,
-  memory `reference_test_relay_vm_hollowsrv`). On 11-12 the t14-rostercheck fleet try 3 onboarded
-  throwaways r, s, u WITHOUT `-Relay`: they authenticated to production and created a server
-  there, and another try's proxy had no `FLEET_RELAY_CONNECT`, so its upstream went to production
-  (refused at TLS). A 0.14 client on the 0.13 production relay also hammers it: an owner made join
-  locks about 25 a second (2,985 in 2 min) on 11-05 because the relay never kept them.
-- **Never mix Mac and VM peers in one run** (`-Peers a=d,b=linux:q` from the mini). On 11-14 the VM
-  peer's TLS to hollowtest was answered with relay.anonlisten.com's certificate ("certificate not
-  valid for name hollowtest.duckdns.org"): the Mac side's proxy environment leaked into the remote
-  agent. The name check refused it, so nothing connected, but the route led to production. Run
-  VM-only fleets for Linux; they reach hollowtest correctly.
-- **Prove it in every digest**: each peer's first connect names the test relay, and
-  `relay.anonlisten.com` appears 0 times in every peer log (the t14-deps and t14-iospush runners
-  checked this). A runner that finds it reports the run void.
+**Name the relay once:** `-Relay <test relay>` on any fleet.ps1 run, or `FLEET_RELAY=<test relay>`
+in the shell (journeys that call `fleet.ps1 -Onboard` themselves, `Start-FreshFleet`, inherit it).
+`-Onboard` with neither is refused. `-Relay` without `-Onboard` is the relay the run expects.
+A journey that MOVES a peer between test relays names the others in `FLEET_RELAY_ALSO`
+(comma list, or fleet.ps1 `-RelayAlso`, forwarded to remote machines): each is judged like
+`-Relay`, a fixture stamped with one of them boots, and the probe's `UI_PROBE_EXPECT_RELAY`
+becomes the set (boot relay first). A relay change the probe lets through rewrites the data
+dir's `fleet_relay` stamp, so a `-ReuseData` run after a move is judged by where the peer is.
+`fleet.ps1 ... -GuardOnly` runs only the checks below and exits, before anything is built,
+stopped, reset or launched.
+
+The layers (each refuses on its own; shared code in `scripts/fleet_relay_guard.ps1`):
+
+- **The fixture's relay.** `-Onboard` writes `fleet_relay` (one line) into the data dir, so it rides
+  every fixture copy (`Save-Fixture`, Android `Pull-AppDir`). Before a launch fleet.ps1 reads the
+  stamp the peer WILL boot with (fixture, or the run dir with `-ReuseData`), so `-Live` resetting a
+  peer to a production fixture is refused before anything stops. A stamp other than `-Relay` is
+  refused too. A fixture made before the guard has no stamp: it boots and the probe judges it
+  (fleet.ps1 says so in yellow); re-onboard it with `-Relay` to stamp it.
+- **The proxy's upstream.** `Start-FleetProxy` takes the proxied peers' relay, never a default, and
+  refuses no relay, a production relay, a production `FLEET_RELAY_CONNECT`, and a route whose TLS
+  certificate (read only, SNI = the relay) names anything under anonlisten.com. A running proxy
+  from before the guard (no `upstream` in `_proxy.json`) or routing elsewhere is not reused.
+  `zombie_proxy.py` refuses a production route by itself (exit 3) and judges every dial's
+  resolved address again; `--allow-production` lifts it, `--production-addr` adds an address.
+- **Remote agents.** Every remote fleet.ps1 run (`Start-RemoteFleet`, `Invoke-PeerFleet`, the
+  `proxy` agent command) gets this run's `-Relay` and opt-in in its arguments, so a remote machine
+  judges with the driver's relay and never falls back to its own defaults; `-NetProxy` reaching a
+  machine that knows no relay is refused there.
+- **Direct routes.** Each relay a non-proxied peer dials gets the same certificate check (a route
+  that does not answer passes with a note: nothing can reach it).
+- **Inside the app** (`integration_test/probe/probe_relay_guard.dart`, probe builds only, wired in
+  `ui_probe_test.dart`): the probe's relay setting defaults to `no-relay-stamped.invalid`, never
+  the official relay (opted in: the official relay); a loaded or newly chosen relay is judged before it is saved or used; node
+  start is judged again (relay, where it resolves, the `relay_connect` override); and every Dart
+  HTTP request to the official relay (`/relay-status` and the like, through
+  `HttpOverrides.findProxyFromEnvironment`) is refused. A refusal writes
+  `build/fleet_out/<peer>/relay_guard.json` (`verdict: refused`, `where`, `reason`) and ends the
+  process with exit code 86 before the dial. `UI_PROBE_EXPECT_RELAY` (from fleet.ps1, a comma
+  set) refuses any other relay.
+- **Journey launches.** Every journey script launches through ONE helper,
+  `Start-FleetJourneyPeer` (fleet_lib.ps1): the stamp its data carries against `FLEET_RELAY`
+  (an EMPTY data dir onboards, so it needs a relay and gets stamped), the guard env for the
+  probe, the node's dial marker, and after boot the probe's marker, its refusal and the log's
+  connect lines; before its verdict each journey judges every peer it launched again
+  (`Add-FleetJourneyRelayVoid`, a void run fails). Every welcome walk types the relay through
+  `Get-RelayWelcomeSteps` (empty = `FLEET_RELAY`, none = refused). The self-test's source scans
+  hold every script to all three.
+- **Inside the node** (debug builds only, `node/fleet_relay_guard.rs`): with the `relay_guard`
+  marker the fleet writes into each peer's data dir (fleet.ps1 `Start-Peer`, Android included,
+  and the journey helper; an opted-in run removes it), `ws_client` dials only the addresses it
+  resolved and judged (none may be the official relay's), and a push fetch (`run_fetch`, the
+  Android background isolate the probe never sees) refuses an official relay outright. A release
+  build compiles none of it.
+- **After boot** (`Wait-Ready`): a refusal marker fails the run at once with its reason; a peer
+  without the marker runs a build from before the guard and is stopped ("rebuild with -Build"); the
+  app log's `[HOLLOW-WS] Connecting to` lines written by THIS launch (offset taken at launch) and
+  the provider's `relayDomain` must not name production. At the end every peer's new log lines are
+  judged again: a production dial prints `RUN VOID` and exits 1.
+
+Traps:
+- A mixed Mac + VM run (`-Peers a=d,b=linux:q`) is guarded by the remote-arguments layer (the VM
+  gets `-Relay`, its proxy routes there or refuses); not yet proven live (hollowsrv was down on
+  11-14), so check the VM peer's first connect in the digest.
+- `fleet_relay_switch.ps1 -RelayHost <test relay A> -HomeRelay <test relay B>` runs on two test
+  relays (b and c start on B, c moves to A; `FLEET_RELAY_ALSO` = both). Without `-HomeRelay`
+  b and c start on the official relay, which is refused unless `UI_PROBE_ALLOW_PRODUCTION=1`.
+- `fleet_relay_restart.ps1` takes the box from `FLEET_RELAY_SSH` (or `-RelayHost`), vetted like
+  `relay_deny` (pinned test-relay host key, private address, never the official relay's), and
+  the name from `FLEET_RELAY` (or `-RelayDomain`); either one missing or official is refused
+  before any build, ssh or node call unless `-AllowProduction`.
+- `FLEET_RELAY_CA` + `FLEET_RELAY_CONNECT` put a test relay behind ANOTHER relay's name; when
+  that name is the official relay's, the peer's relay is production to every layer and the run
+  needs `-AllowProduction` (a fallback route would sign in to the official relay).
+- The zombie proxy dials the addresses it judged, never the name again.
+- `ui_probe.ps1` mirrors a REAL identity (on production), so it now refuses unless
+  `-AllowProduction`; use a fleet peer instead (memory `feedback_probe_throwaway_identities_only`).
+- The status feed (`anonlisten.com/hollow/releases`, Rust) and the website, shop and GIF hosts are
+  not the relay and stay reachable.
+- Self-test: `pwsh scripts/fleet_relay_guard_selftest.ps1` (no relay, no build, no device;
+  fleet.ps1 runs from a temp copy with its own HOME/TEMP), `flutter test
+  test/probe_relay_guard_test.dart`, `python tools/zombie_proxy/test_zombie_proxy.py ProductionGuard`.
+- **Prove it in every digest** still: each peer's first connect names the test relay, and
+  `relay.anonlisten.com` appears 0 times in every peer log. A runner that finds it reports the run
+  void.
 - **Production cleanup** after a leak (a server or identity left there) is the lead's call; never
-  run `fleet_relay_restart` (it restarts PRODUCTION) as a fix.
+  run `fleet_relay_restart -AllowProduction` against it as a fix.

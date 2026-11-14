@@ -8,6 +8,7 @@ upstream.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shutil
@@ -553,6 +554,109 @@ class Parsing(unittest.TestCase):
         for bad in ('b', 'b=1', '=1:2=3:4', 'b=h:1=h'):
             with self.assertRaises(ValueError):
                 zombie_proxy.parse_route(bad)
+
+
+class ProductionGuard(unittest.TestCase):
+    """The proxy never dials the official relay unless told --allow-production."""
+
+    PROD = {'141.227.186.209', '2001:41d0:ab01::4:0:d'}
+
+    def serve(self, *routes, extra=()):
+        tmp = tempfile.mkdtemp(prefix='zombie-proxy-guard-')
+        self.addCleanup(shutil.rmtree, tmp, True)
+        ready = os.path.join(tmp, 'ready.json')
+        argv = [sys.executable, os.path.join(HERE, 'zombie_proxy.py'), 'serve',
+                '--control', '127.0.0.1:0', '--ready-file', ready]
+        for route in routes:
+            argv += ['--route', route]
+        proc = subprocess.Popen(argv + list(extra), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        self.addCleanup(lambda: (proc.poll() is None and proc.kill(), proc.wait(), proc.stderr.close()))
+        return proc, ready
+
+    def test_production_names_and_addresses_are_recognised(self):
+        for host in ('relay.anonlisten.com', 'RELAY.ANONLISTEN.COM.', 'anonlisten.com', 'x.y.anonlisten.com',
+                     '141.227.186.209', '[2001:41d0:ab01::4:0:d]', '::ffff:141.227.186.209'):
+            self.assertIsNotNone(zombie_proxy.production_reason(host, self.PROD), host)
+        for host in ('hollowtest.duckdns.org', 'anonlisten.com.evil.example', 'notanonlisten.com',
+                     '192.168.18.2', '127.0.0.1'):
+            self.assertIsNone(zombie_proxy.production_reason(host, self.PROD), host)
+
+    def test_a_route_to_the_official_relay_is_refused_at_start(self):
+        for upstream in ('relay.anonlisten.com:443', '141.227.186.209:443', '[2001:41d0:ab01::4:0:d]:443'):
+            proc, ready = self.serve(f'z=127.0.0.1:0={upstream}')
+            self.assertEqual(proc.wait(timeout=30), zombie_proxy.REFUSED_EXIT, upstream)
+            self.assertIn(b'PRODUCTION RELAY GUARD', proc.stderr.read())
+            self.assertFalse(os.path.exists(ready), f'{upstream}: a refused proxy must never listen')
+
+    def test_a_name_that_resolves_to_the_official_relay_is_refused_at_the_dial(self):
+        upstream = Upstream()
+        self.addCleanup(upstream.close)
+        proc, ready = self.serve(f'z=127.0.0.1:0=localhost:{upstream.port}',
+                                 extra=('--production-addr', '127.0.0.1', '--production-addr', '::1'))
+        self.assertTrue(wait_until(lambda: os.path.exists(ready) and os.path.getsize(ready) > 0))
+        with open(ready, encoding='utf-8') as handle:
+            ports = json.load(handle)
+        sock = socket.create_connection(('127.0.0.1', ports['routes']['z']), timeout=10)
+        try:
+            sock.sendall(b'hello')
+            sock.settimeout(10)
+            try:
+                closed = sock.recv(16) == b''
+            except ConnectionResetError:
+                closed = True
+            self.assertTrue(closed, 'the refused connection must be closed')
+        finally:
+            sock.close()
+        time.sleep(QUIET)
+        self.assertEqual(upstream.count(), 0, 'nothing may reach an upstream that resolves to the official relay')
+        zombie_proxy.control(f'127.0.0.1:{ports["control"]}', 'quit')
+
+    def test_the_dial_goes_to_the_address_judged_never_the_name_again(self):
+        # A resolver whose second answer is the official relay: dialling the name
+        # again (asyncio resolves it inside create_connection) would reach it.
+        answers = [[(socket.AF_INET, socket.SOCK_STREAM, 6, '', ('127.0.0.1', 4100))],
+                   [(socket.AF_INET6, socket.SOCK_STREAM, 6, '', ('::1', 4100, 0, 0))]]
+        proxy = zombie_proxy.Proxy([zombie_proxy.parse_route('z=127.0.0.1:0=moving.test:4100')],
+                                   prod_addrs={'::1'})
+        conn = zombie_proxy.Conn(proxy, proxy.routes['z'], 1)
+        proxy.conns[1] = conn
+        dialled = []
+
+        async def run():
+            loop = asyncio.get_running_loop()
+
+            async def getaddrinfo(host, port, **_):
+                return answers.pop(0)
+
+            async def create_connection(factory, host, port, **_):
+                if zombie_proxy._plain_address(host) is None:
+                    host = (await loop.getaddrinfo(host, port))[0][4][0]
+                dialled.append(host)
+                raise ConnectionRefusedError('test: nothing listens')
+
+            loop.getaddrinfo = getaddrinfo
+            loop.create_connection = create_connection
+            await conn._dial()
+
+        asyncio.run(run())
+        self.assertEqual(dialled, ['127.0.0.1'])
+
+    def test_allow_production_lets_the_same_route_through(self):
+        upstream = Upstream()
+        self.addCleanup(upstream.close)
+        proc, ready = self.serve(f'z=127.0.0.1:0=localhost:{upstream.port}',
+                                 extra=('--production-addr', '127.0.0.1', '--production-addr', '::1',
+                                        '--allow-production'))
+        self.assertTrue(wait_until(lambda: os.path.exists(ready) and os.path.getsize(ready) > 0))
+        with open(ready, encoding='utf-8') as handle:
+            ports = json.load(handle)
+        sock = socket.create_connection(('127.0.0.1', ports['routes']['z']), timeout=10)
+        try:
+            sock.sendall(b'hello')
+            self.assertTrue(wait_until(lambda: upstream.count() == 1 and upstream.received(0) == b'hello'))
+        finally:
+            sock.close()
+        zombie_proxy.control(f'127.0.0.1:{ports["control"]}', 'quit')
 
 
 if __name__ == '__main__':

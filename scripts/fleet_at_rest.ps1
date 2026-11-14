@@ -255,7 +255,6 @@ function Wait-ForConnected($peer, $timeoutSeconds = 120) {
 }
 
 function Start-PeerProcess($peer) {
-    $dest = Join-Path $script:FleetStageRoot $peer
     $data = Join-Path $runRoot $peer
     $out = Join-Path $script:FleetOutRoot $peer
     # A relaunch wipes the probe's output directory, and this journey relaunches
@@ -268,30 +267,7 @@ function Start-PeerProcess($peer) {
             ForEach-Object { Copy-Item $_.FullName (Join-Path $kept $_.Name) -Force -ErrorAction SilentlyContinue }
         Remove-Item $out -Recurse -Force
     }
-    New-Item -ItemType Directory -Path $out -Force | Out-Null
-    New-Item -ItemType Directory -Path $data -Force | Out-Null
-    $script:FleetConsumed[$peer] = 0
-
-    $env:HOLLOW_DATA_DIR = $data
-    $env:UI_PROBE_OUT = $out
-    $env:UI_PROBE_MODE = 'live'
-    $env:UI_PROBE_PEER = $peer
-    $env:UI_PROBE_IDLE_MINUTES = '40'
-    $env:UI_PROBE_SCENARIO_FILE = ''
-    $env:UI_PROBE_STEPS = ''
-    # No -RedirectStandardOutput/-RedirectStandardError, ever: they flip
-    # Start-Process into inherit-handles mode and every instance then holds a
-    # duplicate of this script's stdout pipe, so the script never returns.
-    $proc = Start-Process -FilePath (Join-Path $dest 'hollow.exe') -WorkingDirectory $dest -PassThru
-    Say "launched $peer (pid $($proc.Id)) on $data"
-
-    $deadline = (Get-Date).AddSeconds($BootTimeoutSeconds)
-    while ((Get-Date) -lt $deadline) {
-        if (Test-PeerLive $peer) { Say "$peer is live" 'Green'; return }
-        if (-not (Get-PeerProcess $peer)) { throw "peer $peer died on launch.`n" + (Get-CrashTail $peer) }
-        Start-Sleep -Milliseconds 300
-    }
-    throw "peer $peer never came live.`n" + (Get-CrashTail $peer)
+    Start-FleetJourneyPeer -Peer $peer -DataDir $data -BootTimeoutSeconds $BootTimeoutSeconds | Out-Null
 }
 
 function Stop-Peer($peer) {
@@ -1020,6 +996,7 @@ function Invoke-SeedPhase {
     Write-GateReport "phase S gates for run $runTag"
     Say "server $server (kept ON PURPOSE: phase U joins it with c and deletes it there)" 'Yellow'
     Say "seed: $seedRoot" 'DarkCyan'
+    $failure = Add-FleetJourneyRelayVoid $failure
     if ($failure) { throw $failure }
     Say 'PASS' 'Green'
 }
@@ -1555,6 +1532,7 @@ function Invoke-UpgradePhase {
 
     Write-GateReport "phase U gates for run $runTag (seed $($manifest.run))"
     Say "exports: $exportRoot" 'DarkCyan'
+    $failure = Add-FleetJourneyRelayVoid $failure
     if ($failure) { throw $failure }
     if (-not $KeepUp) {
         Say 'stopping the fleet'
@@ -1570,3 +1548,4 @@ function Invoke-UpgradePhase {
 if ($Seed) { Invoke-SeedPhase }
 elseif ($AbortSeed) { Invoke-AbortSeed }
 else { Invoke-UpgradePhase }
+Assert-FleetJourneyRelayLogs

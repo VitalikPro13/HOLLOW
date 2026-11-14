@@ -96,6 +96,8 @@ $runTag = $script:FleetVars.RUN
 $runRoot = if (Test-MacBackend) { Get-MacRunRoot } else { Join-Path ([System.IO.Path]::GetTempPath()) 'hollow_fleet\run' }
 $server = "fleet-link-$runTag"
 $journeyPeers = if ($EdgeGates) { @('a', 'b') } else { @('a', 'b', 'c') }
+# E1 types an unreachable relay into b's welcome dialog: the probe's guard must take it.
+if ($EdgeGates) { $env:FLEET_RELAY_ALSO = (@("$env:FLEET_RELAY_ALSO", $DeadRelay) | Where-Object { $_ }) -join ',' }
 # G8's picked image: a 16x16 PNG carried inline so every backend has it, and
 # names that fit the emote grammar (lowercase a-z, 0-9, _, at most 24).
 $emotePngBase64 = 'iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAABNSURBVDhPY7hjY/OfEjycDfh/nQEDY1OH1QBsmmEYXS2GAdg0oWNk9dQ1AJtibBhZzyDzAgxj0wTD6GqxGgDCxGgGYZwGEIsH2gCb/wBSPnarPKl6tgAAAABJRU5ErkJggg=='
@@ -257,130 +259,8 @@ function Start-EmptyPeer($peer) {
     Start-PeerProcess $peer $true
 }
 
-# The simulator launch, which differs from the desktop one only in where things
-# live: an iOS app can write nowhere but its own container, and
-# Platform.environment is EMPTY there, so the configuration goes in as a file.
-function Start-SimPeerProcess($peer, $wipeData) {
-    $udid = Get-SimUdid $peer
-    Start-SimDevice $udid
-    $documents = Join-Path (Get-SimContainer $udid) 'Documents'
-    $data = Join-Path $documents 'hollow'
-    $probeOut = Join-Path $documents 'probe_out'
-    New-Item -ItemType Directory -Path $data -Force | Out-Null
-    if (Test-Path $probeOut) { Remove-Item $probeOut -Recurse -Force }
-    New-Item -ItemType Directory -Path $probeOut -Force | Out-Null
-    $out = Join-Path $script:FleetOutRoot $peer
-    New-Item -ItemType Directory -Path $script:FleetOutRoot -Force | Out-Null
-    & rm -rf $out
-    & ln -sfn $probeOut $out
-    $config = @(
-        "UI_PROBE_OUT=$probeOut",
-        'UI_PROBE_MODE=live',
-        "UI_PROBE_PEER=$peer",
-        'UI_PROBE_IDLE_MINUTES=40',
-        "HOLLOW_DATA_DIR=$data"
-    )
-    [System.IO.File]::WriteAllText((Join-Path $documents 'probe.env'),
-        (($config -join "`n") + "`n"), (New-Object System.Text.UTF8Encoding($false)))
-    $script:FleetConsumed[$peer] = 0
-    $launched = "$(& xcrun simctl launch --terminate-running-process $udid com.anonlisten.hollow 2>&1)"
-    if ($LASTEXITCODE -ne 0) { throw "simctl launch for $peer failed: $launched" }
-    $what = if ($wipeData) { 'an EMPTY data dir' } else { 'its EXISTING data dir' }
-    Say "launched $peer in simulator hollow-$peer on $what"
-}
-
-# The macOS app as fleet.ps1 starts it: the binary from a launcher that carries
-# the environment, HOME of its own and stdio in files, started over ssh to this
-# Mac so its microphone ask never puts a dialog in front of the person.
-function Start-MacPeerProcess($peer, $dest, $out) {
-    $peerHome = Join-Path (Get-MacHomeRoot) $peer
-    New-Item -ItemType Directory -Path $peerHome -Force | Out-Null
-    $vars = [ordered]@{ HOME = $peerHome }
-    foreach ($item in @(Get-ChildItem Env: | Where-Object { $_.Name -like 'UI_PROBE_*' -or $_.Name -like 'HOLLOW_*' -or $_.Name -like 'RUST_*' })) {
-        $vars[$item.Name] = $item.Value
-    }
-    $launcher = Join-Path $out 'launch.sh'
-    $lines = @('#!/bin/sh')
-    foreach ($name in $vars.Keys) { $lines += ("export {0}='{1}'" -f $name, ("$($vars[$name])" -replace "'", "'\''")) }
-    $lines += ('exec "{0}" -NSAppSleepDisabled YES >"{1}" 2>"{2}" </dev/null' -f (Get-MacPeerBinary $peer),
-        (Join-Path $out 'native-stdout.log'), (Join-Path $out 'native-stderr.log'))
-    [System.IO.File]::WriteAllText($launcher, (($lines -join "`n") + "`n"))
-    & chmod +x $launcher
-    if ($env:SSH_CONNECTION -or $env:FLEET_MAC_DIRECT -eq '1') {
-        return Start-Process -FilePath $launcher -WorkingDirectory $dest -PassThru
-    }
-    $self = if ($env:FLEET_MAC_SELF_SSH) { $env:FLEET_MAC_SELF_SSH } else { 'localhost' }
-    $said = "$(& ssh -o BatchMode=yes -o ConnectTimeout=5 $self "nohup /bin/sh '$launcher' >/dev/null 2>&1 </dev/null &" 2>&1)"
-    if ($LASTEXITCODE -ne 0) { throw "starting $peer over 'ssh $self' failed: $said (see fleet.ps1 Start-Peer)" }
-    $deadline = (Get-Date).AddSeconds(30)
-    while ((Get-Date) -lt $deadline) {
-        $proc = @(Get-MacFleetProcesses @($peer)) | ForEach-Object { $_.Process } | Select-Object -First 1
-        if ($proc) { return $proc }
-        Start-Sleep -Milliseconds 200
-    }
-    throw "launching $peer over ssh $self started no process; see $(Join-Path $out 'native-stderr.log')"
-}
-
 function Start-PeerProcess($peer, $wipeData) {
-    if (Test-SimBackend) {
-        Start-SimPeerProcess $peer $wipeData
-        $deadline = (Get-Date).AddSeconds($BootTimeoutSeconds)
-        while ((Get-Date) -lt $deadline) {
-            if (Test-PeerLive $peer) { Say "$peer is live" 'Green'; return }
-            if (-not (Get-PeerProcess $peer)) { throw "peer $peer died on launch.`n" + (Get-CrashTail $peer) }
-            Start-Sleep -Milliseconds 300
-        }
-        throw "peer $peer never came live.`n" + (Get-CrashTail $peer)
-    }
-    $dest = Join-Path $script:FleetStageRoot $peer
-    $data = Get-PeerDataDir $peer
-    $out = Join-Path $script:FleetOutRoot $peer
-    if (Test-Path $out) { Remove-Item $out -Recurse -Force }
-    New-Item -ItemType Directory -Path $out -Force | Out-Null
-    New-Item -ItemType Directory -Path $data -Force | Out-Null
-    # The outbox is gone, so the read cursor for this peer has to go with it.
-    $script:FleetConsumed[$peer] = 0
-
-    $env:HOLLOW_DATA_DIR = $data
-    $env:UI_PROBE_OUT = $out
-    $env:UI_PROBE_MODE = 'live'
-    $env:UI_PROBE_PEER = $peer
-    $env:UI_PROBE_IDLE_MINUTES = '40'
-    $env:UI_PROBE_SCENARIO_FILE = ''
-    $env:UI_PROBE_STEPS = ''
-    Wait-FleetLaunchSlot $peer
-    # No -RedirectStandardOutput/-RedirectStandardError, ever: they flip
-    # Start-Process into inherit-handles mode and every instance then holds a
-    # duplicate of this script's stdout pipe, so the script never returns.
-    if (Test-LinuxBackend) {
-        # The same launcher fleet.ps1 uses: its own session bus per instance and
-        # stdio to files, never a pipe this script holds.
-        $launcher = Join-Path $out 'launch.sh'
-        $lines = @(
-            '#!/bin/sh',
-            ('exec dbus-run-session -- "{0}" >"{1}" 2>"{2}" </dev/null' -f (Join-Path $dest 'hollow'),
-                (Join-Path $out 'native-stdout.log'), (Join-Path $out 'native-stderr.log'))
-        )
-        [System.IO.File]::WriteAllText($launcher, (($lines -join "`n") + "`n"))
-        & chmod +x $launcher
-        $proc = Start-Process -FilePath $launcher -WorkingDirectory $dest -PassThru
-    } elseif (Test-MacBackend) {
-        $proc = Start-MacPeerProcess $peer $dest $out
-    } else {
-        $proc = Start-Process -FilePath (Join-Path $dest 'hollow.exe') -WorkingDirectory $dest -PassThru
-    }
-    $what = if ($wipeData) { 'an EMPTY data dir' } else { 'its EXISTING data dir' }
-    Say "launched $peer (pid $($proc.Id)) on $what"
-
-    $deadline = (Get-Date).AddSeconds($BootTimeoutSeconds)
-    while ((Get-Date) -lt $deadline) {
-        if (Test-PeerLive $peer) { Say "$peer is live" 'Green'; return }
-        # The handle, not a path lookup: a process still initialising hides its
-        # path and reads as dead for a poll or two.
-        if ($proc.HasExited) { throw "peer $peer died on launch.`n" + (Get-CrashTail $peer) }
-        Start-Sleep -Milliseconds 300
-    }
-    throw "peer $peer never came live.`n" + (Get-CrashTail $peer)
+    Start-FleetJourneyPeer -Peer $peer -DataDir (Get-PeerDataDir $peer) -BootTimeoutSeconds $BootTimeoutSeconds | Out-Null
 }
 
 # Hand the out directory over to a copy of the app that is about to replace
@@ -731,20 +611,14 @@ function Get-LinkCode($peer) {
     throw "[$peer] never rendered a 10-character link code"
 }
 
-# Walks the welcome dialog to the enter-code screen. `relayDomain` empty leaves
-# the official relay in place; anything else is typed into the Advanced field,
-# which is how E1 gets a peer that cannot reach a relay without the fleet
-# growing a switch of its own.
+# Walks the welcome dialog to the enter-code screen, typing `relayDomain` into the
+# Advanced relay field (empty: the run's FLEET_RELAY), which is how E1 gets a peer
+# that cannot reach a relay without the fleet growing a switch of its own.
 function Open-EnterCode($peer, $relayDomain) {
     Step $peer @{ op = 'wait_for'; target = 'text:Agree and continue'; timeout_ms = 90000 }
     Step $peer @{ op = 'tap'; target = 'text:Agree and continue'; index = 0 }
     Step $peer @{ op = 'wait_for'; target = 'text:Create an identity'; timeout_ms = 20000 }
-    if ($relayDomain) {
-        Step $peer @{ op = 'tap'; target = 'semantics:Change the relay'; index = 0 }
-        Step $peer @{ op = 'wait_for'; target = 'hint:relay.anonlisten.com'; timeout_ms = 10000 }
-        Step $peer @{ op = 'enter_text'; target = 'hint:relay.anonlisten.com'; value = $relayDomain }
-        Step $peer @{ op = 'wait_for'; target = "text:$relayDomain"; timeout_ms = 10000 }
-    }
+    foreach ($s in @(Get-RelayWelcomeSteps $relayDomain)) { Step $peer $s }
     Step $peer @{ op = 'tap'; target = 'text:Link a device'; index = 0 }
     # A throwaway identity is created and the node started before the dialog
     # appears, so this is the slow one.
@@ -1401,6 +1275,7 @@ if (-not $EdgeGates) {
 }
 foreach ($note in $script:Notes) { Write-Host ("  note     : {0}" -f $note) -ForegroundColor DarkCyan }
 
+$failure = Add-FleetJourneyRelayVoid $failure
 if ($failure) {
     Write-Host ''
     Say 'the fleet is left UP for diagnosis. Logs:' 'Yellow'

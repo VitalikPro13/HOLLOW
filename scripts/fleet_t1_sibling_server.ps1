@@ -134,33 +134,7 @@ function Backup-PeerArtifacts($peer, $label) {
 }
 
 function Start-PeerProcess($peer, $wipeData) {
-    $dest = Join-Path $script:FleetStageRoot $peer
-    $data = Get-PeerDataDir $peer
-    $out = Join-Path $script:FleetOutRoot $peer
-    if (Test-Path $out) { Remove-Item $out -Recurse -Force }
-    New-Item -ItemType Directory -Path $out -Force | Out-Null
-    New-Item -ItemType Directory -Path $data -Force | Out-Null
-    $script:FleetConsumed[$peer] = 0
-
-    $env:HOLLOW_DATA_DIR = $data
-    $env:UI_PROBE_OUT = $out
-    $env:UI_PROBE_MODE = 'live'
-    $env:UI_PROBE_PEER = $peer
-    $env:UI_PROBE_IDLE_MINUTES = '40'
-    $env:UI_PROBE_SCENARIO_FILE = ''
-    $env:UI_PROBE_STEPS = ''
-    # No output redirection: it flips Start-Process into inherit-handles mode.
-    $proc = Start-Process -FilePath (Join-Path $dest 'hollow.exe') -WorkingDirectory $dest -PassThru
-    $what = if ($wipeData) { 'an EMPTY data dir' } else { 'its EXISTING data dir' }
-    Say "launched $peer (pid $($proc.Id)) on $what"
-
-    $deadline = (Get-Date).AddSeconds($BootTimeoutSeconds)
-    while ((Get-Date) -lt $deadline) {
-        if (Test-PeerLive $peer) { Say "$peer is live" 'Green'; return }
-        if ($proc.HasExited) { throw "peer $peer died on launch.`n" + (Get-CrashTail $peer) }
-        Start-Sleep -Milliseconds 300
-    }
-    throw "peer $peer never came live.`n" + (Get-CrashTail $peer)
+    Start-FleetJourneyPeer -Peer $peer -DataDir (Get-PeerDataDir $peer) -BootTimeoutSeconds $BootTimeoutSeconds | Out-Null
 }
 
 function Restart-Peer($peer, $label) {
@@ -395,6 +369,8 @@ try {
     Say "g is showing link code $code" 'Green'
     Start-EmptyPeer h
     Step h @{ op = 'wait_for'; target = 'text:Agree and continue'; timeout_ms = 90000 }
+    # The relay this run is on (FLEET_RELAY), typed before an identity exists.
+    foreach ($s in @(Get-RelayWelcomeSteps '')) { Step h $s }
     Step h @{ op = 'tap'; target = 'text:Agree and continue'; index = 0 }
     Step h @{ op = 'wait_for'; target = 'text:Create an identity'; timeout_ms = 20000 }
     Step h @{ op = 'tap'; target = 'text:Link a device'; index = 0 }
@@ -536,6 +512,7 @@ Write-Host ("  master g : {0} (devices g={1} h={2})" -f $masterG, $deviceG, $dev
 Write-Host ("  evidence : {0}" -f $evidenceRoot) -ForegroundColor Gray
 foreach ($note in $script:Notes) { Write-Host ("  note     : {0}" -f $note) -ForegroundColor DarkCyan }
 
+$failure = Add-FleetJourneyRelayVoid $failure
 $failed = @($script:Gates.Values | Where-Object { $_ -eq 'FAIL' }).Count
 if ($failure -or $failed -gt 0) {
     $pids = $Peers3 | ForEach-Object {

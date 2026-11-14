@@ -103,34 +103,8 @@ function Stop-Peer($peer) {
 # e runs with the scratch APPDATA, USERPROFILE and HOME; everything else is the
 # fleet's usual launch. Child processes (the relaunch waiter) inherit both.
 function Start-PeerProcess($peer, $dataDir, [hashtable]$extraEnv) {
-    $dest = Join-Path $script:FleetStageRoot $peer
-    $out = Join-Path $script:FleetOutRoot $peer
-    if (Test-Path $out) { Remove-Item $out -Recurse -Force }
-    New-Item -ItemType Directory -Path $out -Force | Out-Null
-    $script:FleetConsumed[$peer] = 0
-    $saved = @{}
-    $vars = @{
-        HOLLOW_DATA_DIR = $dataDir; UI_PROBE_OUT = $out; UI_PROBE_MODE = 'live'; UI_PROBE_PEER = $peer
-        UI_PROBE_IDLE_MINUTES = '40'; UI_PROBE_SCENARIO_FILE = ''; UI_PROBE_STEPS = ''
-    }
-    if ($extraEnv) { foreach ($k in $extraEnv.Keys) { $vars[$k] = $extraEnv[$k] } }
-    foreach ($k in $vars.Keys) {
-        $saved[$k] = [Environment]::GetEnvironmentVariable($k, 'Process')
-        [Environment]::SetEnvironmentVariable($k, $vars[$k], 'Process')
-    }
-    try {
-        $proc = Start-Process -FilePath (Join-Path $dest 'hollow.exe') -WorkingDirectory $dest -PassThru
-    } finally {
-        foreach ($k in $saved.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k], 'Process') }
-    }
-    Say "launched $peer (pid $($proc.Id)) on $dataDir"
-    $deadline = (Get-Date).AddSeconds($BootTimeoutSeconds)
-    while ((Get-Date) -lt $deadline) {
-        if (Test-PeerLive $peer) { return $proc.Id }
-        if ($proc.HasExited) { throw "peer $peer died on launch.`n" + (Get-CrashTail $peer) }
-        Start-Sleep -Milliseconds 300
-    }
-    throw "peer $peer never came live.`n" + (Get-CrashTail $peer)
+    if (-not $extraEnv) { $extraEnv = @{} }
+    return (Start-FleetJourneyPeer -Peer $peer -DataDir $dataDir -ExtraEnv $extraEnv -BootTimeoutSeconds $BootTimeoutSeconds).Id
 }
 
 function Reset-PeerMailbox($peer) {
@@ -333,5 +307,6 @@ try {
     foreach ($n in $script:Notes) { Write-Host "  note: $n" -ForegroundColor DarkCyan }
     if (-not $KeepUp -and -not $failure) { foreach ($p in @('e', 'f')) { Stop-Peer $p } }
 }
+if (Get-FleetJourneyRelayVoid) { $script:Gates['V  no peer dialled the official relay'] = 'FAIL' }
 $failed = @($script:Gates.Values | Where-Object { $_ -ne 'PASS' }).Count
 if ($failed -gt 0) { exit 1 }

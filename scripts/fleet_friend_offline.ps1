@@ -73,31 +73,7 @@ function Step($peer, $step) {
 # Relaunch ONE peer on its EXISTING data dir (fixture NOT restored), so the
 # friendship survives the round trip. Mirrors fleet_owner_offline.ps1.
 function Restart-Peer($peer) {
-    $dest = Join-Path $script:FleetStageRoot $peer
-    $data = Join-Path $runRoot $peer
-    $out = Join-Path $script:FleetOutRoot $peer
-    if (Test-Path $out) { Remove-Item $out -Recurse -Force }
-    New-Item -ItemType Directory -Path $out -Force | Out-Null
-    $script:FleetConsumed[$peer] = 0
-
-    $env:HOLLOW_DATA_DIR = $data
-    $env:UI_PROBE_OUT = $out
-    $env:UI_PROBE_MODE = 'live'
-    $env:UI_PROBE_PEER = $peer
-    $env:UI_PROBE_IDLE_MINUTES = '40'
-    $env:UI_PROBE_SCENARIO_FILE = ''
-    $env:UI_PROBE_STEPS = ''
-    Wait-FleetLaunchSlot $peer
-    $proc = Start-Process -FilePath (Join-Path $dest 'hollow.exe') -WorkingDirectory $dest -PassThru
-    Say "relaunched $peer (pid $($proc.Id)) on its EXISTING data dir"
-
-    $deadline = (Get-Date).AddSeconds($BootTimeoutSeconds)
-    while ((Get-Date) -lt $deadline) {
-        if (Test-PeerLive $peer) { Say "$peer is live again" 'Green'; return }
-        if (-not (Get-PeerProcess $peer)) { throw "peer $peer died on relaunch.`n" + (Get-CrashTail $peer) }
-        Start-Sleep -Milliseconds 300
-    }
-    throw "peer $peer never came back live.`n" + (Get-CrashTail $peer)
+    Start-FleetJourneyPeer -Peer $peer -DataDir (Join-Path $runRoot $peer) -BootTimeoutSeconds $BootTimeoutSeconds | Out-Null
 }
 
 function Stop-Peer($peer) {
@@ -180,4 +156,5 @@ Step b @{ op = 'wait_for'; target = 'text:No requests waiting'; timeout_ms = 150
 Say "PASS gate 2: nothing waits under b's Requests - the accepted friend was not downgraded"
 
 Step b @{ op = 'dump'; name = 'friend_offline_converged' }
+Assert-FleetJourneyRelayLogs
 Say "DONE - async friend survived zero overlap AND mailbox re-delivery" 'Green'

@@ -68,6 +68,11 @@ pub(crate) async fn run_fetch(
 ) -> Result<Vec<FetchedDm>, String> {
     let relay_domain = fetch_relay_domain(relay_domain, db_path, db_passphrase)
         .inspect_err(|_| hollow_log!("[HOLLOW-FETCH] This install's relay is unreadable, nothing fetched"))?;
+    #[cfg(debug_assertions)]
+    if let Some(why) = crate::node::fleet_relay_guard::fetch_refusal(&relay_domain, db_path) {
+        hollow_log!("[HOLLOW-FETCH] {why}");
+        return Err(why);
+    }
     let relay_url = format!("wss://{relay_domain}/ws");
     // The push payload names the server; one we are not a member of is never
     // joined, or the payload steers our socket into any room (J4).
@@ -2545,6 +2550,32 @@ mod tests {
         let (_fetched, dialed) = tokio::join!(fetch, dialed);
         assert!(matches!(dialed, Ok(Ok(_))), "the fetch never dialed the relay this install uses");
         assert_eq!(fetch_relay_domain("relay.example.org", &path, &pass).as_deref(), Ok("relay.example.org"), "a relay given wins");
+    }
+
+    /// Under the fleet's marker beside the database, a push fetch never dials the official
+    /// relay, which is what an unstamped fleet phone's wake would otherwise reach.
+    #[tokio::test]
+    #[cfg(debug_assertions)]
+    async fn a_fleet_fetch_refuses_the_official_relay_before_it_dials() {
+        let (_tmp, path, pass) = temp_store();
+        crate::storage::MessageStore::open(&path, &pass).unwrap();
+        let dir = std::path::Path::new(&path).parent().unwrap();
+        std::fs::write(dir.join(crate::node::fleet_relay_guard::MARKER), "on\n").unwrap();
+        let me = kp(187);
+        let mut olm = OlmManager::new();
+        let mut mls = None;
+        let crypto_store = CryptoStore::open(path.clone(), pass.clone()).unwrap();
+        let proto = me.to_protobuf_encoding().unwrap();
+        let (id, pk, sender) = (me.peer_id(), pk_b64(&me), kp(188).peer_id());
+        // A name under the official suffix that no relay answers, so even a broken guard
+        // reaches nothing of production's.
+        let fetched = run_fetch(
+            "fleet-guard-probe.invalid.anonlisten.com", &id, &id, &proto, &pk, None,
+            &sender, None, Duration::from_secs(2),
+            &mut olm, &mut mls, &crypto_store, &path, &pass,
+        )
+        .await;
+        assert!(fetched.as_ref().is_err_and(|e| e.contains("PRODUCTION RELAY GUARD")), "{:?}", fetched.map(|v| v.len()));
     }
 
     /// Only a database that reads and holds no choice means the official relay: one that

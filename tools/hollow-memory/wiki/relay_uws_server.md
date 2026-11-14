@@ -685,7 +685,7 @@ Everything the relay holds is RAM. A service restart used to empty it: three day
 
 **Rules:** a new RAM registry an offline peer cannot re-send joins the codec (bump `VERSION`; an old snapshot is then discarded whole, which is intended). VERSION 12 (0.14, t14-deny) carries the operator denylist in force and the devices learned for its identities; a rollback from a v12 relay to a v11 binary (0.13) discards the whole snapshot on that restart, buffers, rings, sessions and push tokens included. Snapshot BEFORE `app.close()`. Log counts, never keys. Memory peak at shutdown ≈ 3x buffered bytes, at restore ≈ 2x; stream-encode from state before a multi-GB budget.
 
-**Proof:** `scripts/fleet_relay_restart.ps1` (two real instances; b closed, a sends a DM and a channel message and closes, relay restarted with nobody connected, b returns alone and sees both). Journal at that restart: `handed to the fd store: 6 DM frames in 2 queues, 4 topic frames in 2 rings, 2 opt-ins` and `restored ... 10 frames live after expiry`.
+**Proof:** `scripts/fleet_relay_restart.ps1` (on the TEST relay box, `FLEET_RELAY_SSH` + `FLEET_RELAY`; two real instances; b closed, a sends a DM and a channel message and closes, relay restarted with nobody connected, b returns alone and sees both). Journal at that restart: `handed to the fd store: 6 DM frames in 2 queues, 4 topic frames in 2 rings, 2 opt-ins` and `restored ... 10 frames live after expiry`.
 
 ---
 

@@ -60,23 +60,28 @@
 # ed25519 key, the peer id libp2p derives from it, and a deposit that must draw
 # no `kill_deposited` answer. Without node on the machine it reports WARN.
 #
-# The relay host is read from BUILD_GUIDE.md's deploy section: ssh as
-# ubuntu@141.227.186.209 with the passwordless key this machine already uses
-# for deploys. Windows PowerShell 5.1 (no pwsh-only syntax).
+# It runs against the TEST relay: the box is FLEET_RELAY_SSH (or -RelayHost), which
+# must be the pinned test relay at a private address (Resolve-FleetRelayDenyTarget),
+# and its name is FLEET_RELAY (or -RelayDomain). The production relay guard refuses
+# the official relay for both, before any build, ssh or node call, unless
+# -AllowProduction. Windows PowerShell 5.1 (no pwsh-only syntax).
 
 param(
     [switch]$KeepIdentities,
     [switch]$KeepUp,
     [switch]$SkipBuild,
     [switch]$KeepServer,
-    [string]$RelayHost = 'ubuntu@141.227.186.209',
-    # The ssh target above is a machine; this is the name its clients dial.
-    [string]$RelayDomain = 'relay.anonlisten.com',
+    # The relay box to ssh to (user@host or an ssh config name); FLEET_RELAY_SSH by default.
+    [string]$RelayHost = '',
+    # The name its clients dial; FLEET_RELAY by default.
+    [string]$RelayDomain = '',
+    # Lift the production relay guard for this journey and every fleet.ps1 it runs.
+    [switch]$AllowProduction,
     [int]$BootTimeoutSeconds = 240
 )
 
 if ($args.Count -gt 0) {
-    throw "unrecognised argument(s): $($args -join ' '). This script takes -KeepIdentities, -KeepUp, -SkipBuild, -KeepServer, -RelayHost, -RelayDomain and -BootTimeoutSeconds."
+    throw "unrecognised argument(s): $($args -join ' '). This script takes -KeepIdentities, -KeepUp, -SkipBuild, -KeepServer, -RelayHost, -RelayDomain, -AllowProduction and -BootTimeoutSeconds."
 }
 
 $ErrorActionPreference = 'Stop'
@@ -90,6 +95,15 @@ $script:FleetOutRoot = Join-Path $repoRoot 'build\fleet_out'
 # traffic for three days, so a fixed string can be matched by an EARLIER run.
 $script:FleetVars = @{ RUN = (Get-Date -Format 'HHmmss') }
 . (Join-Path $PSScriptRoot 'fleet_lib.ps1')
+
+if ($AllowProduction) { $script:FleetAllowProduction = $true }
+if (-not $RelayDomain) { $RelayDomain = Get-FleetExpectedRelay '' }
+$RelayDomain = ConvertTo-FleetRelayHostPort $RelayDomain
+Assert-FleetNotProduction 'the relay this journey restarts and logs guest sockets into' $RelayDomain
+if (-not $RelayHost) { $RelayHost = "$env:FLEET_RELAY_SSH" }
+$script:RelaySsh = Resolve-FleetRelaySshTarget 'restarting the relay' $RelayHost "$env:FLEET_RELAY_SSH_OPTS"
+# The fleet.ps1 runs below onboard and boot on the same relay.
+$env:FLEET_RELAY = $RelayDomain
 
 $runRoot = Join-Path $env:TEMP 'hollow_fleet\run'
 $server = "rrs-$($script:FleetVars.RUN)"
@@ -184,8 +198,6 @@ function Wait-ForConnected($peer, $timeoutSeconds = 120) {
 # Relaunch ONE peer on its EXISTING data dir (fixture NOT restored), so the
 # friendship and the server survive the round trip.
 function Restart-Peer($peer) {
-    $dest = Join-Path $script:FleetStageRoot $peer
-    $data = Join-Path $runRoot $peer
     $out = Join-Path $script:FleetOutRoot $peer
     $kept = Join-Path $script:FleetOutRoot "kept\$peer"
     if (Test-Path $out) {
@@ -195,29 +207,7 @@ function Restart-Peer($peer) {
             ForEach-Object { Copy-Item $_.FullName (Join-Path $kept $_.Name) -Force -ErrorAction SilentlyContinue }
         Remove-Item $out -Recurse -Force
     }
-    New-Item -ItemType Directory -Path $out -Force | Out-Null
-    $script:FleetConsumed[$peer] = 0
-
-    $env:HOLLOW_DATA_DIR = $data
-    $env:UI_PROBE_OUT = $out
-    $env:UI_PROBE_MODE = 'live'
-    $env:UI_PROBE_PEER = $peer
-    $env:UI_PROBE_IDLE_MINUTES = '40'
-    $env:UI_PROBE_SCENARIO_FILE = ''
-    $env:UI_PROBE_STEPS = ''
-    # No -RedirectStandardOutput/-RedirectStandardError, ever: they flip
-    # Start-Process into inherit-handles mode and every instance then holds a
-    # duplicate of this script's stdout pipe, so the script never returns.
-    $proc = Start-Process -FilePath (Join-Path $dest 'hollow.exe') -WorkingDirectory $dest -PassThru
-    Say "relaunched $peer (pid $($proc.Id)) on its EXISTING data dir"
-
-    $deadline = (Get-Date).AddSeconds($BootTimeoutSeconds)
-    while ((Get-Date) -lt $deadline) {
-        if (Test-PeerLive $peer) { Say "$peer is live again" 'Green'; return }
-        if (-not (Get-PeerProcess $peer)) { throw "peer $peer died on relaunch.`n" + (Get-CrashTail $peer) }
-        Start-Sleep -Milliseconds 300
-    }
-    throw "peer $peer never came back live.`n" + (Get-CrashTail $peer)
+    Start-FleetJourneyPeer -Peer $peer -DataDir (Join-Path $runRoot $peer) -BootTimeoutSeconds $BootTimeoutSeconds | Out-Null
 }
 
 function Stop-Peer($peer) {
@@ -238,7 +228,8 @@ function Stop-Peer($peer) {
 # --------------------------------------------------------------------------
 
 function Invoke-Relay($remote) {
-    $out = & ssh -o BatchMode=yes -o ConnectTimeout=20 $RelayHost $remote 2>&1
+    $sshArgs = $script:RelaySsh.args
+    $out = & ssh @sshArgs $RelayHost $remote 2>&1
     if ($LASTEXITCODE -ne 0) { throw "ssh $RelayHost failed ($LASTEXITCODE): $out" }
     return @($out)
 }
@@ -861,7 +852,9 @@ Write-Host ''
 Say "a = $($script:FleetVars.PEER_A)" 'DarkCyan'
 Say "b = $($script:FleetVars.PEER_B)" 'DarkCyan'
 Say "d = $($script:FleetVars.PEER_D) (throwaway, kill-list target only)" 'DarkCyan'
+foreach ($f in @($script:RelaySsh.files)) { if ($f) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue } }
 
+$failure = Add-FleetJourneyRelayVoid $failure
 if ($failure) { throw $failure }
 if (-not $KeepUp) {
     Say 'stopping the fleet'

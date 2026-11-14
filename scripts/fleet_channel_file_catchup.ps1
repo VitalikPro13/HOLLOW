@@ -180,8 +180,6 @@ function Wait-ForConnected($peer, $timeoutSeconds = 120) {
 }
 
 function Restart-Peer($peer) {
-    $dest = Join-Path $script:FleetStageRoot $peer
-    $data = Join-Path $runRoot $peer
     $out = Join-Path $script:FleetOutRoot $peer
     # A relaunch wipes the probe's output directory, and this journey relaunches
     # three times - so without this the only screenshots that survive a run are
@@ -195,30 +193,7 @@ function Restart-Peer($peer) {
             ForEach-Object { Copy-Item $_.FullName (Join-Path $kept $_.Name) -Force -ErrorAction SilentlyContinue }
         Remove-Item $out -Recurse -Force
     }
-    New-Item -ItemType Directory -Path $out -Force | Out-Null
-    $script:FleetConsumed[$peer] = 0
-
-    $env:HOLLOW_DATA_DIR = $data
-    $env:UI_PROBE_OUT = $out
-    $env:UI_PROBE_MODE = 'live'
-    $env:UI_PROBE_PEER = $peer
-    $env:UI_PROBE_IDLE_MINUTES = '40'
-    $env:UI_PROBE_SCENARIO_FILE = ''
-    $env:UI_PROBE_STEPS = ''
-    Wait-FleetLaunchSlot $peer
-    # No -RedirectStandardOutput/-RedirectStandardError, ever: they flip
-    # Start-Process into inherit-handles mode and every instance then holds a
-    # duplicate of this script's stdout pipe, so the script never returns.
-    $proc = Start-Process -FilePath (Join-Path $dest 'hollow.exe') -WorkingDirectory $dest -PassThru
-    Say "relaunched $peer (pid $($proc.Id)) on its EXISTING data dir"
-
-    $deadline = (Get-Date).AddSeconds($BootTimeoutSeconds)
-    while ((Get-Date) -lt $deadline) {
-        if (Test-PeerLive $peer) { Say "$peer is live again" 'Green'; return }
-        if (-not (Get-PeerProcess $peer)) { throw "peer $peer died on relaunch.`n" + (Get-CrashTail $peer) }
-        Start-Sleep -Milliseconds 300
-    }
-    throw "peer $peer never came back live.`n" + (Get-CrashTail $peer)
+    Start-FleetJourneyPeer -Peer $peer -DataDir (Join-Path $runRoot $peer) -BootTimeoutSeconds $BootTimeoutSeconds | Out-Null
 }
 
 function Stop-Peer($peer) {
@@ -655,6 +630,7 @@ Write-Host ''
 Say "a = $($script:FleetVars.PEER_A)" 'DarkCyan'
 Say "b = $($script:FleetVars.PEER_B)" 'DarkCyan'
 
+$failure = Add-FleetJourneyRelayVoid $failure
 if ($failure) { throw $failure }
 if (-not $KeepUp) {
     Say 'stopping the fleet'

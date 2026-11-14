@@ -20,6 +20,7 @@ import 'package:window_manager/window_manager.dart';
 
 import 'probe/design_gallery.dart';
 import 'probe/probe_env.dart';
+import 'probe/probe_relay_guard.dart';
 import 'probe/probe_runner.dart';
 
 /// Drives the REAL app against a COPY of a real data directory, so a change
@@ -64,6 +65,9 @@ void main() {
   var outDir = 'build/ui_probe';
   var mode = 'script';
   var idleMinutes = 20;
+  // Armed in setUpAll, before the app exists; the container below takes its
+  // overrides, so nothing reaches a relay without passing it.
+  ProbeRelayGuard? relayGuard;
 
   // RustLib.init() MUST run here, not inside the test body. It does real
   // async work (loading the native lib and handshaking), and the test body
@@ -82,6 +86,10 @@ void main() {
     debugPrint('[ui-probe] config: mode=$mode peer=${env['UI_PROBE_PEER']} '
         'out=$outDir data=${env['HOLLOW_DATA_DIR']} '
         '(from $probeEnvSource, ${Platform.environment.length} env vars)');
+    final guard = ProbeRelayGuard.fromEnv(env, outDir);
+    HttpOverrides.global = RelayGuardHttpOverrides(guard);
+    guard.announce();
+    relayGuard = guard;
 
     // main() initialises Firebase before anything asks for a push token; the
     // push service assumes it happened. Without it the Firebase getters throw
@@ -203,7 +211,7 @@ void main() {
     // The container is ours rather than ProviderScope's so the dump can read
     // app state directly. UncontrolledProviderScope is what ProviderScope
     // builds internally, so the app cannot tell the difference.
-    final container = ProviderContainer();
+    final container = ProviderContainer(overrides: relayGuard!.overrides);
     final binding = tester.binding as LiveTestWidgetsFlutterBinding;
     binding.deviceEventDispatcher =
         _ForwardCancels(binding, binding.deviceEventDispatcher!);

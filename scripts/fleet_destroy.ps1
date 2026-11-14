@@ -187,55 +187,12 @@ function Stop-Peer($peer) {
 }
 
 function Start-PeerProcess($peer, $wipeData, $requireLive = $true) {
-    $dest = Join-Path $script:FleetStageRoot $peer
     $data = Get-PeerDataDir $peer
-    $out = Join-Path $script:FleetOutRoot $peer
     if ($wipeData -and (Test-Path $data)) { Remove-Item $data -Recurse -Force }
-    if (Test-Path $out) { Remove-Item $out -Recurse -Force }
-    New-Item -ItemType Directory -Path $out -Force | Out-Null
-    New-Item -ItemType Directory -Path $data -Force | Out-Null
-    # The outbox is gone, so the read cursor for this peer has to go with it.
-    $script:FleetConsumed[$peer] = 0
-
-    $env:HOLLOW_DATA_DIR = $data
-    $env:UI_PROBE_OUT = $out
-    $env:UI_PROBE_MODE = 'live'
-    $env:UI_PROBE_PEER = $peer
-    $env:UI_PROBE_IDLE_MINUTES = '40'
-    $env:UI_PROBE_SCENARIO_FILE = ''
-    $env:UI_PROBE_STEPS = ''
-    Wait-FleetLaunchSlot $peer
-    # No -RedirectStandardOutput/-RedirectStandardError, ever: they flip
-    # Start-Process into inherit-handles mode and every instance then holds a
-    # duplicate of this script's stdout pipe, so the script never returns.
-    if (Test-LinuxBackend) {
-        $launcher = Join-Path $out 'launch.sh'
-        $lines = @(
-            '#!/bin/sh',
-            ('exec dbus-run-session -- "{0}" >"{1}" 2>"{2}" </dev/null' -f (Join-Path $dest 'hollow'),
-                (Join-Path $out 'native-stdout.log'), (Join-Path $out 'native-stderr.log'))
-        )
-        [System.IO.File]::WriteAllText($launcher, (($lines -join "`n") + "`n"))
-        & chmod +x $launcher | Out-Null
-        $proc = Start-Process -FilePath $launcher -WorkingDirectory $dest -PassThru
-    } else {
-        $proc = Start-Process -FilePath (Join-Path $dest 'hollow.exe') -WorkingDirectory $dest -PassThru
-    }
-    $what = if ($wipeData) { 'an EMPTY data dir' } else { 'its EXISTING data dir' }
-    Say "launched $peer (pid $($proc.Id)) on $what"
-
-    $deadline = (Get-Date).AddSeconds($BootTimeoutSeconds)
-    while ((Get-Date) -lt $deadline) {
-        if (Test-PeerLive $peer) { Say "$peer is live" 'Green'; return $proc.Id }
-        if ($proc.HasExited) {
-            # A peer launched to take a destruction order is SUPPOSED to die.
-            if (-not $requireLive) { Say "$peer exited before it came live" 'Yellow'; return $proc.Id }
-            throw "peer $peer died on launch.`n" + (Get-CrashTail $peer)
-        }
-        Start-Sleep -Milliseconds 300
-    }
-    if (-not $requireLive) { return $proc.Id }
-    throw "peer $peer never came live.`n" + (Get-CrashTail $peer)
+    # A peer launched to take a destruction order is SUPPOSED to die.
+    $proc = Start-FleetJourneyPeer -Peer $peer -DataDir $data -BootTimeoutSeconds $BootTimeoutSeconds -AllowDeath:(-not $requireLive)
+    if ($proc.HasExited) { Say "$peer exited before it came live" 'Yellow' }
+    return $proc.Id
 }
 
 # Relaunch ONE peer on its EXISTING data directory. `fleet.ps1 -Live` restores
@@ -635,6 +592,8 @@ function Wait-Welcome($peer, $timeoutSeconds) {
 # Walks the welcome dialog to the enter-code screen on an EMPTY peer.
 function Open-EnterCode($peer) {
     Step $peer @{ op = 'wait_for'; target = 'text:Agree and continue'; timeout_ms = 90000 }
+    # The relay this run is on (FLEET_RELAY), typed before an identity exists.
+    foreach ($s in @(Get-RelayWelcomeSteps '')) { Step $peer $s }
     Step $peer @{ op = 'tap'; target = 'text:Agree and continue'; index = 0 }
     Step $peer @{ op = 'wait_for'; target = 'text:Create an identity'; timeout_ms = 20000 }
     Step $peer @{ op = 'tap'; target = 'text:Link a device'; index = 0 }
@@ -1162,6 +1121,7 @@ Write-Host ("  master c : {0}" -f $masterC) -ForegroundColor Gray
 Write-Host ("  devices  : a={0} b={1} d={2}" -f $deviceA, $deviceB, $deviceD) -ForegroundColor Gray
 foreach ($note in $script:Notes) { Write-Host ("  note     : {0}" -f $note) -ForegroundColor DarkCyan }
 
+$failure = Add-FleetJourneyRelayVoid $failure
 if ($failure) {
     Write-Host ''
     Say 'the fleet is left UP for diagnosis. Logs:' 'Yellow'

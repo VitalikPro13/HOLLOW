@@ -58,6 +58,8 @@ pub(crate) mod overlay_look;
 pub(crate) mod presence_audit;
 pub(crate) mod profile_card;
 pub(crate) mod recovery_pool;
+#[cfg(debug_assertions)]
+pub(crate) mod fleet_relay_guard;
 pub(crate) mod relay_clock;
 pub(crate) mod relay_denial;
 pub(crate) mod unsent_ops;

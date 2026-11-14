@@ -6,6 +6,7 @@
 #   powershell -File scripts\fleet.ps1 -Onboard          # make the fixture identities
 #   powershell -File scripts\fleet.ps1 -Onboard -Fresh   # ... from BRAND-NEW keys
 #   powershell -File scripts\fleet.ps1 -Onboard -Relay my.relay.example  # ... on a self-hosted relay
+#   powershell -File scripts\fleet.ps1 -Live -Relay my.relay.example -GuardOnly   # would this run be allowed?
 #   powershell -File scripts\fleet.ps1 -Live             # boot and leave them up
 #   powershell -File scripts\fleet.ps1 -Scenario dm_hello -Attach   # reuse them
 #   powershell -File scripts\fleet.ps1 -Stop
@@ -42,10 +43,15 @@
 #
 # ## SAFETY, and it is not optional
 #
-# These are REAL identities on the REAL relay writing REAL CRDT ops. A fleet
+# These are REAL identities on a REAL relay writing REAL CRDT ops. A fleet
 # peer that joins one of your servers pollutes your data and replicates it to
 # your phone. Every scenario creates its own server and deletes it again in
 # `cleanup`, which runs even when the run fails.
+#
+# Fleet peers live on a TEST relay (-Relay or FLEET_RELAY, stamped into each
+# fixture as `fleet_relay`). The production relay guard (fleet_relay_guard.ps1
+# and the probe's own, integration_test/probe/probe_relay_guard.dart) refuses
+# the official relay everywhere unless the run says -AllowProduction.
 #
 # Windows PowerShell 5.1 is what is installed here, so no pwsh-only syntax.
 #
@@ -166,7 +172,19 @@ param(
     # before an identity exists and is stamped into the fixture with it, so
     # this is the only moment a fleet peer can be pointed anywhere else. Peers
     # that need DIFFERENT relays take one -Onboard call each.
+    # Without -Onboard it is the relay this run expects: every peer's stamped
+    # relay must match it, the proxy routes to it, and remote machines get it.
+    # FLEET_RELAY stands in when it is not given.
     [string]$Relay = '',
+    # Other TEST relays a peer may move to during this run (comma list; FLEET_RELAY_ALSO
+    # stands in), for a journey that switches a peer between two test relays.
+    [string]$RelayAlso = '',
+    # Lift the production relay guard: peers may reach the OFFICIAL relay. Off
+    # by default, and loud when on; UI_PROBE_ALLOW_PRODUCTION=1 means the same.
+    [switch]$AllowProduction,
+    # Run the production relay guard's checks for these arguments and exit,
+    # before anything is built, stopped, reset or launched.
+    [switch]$GuardOnly,
     # Boot the fleet and leave it listening, for driving by hand.
     [switch]$Live,
     # Use the instances that are ALREADY running instead of booting: no reboot,
@@ -211,6 +229,9 @@ $script:FleetOutRoot = Join-Path (Join-Path $repoRoot 'build') 'fleet_out'
 # `${REPO}` is the repo root with forward slashes, for fixture paths in scenarios.
 $script:FleetVars = @{ RUN = (Get-Date -Format 'HHmmss'); REPO = ($repoRoot.Replace('\', '/')) }
 . (Join-Path $PSScriptRoot 'fleet_lib.ps1')
+if ($AllowProduction) { $script:FleetAllowProduction = $true }
+$Relay = Get-FleetExpectedRelay $Relay
+if ($RelayAlso) { [Environment]::SetEnvironmentVariable($script:FleetAlsoRelayEnv, $RelayAlso) }
 
 $stageRoot   = $script:FleetStageRoot
 $outRoot     = $script:FleetOutRoot
@@ -342,7 +363,7 @@ function Start-RemoteFleet($fleetArgs) {
     }
     $pending = @()
     foreach ($agent in $groups.Keys) {
-        $all = @($fleetArgs) + @('-IdleMinutes', "$IdleMinutes", '-Peers', ($groups[$agent] -join ','))
+        $all = Add-FleetRelayArgs (@($fleetArgs) + @('-IdleMinutes', "$IdleMinutes", '-Peers', ($groups[$agent] -join ','))) $Relay
         Write-Step "on $agent ($($groups[$agent] -join ',')): fleet.ps1 $($all -join ' ')"
         $pending += Send-FleetAgentRequest (New-FleetAgentRequest $agent @{ cmd = 'fleet'; args = $all })
     }
@@ -366,11 +387,9 @@ if ($Fresh -and -not $Onboard) {
     throw '-Fresh only means something with -Onboard. Use: -Onboard -Fresh -Peers a,b'
 }
 
-# Same reason: the welcome dialog only exists while there is no identity yet,
-# so -Relay without -Onboard would silently leave every peer where it was.
-if ($Relay -and -not $Onboard) {
-    throw '-Relay only means something with -Onboard. Use: -Onboard -Fresh -Peers a -Relay my.relay.example'
-}
+# -Relay without -Onboard never moves a peer (the welcome dialog is the only
+# moment a relay is chosen): it is the relay the run expects, which the relay
+# guard holds every peer to.
 
 # --------------------------------------------------------------------------
 # Scenario
@@ -615,6 +634,84 @@ function Stage-Peer($peer) {
     }
 }
 
+# --------------------------------------------------------------------------
+# The production relay guard, before anything is built, stopped, reset or
+# launched (fleet_relay_guard.ps1). It judges the relay each peer will boot
+# with, the run's -Relay, the proxy's upstream and the certificate each route
+# presents; the probe judges again inside the app, and Wait-Ready after boot.
+# --------------------------------------------------------------------------
+
+# fleet.ps1's mode on another machine, for its own run of these checks and its boot.
+function Get-RemoteModeArgs {
+    if ($Onboard) {
+        $modeArgs = @('-Onboard')
+        if ($Fresh) { $modeArgs += '-Fresh' }
+        return $modeArgs
+    }
+    $modeArgs = @('-Live')
+    foreach ($flag in 'ReuseData', 'Empty', 'KeepOthers', 'NetProxy') {
+        if ((Get-Variable $flag -ValueOnly)) { $modeArgs += "-$flag" }
+    }
+    return $modeArgs
+}
+
+# The relay a peer's data carries once Reset-PeerData has run, read before it runs.
+function Get-PeerLaunchStamp($peer) {
+    if ($Onboard -or $Empty) { return '' }
+    try {
+        if (Test-AndroidBackend $peer) {
+            if ($ReuseData -and (Test-AndroidDeviceUp $peer)) {
+                $text = "$(Invoke-AppShell $peer "cat $($script:AndroidDocs)/hollow/$($script:FleetRelayStampFile) 2>/dev/null")"
+                if ($text.Trim()) { return (ConvertTo-FleetRelayHostPort $text) }
+            }
+        } elseif ($ReuseData) {
+            $run = Get-FleetPeerDataDir $peer
+            if ($run -and (Test-Path $run)) { return (Get-FleetRelayStamp $run) }
+        }
+    } catch { return '' }
+    return (Get-FleetRelayStamp (Join-Path (Get-FixtureRoot $peer) $peer))
+}
+
+$script:PeerRelay = @{}
+function Invoke-FleetRelayPreflight {
+    if (Test-FleetProductionAllowed) { Write-FleetProductionBanner "this run ($(@($peerList + $remotePeers) -join ', '))" }
+    if ($Relay) { Assert-FleetNotProduction "this run's relay" $Relay }
+    $null = Get-FleetAlsoRelays
+    foreach ($peer in $peerList) {
+        $stamp = Get-PeerLaunchStamp $peer
+        Assert-FleetGuardVerdict "peer $peer" (Get-FleetLaunchRelayVerdict $stamp $Relay ([bool]$Onboard) (Get-FleetAlsoRelays))
+        $peerRelay = if ($Onboard) { $Relay } elseif ($stamp) { $stamp } else { $Relay }
+        $script:PeerRelay[$peer] = $peerRelay
+        if (-not $stamp -and -not $Onboard -and -not $Empty) {
+            Write-Step "$peer's data carries no relay stamp (made before the relay guard, or never onboarded): the probe judges its relay at node start. Re-onboard with -Relay to stamp it." 'Yellow'
+        }
+    }
+    $proxied = @()
+    if ($NetProxy) { $proxied = @($peerList | Where-Object { -not (Test-AndroidBackend $_) }) }
+    $script:ProxyRelay = ''
+    if ($proxied.Count -gt 0) {
+        $relays = @($proxied | ForEach-Object { $script:PeerRelay[$_] } | Where-Object { $_ } | Select-Object -Unique)
+        if ($relays.Count -gt 1) { throw "-NetProxy routes one relay, and these peers carry $($relays -join ' and '): run them apart" }
+        if ($relays.Count -eq 1) { $script:ProxyRelay = $relays[0] }
+        $null = Resolve-FleetProxyUpstream $script:ProxyRelay
+    }
+    foreach ($relay in @($peerList | Where-Object { $proxied -notcontains $_ } | ForEach-Object { $script:PeerRelay[$_] } | Where-Object { $_ } | Select-Object -Unique)) {
+        Assert-FleetTlsNotProduction 'the relay route' $relay $relay
+    }
+}
+
+if (-not $Attach -and ($peerList.Count -gt 0 -or $remotePeers.Count -gt 0)) {
+    Invoke-FleetRelayPreflight
+    if ($GuardOnly) {
+        if ($remotePeers.Count -gt 0) { Wait-RemoteFleet (Start-RemoteFleet (@(Get-RemoteModeArgs) + '-GuardOnly')) }
+        Write-Step "relay guard: this run may start ($(@($peerList | ForEach-Object { "$_=$(if ($script:PeerRelay[$_]) { $script:PeerRelay[$_] } else { 'judged at node start' })" }) -join ', '))" 'Green'
+        exit 0
+    }
+} elseif ($GuardOnly) {
+    Write-Step 'relay guard: nothing to launch' 'Green'
+    exit 0
+}
+
 if ($Build) {
     if ($env:FLEET_LANE -and $env:FLEET_LANE -ne '0') { throw "-Build in lane $($env:FLEET_LANE): build in lane 0, fleet_all.ps1 stages the lanes from it" }
     $remoteBuild = @()
@@ -676,6 +773,7 @@ function Reset-PeerData($peer) {
             Write-Step "$peer reusing its last data directory"
         } elseif ($Onboard -or -not (Test-Path $fixture)) {
             Invoke-AppShell $peer "rm -rf $data && mkdir -p $data" | Out-Null
+            if ($Onboard -and $Relay) { Set-AppFile $peer "$data/$($script:FleetRelayStampFile)" "$Relay`n" }
             if ($Onboard) { Write-Step "$peer starting from an empty data directory" }
             else { Write-Step "$peer has no fixture identity yet - it will onboard from scratch. Run -Onboard to stamp one." 'Yellow' }
         } else {
@@ -701,6 +799,8 @@ function Reset-PeerData($peer) {
         }
         if (Test-Path $run) { Remove-Item $run -Recurse -Force }
         New-Item -ItemType Directory -Path $run -Force | Out-Null
+        # The relay the fixture is made on rides inside it, for every later launch's guard.
+        if ($Relay) { Set-FleetRelayStamp $run $Relay }
         Write-Step "$peer starting from an empty data directory"
         return
     }
@@ -740,18 +840,29 @@ function Save-Fixture($peer) {
 # --------------------------------------------------------------------------
 
 $script:processes = @{}
+$script:LogOffsets = @{}
 $script:onboardOk = $false
 $script:phrases = @{}
+
+# What the probe's relay guard is told: the relay this peer must be on, and the opt-in.
+function Get-PeerGuardConfig($peer) {
+    $allow = ''
+    if (Test-FleetProductionAllowed) { $allow = '1' }
+    return @("UI_PROBE_EXPECT_RELAY=$(Get-FleetProbeExpect "$($script:PeerRelay[$peer])")", "UI_PROBE_ALLOW_PRODUCTION=$allow")
+}
 
 function Start-Peer($peer) {
     $out = Join-Path $outRoot $peer
     if (Test-SimBackend $peer) {
         $udid = Get-SimUdid $peer
         Start-SimDevice $udid
+        # Where this launch's log lines start, for the relay guard's look at them.
+        $script:LogOffsets[$peer] = Get-PeerAppLogLength $peer
         $documents = Join-Path (Get-SimContainer $udid) 'Documents'
         $data = Join-Path $documents 'hollow'
         $probeOut = Join-Path $documents 'probe_out'
         New-Item -ItemType Directory -Path $data -Force | Out-Null
+        Set-FleetDialGuard $data
         if (Test-Path $probeOut) { Remove-Item $probeOut -Recurse -Force }
         New-Item -ItemType Directory -Path $probeOut -Force | Out-Null
         # build/fleet_out/<peer> points into the container, so every reader of
@@ -767,7 +878,7 @@ function Start-Peer($peer) {
             "UI_PROBE_PEER=$peer",
             "UI_PROBE_IDLE_MINUTES=$IdleMinutes",
             "HOLLOW_DATA_DIR=$data"
-        )
+        ) + @(Get-PeerGuardConfig $peer)
         [System.IO.File]::WriteAllText((Join-Path $documents 'probe.env'),
             (($config -join "`n") + "`n"), (New-Object System.Text.UTF8Encoding($false)))
         $launched = "$(& xcrun simctl launch --terminate-running-process $udid com.anonlisten.hollow 2>&1)"
@@ -781,8 +892,12 @@ function Start-Peer($peer) {
     if (Test-AndroidBackend $peer) {
         Start-AndroidDevice $peer
         Invoke-Adb $peer 'shell' "am force-stop $($script:AndroidPackage)" 2>&1 | Out-Null
+        $script:LogOffsets[$peer] = Get-PeerAppLogLength $peer
         $docs = $script:AndroidDocs
         Invoke-AppShell $peer "rm -rf $docs/probe_out && mkdir -p $docs/probe_out $docs/hollow" | Out-Null
+        # The push fetch node runs outside the probe, so this marker is all that guards it.
+        if (Test-FleetProductionAllowed) { Invoke-AppShell $peer "rm -f $docs/hollow/$($script:FleetDialGuardFile)" | Out-Null }
+        else { Set-AppFile $peer "$docs/hollow/$($script:FleetDialGuardFile)" "on`n" }
         # A real directory here, where the simulator backend leaves a symlink:
         # rm, so a link goes as a link and never takes its target with it.
         New-Item -ItemType Directory -Path $outRoot -Force | Out-Null
@@ -794,7 +909,7 @@ function Start-Peer($peer) {
             "UI_PROBE_PEER=$peer",
             "UI_PROBE_IDLE_MINUTES=$IdleMinutes",
             "HOLLOW_DATA_DIR=$($script:AndroidDocsAbs)/hollow"
-        )
+        ) + @(Get-PeerGuardConfig $peer)
         Set-AppFile $peer "$docs/probe.env" (($config -join "`n") + "`n")
         # A start right after a force-stop can be "delivered to top" of the
         # activity still being torn down, and then no process starts at all
@@ -818,9 +933,11 @@ function Start-Peer($peer) {
         return
     }
     Wait-FleetLaunchSlot $peer
+    $script:LogOffsets[$peer] = Get-PeerAppLogLength $peer
     $dest = Join-Path $stageRoot $peer
     $data = Join-Path $runRoot $peer
     New-Item -ItemType Directory -Path $data -Force | Out-Null
+    Set-FleetDialGuard $data
     if (Test-Path $out) { Remove-Item $out -Recurse -Force }
     New-Item -ItemType Directory -Path $out -Force | Out-Null
 
@@ -833,6 +950,10 @@ function Start-Peer($peer) {
     $env:UI_PROBE_IDLE_MINUTES = "$IdleMinutes"
     $env:UI_PROBE_SCENARIO_FILE = ''
     $env:UI_PROBE_STEPS = ''
+    foreach ($line in Get-PeerGuardConfig $peer) {
+        $kv = $line -split '=', 2
+        [Environment]::SetEnvironmentVariable($kv[0], $kv[1])
+    }
 
     if (Test-MacBackend) {
         # The binary itself, never `open` (Test-MacBackend), from a launcher
@@ -1010,24 +1131,72 @@ exit 0
     Write-Step "launched $peer (pid $($proc.Id)) data=$data"
 }
 
+# A guard refusal stops this run's peers: a run that tried the official relay is void.
+function Stop-FleetForGuard($why) {
+    Write-Step "PRODUCTION RELAY GUARD: $why" 'Red'
+    Stop-Fleet $stopOnly
+    throw "PRODUCTION RELAY GUARD: $why"
+}
+
+# What a peer refused itself (the probe ends the process before the dial).
+function Assert-PeerNotRefused($peer) {
+    $mark = Get-PeerRelayGuard $peer
+    if ($mark -and "$($mark.verdict)" -eq 'refused') {
+        Stop-FleetForGuard "$peer refused the relay at $($mark.where) ($($mark.reason)); nothing was dialled"
+    }
+}
+
+# After boot: the probe's guard is in this build, nothing it logged dialled the
+# official relay, and the relay its provider holds is not the official one.
+function Assert-FleetBootRelay($peers) {
+    $allowed = Test-FleetProductionAllowed
+    foreach ($peer in $peers) {
+        $mark = Get-PeerRelayGuard $peer
+        if (-not $mark) {
+            if ($allowed) { Write-Step "$peer's probe has no relay guard (built before it)" 'Yellow' }
+            else { Stop-FleetForGuard "$peer's probe build has no relay guard (built before it): rebuild with -Build" }
+        }
+        Assert-PeerNotRefused $peer
+        $hits = @(Get-FleetProdConnectLines (Get-PeerAppLogSince $peer $script:LogOffsets[$peer]))
+        if ($hits.Count -gt 0) {
+            if ($allowed) { Write-FleetProductionBanner "$peer dialled $($hits[0])" }
+            else { Stop-FleetForGuard "$peer dialled the official relay: $($hits[0])" }
+        }
+        $name = 'RELAY_' + $peer.ToUpper()
+        $answer = Send-FleetStep $peer ([pscustomobject]@{ op = 'capture'; from = 'provider'; key = 'relayDomain'; as = $name }) 60
+        if (-not $answer.ok) { Write-Step "could not read $peer's relay setting: $($answer.message)" 'Yellow'; continue }
+        $why = Get-FleetProdNameReason "$($script:FleetVars[$name])"
+        if ($why) {
+            if ($allowed) { Write-FleetProductionBanner "$peer's relay setting ($why)" }
+            else { Stop-FleetForGuard "$peer's relay setting: $why" }
+        }
+    }
+}
+
 function Wait-Ready($peers) {
     $deadline = (Get-Date).AddSeconds($BootTimeoutSeconds)
     $ready = @{}
+    $round = 0
     while ((Get-Date) -lt $deadline -and $ready.Count -lt $peers.Count) {
         foreach ($peer in $peers) {
             if ($ready.ContainsKey($peer)) { continue }
             if (Test-PeerLive $peer) {
                 $ready[$peer] = $true
                 Write-Step "$peer is live" 'Green'
+            } elseif (-not (Test-AndroidBackend $peer) -or $round % 10 -eq 0) {
+                Assert-PeerNotRefused $peer
             }
         }
+        $round++
         Start-Sleep -Milliseconds 300
     }
     $missing = $peers | Where-Object { -not $ready.ContainsKey($_) }
     if ($missing) {
+        foreach ($peer in @($missing)) { Assert-PeerNotRefused $peer }
         $detail = ($missing | ForEach-Object { "--- $_ ---`n" + (Get-CrashTail $_) }) -join "`n"
         throw "these instances never reached live-ready: $($missing -join ', ').`n$detail"
     }
+    Assert-FleetBootRelay $peers
 }
 
 # Windows land on top of each other otherwise, and the whole point is that a
@@ -1206,33 +1375,31 @@ $remoteUp = $false
 # A remote -Build already booted and stopped its peers, as this machine's boot does.
 $buildOnly = $Build -and -not ($Onboard -or $Live -or $Keep -or $scenarioSteps.Count -gt 0)
 if ($remotePeers.Count -gt 0 -and -not $Attach -and -not $buildOnly) {
-    if ($Onboard) {
-        $remoteArgs = @('-Onboard')
-        if ($Fresh) { $remoteArgs += '-Fresh' }
-        if ($Relay) { $remoteArgs += @('-Relay', $Relay) }
-    } else {
-        $remoteArgs = @('-Live')
-        foreach ($flag in 'ReuseData', 'Empty', 'KeepOthers', 'NetProxy') {
-            if ((Get-Variable $flag -ValueOnly)) { $remoteArgs += "-$flag" }
-        }
-    }
-    $remotePending = Start-RemoteFleet $remoteArgs
+    $remotePending = Start-RemoteFleet (Get-RemoteModeArgs)
 }
 
 if (-not $Attach -and $peerList.Count -gt 0) {
-    Stop-Fleet $stopOnly
-    foreach ($peer in $peerList) { Reset-PeerData $peer }
-    if ($NetProxy) {
-        $proxied = @($peerList | Where-Object { -not (Test-AndroidBackend $_) })
-        if ($proxied.Count -gt 0) {
-            $routed = @(Start-FleetProxy $proxied)
-            foreach ($peer in $proxied) {
-                if ($routed -contains $peer) { Set-PeerRelayConnect $peer (Get-PeerDataDir $peer) }
-                else { Clear-PeerRelayConnect (Get-PeerDataDir $peer) }
+    # Start-Peer hands desktop peers the guard env through this process's own; it is put
+    # back however the launches end, so a same-process caller never inherits an opt-in.
+    $guardEnvBefore = @{}
+    foreach ($k in 'UI_PROBE_EXPECT_RELAY', 'UI_PROBE_ALLOW_PRODUCTION') { $guardEnvBefore[$k] = [Environment]::GetEnvironmentVariable($k) }
+    try {
+        Stop-Fleet $stopOnly
+        foreach ($peer in $peerList) { Reset-PeerData $peer }
+        if ($NetProxy) {
+            $proxied = @($peerList | Where-Object { -not (Test-AndroidBackend $_) })
+            if ($proxied.Count -gt 0) {
+                $routed = @(Start-FleetProxy $proxied $script:ProxyRelay)
+                foreach ($peer in $proxied) {
+                    if ($routed -contains $peer) { Set-PeerRelayConnect $peer (Get-PeerDataDir $peer) }
+                    else { Clear-PeerRelayConnect (Get-PeerDataDir $peer) }
+                }
             }
         }
+        foreach ($peer in $peerList) { Start-Peer $peer }
+    } finally {
+        foreach ($k in @($guardEnvBefore.Keys)) { [Environment]::SetEnvironmentVariable($k, $guardEnvBefore[$k]) }
     }
-    foreach ($peer in $peerList) { Start-Peer $peer }
 }
 
 $exitCode = 0
@@ -1290,6 +1457,15 @@ try {
         }
     }
 } finally {
+    # Every log line this run's peers wrote, judged once more: a dial to the
+    # official relay voids the run whatever its steps said.
+    foreach ($peer in @($peerList | Where-Object { $script:LogOffsets.ContainsKey($_) })) {
+        $hits = @(Get-FleetProdConnectLines (Get-PeerAppLogSince $peer $script:LogOffsets[$peer]))
+        if ($hits.Count -gt 0) {
+            Write-Step "RUN VOID: $peer dialled the official relay ($($hits[0]))" 'Red'
+            if (-not (Test-FleetProductionAllowed)) { $exitCode = 1 }
+        }
+    }
     if ($Onboard) {
         # The fixture is the data directory AFTER a clean exit, so the WAL is
         # folded in and the lock file is gone. A half-onboarded directory is

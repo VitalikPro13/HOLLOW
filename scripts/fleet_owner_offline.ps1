@@ -73,35 +73,7 @@ function Step($peer, $step) {
 # restores every fixture, which would throw away the very server this journey is
 # about; this is the same launch with that step deliberately left out.
 function Restart-Peer($peer) {
-    $dest = Join-Path $script:FleetStageRoot $peer
-    $data = Join-Path $runRoot $peer
-    $out = Join-Path $script:FleetOutRoot $peer
-    if (Test-Path $out) { Remove-Item $out -Recurse -Force }
-    New-Item -ItemType Directory -Path $out -Force | Out-Null
-    # The outbox is gone, so the read cursor for this peer has to go with it.
-    $script:FleetConsumed[$peer] = 0
-
-    $env:HOLLOW_DATA_DIR = $data
-    $env:UI_PROBE_OUT = $out
-    $env:UI_PROBE_MODE = 'live'
-    $env:UI_PROBE_PEER = $peer
-    $env:UI_PROBE_IDLE_MINUTES = '40'
-    $env:UI_PROBE_SCENARIO_FILE = ''
-    $env:UI_PROBE_STEPS = ''
-    Wait-FleetLaunchSlot $peer
-    # No -RedirectStandardOutput/-RedirectStandardError, ever: they flip
-    # Start-Process into inherit-handles mode and every instance then holds a
-    # duplicate of this script's stdout pipe, so the script never returns.
-    $proc = Start-Process -FilePath (Join-Path $dest 'hollow.exe') -WorkingDirectory $dest -PassThru
-    Say "relaunched $peer (pid $($proc.Id)) on its EXISTING data dir"
-
-    $deadline = (Get-Date).AddSeconds($BootTimeoutSeconds)
-    while ((Get-Date) -lt $deadline) {
-        if (Test-PeerLive $peer) { Say "$peer is live again" 'Green'; return }
-        if (-not (Get-PeerProcess $peer)) { throw "peer $peer died on relaunch.`n" + (Get-CrashTail $peer) }
-        Start-Sleep -Milliseconds 300
-    }
-    throw "peer $peer never came back live.`n" + (Get-CrashTail $peer)
+    Start-FleetJourneyPeer -Peer $peer -DataDir (Join-Path $runRoot $peer) -BootTimeoutSeconds $BootTimeoutSeconds | Out-Null
 }
 
 function Stop-Peer($peer) {
@@ -264,6 +236,7 @@ if (-not $KeepServer) {
     }
 }
 
+$failure = Add-FleetJourneyRelayVoid $failure
 if ($failure) { throw $failure }
 if ($offlineDelete -eq $false) { throw "a member closed during the delete kept the server" }
 Say 'PASS' 'Green'

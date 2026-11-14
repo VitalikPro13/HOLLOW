@@ -20,6 +20,9 @@
 # ("already booted", "not installed"), so the exit codes are read by hand.
 $PSNativeCommandUseErrorActionPreference = $false
 
+# The production relay guard (refuses the official relay unless -AllowProduction).
+. (Join-Path $PSScriptRoot 'fleet_relay_guard.ps1')
+
 # Which machine this is. Windows PowerShell 5.1 has no $IsMacOS or $IsLinux, so
 # both are simply absent there and read as false.
 if ($IsMacOS) { $script:FleetBackend = 'sim' }
@@ -605,9 +608,15 @@ function Expand-FleetVars($value) {
 # is stamped into the fixture with everything else; there is no other moment a
 # fleet peer can be pointed at a self-hosted relay. Shared so fleet.ps1's
 # -Relay and the journey scripts fill the same field the same way.
-# An empty domain means the official relay and produces no steps at all.
+# An empty domain falls back to FLEET_RELAY; with neither, the official relay is
+# refused unless the run allows production (then no steps at all).
 function Get-RelayWelcomeSteps($relayDomain) {
-    if (-not $relayDomain) { return @() }
+    if (-not $relayDomain) { $relayDomain = Get-FleetExpectedRelay '' }
+    if (-not $relayDomain) {
+        Assert-FleetGuardVerdict 'onboarding with no relay' 'the welcome dialog keeps the official relay'
+        return @()
+    }
+    Assert-FleetNotProduction 'onboarding onto' $relayDomain
     return @(
         @{ op = 'tap'; target = 'semantics:Change the relay'; index = 0 },
         @{ op = 'wait_for'; target = 'hint:relay.anonlisten.com'; timeout_ms = 10000 },
@@ -808,6 +817,218 @@ function Send-FleetStep($peer, $step, $timeoutSeconds = 180) {
 }
 
 # --------------------------------------------------------------------------
+# One journey peer launch, with the production relay guard's launch checks
+# --------------------------------------------------------------------------
+
+# Every launch a journey script makes itself goes through Start-FleetJourneyPeer, never
+# its own Start-Process or simctl launch (a self-test source scan holds them to it): the
+# relay its data carries against this run's, the guard env for the probe, the node's
+# dial guard, and after boot the probe's marker and the relay its log dialled. A
+# journey calls Assert-FleetJourneyRelayLogs before its verdict.
+$script:FleetJourneyLogOffsets = @{}
+
+# A data dir holding nothing but fleet markers onboards through the welcome dialog.
+function Test-FleetDataFresh([string]$dataDir) {
+    if (-not (Test-Path -LiteralPath $dataDir)) { return $true }
+    $markers = @($script:FleetRelayStampFile, $script:FleetDialGuardFile, 'relay_connect', 'relay_ca.pem')
+    return @(Get-ChildItem -LiteralPath $dataDir -Force | Where-Object { $markers -notcontains $_.Name }).Count -eq 0
+}
+
+# The macOS app the way fleet.ps1 starts it: the binary from a launcher that carries the
+# environment, HOME of its own and stdio in files, started over ssh to this Mac so its
+# microphone ask never puts a dialog in front of the person.
+function Start-FleetMacPeerProcess($peer, $dest, $out) {
+    $peerHome = Join-Path (Get-MacHomeRoot) $peer
+    New-Item -ItemType Directory -Path $peerHome -Force | Out-Null
+    $vars = [ordered]@{ HOME = $peerHome }
+    foreach ($item in @(Get-ChildItem Env: | Where-Object { $_.Name -like 'UI_PROBE_*' -or $_.Name -like 'HOLLOW_*' -or $_.Name -like 'RUST_*' })) {
+        $vars[$item.Name] = $item.Value
+    }
+    $launcher = Join-Path $out 'launch.sh'
+    $lines = @('#!/bin/sh')
+    foreach ($name in $vars.Keys) { $lines += ("export {0}='{1}'" -f $name, ("$($vars[$name])" -replace "'", "'\''")) }
+    $lines += ('exec "{0}" -NSAppSleepDisabled YES >"{1}" 2>"{2}" </dev/null' -f (Get-MacPeerBinary $peer),
+        (Join-Path $out 'native-stdout.log'), (Join-Path $out 'native-stderr.log'))
+    [System.IO.File]::WriteAllText($launcher, (($lines -join "`n") + "`n"))
+    & chmod +x $launcher
+    if ($env:SSH_CONNECTION -or $env:FLEET_MAC_DIRECT -eq '1') {
+        return Start-Process -FilePath $launcher -WorkingDirectory $dest -PassThru
+    }
+    $self = if ($env:FLEET_MAC_SELF_SSH) { $env:FLEET_MAC_SELF_SSH } else { 'localhost' }
+    $said = "$(& ssh -o BatchMode=yes -o ConnectTimeout=5 $self "nohup /bin/sh '$launcher' >/dev/null 2>&1 </dev/null &" 2>&1)"
+    if ($LASTEXITCODE -ne 0) { throw "starting $peer over 'ssh $self' failed: $said (see fleet.ps1 Start-Peer)" }
+    $deadline = (Get-Date).AddSeconds(30)
+    while ((Get-Date) -lt $deadline) {
+        $proc = @(Get-MacFleetProcesses @($peer)) | ForEach-Object { $_.Process } | Select-Object -First 1
+        if ($proc) { return $proc }
+        Start-Sleep -Milliseconds 200
+    }
+    throw "launching $peer over ssh $self started no process; see $(Join-Path $out 'native-stderr.log')"
+}
+
+# The probe refused its relay (it exits before the dial): this run is void.
+function Assert-FleetJourneyNotRefused($peer) {
+    $mark = Get-PeerRelayGuard $peer
+    if ($mark -and "$($mark.verdict)" -eq 'refused') {
+        throw "PRODUCTION RELAY GUARD: $peer refused the relay at $($mark.where) ($($mark.reason)); nothing was dialled"
+    }
+}
+
+# What a launch left to judge: the probe's marker (a build from before the guard has
+# none), its refusal, and any "[HOLLOW-WS] Connecting to" the official relay since.
+function Assert-FleetJourneyPeerRelay($peer) {
+    $allowed = Test-FleetProductionAllowed
+    if (-not (Get-PeerRelayGuard $peer)) {
+        if ($allowed) { Write-Host "[fleet] $peer's probe has no relay guard (built before it)" -ForegroundColor Yellow }
+        else { throw "PRODUCTION RELAY GUARD: $peer's probe build has no relay guard (built before it): rebuild with fleet.ps1 -Build" }
+    }
+    Assert-FleetJourneyNotRefused $peer
+    $hits = @(Get-FleetProdConnectLines (Get-PeerAppLogSince $peer $script:FleetJourneyLogOffsets[$peer]))
+    if ($hits.Count -gt 0) {
+        if ($allowed) { Write-FleetProductionBanner "$peer dialled $($hits[0])" }
+        else { throw "PRODUCTION RELAY GUARD: RUN VOID, $peer dialled the official relay: $($hits[0])" }
+    }
+}
+
+# Every peer this journey launched, judged once more before its verdict.
+function Assert-FleetJourneyRelayLogs {
+    foreach ($peer in @($script:FleetJourneyLogOffsets.Keys)) { Assert-FleetJourneyPeerRelay $peer }
+}
+
+# The same judgement for a journey's verdict, never throwing: why the run is void, or ''.
+function Get-FleetJourneyRelayVoid {
+    try { Assert-FleetJourneyRelayLogs; return '' } catch {
+        Write-Host "[fleet] $($_.Exception.Message)" -ForegroundColor Red
+        return "$($_.Exception.Message)"
+    }
+}
+
+# A journey's failure with the void folded in: the first failure stands.
+function Add-FleetJourneyRelayVoid($failure) {
+    $void = Get-FleetJourneyRelayVoid
+    if ($void -and -not $failure) { return $void }
+    return $failure
+}
+
+# The guard's half of a journey launch, before anything starts: refuses a data dir
+# whose relay the run may not boot, stamps one about to onboard, arms the node's dial
+# guard, and gives the relay it boots on and the env the probe judges it by.
+function Get-FleetJourneyLaunchPlan([string]$peer, [string]$dataDir) {
+    $expected = Get-FleetExpectedRelay ''
+    $stamp = Get-FleetRelayStamp $dataDir
+    $fresh = Test-FleetDataFresh $dataDir
+    Assert-FleetGuardVerdict "journey peer $peer" (Get-FleetLaunchRelayVerdict $stamp $expected $fresh (Get-FleetAlsoRelays))
+    if ($fresh -and $expected) { Set-FleetRelayStamp $dataDir $expected }
+    $relay = if ($fresh) { $expected } elseif ($stamp) { $stamp } else { $expected }
+    if (-not $stamp -and -not $fresh) {
+        Write-Host "[fleet] $peer's data carries no relay stamp (made before the relay guard): the probe judges its relay at node start" -ForegroundColor Yellow
+    }
+    New-Item -ItemType Directory -Path $dataDir -Force | Out-Null
+    Set-FleetDialGuard $dataDir
+    $allow = ''
+    if (Test-FleetProductionAllowed) { $allow = '1' }
+    return [pscustomobject]@{ fresh = $fresh; relay = $relay
+        env = @{ UI_PROBE_EXPECT_RELAY = (Get-FleetProbeExpect $relay); UI_PROBE_ALLOW_PRODUCTION = $allow } }
+}
+
+# Launches $Peer on $DataDir and, unless -NoWait, waits for it to come live. Returns the
+# process (on the simulator an object with its pid). -AllowDeath: a process that exits
+# is the journey's business (a wipe), not a failure. -ExtraEnv is set for this launch
+# only.
+function Start-FleetJourneyPeer {
+    param(
+        [Parameter(Mandatory = $true)][string]$Peer,
+        [Parameter(Mandatory = $true)][string]$DataDir,
+        [int]$BootTimeoutSeconds = 240,
+        [hashtable]$ExtraEnv = @{},
+        [switch]$NoWait,
+        [switch]$AllowDeath
+    )
+    $plan = Get-FleetJourneyLaunchPlan $Peer $DataDir
+    $fresh = $plan.fresh
+    $peerRelay = $plan.relay
+    $guardEnv = $plan.env
+    foreach ($k in @($ExtraEnv.Keys)) { $guardEnv[$k] = $ExtraEnv[$k] }
+    $out = Join-Path $script:FleetOutRoot $Peer
+    $script:FleetConsumed[$Peer] = 0
+    Wait-FleetLaunchSlot $Peer
+    $script:FleetJourneyLogOffsets[$Peer] = Get-PeerAppLogLength $Peer
+    $proc = $null
+
+    if (Test-SimBackend $Peer) {
+        # Platform.environment is EMPTY on iOS, so the configuration goes in as a file.
+        $udid = Get-SimUdid $Peer
+        Start-SimDevice $udid
+        $documents = Join-Path (Get-SimContainer $udid) 'Documents'
+        $probeOut = Join-Path $documents 'probe_out'
+        if (Test-Path $probeOut) { Remove-Item $probeOut -Recurse -Force }
+        New-Item -ItemType Directory -Path $probeOut -Force | Out-Null
+        New-Item -ItemType Directory -Path $script:FleetOutRoot -Force | Out-Null
+        # rm, not Remove-Item: a symlink to a directory must go as a link.
+        & rm -rf $out
+        & ln -sfn $probeOut $out
+        $config = @("UI_PROBE_OUT=$probeOut", 'UI_PROBE_MODE=live', "UI_PROBE_PEER=$Peer", 'UI_PROBE_IDLE_MINUTES=40', "HOLLOW_DATA_DIR=$DataDir")
+        foreach ($k in @($guardEnv.Keys)) { $config += "$k=$($guardEnv[$k])" }
+        [System.IO.File]::WriteAllText((Join-Path $documents 'probe.env'),
+            (($config -join "`n") + "`n"), (New-Object System.Text.UTF8Encoding($false)))
+        $launched = "$(& xcrun simctl launch --terminate-running-process $udid com.anonlisten.hollow 2>&1)"
+        if ($LASTEXITCODE -ne 0) { throw "simctl launch for $Peer failed: $launched" }
+        $proc = Get-PeerProcess $Peer
+    } else {
+        $dest = Join-Path $script:FleetStageRoot $Peer
+        if (Test-Path $out) { Remove-Item $out -Recurse -Force }
+        New-Item -ItemType Directory -Path $out -Force | Out-Null
+        $env:HOLLOW_DATA_DIR = $DataDir
+        $env:UI_PROBE_OUT = $out
+        $env:UI_PROBE_MODE = 'live'
+        $env:UI_PROBE_PEER = $Peer
+        $env:UI_PROBE_IDLE_MINUTES = '40'
+        $env:UI_PROBE_SCENARIO_FILE = ''
+        $env:UI_PROBE_STEPS = ''
+        # No -RedirectStandardOutput/-RedirectStandardError, ever: they flip Start-Process
+        # into inherit-handles mode and every instance then holds this script's stdout pipe.
+        $proc = Invoke-FleetWithEnv $guardEnv {
+            if (Test-LinuxBackend) {
+                # Its own session bus per instance and stdio to files, never a pipe we hold.
+                $launcher = Join-Path $out 'launch.sh'
+                $lines = @('#!/bin/sh', ('exec dbus-run-session -- "{0}" >"{1}" 2>"{2}" </dev/null' -f (Join-Path $dest 'hollow'),
+                    (Join-Path $out 'native-stdout.log'), (Join-Path $out 'native-stderr.log')))
+                [System.IO.File]::WriteAllText($launcher, (($lines -join "`n") + "`n"))
+                & chmod +x $launcher
+                Start-Process -FilePath $launcher -WorkingDirectory $dest -PassThru
+            } elseif (Test-MacBackend) {
+                Start-FleetMacPeerProcess $Peer $dest $out
+            } else {
+                Start-Process -FilePath (Join-Path $dest 'hollow.exe') -WorkingDirectory $dest -PassThru
+            }
+        }
+    }
+    $pidText = if ($proc) { "pid $($proc.Id)" } else { 'no pid yet' }
+    $what = if ($fresh) { 'an EMPTY data dir' } else { 'its EXISTING data dir' }
+    Write-Host "[fleet] launched $Peer ($pidText) on $what, relay $(if ($peerRelay) { $peerRelay } else { 'judged at node start' })" -ForegroundColor Cyan
+    if ($NoWait) { return $proc }
+
+    $deadline = (Get-Date).AddSeconds($BootTimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        if (Test-PeerLive $Peer) {
+            Write-Host "[fleet] $Peer is live" -ForegroundColor Green
+            Assert-FleetJourneyPeerRelay $Peer
+            return $proc
+        }
+        Assert-FleetJourneyNotRefused $Peer
+        # The handle, not a path lookup: a process still initialising hides its path.
+        $gone = if ($proc -and $proc -is [System.Diagnostics.Process]) { $proc.HasExited } else { -not (Get-PeerProcess $Peer) }
+        if ($gone) {
+            Assert-FleetJourneyNotRefused $Peer
+            if ($AllowDeath) { return $proc }
+            throw "peer $Peer died on launch.`n" + (Get-CrashTail $Peer)
+        }
+        Start-Sleep -Milliseconds 300
+    }
+    throw "peer $Peer never came live.`n" + (Get-CrashTail $Peer)
+}
+
+# --------------------------------------------------------------------------
 # Fresh identities for a journey that cannot share a mailbox with its own past
 # --------------------------------------------------------------------------
 
@@ -820,7 +1041,8 @@ function Send-FleetStep($peer, $step, $timeoutSeconds = 180) {
 function Invoke-FleetScript($fleetArgs) {
     $fleet = Join-Path (Join-Path $script:FleetRepo 'scripts') 'fleet.ps1'
     if (-not (Test-Path $fleet)) { throw "fleet.ps1 not found at $fleet" }
-    $all = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $fleet) + $fleetArgs
+    # A journey's -AllowProduction lives in this process alone, so the child is told.
+    $all = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $fleet) + @(Add-FleetRelayArgs $fleetArgs '')
     & (Get-PowerShellExe) @all | ForEach-Object { Write-Host "    | $_" -ForegroundColor DarkGray }
     if ($LASTEXITCODE -ne 0) {
         throw "fleet.ps1 $($fleetArgs -join ' ') failed with $LASTEXITCODE"

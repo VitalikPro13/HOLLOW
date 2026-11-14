@@ -383,6 +383,8 @@ function Show-Channel($peer) {
 function Open-EnterCode($peer) {
     # The terms come first since 0.12.2 (Apple 1.2), as in fleet_device_link.ps1.
     Step $peer @{ op = 'wait_for'; target = 'text:Agree and continue'; timeout_ms = 120000 } | Out-Null
+    # The relay this run is on (FLEET_RELAY), typed before an identity exists.
+    foreach ($s in @(Get-RelayWelcomeSteps '')) { Step $peer $s | Out-Null }
     Step $peer @{ op = 'tap'; target = 'text:Agree and continue'; index = 0 } | Out-Null
     Step $peer @{ op = 'wait_for'; target = 'text:Create an identity'; timeout_ms = 20000 } | Out-Null
     Step $peer @{ op = 'tap'; target = 'text:Link a device'; index = 0 } | Out-Null
@@ -450,7 +452,7 @@ try {
     if ($script:UseProxy) {
         foreach ($peer in @($P, $R) + @($T | Where-Object { $_ })) {
             if ((Get-Platform $peer) -eq 'android') { continue }
-            Invoke-PeerCommand $peer 'proxy' @{ peers = @('a', 'b', 'c', 'd', 'e') } | Out-Null
+            Invoke-PeerCommand $peer 'proxy' @{ peers = @('a', 'b', 'c', 'd', 'e'); relay = (Get-FleetExpectedRelay '') } | Out-Null
         }
     }
     Say "minting fresh identities for the presenter and the friend"

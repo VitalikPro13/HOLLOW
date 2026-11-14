@@ -31,6 +31,10 @@
 # SAFETY: never points the app at the live data directory. It mirrors it to a
 # scratch copy first, because the probe clicks real buttons and writes real
 # CRDT ops. Re-copy with -Fresh after the live data changes.
+#
+# The probe's production relay guard refuses the official relay, which a copy
+# of a real identity is on: such a run needs -AllowProduction, and should be
+# a fleet run on a throwaway identity instead (scripts\fleet.ps1).
 
 param(
     # A file in scripts\probe_scenarios (without .json), or 'boot' for the
@@ -53,11 +57,14 @@ param(
     # Re-mirror the data copy even if it already exists.
     [switch]$Fresh,
     # Skip the mirror entirely and reuse whatever the copy already holds.
-    [switch]$ReuseData
+    [switch]$ReuseData,
+    # Let the probe reach the OFFICIAL relay (its relay guard refuses it otherwise).
+    [switch]$AllowProduction
 )
 
 $ErrorActionPreference = 'Stop'
 $repoRoot = Split-Path -Parent $PSScriptRoot
+. (Join-Path $PSScriptRoot 'fleet_relay_guard.ps1')
 Set-Location $repoRoot
 
 # -- 0. Resolve the scenario ---
@@ -82,6 +89,13 @@ $env:SERVER = $Server
 $env:UI_PROBE_MODE = if ($Live) { 'live' } else { 'script' }
 $env:UI_PROBE_IDLE_MINUTES = "$IdleMinutes"
 $env:UI_PROBE_WIDGET = $Widget
+# Set for flutter drive alone (Invoke-FleetWithEnv): an opt-in left in this
+# process would lift the guard for the next fleet.ps1 run from the same shell.
+$probeAllow = ''
+if ($AllowProduction) {
+    $probeAllow = '1'
+    Write-Host '[ui-probe] !!! PRODUCTION RELAY ALLOWED: this probe may reach the OFFICIAL relay as the identity it copied' -ForegroundColor Red
+}
 
 $what = 'boot + map'
 if ($Live) { $what = 'live' }
@@ -159,12 +173,13 @@ if ($Live) {
 }
 
 try {
-    & flutter drive `
-        --driver=test_driver/integration_test.dart `
-        --target=integration_test/ui_probe_test.dart `
-        -d windows
-
-    $driveExit = $LASTEXITCODE
+    $driveExit = Invoke-FleetWithEnv @{ UI_PROBE_ALLOW_PRODUCTION = $probeAllow; UI_PROBE_EXPECT_RELAY = '' } {
+        & flutter drive `
+            --driver=test_driver/integration_test.dart `
+            --target=integration_test/ui_probe_test.dart `
+            -d windows | Out-Host
+        $LASTEXITCODE
+    }
 } finally {
     if ($didHide -and (Test-Path $hiddenDll)) {
         Move-Item -Force $hiddenDll $staleDll

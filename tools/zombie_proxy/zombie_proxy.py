@@ -17,6 +17,10 @@ mini and the Linux VM.
         --route b=127.0.0.1:18522=127.0.0.1:18501:tls --ready-file ready.json
     python zombie_proxy.py ctl --control 127.0.0.1:18549 freeze route:b
 
+A route whose upstream is the official relay (a name under anonlisten.com, or an
+address it has or resolves to, judged at start and again at every dial) is refused
+unless the proxy runs with --allow-production.
+
 A route is NAME=LISTEN_HOST:PORT=UPSTREAM_HOST:PORT, with a trailing `:tls` when
 the proxy should speak TLS to the upstream itself (no certificate check) while
 its clients speak plain TCP. That mode exists for the end-to-end test only,
@@ -47,6 +51,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import ipaddress
 import json
 import socket
 import ssl
@@ -55,6 +60,12 @@ import sys
 import time
 
 READ_PAUSED_LIMIT = 4 * 1024 * 1024
+# The official relay: the fleet's proxy never dials it unless told --allow-production
+# (scripts/fleet_relay_guard.ps1 holds the same list).
+PRODUCTION_SUFFIX = 'anonlisten.com'
+PRODUCTION_NAMES = ('relay.anonlisten.com', 'anonlisten.com')
+PRODUCTION_ADDRS = ('141.227.186.209', '2001:41d0:ab01::4:0:d')
+REFUSED_EXIT = 3
 # How long a thawed held connection reads before it dials, so a client that gave
 # up while held is seen to have closed.
 HELD_SETTLE_S = 0.05
@@ -80,6 +91,42 @@ def parse_route(text):
     lhost, lport = _parse_hostport(listen)
     uhost, uport = _parse_hostport(upstream)
     return {'name': name, 'listen': (lhost, lport), 'upstream': (uhost, uport), 'tls': tls}
+
+
+def _plain_address(text):
+    """The canonical form of an IP literal (IPv4-mapped IPv6 as IPv4), None otherwise."""
+    try:
+        ip = ipaddress.ip_address(text.strip('[]'))
+    except ValueError:
+        return None
+    if ip.version == 6 and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    return str(ip)
+
+
+def production_addresses(resolve=True):
+    """The official relay's pinned addresses, plus what its names resolve to now."""
+    found = {_plain_address(a) for a in PRODUCTION_ADDRS}
+    if resolve:
+        for name in PRODUCTION_NAMES:
+            try:
+                for info in socket.getaddrinfo(name, 443, proto=socket.IPPROTO_TCP):
+                    found.add(_plain_address(info[4][0]))
+            except OSError:
+                pass
+    found.discard(None)
+    return found
+
+
+def production_reason(host, prod_addrs):
+    """Why `host` (a name or address) is the official relay, judged by its text; None if not."""
+    name = host.strip().strip('[]').rstrip('.').lower()
+    if name == PRODUCTION_SUFFIX or name.endswith('.' + PRODUCTION_SUFFIX):
+        return f'{name} is under {PRODUCTION_SUFFIX}, the official relay'
+    plain = _plain_address(name)
+    if plain is not None and plain in prod_addrs:
+        return f"{name} is the official relay's address"
+    return None
 
 
 def _reset_on_close(transport):
@@ -206,7 +253,30 @@ class Conn:
             context.verify_mode = ssl.CERT_NONE
             kwargs = {'ssl': context, 'server_hostname': host}
         try:
-            await loop.create_connection(lambda: Side(self, False), host, port, **kwargs)
+            targets = [(host, port)]
+            # Resolved and judged before the dial, and the judged addresses are what
+            # is dialled: a name that moved onto the official relay is refused too.
+            if not self.proxy.allow_production:
+                infos = await loop.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
+                plains = [_plain_address(info[4][0]) for info in infos]
+                hit = [p for p in plains if p in self.proxy.prod_addrs]
+                if hit or not plains:
+                    why = f'{host} resolves to the official relay ({hit[0]})' if hit else f'{host} does not resolve'
+                    self.proxy.log(f'REFUSED {self.id}: {why}')
+                    self.connecting = False
+                    self._close_both(reset=True)
+                    return
+                targets = list(dict.fromkeys((info[4][0], info[4][1]) for info in infos))
+            failure = None
+            for address, aport in targets:
+                try:
+                    await loop.create_connection(lambda: Side(self, False), address, aport, **kwargs)
+                    failure = None
+                    break
+                except OSError as exc:
+                    failure = exc
+            if failure is not None:
+                raise failure
         except OSError as exc:
             self.proxy.log(f'upstream {self.id} failed: {exc}')
             self.connecting = False
@@ -342,7 +412,9 @@ class Conn:
 
 
 class Proxy:
-    def __init__(self, routes, verbose=False, log_file=None):
+    def __init__(self, routes, verbose=False, log_file=None, allow_production=False, prod_addrs=None):
+        self.allow_production = allow_production
+        self.prod_addrs = prod_addrs if prod_addrs is not None else set()
         self.routes = {r['name']: Route(r) for r in routes}
         self.conns = {}
         self.next_id = 1
@@ -462,8 +534,19 @@ class Proxy:
         self.control_server.close()
 
 
-async def _serve(args):
-    proxy = Proxy([parse_route(r) for r in args.route], verbose=args.verbose, log_file=args.log)
+def refused_routes(routes, prod_addrs):
+    """(route name, reason) for every route whose upstream is the official relay."""
+    refused = []
+    for route in routes:
+        why = production_reason(route['upstream'][0], prod_addrs)
+        if why:
+            refused.append((route['name'], why))
+    return refused
+
+
+async def _serve(args, routes, prod_addrs):
+    proxy = Proxy(routes, verbose=args.verbose, log_file=args.log,
+                  allow_production=args.allow_production, prod_addrs=prod_addrs)
     await proxy.start(_parse_hostport(args.control))
     ports = proxy.ports()
     if args.ready_file:
@@ -498,6 +581,10 @@ def main(argv=None):
     serve.add_argument('--ready-file', help='write the bound ports here once listening')
     serve.add_argument('--log', help='append connection events to this file')
     serve.add_argument('--verbose', action='store_true', help='connection events to stderr')
+    serve.add_argument('--allow-production', action='store_true',
+                       help='let routes reach the official relay (refused by default)')
+    serve.add_argument('--production-addr', action='append', default=[],
+                       help="one more address to treat as the official relay's, repeatable")
     ctl = sub.add_parser('ctl', help='send one control command')
     ctl.add_argument('--control', required=True)
     ctl.add_argument('words', nargs='+')
@@ -508,11 +595,21 @@ def main(argv=None):
         print(json.dumps(answer))
         return 0 if answer.get('ok') else 1
 
+    routes = [parse_route(r) for r in args.route]
+    prod_addrs = production_addresses() | {_plain_address(a) for a in args.production_addr} - {None}
+    if not args.allow_production:
+        refused = refused_routes(routes, prod_addrs)
+        if refused:
+            for name, why in refused:
+                print(f'zombie_proxy: PRODUCTION RELAY GUARD refused route {name}: {why}; '
+                      'fleet routes go to the test relay (--allow-production overrides)', file=sys.stderr)
+            return REFUSED_EXIT
+
     if sys.platform == 'win32':
         # The selector loop closes a socket without a shutdown first; the proactor
         # loop's shutdown would send a FIN ahead of the reset a drop promises.
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    asyncio.run(_serve(args))
+    asyncio.run(_serve(args, routes, prod_addrs))
     return 0
 
 

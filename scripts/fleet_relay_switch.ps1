@@ -2,7 +2,7 @@
 # invite carries the relay it was made on, a peer on a different relay is asked
 # before it moves, and a peer that agrees switches, restarts and joins.
 #
-#   powershell -File scripts\fleet_relay_switch.ps1 -RelayHost my.duckdns.org
+#   powershell -File scripts\fleet_relay_switch.ps1 -RelayHost my.duckdns.org -HomeRelay hollowtest.duckdns.org
 #   powershell -File scripts\fleet_relay_switch.ps1 -RelayHost ... -Build
 #   powershell -File scripts\fleet_relay_switch.ps1 -RelayHost ... -Keep
 #   powershell -File scripts\fleet_relay_switch.ps1 -RelayHost ... -NoTurnRelay
@@ -19,6 +19,10 @@
 # The other reason is the fleet itself: a and b live on DIFFERENT relays, and a
 # relay is chosen in the welcome dialog before an identity exists, so each side
 # takes its own `fleet.ps1 -Onboard -Fresh -Relay ...` call.
+#
+# b and c live on -HomeRelay, a second TEST relay. Left out, it is the official
+# relay, which the production relay guard refuses unless the run opts in
+# (UI_PROBE_ALLOW_PRODUCTION=1): throwaway identities do not belong there.
 #
 #   G1  a, on the self-hosted relay, creates a server and its invite names it.
 #   G2  b, on the official relay, pastes it, is warned, cancels, and NOTHING
@@ -37,6 +41,8 @@ param(
     # The self-hosted relay a is onboarded onto, and the one c switches to.
     [Parameter(Mandatory = $true)]
     [string]$RelayHost,
+    # The relay b and c start on, and the one b's own invite names (G4).
+    [string]$HomeRelay = '',
     # Leave the instances running after a PASS. A FAILED run always leaves them
     # up, whatever this says.
     [switch]$Keep,
@@ -63,7 +69,7 @@ param(
 # and binds the rest, so a mistyped flag would run a journey nobody asked for
 # and report a clean pass for it.
 if ($args.Count -gt 0) {
-    throw "unrecognised argument(s): $($args -join ' '). This script takes -RelayHost, -Keep, -Build, -KeepIdentities, -NoTurnRelay, -TurnGateOnly and -BootTimeoutSeconds."
+    throw "unrecognised argument(s): $($args -join ' '). This script takes -RelayHost, -HomeRelay, -Keep, -Build, -KeepIdentities, -NoTurnRelay, -TurnGateOnly and -BootTimeoutSeconds."
 }
 
 $ErrorActionPreference = 'Stop'
@@ -81,7 +87,15 @@ $script:FleetVars = @{ RUN = (Get-Date -Format 'HHmmss') }
 
 $runTag = $script:FleetVars.RUN
 $runRoot = Join-Path $env:TEMP 'hollow_fleet\run'
-$officialRelay = 'relay.anonlisten.com'
+$RelayHost = ConvertTo-FleetRelayHostPort $RelayHost
+$officialRelay = if ($HomeRelay) { ConvertTo-FleetRelayHostPort $HomeRelay } else { 'relay.anonlisten.com' }
+Assert-FleetNotProduction 'a onboards onto' $RelayHost
+Assert-FleetNotProduction 'b and c onboard onto' $officialRelay
+if ($RelayHost -eq $officialRelay) { throw "-RelayHost and -HomeRelay must be two different relays (both are $RelayHost)" }
+# The journey's peers live on two relays and c moves between them: no single run
+# relay, and the probe on every peer accepts both.
+$env:FLEET_RELAY = ''
+$env:FLEET_RELAY_ALSO = "$RelayHost,$officialRelay"
 $selfServer = "fleet-relay-$runTag"
 $officialServer = "fleet-official-$runTag"
 $journeyPeers = if ($TurnGateOnly) { @('a', 'c') } else { @('a', 'b', 'c') }
@@ -234,46 +248,7 @@ function Stop-Peer($peer) {
 # every fixture, which would throw away the relay switch this journey is about.
 function Restart-Peer($peer) {
     if (Test-SimBackend) { throw 'the relay-switch journey has no simulator branch yet' }
-    $dest = Join-Path $script:FleetStageRoot $peer
-    $data = Get-PeerDataDir $peer
-    $out = Join-Path $script:FleetOutRoot $peer
-    if (Test-Path $out) { Remove-Item $out -Recurse -Force }
-    New-Item -ItemType Directory -Path $out -Force | Out-Null
-    New-Item -ItemType Directory -Path $data -Force | Out-Null
-    # The outbox is gone, so the read cursor for this peer has to go with it.
-    $script:FleetConsumed[$peer] = 0
-
-    $env:HOLLOW_DATA_DIR = $data
-    $env:UI_PROBE_OUT = $out
-    $env:UI_PROBE_MODE = 'live'
-    $env:UI_PROBE_PEER = $peer
-    $env:UI_PROBE_IDLE_MINUTES = '40'
-    $env:UI_PROBE_SCENARIO_FILE = ''
-    $env:UI_PROBE_STEPS = ''
-    # No -RedirectStandardOutput/-RedirectStandardError, ever: they flip
-    # Start-Process into inherit-handles mode and every instance then holds a
-    # duplicate of this script's stdout pipe, so the script never returns.
-    if (Test-LinuxBackend) {
-        $launcher = Join-Path $out 'launch.sh'
-        $lines = @(
-            '#!/bin/sh',
-            ('exec dbus-run-session -- "{0}" >"{1}" 2>"{2}" </dev/null' -f (Join-Path $dest 'hollow'),
-                (Join-Path $out 'native-stdout.log'), (Join-Path $out 'native-stderr.log'))
-        )
-        [System.IO.File]::WriteAllText($launcher, (($lines -join "`n") + "`n"))
-        & chmod +x $launcher
-        $proc = Start-Process -FilePath $launcher -WorkingDirectory $dest -PassThru
-    } else {
-        $proc = Start-Process -FilePath (Join-Path $dest 'hollow.exe') -WorkingDirectory $dest -PassThru
-    }
-    Say "relaunched $peer (pid $($proc.Id)) on its existing data dir"
-    $deadline = (Get-Date).AddSeconds($BootTimeoutSeconds)
-    while ((Get-Date) -lt $deadline) {
-        if (Test-PeerLive $peer) { Say "$peer is live" 'Green'; return }
-        if ($proc.HasExited) { throw "peer $peer died on launch.`n" + (Get-CrashTail $peer) }
-        Start-Sleep -Milliseconds 300
-    }
-    throw "peer $peer never came live.`n" + (Get-CrashTail $peer)
+    Start-FleetJourneyPeer -Peer $peer -DataDir (Get-PeerDataDir $peer) -BootTimeoutSeconds $BootTimeoutSeconds | Out-Null
 }
 
 # Hand the out directory over to a copy of the app that is about to replace
@@ -521,7 +496,7 @@ if ($TurnGateOnly) {
     Say "minting fresh identities: a on $RelayHost, b and c on $officialRelay"
     Invoke-FleetScript @('-Stop')
     Invoke-FleetScript @('-Onboard', '-Fresh', '-Peers', 'a', '-Relay', $RelayHost)
-    Invoke-FleetScript @('-Onboard', '-Fresh', '-Peers', 'b,c')
+    Invoke-FleetScript @('-Onboard', '-Fresh', '-Peers', 'b,c', '-Relay', $officialRelay)
     Invoke-FleetScript @('-Live', '-Peers', ($journeyPeers -join ','))
     foreach ($peer in $journeyPeers) { $script:FleetConsumed[$peer] = 0 }
 }
@@ -861,6 +836,7 @@ if ($invite2) { Write-Host ("  invite2  : {0}" -f $invite2) -ForegroundColor Gra
 Write-Host ("  relaunch : {0}" -f $relaunchPath) -ForegroundColor Gray
 foreach ($note in $script:Notes) { Write-Host ("  note     : {0}" -f $note) -ForegroundColor DarkCyan }
 
+$failure = Add-FleetJourneyRelayVoid $failure
 if ($failure) {
     Write-Host ''
     Say 'the fleet is left UP for diagnosis. Logs:' 'Yellow'
