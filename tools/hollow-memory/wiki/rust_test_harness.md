@@ -287,6 +287,14 @@ Tests: `mailbox_requires_a_roster_that_counts_the_device`,
   a device, delivered or not: the absence check for "we never told the stranger".
 - The mutation script for these rules is the untracked `tmp_s27_mutate.py` (repo root).
 
+## 0.14 relay levers (t14-deny-client, t14-relay, t14-rostercheck)
+
+- **Operator denylist.** `MockRelay::deny_room(room)` tells every member `RoomDenied` and drops the room with no `peer_left`; joins and lock reads and writes of it are refused until `lift_room(room)` (members learn on their next try). `watch_scopes()` then `scoped(dev, scope)` count every frame a device sent scoped to a server, Olm frames included: the absence proof for "nothing leaves for a refused server". `confirmed_refusal(s)(dev, room)` read whether the node answered `RefuseRoom`. Tests `t14_deny_*`.
+- **Presence batches.** `set_presence_lag(ms)` holds every presence frame up to `ms`, as the relay's 100 ms batch window can; `lose_peer_joined(dev, room, n)` loses the next `n` joins to a device, as dropped writes; `forget_silently(room, dev)` is a ghost eviction nobody hears; `set_quiet_rejoins` models a re-join that announces nothing. Tests `t14relay_a..h` (a lagged join and a lock move still talk both ways, a short answer that differs purges the dropped peer).
+- **Roster check.** `WsCommand::RosterCheck` is answered by the relay's rule from `roster_check_vectors.json` (the C++ test replays the same file) over the mock's rooms and roster book; `roster_check_off` (a relay without it) and `roster_check_silent` (one that never answers) are the two levers, and `roster_checks` logs who asked about whom.
+- **Fixed-sleep budget.** `harness_fixed_sleep_budget_does_not_grow` sums every fixed sleep in this file against `BUDGET_MS` (1,242,500 ms after t14-rostercheck); each track that adds absence waits raises it with a dated line saying why. Prefer polling a condition (`digest_busy`) to a fixed wait.
+- **The Windows debug stack.** New loop or request arms must keep the swarm inside the 2048 KiB tokio worker stack in a DEBUG build (`rust_swarm_event_loop` "The Windows debug worker stack"); a harness test aborting with `0xc00000fd` on the PC alone is that, not a logic failure. Release builds never show it.
+
 ## Flakes closed in track b14-flakes (2026-10-31)
 
 - **A restart waits for the old node's last connection.** `restart_node_with` used to sleep

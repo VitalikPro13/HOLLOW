@@ -141,6 +141,10 @@ The FFI-facing event enum — ~80 variants covering every domain in the app. Org
 
 **License/Twitch/Budget:** `LicenseError`, `TwitchJoinRejected`, `RoomBudgetUpdate`, `RoomCapHit`.
 
+**Relay refusals (0.14, operator denylist):** `ServerUnavailable { server_id }` (this relay does not carry the server or meeting `conf:{id}`: it opens read-only, nothing is deleted), `ServerAvailable { server_id }` (carried again, after the member list of a probed room lifts it), `RelayDenied { kind }` (`account_denied` or `network_denied`: Dart shows "Refused by this relay" and one dialog that waits for the App Lock).
+
+**Age gate (0.14):** `AgeGateChanged { allowed }`: which servers this device hides as age-restricted may have changed; reload the server list, unread counts and push filters.
+
 ### DiscoveredPeer
 
 FFI struct with `peer_id: String` and `addresses: Vec<String>`. Mirrors the internal peer discovery type.
@@ -168,6 +172,14 @@ Nearly all FFI functions that trigger node behavior follow the same pattern:
 5. Return `Ok(())`.
 
 This is a synchronous blocking send from the FFI thread into the async event loop. The `block_on` only waits for the send to complete (channel has capacity 100), not for the command to be processed. Processing happens asynchronously in `swarm.rs:run_event_loop()`.
+
+## retry_relay_denials() / retry_relay_denial(room) (0.14)
+
+`retry_relay_denials()` asks the relay again about everything it refused (a server or meeting, our account, our network); `retry_relay_denial(room)` only one server or `conf:{id}` room. Both send `WsCommand::RetryDenied` and never switch relays. Behind the person's Try again; ws_client also retries quietly every 6 h plus jitter.
+
+## revoke_device(device_peer_id, lost_since_ms, with_dependents) (0.14)
+
+Removes one of OUR OWN devices: `lost_since_ms` None = retired (keeps what it did); Some = lost or stolen (keeps only what predates that moment). `with_dependents` also removes the devices only it placed; those linked after the moment go regardless. Refused for the running device or an id that is not ours. The removal moves the join lock of every server of the identity (`relay_uws_server` "Join lock chains").
 
 ## set_license_key()
 

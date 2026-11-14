@@ -1,6 +1,6 @@
 # Hollow: Privacy Policy
 
-**Last updated: October 29, 2026**
+**Last updated: November 14, 2026**
 
 Hollow is built on one principle: your conversations are yours. We cannot read your messages, listen to your calls, or identify you. This policy explains what data exists, where it exists, and what we can and cannot access.
 
@@ -18,13 +18,13 @@ Hollow is a fully distributed, encrypted communication platform. There is no cen
 
 - **Your identity** is a cryptographic keypair (Ed25519) generated on your device from a BIP-39 mnemonic phrase. We never see or store this keypair.
 - **Messages** are end-to-end encrypted using the Olm/Double Ratchet protocol (for direct messages) and OpenMLS (for group/server channels). Only the intended recipients can decrypt them.
-- **Voice and video calls** are peer-to-peer (WebRTC) and encrypted between the participants (DTLS-SRTP), with an extra end-to-end layer (SFrame, AES-128-GCM) on voice, voice-channel video and screen shares. Call content never passes through our infrastructure in a readable form.
+- **Voice and video calls** are peer-to-peer (WebRTC) and encrypted between the participants (DTLS-SRTP), with an extra end-to-end layer (SFrame, AES-128-GCM) on voice, camera video and screen shares. Call content never passes through our infrastructure in a readable form.
 - **Files** are encrypted and transferred peer-to-peer. In smaller communities (under 6 members) and direct messages, files are fully replicated to all participants. In larger communities, files use an erasure-coded shard system where encrypted fragments are distributed across peers; no single peer (including us) holds a complete file.
 - **All local data** is stored in an encrypted database (SQLCipher) on your device.
 
 ## What the relay server does
 
-Hollow uses a WebSocket relay server for signaling and message routing. The relay routes end-to-end encrypted data between peers. It cannot decrypt anything it carries, and it writes nothing about you or your activity to disk. The only thing the relay ever persists is the anonymous counter of reports and blocks described in "In-app reporting and blocking" below.
+Hollow uses a WebSocket relay server for signaling and message routing. The relay routes end-to-end encrypted data between peers. It cannot decrypt anything it carries, and it writes nothing about you or your activity to disk. The only thing the relay ever persists is the anonymous counter of reports and blocks described in "In-app reporting and blocking" below. Its operator's list of refused servers, accounts and networks is the one other file about users on the relay machine (see "Refused servers, accounts and networks" below).
 
 **What the relay processes in transit (not stored):**
 
@@ -38,7 +38,9 @@ Hollow uses a WebSocket relay server for signaling and message routing. The rela
 
 **Fair-use accounting (in-memory).** To keep the relay usable for everyone and to keep it from running out of memory, it keeps a few counters in memory. Per IP address, it counts simultaneous connections and the rate of new connections. Per connected session, it counts how much work the session's traffic causes the relay (messages, the deliveries they lead to, and signature checks), and it estimates how many different devices the session contacts without sharing a conversation with them. Per connection, it counts how much data is waiting to be sent. None of them measures how much you send over time, and none caps it. A connection that would overload the relay is closed and asked to reconnect a moment later. The session and connection counters are kept under labels the relay makes from device IDs and addresses with a secret that exists only in its memory, so the counters name no device, address or conversation. All of these counters stay in memory, are never written to disk or to logs, are not carried across relay updates, and are lost on restart. The relay publishes only anonymous totals, such as how often these limits were reached. When the relay's network link is saturated, capacity is shared fairly between client addresses by the operating system's network queue; this involves no per-user accounting and records nothing.
 
-**Push notification tokens (mobile).** If you use Hollow on Android or iOS, the relay holds your device's push token in memory only (never on disk) so it can send a wake signal when a message arrives while the app is closed. It also holds the notification settings you changed from the default (servers and channels you muted or set to mentions only, and the device IDs of people whose DMs you muted), so it can skip the pushes you turned off. Both are carried across relay updates the same way as the buffers above and are gone when the server reboots. See "Push notifications (mobile)" below.
+**Push notification tokens (mobile).** If you use Hollow on Android or iOS, the relay holds your device's push token in memory only (never on disk) so it can send a wake signal when a message arrives while the app is closed. It also holds the notification settings you changed from the default (servers and channels you muted or set to mentions only, and the device IDs of people whose DMs you muted), so it can skip the pushes you turned off. Both are carried across relay updates the same way as the buffers above and are gone when the server reboots. See "Push notifications (mobile)" below. If your phones hide age-restricted servers, your computer also sends the relay the list of those servers, so the relay can skip their notifications while your phone is asleep. From this list the relay can tell which of your servers are age-restricted.
+
+**Refused servers, accounts and networks.** When a notice with evidence shows that a server, an account or a network broke the relay's Terms of use, we can refuse it on the relays we operate. The list sits in a file on the relay machine and holds only the server IDs, account IDs and network addresses we refused, each with at most our own reference number for the notice, never the notice itself or its reasons. The relay holds it in memory and writes no record of who it turned away or when. If your account is refused, the relay also drops the encrypted traffic it was holding for your devices and their push tokens, and your app says this relay does not accept the account. A refused server's members keep everything already on their devices. The relay shows how many entries of each kind it holds only when its operator turns that on, which is off by default, and never shows which entries they are. A self-hosted relay keeps its own list under its operator's own rules.
 
 **What the relay does NOT have access to:**
 
@@ -128,7 +130,7 @@ Because Hollow is designed with privacy by design, our ability to respond to dat
 - We **cannot** provide conversation history. No readable message history exists on our infrastructure. The temporary offline-delivery buffer holds only end-to-end encrypted payloads, in memory, that we have no keys to decrypt.
 - We **cannot** provide metadata about who communicates with whom. The relay does not maintain or log this information persistently.
 
-The only user-related record our infrastructure writes to disk is the abuse-report counter described above: the peer IDs of reported or blocked accounts with their counts, and the keyed fingerprints. It contains no message content, no communication metadata, and no readable record of who filed a report or who blocked whom.
+The only user-related records our infrastructure keeps on disk are the abuse-report counter described above (the peer IDs of reported or blocked accounts with their counts, and the keyed fingerprints) and the list of refused servers, accounts and networks. Neither contains message content or communication metadata, and the counter has no readable record of who filed a report or who blocked whom.
 
 We will comply with valid, binding court orders issued under applicable law (the European Union and Poland). We will notify affected users of any requests unless legally prohibited from doing so. We will challenge overbroad or legally questionable requests.
 
@@ -152,6 +154,8 @@ Call and screen recordings you make on a computer are ordinary video files in yo
 ## Third-party services
 
 Hollow does not integrate with any analytics, advertising, or tracking services. Hollow is a native desktop and mobile application; it does not use cookies or any web-based tracking technology.
+
+The Get help page in Settings, which lists emergency numbers and help services for your country, uses a list that ships with the app. Opening it sends nothing, and a service's page opens in your browser only when you tap it.
 
 The only third parties Hollow ever communicates with are the ones described in this policy: Google/Apple push services on mobile (wake signals only, no content) and, only if you choose to use the corresponding optional features, Twitch (verification), IGDB/Steam via our proxy (game showcase), FrankerFaceZ/KLIPY via our proxy (emote and GIF search), or KLIPY directly if you supply your own API key. Sharing a web link also contacts that link's own site directly to build its preview card, unless you turn link previews off (see [Link previews](#link-previews)).
 

@@ -384,6 +384,8 @@ Ghost/outline rest bg is the hover color at ZERO ALPHA, not `Colors.transparent`
 
 **Padding:** compact = `HollowSpacing.md` horizontal / `HollowSpacing.sm` vertical; normal = `HollowSpacing.lg` / `HollowSpacing.sm + 2`.
 
+**Label inside a parent-sized button (0.14, dcce6b29):** the label sits in a loose `Flexible` (`_flexibleLabel`) with `textAlign: center`, so a button its parent sizes (full width, a stacked dialog row) wraps its label, or ellipsizes when the child `Text` asks, instead of overflowing; an unbounded button still takes the label's own width, and a caller whose child is already a `Flexible`/`Expanded` keeps its own.
+
 
 ## StatBar
 
@@ -554,6 +556,18 @@ File: `lib/src/ui/components/hollow_toggle.dart`
 **Disabled state:** opacity 0.4 via `AlwaysStoppedAnimation`, cursor changes to `basic`.
 
 **didUpdateWidget:** Forwards or reverses animation when `value` changes externally.
+
+## HollowCheckbox
+
+File: `lib/src/ui/components/hollow_checkbox.dart` (0.14, 44ea4712, a standard component decided 11-14). A box the person ticks to AGREE to the sentence beside it, for an agreement that gates one action (the shop's right-to-cancel box before Buy on Ko-fi); a setting stays a `HollowToggle`. Parameters: `value`, `onChanged` (null = disabled, `textTertiary`), `label` (the whole sentence is the target), `footer` (under it, outside the target, for links such as Terms and Refunds). 16 px box centred on the first text line at any text scale, 44 px touch target on phones, `HollowFocusRing` for keyboard. Material `Checkbox` stays guarded at 0.
+
+## HollowTextLink `quiet`
+
+`HollowTextLink(quiet: true)` (0.14) = secondary text, always underlined, for a run of links that are not the point of their surface (an artist's social links, the terms under an agreement). The default form is the accent link that stands in prose where a ghost button's padding would pull it off the left edge.
+
+## HollowListRow `wrap`
+
+`HollowListRow(wrap: true)` (0.14) lets title and subtitle wrap instead of ellipsizing, for a row whose words carry the choice (a restore point and who named it). A touch row inside a padded dialog keeps its rounded fill (only flush rows square off, `HollowFlushRows`).
 
 
 ## HollowAvatar

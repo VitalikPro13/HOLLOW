@@ -191,6 +191,9 @@ consolidated into the shared `handle_envelope_voice_channel_screen_*` handlers s
 ONE place for both Olm and MLS paths (`emit_vc_screen_sdp_signal` = the screen twin of
 `emit_vc_sdp_signal` with the origin guard + payload passthrough).
 
+**Forward ask (targeted, 0.14):**
+- `"fwd_want"` -> `MessageEnvelope::VoiceChannelFwdWant { sid, cid, origins, target }`: the members a listener wants this leg to forward. `fwd_want_origins` keeps only non-empty ASCII-alphanumeric ids of at most 64 chars, at most `MAX_FWD_WANT_ORIGINS` (64). On receive `handle_envelope_voice_channel_fwd_want` (both swarm VC arms) drops it from a non-participant and keeps only origins that are participants other than the sender. Dormant while Dart's `gossipForwardingEnabled` is off.
+
 **Renegotiation (targeted):**
 - `"reneg_offer"` -> `MessageEnvelope::VoiceChannelRenegOffer { sid, cid, sdp, target }`
 - `"reneg_answer"` -> `MessageEnvelope::VoiceChannelRenegAnswer { sid, cid, sdp, target }`
@@ -229,10 +232,11 @@ Called when Dart reports a WebRTC data channel ping RTT measurement. Updates the
 
 Evaluates whether a voice channel should switch between full-mesh and gossip-relay mode based on participant count. Called after every join/leave event (both local and remote).
 
-### Thresholds (hysteresis)
-- **Mesh to gossip:** triggers when participant count >= `VOICE_GOSSIP_THRESHOLD_UP` (6)
-- **Gossip to mesh:** triggers when participant count < `VOICE_GOSSIP_THRESHOLD_DOWN` (4)
-- The gap between 4 and 6 prevents rapid mode flapping when participants hover around the threshold.
+### Thresholds (0.14)
+- **Mesh to gossip:** at participant count >= `VOICE_GOSSIP_THRESHOLD_UP` (17, us included)
+- **Gossip to mesh:** below `VOICE_GOSSIP_THRESHOLD_DOWN` (17, equal to UP: a channel that fits a full mesh again goes back to one)
+- Why 17: gossip forwards no voices yet (Dart `gossipForwardingEnabled = false`, the Windows forwarder crashed in libwebrtc), so a member in gossip mode hears only its overlay neighbours. Everyone stays a full mesh while it fits the app's voice leg cap (`maxVoicePcs` 15 legs, 16 people).
+- Debug builds only: `debug_gossip_knob()` reads `debug_voice_gossip_at` in the data dir (`<count> [chain]`) to lower the switch point and pick `chain_neighbors` (sorted ids, one each side) for fleet tests; release builds always return `None`.
 
 ### Mode transition behavior
 
@@ -445,8 +449,9 @@ All emit `NetworkEvent::CallSignal { peer_id, signal_type, payload }`:
 - `VC_SIGNAL_RATE_BURST = 30` (types.rs) — max tokens in rate limiter bucket
 - `VC_SIGNAL_RATE_REFILL = 10` (types.rs) — tokens per second refill rate
 - `MAX_SDP_SIZE = 64 * 1024` (types.rs) — 64 KB SDP size limit
-- `VOICE_GOSSIP_THRESHOLD_UP = 6` (gossip.rs) — switch mesh -> gossip at this participant count
-- `VOICE_GOSSIP_THRESHOLD_DOWN = 4` (gossip.rs) — switch gossip -> mesh below this count
+- `VOICE_GOSSIP_THRESHOLD_UP = 17` (gossip.rs): switch mesh -> gossip at this participant count
+- `VOICE_GOSSIP_THRESHOLD_DOWN = 17` (gossip.rs): switch gossip -> mesh below this count
+- `MAX_FWD_WANT_ORIGINS = 64` (voice_handler.rs): origins one `fwd_want` may name
 - `MAX_GOSSIP_NEIGHBORS = 12` (gossip.rs) — max gossip relay neighbors per voice channel
 
 ---

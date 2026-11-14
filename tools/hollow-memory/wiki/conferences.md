@@ -54,6 +54,14 @@ since a past epoch still decrypts. Harness
 - **Chat**: `ConferenceChat{conf_id, body}` = MLS application message of `{text, ts}`; RAM-ONLY both ends (never persisted, never rings). Attribution = the authenticated MLS **leaf credential** from `decrypt` (device id; Dart collapses via identityOf), NOT the WS frame sender. Send stamps ride `chat_clock::next_send_stamp_us` via the FFI.
 - **Roster hygiene:** `handle_conf_room_peer_gone` (PeerLeft + RoomMembers-vanished arms) — room presence is a prereq for call presence: drops the peer from `voice_channel_participants["conf:x:main"]` and emits `VoiceChannelLeft` (live tile removal for kicked/crashed/left members whose VoiceChannelLeave raced the host's room-leave). `clear_conf_voice_state` wipes `conf:{id}:*` keys on start/end/leave (restart reuses the same key). Disconnected clears host pending lists.
 
+## A meeting the relay refuses (operator denylist, 0.14)
+
+A relay operator can list a `conf:` meeting id (wiki `relay_uws_server`, denylist). The client takes the refusal for its own meetings only (`node/relay_denial.rs`), and while refused nothing scoped to the meeting leaves through that relay.
+- Dart `event_provider.leaveRefusedVoice` leaves the active refused meeting through `conferenceProvider.leaveRefusedMeeting(confId)` at ANY stage (seated, stepped out, waiting, joining); a host ends it. Never a bare `leaveChannel`.
+- A start, knock or rejoin of a refused meeting first asks the relay about that meeting's room only (`_relayStillRefuses` -> `_askRelayAgain` -> FFI `retryRelayDenial(room:)`, bounded wait); one ask per meeting (`_relayAsks`), a second tap waits on the first and only the first caller acts. While asking, the screens show it as joining; still refused = toast `kMeetingDeniedText`.
+- `handle_conference_end` and `handle_conference_leave` `relay_denial::forget` the meeting, so a left or ended meeting is not put back in its room by Try again or the 6 h retry.
+- Tests: `test/meeting_relay_denied_test.dart`; fleet `deny_meeting.json`.
+
 ## Conference-aware branches OUTSIDE conference.rs (only these)
 
 1. `voice_handler::handle_envelope_voice_channel_join` — conf branch: membership = a seat in the group now (`conference::seated`; decrypting is not enough, a past epoch still decrypts for a removed leaf); channel must be `"main"`; PLUS **reply-on-join sync**: if we're already a participant, reply DIRECT with our own plaintext `VoiceChannelJoin` (a freshly-admitted member has no way to learn the pre-existing roster).
@@ -110,4 +118,4 @@ Harness guard `conference_waiting_room_admits_denies_and_chats` (test_harness.rs
 
 ## Phase 2+ (deferred)
 
-Co-host ENFORCEMENT at ingest (DB field exists), broadcast mode (gated on the media-forwarding epic — only AUDIO gossip-forwards today), local RTMP ingest (OBS→localhost→ffmpeg→share track; never server-side), Flutter-web wasm guest.
+Co-host ENFORCEMENT at ingest (DB field exists), broadcast mode (gated on the media-forwarding epic; nothing gossip-forwards today, voice forwarding ships off since 0.14), local RTMP ingest (OBS→localhost→ffmpeg→share track; never server-side). (A Flutter-web guest is off the list: Hollow ships five platforms, no web, Vitalik 11-07.)

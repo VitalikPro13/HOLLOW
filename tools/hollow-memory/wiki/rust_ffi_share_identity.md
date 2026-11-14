@@ -130,6 +130,18 @@ Returns `{ is_encrypted, has_password, has_os_keychain, os_keychain_available }`
 
 Whether the session wrapping key is set.
 
+### `settle_keychain_move() -> Result<(), String>` (macOS, 0.14, HOL-SEC-187)
+Once per start, after the pending wipe and `settle_relink` and before the launch unlock or any prompt: moves every Hollow key out of the login keychain (and out of the app-ID group once the keys group works) into the data-protection keychain, copy first, read back, delete by reference last; a missing or unknown answer changes nothing. Nothing else starts it. A no-op elsewhere. Wiki `security_write_gates` §43b.
+
+### First-run link throwaway (`api/storage.rs`, 0.14, eeb0e8b1, #123)
+Linking a fresh device runs on a throwaway identity. `mark_link_throwaway()` marks it by a digest of its key file the moment it exists; `settle_link_throwaway() -> bool` (at launch, BEFORE the wipe check) queues its wipe when that key is still in place, no link is stashed and no other wipe is queued (a destroy keeps its own marker); any other key only clears the marker. `perform_pending_wipe()` never sweeps while this process holds an identity open (`identity_open_here`: the store, a node or a fetch node). Dart side: every way out of `runFirstRunLink` but a landed link relaunches to Welcome (`rules_ui_flutter` dialogs).
+
+### Device removal and recovery (`api/network.rs`, `api/roster.rs`, 0.14 track C, 060ca581)
+- `revoke_device(device_peer_id, lost_since_ms: Option<i64>, with_dependents: bool)`: remove one of OUR devices. Retiring (`None`) keeps what it did (re-signs everything it removed, writes `DeviceRetired` with its post window); lost or stolen keeps only what this device saw from it before `lost_since_ms`, and takes the devices it linked afterwards with it; `with_dependents` also removes the devices only it placed. Refused for this device or an id not ours.
+- `remove_device_plan(device_peer_id, lost_since_ms) -> DeviceRemovalPlan`: what the removal will take, shown under the choice; false when a device closer to the phrase removed this one first.
+- `recover_with_phrase(phrase, keep: Vec<String>, lost_since_ms)`: a recovery keeping this device and `keep`; every other device counts as lost or stolen since `lost_since_ms`. `recovery_kept_by_default(lost_since_ms)` = the devices this device counted before then.
+- Server authority reads `Roster::authority()` (the removal walk with reserved slots, so a flood cannot push out the removal that keeps a device out). One helper adds every removal and re-signs the removals that kept a device out until nothing comes back. The first sight of each roster statement is kept locally (`roster_statement_first_seen`); the upgrade dates what an older install held. Roster notices and syncs are kept only for masters this node already knows (R31-8).
+
 ### Underlying identity system (`identity/keys.rs`, `identity/native_identity.rs`, `identity/encryption.rs`, `identity/platform_keystore.rs`)
 
 - **Data directory:** `identity::data_dir()` returns `~/.hollow/` (or `DATA_DIR_OVERRIDE` set by `set_data_dir()` on mobile, or `HOLLOW_DATA_DIR` env var). Falls back to `dirs::data_dir().join("hollow")` which is `%APPDATA%/hollow` on Windows.
@@ -138,7 +150,7 @@ Whether the session wrapping key is set.
 - **Mnemonic flow:** BIP-39 24-word (256-bit entropy) -> SHA-512 HMAC seed -> first 32 bytes -> Ed25519 secret key.
 - **Peer ID derivation:** Public key -> protobuf encoding -> identity multihash -> base58 string.
 - **Encryption:** `encryption.rs` — HKEYV1 format, Argon2id KDF (64MB/3iter), AES-256-GCM, session key static.
-- **Platform keystore:** `platform_keystore.rs` — Windows Credential Manager + DPAPI blob (`windows-sys`), macOS Keychain (`security-framework`), Linux fallback (not available). Slots are PER-PROFILE since 2026-08-05: suffix = first 8 bytes of SHA-256 over the data-dir path (`com.hollow.identity.wrapping_key.<hex16>` / mac account `wrapping_key.<hex16>`), with the legacy unsuffixed slot still written and read as a fallback. `store_key` writes per-profile + legacy + (Windows) the `identity.dpapi` blob; `retrieve_key_candidates()` returns all, most-authoritative first. Tests snapshot/restore the REAL slots via `SlotGuard` (they used to nuke a keychain-protected dev profile's key on every `cargo test`).
+- **Platform keystore:** `platform_keystore.rs`: Windows Credential Manager + DPAPI blob (`windows-sys`), macOS: since 0.14 (HOL-SEC-187) ONLY the data-protection keychain in the keys app group (`group.com.anonlisten.hollow.keys`), read only after the bundle self-check, the legacy login-keychain item moved once by `settle_keychain_move` (copy, read back, delete by reference); Linux fallback (not available). Slots are PER-PROFILE since 2026-08-05: suffix = first 8 bytes of SHA-256 over the data-dir path (`com.hollow.identity.wrapping_key.<hex16>` / mac account `wrapping_key.<hex16>`), with the legacy unsuffixed slot still written and read as a fallback. `store_key` writes per-profile + legacy + (Windows) the `identity.dpapi` blob; `retrieve_key_candidates()` returns all, most-authoritative first. Tests snapshot/restore the REAL slots via `SlotGuard` (they used to nuke a keychain-protected dev profile's key on every `cargo test`).
 
 ## Twitch API (`api/twitch.rs`)
 

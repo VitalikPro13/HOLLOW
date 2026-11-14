@@ -98,6 +98,7 @@ All incoming friend messages are processed directly in `swarm.rs:handle_incoming
 
 ### HavenMessage::FriendRequest { requested_at }
 0. BLOCK GUARD (after the self-guard): `blocklist::is_blocked(peer_str)` → silent drop — no pending row, no room join, no event. This is the anti-spam surface blocking exists for.
+0b. BOUNDS FIRST (HOL-SEC-192, 0.14): at most `MAX_INCOMING_FRIEND_REQUESTS` (64) pending incoming requests, of which requesters sharing no server with us (strangers) hold at most `MAX_STRANGER_FRIEND_REQUESTS` (32); a full share refuses the newcomer BEFORE its roster, key bundle, card or row is written, and the relay mailbox hands the request back later. Outgoing stays capped at `MAX_OUTSTANDING_FRIEND_REQUESTS` (32).
 1. Persists as `save_friend(peer_str, "pending", "incoming", requested_at)` in MessageStore
 2. Registers the DM room code via signaling (`SetRoom` + `Bootstrap`) for future peer discovery
 3. Emits `NetworkEvent::FriendRequestReceived { peer_id }`
@@ -113,6 +114,8 @@ FFI is direct (no NodeCommand): `block_peer`/`unblock_peer`/`load_blocked_peers`
 1. Updates to `save_friend(peer_str, "accepted", "", now)` in MessageStore
 2. Registers DM room code via signaling
 3. Emits `NetworkEvent::FriendRequestAccepted { peer_id }`
+
+**0.14:** an accept's or decline's roster is kept only when it meets our request or a friendship, looked up under the master, the sending device and each device whose own consent the roster carries (HOL-SEC-192).
 
 ### HavenMessage::FriendReject { requested_at, device_list }
 1. **Attribution:** with a carried list, `verify_device_list` + sender device in `devices` and not in `revoked` + `ingest_device_list`, master taken FROM THE LIST; a present-but-bad list DROPS the frame (no resolver fallback). No list = `resolve(peer_str)`.
@@ -215,6 +218,8 @@ Receive-side staleness check, called by BOTH incoming ProfileUpdate handlers aft
 `social.rs:handle_profile_request_for(ws_cmd_tx, ws_room_peers, requester_peer, target_peer_id, db_path, db_passphrase)`
 
 Handles `ProfileRequestFor` — looks up an offline peer's cached profile in local DB and sends it back as `ProfileRelay` (avatar included, no banner). Called when an online peer asks us for a third peer's profile. A relay carries NO roster and needs a stored owner signature, so it never teaches a joiner anyone's devices.
+
+**A profile's roster is kept only for an identity we already know (HOL-SEC-193, a58d7f38).** A carried `ProfileCard`/`ProfileUpdate` and the MLS `ProfileUpdate` pass `roster_book::admit_profile_roster` BEFORE any fold: kept only for our own master, a held roster, a friend row or a master a held server names; a refused roster drops the whole card or profile. An MLS leaf's certificate admits nothing by itself, and a `ProfileUpdate` decrypted in a meeting group drops (a meeting's host seats any leaf). A meeting keeps cards for at most `MEETING_CARD_IDENTITIES` (256) identities while we sit in it. Open (accepted risk, Vitalik 11-06): profile updates are master-signed only, so a stolen device holding the master key can rename or re-avatar the identity until the owner re-signs.
 
 **Co-members who are not friends (session 23).** Each side's first-contact profile exchange (PeerJoined / RoomMembers `is_new` cascade) runs while the join is still pending, when the other is a stranger to `profile_audience`, so no roster crossed and the joiner took the owner's device for a stranger: it refused the owner's channel sync, RTC offers and subgroup KeyPackage request, and on a later promotion forked the restricted channel's MLS subgroup (it could see #staff and never read it). `swarm::after_welcome_joined` now sends a `ProfileRequest` to every device in the server room that our own `device_links` cannot place, once the server-group Welcome lands (everyone online has admitted us by then). Harness `a_joiner_who_is_nobodys_friend_learns_every_members_devices`; found by `fleet/moderation.json`.
 

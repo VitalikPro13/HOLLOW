@@ -298,6 +298,37 @@ Binary stream data. Passed to `ws_stream_transfer::ws_stream_receive()`. If comp
 ### WsEvent::LicenseError / RoomBudgetUpdate / RoomCapHit
 Forwarded directly to Dart as NetworkEvent variants.
 
+### WsEvent::RoomDenied / RelayDenied (0.14 operator denylist, `node/relay_denial.rs`)
+`RoomDenied { room }` is taken only for a room that is OURS to refuse (`relay_denial::ours_to_refuse`:
+a held server, a pending join, a guest room, a leave the leave book holds, a meeting): anything else
+is logged and ignored, so a relay cannot use a refusal to cut an inbox, DM, own-device, forwarder,
+link or share room. For a server we are a member of, `UnsentOps::refused` saves a mark below every op
+made since (`node/unsent_ops.rs`, `MARGIN_MS` 60 s below the refusal, survives a restart);
+`relay_refuses` then tells ws_client `RefuseRoom`, records the denial (`Denials::deny`), freezes the
+server's MLS groups (`MlsManager::set_frozen`: no commit, no KeyPackage, queued changes kept, a
+lift converges without a fork) and emits `NetworkEvent::ServerUnavailable`. While refused
+the sealing stage drops every frame scoped to that server through this relay whatever room it would
+ride (checked twice; a refused carried frame is released unencrypted, never left in the carry book),
+its files and vault repairs are served to nobody, and nothing is deleted. Only the member list of a
+room the client is probing lifts a refusal; on the lift our ops from the mark go to our own devices
+and, paced, to the member devices the room lists, two members are asked what we missed, a deleted
+server's tombstone goes to its members, and the mark ends only once a member device was handed the
+ops. A server or meeting left, given up or deleted while refused is forgotten (a pending leave lands
+on the lift). `RelayDenied { kind }` (our login or network) only reaches Dart as
+`NetworkEvent::RelayDenied`; ws_client itself holds the 6 h jittered retry. Harness `t14_deny_*`.
+
+### WsEvent::RelayRosterCheck / RosterChecked (0.14, `node/roster_check.rs`)
+Whether the relay answers `roster_check`, then its answers. The book is RAM only, one per node loop
+(a restarted loop starts empty), every table bounded by our own asks: an answer stands `FRESH`
+(60 s), one ask per master per `ASK_EVERY` (5 s), a decision waits up to `WAIT` (5 s), a held
+master's roster is re-checked in the background at most every 10 min. The relay's statements are
+verified and merged under the recovery key OUR rosters chose (the relay can withhold a removal, never
+invent one or pick the key). No KeyPackage reaches a foreign device the merge does not count (the
+Legacy re-bootstrap included; one for a device not judged yet is held, fair per server and package
+owner, dropped only when the merge removes the device); every server Welcome waits for its sender to
+be confirmed and is refused when the merge removes one of its leaves; a first-sight roster from a
+server room is held until the relay's copy is merged in. A relay without the check keeps the old rule.
+
 ## Incoming Message Dispatch: handle_incoming_request()
 
 This ~3,600-line function handles all `HavenMessage` variants after WS delivery. It performs two layers of dispatch:
@@ -468,6 +499,17 @@ Event-driven vault rebalance triggered by peer join/leave. Processes `rebalance_
 ### share_tick_timer (50ms)
 Drives Hollow Share scheduler. Chunk requests, Have rebroadcast every 10s, in-flight timeout/retry. Pauses chunk requests when `last_message_traffic` is recent (coexistence with messaging/voice).
 
+### roster_show_timer (30 min + up to 5 min jitter, 0.14)
+`roster_book::show_relay` re-shows our roster to the relay, so its fold (and `roster_check` answers) never goes stale between changes. Its first tick is spent at start (the show on connect already ran).
+
+## The Windows debug worker stack (0.14)
+
+Tokio worker threads have a 2048 KiB stack. In a DEBUG build an async function's poll frame holds every future built inside it, and `Box::pin(callee(..))` still builds the callee's future in the CALLER's frame before boxing it. The event loop and `handle_incoming_request` sit near the bottom of that stack, so every new arm spends headroom: in 0.14 the denylist and the age gate each passed the Windows suite alone and together aborted 17 harness tests with `0xc00000fd` (worst path, an encrypted request, at 2023 KiB). Rules that keep it in:
+- `handle_incoming_request` is a plain (non-async) fn that builds and boxes `handle_incoming_request_inner` in its own short frame. New work that needs a future from the loop or a request arm goes through a `BoxedStep<'a>` built in a short non-async helper (`settle_age_gate`, `relay_refuses`, `emit_boxed`), never inline.
+- Store calls from those arms run on the blocking pool (`off_worker_stack`): SQLCipher's frames do not fit.
+- Large values ride boxed: `ServerState` boxes its large fields (3088 -> 1920 bytes), a join lock link's device proof is boxed inside `CrdtPayload`, and the server load, silent re-ask and join snapshot adoption leave the loop's poll frame.
+- After 74dae4d6 the worst path is 1965 KiB (about 56 KiB headroom). Release frames are far smaller, so only the Windows debug suite shows an overflow: run it on the PC for any change that adds an arm.
+
 ## Signaling Events — REMOVED (2026-07)
 
 The `sig_event_rx` select arm and the whole HTTP signaling task are gone (see `rust_networking.md` → "HTTP Signaling — RETIRED"). `PeerDiscovered` now comes from the WS `DiscoveredPeers` handler.
@@ -536,7 +578,7 @@ Drop stale local group, send KeyPackage to coordinator for re-bootstrap.
 `file_handler::handle_webrtc_transfer_failed()` removes peer from `webrtc_peers`, falls back to WS stream for the pending send. Also serves as the receiver-side re-request path: the Dart flush-verify (short on-disk file after `sink.close()`) and the Rust decrypt-failure auto-retry both route here / through `FileRequest`. See `rust_file_handler.md` → Decrypt-failure auto-retry.
 
 ### Peer discovery (WS-based, replaces HTTP /bootstrap)
-Primary peer discovery rides the LIVE WS connection, not the HTTP `/bootstrap` poll (which paid a fresh TLS handshake per request and could stall under a WS frame burst on the relay's single event loop). The `rebootstrap_timer` sends `WsCommand::DiscoverPeers { room }` for the active room + each server; the relay responds with `discovered_peers` (the room's `ws_rooms` peer set). `WsEvent::DiscoveredPeers` populates `ws_room_peers` and key-exchanges with any peer lacking a confirmed session (reusing the sweep's freshness guard). HTTP bootstrap is kept as a non-fatal fallback — its failures are logged quietly, never surfaced as `NetworkEvent::Error`. The relay's `members`-on-join response already covers most discovery, so this is belt-and-suspenders. **Superseded in 0.13 by the presence audit** (see `rebootstrap_timer`): the full list now arrives only from a relay older than 0.13, through the unchanged `DiscoveredPeers` arm.
+Primary peer discovery rides the LIVE WS connection, not the HTTP `/bootstrap` poll (which paid a fresh TLS handshake per request and could stall under a WS frame burst on the relay's single event loop). The `rebootstrap_timer` sends `WsCommand::DiscoverPeers { room }` for the active room + each server; the relay responds with `discovered_peers` (the room's `ws_rooms` peer set). `WsEvent::DiscoveredPeers` populates `ws_room_peers` and key-exchanges with any peer lacking a confirmed session (reusing the sweep's freshness guard). HTTP bootstrap is kept as a non-fatal fallback: its failures are logged quietly, never surfaced as `NetworkEvent::Error`. The relay's `members`-on-join response already covers most discovery, so this is belt-and-suspenders. **Superseded in 0.13 by the presence audit** (see `rebootstrap_timer`), and since 0.14 the relay never names ids in `discovered_peers` (digest and count only); a list from a relay older than 0.13 adds no presence, so peers arrive only through `members` and presence frames.
 
 ### WS disconnect
 A session lost (`WsEvent::SessionLost`) clears `ws_room_peers`, `synced_peers`, `key_request_in_flight`, `mls_bootstrap_requested`, drains `pending_messages`, and cleans up in-progress WS transfers. The WS client auto-reconnects; on a fresh session (`WsEvent::Connected`), rooms are re-joined and full sync is retriggered for all peers. A socket lost with the session held (`WsEvent::Suspended`) clears nothing; see "Relay sessions" above.

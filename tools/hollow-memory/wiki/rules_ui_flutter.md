@@ -8,6 +8,22 @@ guard catches the breakage, this page says why. Mobile-only UI rules are in
 
 ## Hover, dialogs, menus, toasts
 
+- All UI = Hollow widgets (`src/ui/components/`; icons Lucide, `brand_icons.dart`,
+  `atlas_icons`), no Material: HollowPressable/Button/IconButton/TextField/Dialog
+  (`showHollowDialog()`)/Tooltip/Toast/Toggle/Checkbox. Chat = ONE MessageRow/ChatHeaderBar/
+  ChatComposerRow; names `nameColorFor(MASTER)`. Moved from CLAUDE.md (0.14 docs pass).
+- `HollowCheckbox` (0.14, Vitalik 11-14: our own component, Material `Checkbox` stays
+  guarded) is ONLY for an agreement that gates one action (the shop's right-to-cancel box
+  before Buy); the whole sentence is the target, `footer` holds the explaining links. A
+  setting is still `HollowToggle`, a choice among a few is a row of `HollowChip`.
+  `HollowTextLink(quiet: true)` is for a run of links that are not the point of the surface.
+  Rules `HOLLOW_DESIGN_LANGUAGE.md` component table.
+- A placeholder dialog is dismissed by its OWN route (`removeRoute`), never by popping the
+  top route: another prompt may sit above it (the first-run link's "Connecting" placeholder
+  ate the relay key prompt, #123).
+- A first-run step a system back must not leave wraps its content in `PopScope(canPop:
+  false)`, unconditionally, and closes itself with `Navigator.pop`, never `maybePop` (#123,
+  `first_run_link_test`).
 - Hover/dialog patterns: NEVER animate a color from `Colors.transparent` (it lerps via
   black; pass `backgroundColor: null`); hover never paints outside its control. Dialogs =
   `HollowDialog`/`HollowDialogSurface` on a flat scrim (NO blur), ghost Cancel + ONE
@@ -112,6 +128,19 @@ guard catches the breakage, this page says why. Mobile-only UI rules are in
 
 ## Providers and state
 
+- NEVER pass `WidgetRef ref` as a constructor parameter: use `ConsumerWidget` /
+  `ConsumerStatefulWidget` (a passed `ref` causes cascade rebuilds). Moved from CLAUDE.md.
+- A `Stack` wrapping a `HollowAvatar` passes `clipBehavior: Clip.none`, or it eats the avatar
+  frame (which then LOOKS painted behind the avatar). `feedback_badge_stack_clips_avatar_frame`
+  (pointer moved from CLAUDE.md).
+- A surface that would say "offline" reads `linkDownProvider`: a relay refusal reads "Refused
+  by this relay" and opens the refusal dialog, never "offline" (874767c6).
+- A chat empty state claims where a channel starts only after both the cleared and the
+  begins-later reads answered: "Older messages were cleared from this device.", "Older
+  messages aren't on this device yet.", else "This is the beginning of the channel." (AR-39).
+- Desktop's channel-topic subscribe listener microtask-defers past the server-switch
+  selection batch (the channel is written BEFORE the server); subscribes ALWAYS go through
+  `subscribeChannelTopics()`. Moved from CLAUDE.md (`feedback_channel_topic_subscriptions`).
 - Server switching batches the 4 selection providers atomically in ONE synchronous
   block; canonical `server_strip.dart:_selectServer`. Wiki `couplings_gotchas`.
 - Split view's right pane overrides `selectedServer/Channel/PeerProvider` in a nested

@@ -59,15 +59,15 @@ CRITICAL: All `dispose()`, `close()`, `stop()` calls are awaited. Unawaited disp
 `VoiceChannelService._createPeerConnection(peerId)`:
 1. Closes any existing connection to that peer via `closePeer()`
 2. Calls `createPeerConnection(iceServers)`
-3. Initializes `_remoteDescSet[peerId] = false` and empty pending candidates list
+3. Initializes `_remoteDescSet[peerId] = false`. It never resets the held candidates: what the peer trickled since `closePeer` belongs to this leg (`closePeer` drops the old leg's list before its first await, 0.14)
 4. Wires `onIceCandidate`: serializes candidate to JSON, sends via `network_api.voiceChannelSendSignal()` with signal type `'ice'`
 5. Wires `onConnectionState`:
    - On `Connected`: fires `onPeerConnected` callback, then after 1s delay logs ICE route diagnostics (TURN/STUN/LAN/P2P) by walking `getStats()` candidate-pair reports
-   - On `Failed` or `Closed`: calls `closePeer(peerId)`
+   - On `Closed`: calls `closePeer(peerId)`. On `Failed` after the leg once connected: `closePeer(peerId)`. On `Failed` BEFORE the first connect: holds it in `SetupFailureGrace` (`setup_failure_grace.dart`, `kSetupFailureGrace` 8 s, 0.14); only a connect or the leg's teardown cancels it, and the leg closes only if still failed at the deadline. A relay-only peer behind our coturn peer lock reports `failed` for an instant before its relay candidate lands, then revives.
 6. Wires `onTrack`:
    - Audio tracks: calls `_enableSframeReceiver(peerId, pc)`
    - Video tracks: calls `_handleRemoteVideoTrack(peerId, event, pc)`
-   - Gossip mode: forwards audio tracks to all other gossip neighbor PCs (with dedup via `_forwardedSources` set)
+   - A track whose stream id is `hfwd-<origin>` is a gossip forward (see Gossip Mode); it never counts as the leg's own microphone
 
 ### Glare Prevention
 
@@ -153,7 +153,7 @@ Four methods manage per-peer, per-kind SFrame encryption:
 ### Audio Controls
 
 - `setMuted(bool)`: Toggles `track.enabled` on local audio tracks
-- `setDeafened(bool)`: Sets volume 0.0 or 1.0 on all remote audio receiver tracks, per peer
+- `setDeafened(bool)`: Sets volume 0.0 or the wanted volume on every remote audio receiver, per peer
 - `setRemoteVolume(peerId, volume)`: Per-peer volume control; while deafened it only records the value, un-deafen applies it
 - **Both go through `setRemoteReceiverVolume()`** (`core/services/remote_track_volume.dart`), keyed by (connection, receiver), never a track id (HOL-SEC-190: the sender writes the track id, and the old native lookup checked local tracks first, then every connection). Both cover EVERY audio receiver of the leg but accepted forwards, and `_onPeerTrack` puts the wanted volume on a receiver opened later. Each peer's block is individually try/caught: an unknown receiver comes back as an error, and unguarded that threw out of the whole loop and left every peer after it audible while the user believed they were deafened. `voice_service.setRemoteAudioVolume` (DM calls) uses the same helper. See memory `feedback_remote_track_volume_not_found`.
 - **Native threading (2026-07-18, dispose path 2026-07-19):** audio-track `setEnabled`/`setVolume`/dispose-path `RemoveTrack` are SYNCHRONOUS WebRTC signaling-thread hops, and the LiveKit core releases the microphone while all audio tracks are disabled/removed (mic indicator off on mute = full audio-HAL teardown/open per toggle; 662 ms `trackDispose` hangup stall on Windows). On the merged UI/platform thread that froze the UI 2+ s (Pixel). The fork runs these ops on serial background workers — `audioTrackOpExecutor` (Android MethodCallHandlerImpl) / `HollowAudioTrackOpQueue` (darwin) / `HollowAudioOpQueue` (desktop C++, flutter_webrtc_base) — order preserved, camera-track paths stay synchronous. Desktop lesson: even the track-vector GETTERS (`audio_tracks()`/`video_tracks()`) hop — the platform thread does map-only work and the entire stream walk runs on the worker. NEVER call audio track proxy methods on the platform thread. Known open cost: camera-OFF `trackDispose` ~633 ms (sync video path). See memory `feedback_android_audio_track_proxy_ui_freeze`.
@@ -184,10 +184,13 @@ Local VAD (`_startLocalVad()`):
 
 ### Gossip Mode
 
-When `gossipMode = true` and `gossipNeighbors` is set:
-- `onPeerJoinedMyChannel()` only connects to peers in `gossipNeighbors`
-- `onTrack` handler forwards received audio tracks to all other gossip neighbor PCs
-- `_forwardedSources` set prevents forwarding loops (dedup by peerId)
+A voice channel is a full mesh up to 16 people (the app's voice leg cap `maxVoicePcs` is 15 legs); gossip mode starts at 17 (`VOICE_GOSSIP_THRESHOLD_UP` = `_DOWN` = 17 in `gossip.rs`, 0.14). When `gossipMode = true` and `gossipNeighbors` is set, `onPeerJoinedMyChannel()` only connects to peers in `gossipNeighbors`.
+
+**Voice forwarding ships OFF (0.14):** `gossip_forward.gossipForwardingEnabled = false`. Re-sending a remote track into a sending stream races the audio device's capture thread and libwebrtc aborts the Windows process (RTC_CHECK_RUNS_SERIALIZED), and the stream would carry our microphone too. So above 16 people a member hears only its overlay neighbours until the media forwarder lane carries voice. The forwarding code stays dormant behind the flag:
+- A listener asks each leg for the voices it hears on no leg of its own (`forwardWants`; targeted `vc_fwd_want` signal, Olm; Rust `handle_envelope_voice_channel_fwd_want` counts it only from a participant, origins only participants other than the sender, at most 64).
+- The forwarder marks each forwarded track in the SDP it sends with stream id `hfwd-<origin>` (`markForwardedTracks`), so the neighbour keys the SFrame decryptor (cryptor kind `fwd:<origin>`), the volume and the speaking light to the originator.
+- A forwarded voice counts only with forwarding on, from the leg we asked for that member, for a member we hear on no leg of our own, and only once its SFrame cryptor is bound; silence is kept per forwarder. A peer cannot pass its own microphone off as a forward to slip past our volume.
+- Debug builds only: a `debug_voice_gossip_at` file in the data dir (`<count> [chain]`) lowers the switch point and can force a chain topology for fleet tests.
 
 ### SDP Opus Munging
 
@@ -263,7 +266,9 @@ Audio quality: `opusBitrate` (default 32000), `opusStereo` (default false). Set 
 
 `VoiceService.handleRenegotiationOffer(sdp)`: Sets remote description, creates answer. Schedules `_checkRemoteVideoTrack()` after 150ms delay. **On ANY failure, rolls the PC back to stable** (setLocalDescription/setRemoteDescription with type `'rollback'`, best-effort both) then rethrows — a poisoned offer must never wedge the call in have-remote-offer (which kills video in BOTH directions for the rest of the call).
 
-**Camera codec constraint — `_constrainCameraCodecs(trackId)` (CRITICAL, all platforms):** `setCodecPreferences` on the camera sender's transceiver keeping ONLY VP8 + rtx/red/ulpfec. H.265/AV1 payload types kill the iOS answerer outright; even H264/VP9 entries make iOS's FIRST call of a session fail applying its own answer while VideoToolbox is cold ("Failed to set local video description recv parameters" → first call black, later calls fine). VP8/libvpx is software everywhere and is what negotiation picked in every working session. Applied in `toggleVideo` enable, `_addLocalVideoTracks` (initial video call, awaited before createOffer), and `voice_channel_service._preferVp8ForVideoTrackOnPc` (same constraint for VC cameras). Screen share (separate PC) deliberately NOT constrained.
+**Camera codec constraint: `_constrainCameraCodecs(trackId)` (CRITICAL, all platforms):** `setCodecPreferences` on the camera sender's transceiver keeping ONLY VP8 + rtx/red/ulpfec. H.265/AV1 payload types kill the iOS answerer outright; even H264/VP9 entries make iOS's FIRST call of a session fail applying its own answer while VideoToolbox is cold ("Failed to set local video description recv parameters" → first call black, later calls fine). VP8/libvpx is software everywhere and is what negotiation picked in every working session. Applied in `toggleVideo` enable, `_addLocalVideoTracks` (initial video call, awaited before createOffer), and `voice_channel_service._preferVp8ForVideoTrackOnPc` (same constraint for VC cameras). Screen share (separate PC) deliberately NOT constrained. **A re-offer narrows EVERY video section to VP8** (`_offerVideoAsVp8Only`, 0.14): a section the far side's camera created never passed `_constrainCameraCodecs` here, so a re-offer would put our whole codec list, H.265 and AV1 included, on it and an iOS answerer fails to apply it.
+
+**A 1:1 call's camera carries SFrame (0.14), like every other media path.** `_bindSframeVideoSender()` puts the camera cryptor on the CURRENT video sender (each enable or device switch adds a new sender) or drops it when the camera is off; `_bindSframeVideoReceiver(receiver, fresh:)` puts the decryptor on the given receiver, else the NEWEST video receiver (dead transceivers come first). Both run on every camera add, device switch, onTrack, key apply, heal and transport rebuild; `rebindSframeReceivers()` re-binds after a key change. Missing one of these plays raw SFrame bytes as a black or garbage frame.
 
 **Diagnostics:** `_probeVideoStats(label)` / `_scheduleVideoStatsProbes(label)` — `[HOLLOW-VIDEO-STATS]` inbound/outbound video RTP stats (frames encoded/sent/received/decoded, codec, size) probed at 2/6/12s after video enable (`'send'`) and after a remote video track binds (`'recv'`). `_handleRemoteVideoTrack` also re-asserts `renderer.srcObject = stream` at +400ms/+1200ms (guarded by renderer/stream still current) and logs `renderer.value` (width/height) — distinguishes "no frames arriving" (value stays 0x0) from binding/UI failures.
 
@@ -277,7 +282,9 @@ Audio quality: `opusBitrate` (default 32000), `opusStereo` (default false). Set 
 
 **CRITICAL — the queue is call-keyed** (`services/pending_ice_queue.dart`, 2026-08-26). The answerer queues candidates while `_captureLocalAudio()` is still opening the mic (~220ms cold), and then builds the peer connection on top of them, so a blanket `.clear()` at construction discarded the candidates for the very call being set up. `PendingIceQueue.discardExcept(keepCallId)` drops only other calls'; `_teardownMedia(keepCandidatesForCallId:)` and `_initPeerConnection` both pass the call in flight. The failure was intermittent rather than obvious because ICE still succeeds one-directionally via peer-reflexive discovery. See memory `feedback_pending_ice_queue_call_keyed`.
 
-`_flushPendingCandidates()`: takes only the ACTIVE call's queued candidates (`take(callId)`) and adds them; an entry for any other call is stale and libwebrtc would reject it against these ICE credentials. A queue cap of 256 latches one `[SENTINEL]` line per overflow episode.
+`_flushPendingCandidates()`: takes only the ACTIVE call's queued candidates (`take(callId)`) and adds them; an entry for any other call is stale and libwebrtc would reject it against these ICE credentials. A queue cap of 256 latches one `[SENTINEL]` line per overflow episode. The flush stops once the PC it started on is gone or replaced (0.14), so an old call's candidates never reach a closed or newer PC; the screen share flush has the same guard. A VC leg's flush keeps only candidates whose `ufrag` names the remote description's `a=ice-ufrag` (`candidateFitsRemoteSdp`; a candidate without a ufrag is kept).
+
+Non-relay remote candidates are still added under the "Always relay" policy: a self-hosted coturn without the peer lock still uses those pairs.
 
 ### Peer Connection Setup
 
@@ -290,7 +297,7 @@ Audio quality: `opusBitrate` (default 32000), `opusStereo` (default false). Set 
 6. Wires `onIceConnectionState` and `onIceGatheringState` for logging
 7. Wires `onConnectionState`:
    - `Connected`: fires `onConnected` callback, logs ICE route diagnostics after 1s delay
-   - `Failed`/`Closed`/`Disconnected`: fires `onDisconnected` callback
+   - `Failed`/`Closed`/`Disconnected`: fires `onDisconnected` callback, except a `failed` before the first connect, which `call_provider` holds in `SetupFailureGrace` (8 s, 0.14) and hangs up only if still failed at the deadline (the relay-only caller used to hang up with "didn't connect"). The share and data channel lanes (`screen_share_service`, `webrtc_service`) hold it the same way.
 
 ### Media Controls
 
@@ -370,6 +377,10 @@ mesh, and (partly) screen share.
 | `services/link_watchdog.dart` | Composes the three, owns the 1s timer. |
 | `providers/link_health_provider.dart` | `callLinkHealthProvider`, `vcLinkHealthProvider`. |
 | `ui/components/link_health_chip.dart` | `LinkHealthChip` / `LinkHealthBanner` / `LinkHealthHeader`. |
+| `services/ice_route_probe.dart` | `IceRoute` from the transport's SELECTED pair, `MediaRoute` (direct, relayed, memberForwarder, relayForwarder). |
+| `providers/media_route_provider.dart` | `callMediaRouteProvider`, `callShareRouteProvider`, `vcMediaRouteProvider` (by leg DEVICE id), `vcShareRouteProvider` (by ORIGINATOR). |
+
+**Media route (0.14).** The call route badge reads the route from the watchdog's existing stats sample (`_publishRoute`), so it costs no extra native round trip and follows ICE restarts and network moves; a share leg reads it from the liveness poll it already runs and clears it while its transport is down. The parser prefers the transport's selected pair: after an ICE restart the old pair can still read succeeded and nominated. A share passed along by a forwarder is named by who forwards it (`shareRouteOf`), and a share our own app forwards has no route (the inbound hop is not one we can read). UI: wiki `ui_call_surfaces`, "Route badge".
 
 Where the flair renders (since the call surfaces rebuild, sessions 22 and 23):
 DM = `DmCallRow`, the stage's `CallPersonTile`, the phone call screen's "Weak
@@ -451,7 +462,7 @@ flag describes the track it was last applied to, which the rebuild replaced.
 - The mesh keeps ONE `_localAudioStream` across every leg, so mute survives a
   leg rebuild untouched. **Deafen and per-peer volume do not** — they are set on
   the RECEIVER, which the rebuild replaced, so `_restorePeerAudioState` puts
-  them back on connect (twice: `setVolume` on a track that has not yet carried
+  them back on connect (twice: a receiver volume set on a receiver that has not yet carried
   media is a tolerated no-op, not an error).
 
 ### Relay reconnect is call-aware
@@ -586,7 +597,7 @@ Transfer IDs are padded to exactly 64 bytes (null-padded UTF-8).
 
 ### ICE Route Logging
 
-`_logIceRoute(peerId)`: After 1s delay on connection, walks `getStats()` to find succeeded candidate-pair. Classifies as TURN (relayed), STUN (direct P2P), LAN (direct host-host), or P2P (other).
+`_logIceRoute(peerId)`: After 1s delay on connection, walks `getStats()` to find succeeded candidate-pair. Classifies as TURN (relayed), STUN (direct P2P), LAN (direct host-host), or P2P (other). The shared parser (`ice_route_probe.dart`) takes the transport's `selectedCandidatePairId` first, then a succeeded nominated pair (0.14): after an ICE restart the old pair can still read succeeded and nominated.
 
 ### Internal Classes
 
@@ -785,7 +796,9 @@ Three layers:
 - **Out-of-proc render (exe `--mode render-pcm` NEW):** `FlutterVoiceRedirect` spawns a render-pcm CHILD (`CreateProcess` + stdin pipe + a writer thread so the libwebrtc audio thread never blocks on the pipe; `CancelSynchronousIo` for safe teardown). `VoiceRedirectSink` tags each track's PCM with a stream_id and forwards `[u16 len][u8 stream_id][u16 rate][u8 ch][int16 PCM]`. The exe's `RunRenderPcmMode` (`main.cpp`) is a multi-stream renderer+MIXER: per-stream linear resample→48k stereo + wall-clock-paced mixer (same model as `MultiProcessCapturer`) → `AudioPlayer` (waveOut). One child mixes all VC peers. Method channels `voiceRedirectStart {receivers: [{peerConnectionId, receiverId, volume}]}→{pid}` / `voiceRedirectStop` (mirror `setCaptureGain`); Dart `Helper.voiceRedirectStart/Stop`.
 - **Capture exclude (the simple key):** the render-pcm child is a DESCENDANT of hollow.exe, so `EXCLUDE_TARGET_PROCESS_TREE` on the CHILD pid drops only the child's audio (the voices), NOT its ancestor hollow.exe → Hollow's media IS captured, and it's dynamic for free (no include-set re-enum). So the capturer just passes the child pid as the EXISTING `--exclude-pid` (`ScreenAudioCapturer.start(excludePid:)`; default `io.pid` when no redirect).
 
-**Orchestration (`call_provider` + `voice_channel_provider`):** only `pid==0 && windowHwnd==0` (entire-screen) arms it. `VoiceService.startVoiceRedirect()` / `VoiceChannelService.startVoiceRedirect()` name every audio receiver with the volume it plays at now (deafen, slider, forward silence) → child pid, passed as `excludePid`. **STOP order matters:** close the capturer FIRST, THEN disarm (`stopVoiceRedirect`: native restores each voice at its wanted volume, the service re-applies it, child killed) — else the brief restored-volume window gets re-captured (echo blip). Disarm in stopScreenShare + call/VC teardown (idempotent). **A voice arriving mid-share** (late joiner, rebuilt leg, new section) joins the redirect from the service's onTrack at its wanted volume (Start is incremental, child pid unchanged so the capturer isn't restarted); one arriving while the redirect ARMS is held by `VoiceRedirectArm` and sent once the pid is known. **A render child that dies mid-share stays lost until Stop** (never respawned: the capturer excludes only the first pid), so voices go silent in-process for the rest of the share; Start joins a stopped writer before any restart. Taps are capped at 16 per connection and 256 in all; over a cap = silent in-process. **Known risk (flagged):** during the share the mic AEC can't reference the out-of-proc voices → if both talk, the remote could hear their own echo; mitigation if it surfaces = `SetVolume(0.1)` for an AEC reference.
+**Orchestration (`call_provider` + `voice_channel_provider`):** only `pid==0 && windowHwnd==0` (entire-screen) arms it. `VoiceService.startVoiceRedirect()` / `VoiceChannelService.startVoiceRedirect()` name every audio receiver with the volume it plays at now (deafen, slider, forward silence) → child pid, passed as `excludePid`. **STOP order matters:** close the capturer FIRST, THEN disarm (`stopVoiceRedirect`: native restores each voice at its wanted volume, the service re-applies it, child killed): else the brief restored-volume window gets re-captured (echo blip). Disarm in stopScreenShare + call/VC teardown (idempotent). **A voice arriving mid-share** (late joiner, rebuilt leg, new section) joins the redirect from the service's onTrack at its wanted volume (Start is incremental, child pid unchanged so the capturer isn't restarted); one arriving while the redirect ARMS is held by `VoiceRedirectArm` and sent once the pid is known. **A render child that dies mid-share stays lost until Stop** (never respawned: the capturer excludes only the first pid), so voices go silent in-process for the rest of the share; Start joins a stopped writer before any restart. Taps are capped at 16 per connection and 256 in all; over a cap = silent in-process. Arms run one at a time (`_armInFlight`: native holds ONE redirect per process), and an arm whose share ended meanwhile takes its own redirect back; a voice channel share stopped while its redirect arms disarms it when the arm returns and never tells the room it shares (0.14). **Known risk (flagged):** during the share the mic AEC can't reference the out-of-proc voices → if both talk, the remote could hear their own echo; mitigation if it surfaces = `SetVolume(0.1)` for an AEC reference.
+
+**A share start belongs to the session it started in (HOL-SEC-195, 0.14).** `VoiceChannelNotifier.startScreenShare` mints `_shareSessionId` and sets `_shareStarting` until its capture is ours or lost; the picker is up meanwhile. The capture and self-preview stay LOCAL until the start's last await and are closed when `_shareStartLost(session)` (a stop, leave, kick, channel delete or newer start took the session). A stop during the picker cancels the start, a second start is refused, and a join into another room ends any share left over before the new room hears of us. The DM call share has the same guard per call (`_dmShareStarting`, a teardown counter). Without it, a leave during the picker leaves the capture running and the next room is told we share and served it on a Watch.
 
 **Hollow as its OWN window in the share picker is NOT supported** (investigated + skipped 2026-06-30): libwebrtc drops the calling process's own windows from its enumerator, AND `GetDisplayMedia`'s video path (`flutter_screen_capture.cc`) only captures via a libwebrtc-enumerated `MediaSource` (a synthetic Dart picker entry fails "source not found!"). It would need a Windows-Graphics-Capture→`RTCVideoSource::OnCapturedFrame` frame-inject pipeline for our own HWND. Skipped because entire-screen already shows Hollow's window + plays its media.
 

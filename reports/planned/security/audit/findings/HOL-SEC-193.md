@@ -19,6 +19,11 @@ Traces to:   HOL-SEC-192 residual; track I's R31-8 (notice_may_be_kept) gates on
 Attacker:    P-02 co-member, friend or meeting peer with a modified client
 Found:       2026-11-05 (t14-flood, harness probe on 33024bdb; the code is the same on
              main 8350841b)
+Affected:    every release from 0.12.0 (profiles phase D: cards and rosters ride profile
+             messages) through 0.13.0
+Fix commit:  a58d7f38 (security/0.14, 2026-11-05)
+Embargo:     EMBARGOED until the 0.14 release (local branch security/0.14, never pushed);
+             advisory with the 0.14 GHSAs
 ```
 
 ## Description

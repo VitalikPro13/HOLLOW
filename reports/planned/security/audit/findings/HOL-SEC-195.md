@@ -1,9 +1,9 @@
 # HOL-SEC-195: A leave during the screen share picker left a live share for the next room
 
 ```
-ID:          HOL-SEC-195                 Status: Fixed in worktree t14-left (2026-11-05), uncommitted,
-                                         EMBARGOED until the 0.14 release
-Severity:    proposed Low                (Impact M: our screen is captured with no room
+ID:          HOL-SEC-195                 Status: Fixed on local branch security/0.14
+                                          (f0805308, 2026-11-05), retest at release
+Severity:    Low                         (Impact M: our screen is captured with no room
                                           to stop it, and a voice room we join later is
                                           told we share and is served the capture on a
                                           Watch, a room the person never chose to show
@@ -25,6 +25,9 @@ Found:       2026-11-05 (hostile review of the t14-left leftovers batch, finding
 Affected:    every release with voice channel screen share, read in 0.9.4-beta,
              0.10.0-beta, 0.12.0-beta, 0.12.2+1-beta and main 8350841b (0.13.0); the
              DM call share has the same window but sends nothing after it
+Fix commit:  f0805308 (security/0.14, 2026-11-05)
+Embargo:     EMBARGOED until the 0.14 release (local branch security/0.14, never pushed);
+             advisory with the 0.14 GHSAs
 ```
 
 ## Description

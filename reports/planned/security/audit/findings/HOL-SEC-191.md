@@ -23,6 +23,9 @@ Traces to:   C-21 (participants only); HOL-SEC-190 (same lookup, volume path)
 Attacker:    a participant of the call or voice channel
 Found:       2026-11-04 (hostile review of HOL-SEC-190, finding 1)
 Affected:    every Windows release since 0.10.0 through 0.13.0
+Fix commit:  80daf1f8 (security/0.14, 2026-11-05; Windows fleet proof on the 0.14 test relay)
+Embargo:     EMBARGOED until the 0.14 release (local branch security/0.14, never pushed);
+             advisory with the 0.14 GHSAs
 ```
 
 ## Description

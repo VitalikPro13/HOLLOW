@@ -123,8 +123,11 @@ CrdtOp {
     author: String,             // peer_id (MASTER) of the originator
     payload: CrdtPayload,       // the actual mutation
     auth: Option<Box<CrdtAuth>>, // {sig, pk}, the author's proof
+    dev: Option<Box<DevProof>>,  // 0.14: {device, sig}, which device wrote it
 }
 ```
+
+**Device proof (0.14, track C, DEVICE_PROOF_DESIGN rev 3.5).** A stolen or retired device still holds the master key, so the master signature alone no longer decides. `dev` is the device's own signature over `hollow-crdt-dev1:` + the op's master-signed payload; it sits OUTSIDE the master-signed bytes (the content id ignores it) and a proof that fails reads as none. It proves which device wrote the op, never that it may: `crdt/verdict.rs` judges each author's device against the replica's authority view (`crdt/authority.rs`, built by `node/authority_view.rs` from our OWN store: the book, `server_rosters`, every held `cp_roster`; never the process-global resolver). A server whose founding nonce commits to the owner's recovery key has a CUT (`fold::cut_after`): past it, only ops a counted device wrote, or ops that dominate, fold. Equivocation ranks by verdict first, then the lower content hash. Channel posts, edits, deletions, link cards, reactions and file cards carry their own domain-separated device proofs (`node/post_proof.rs`), judged live, in backfill and on the public answer; a 0.13 member's proof-less post past the cut is refused. Limitation: rules 2 and 3 compare a date the author picks, so a stolen device can still place content at an old date through a stale replica. Wiki `security_write_gates` §56, §63, §64.
 
 Self-contained: every op carries its own server, author, timestamp, payload and proof. No external context needed to apply it.
 
@@ -178,9 +181,19 @@ put a frame into a server room could write ops as the Owner. It is a claim that
 - `ChannelLayoutUpdated { layout_json: String }` — replaces the entire channel layout ordering. The JSON string is deserialized to `Vec<ChannelLayoutItem>`. Last applied wins (no LWW merge, just overwrite).
 - `ChannelPublicChanged { channel_id: String, is_public: bool }` — toggles whether a channel uses plaintext (public) or MLS-encrypted (private) message transport. When `is_public` is true, messages are Ed25519-signed but NOT MLS-encrypted — they are broadcast as plaintext `HavenMessage` variants readable by all room participants. Applied via direct field set on `ChannelInfo.is_public`.
 
+**Join key and lock:**
+- `JoinKeySet { secret: JoinSecret }`: the server's X25519 join secret (64 hex); members hold it, invite links carry its public half (claim C-24). Owner-only in `op_allowed`. Since 0.14 (2f06e8ed, invite reset) a SECOND key retires the one in force (the newest `JOIN_SECRETS_RETIRED` = 8 kept, carried by checkpoints and legacy join snapshots) and moves the join lock at once, as a kick does. The fold voids an admission on a `JoinAsk` naming a retired key, or naming none once a reset is held, in any order. Only one owner device sets a MISSING key (`sync_handler::sets_missing_join_key`: the lowest owner device in the room, its catch-up there finished, no join or whole-log fetch under way, never while away), since a second first key folds as a reset nobody made.
+- `JoinLock { link, door, grants }`: see JoinLock below. Since 92c504bf the maker's verdict is part of the device clause: a lock op whose maker's roster we lack PARKS and folds when the roster lands (a link an uncounted, removed or stolen device made parks and never folds); a parked lock op counts as one a later refusal may rest on.
+
 **Member operations:**
-- `MemberAdded { peer_id: String, display_name: String }` — adds member with default Member role. Uses `or_insert_with` — idempotent, won't overwrite existing member.
-- `MemberRemoved { peer_id: String }` — removes member from `members`, `roles`, `nicknames`, `twitch_usernames`, and `storage_pledges`. Full cleanup.
+- `MemberAdded { peer_id, display_name, follow, ask: Option<JoinAsk> }`: adds member with default Member role (idempotent). `ask` is the joiner's OWN master-signed ask (`hollow-join-ask2` names the invite key it was made with, in its one text form; `hollow-join-ask1` = no key). An admission opens a span only on an ask newer than the member's own last leave (F9); a rejoin's ask names the leave that closed its last span (`node/leave_book.rs` keeps that EARLIEST leave since the opening ask, d0c101a2) and is stamped past our own newest leave, and a leave is stamped past the ask that admitted it, so a spare re-ask never re-admits after a second leave. The admitter witnesses a rejoiner's ask stamp (moves its clock, put back when the fold refuses; a first-time joiner moves no clock). Residuals: AR-37.
+- `MemberRemoved { peer_id, seen: Option<Box<SeenGrants>> }`: removes member from `members`, `roles`, `nicknames`, `twitch_usernames`, `storage_pledges`. A kick or ban (0.14) carries `seen`, the target's grants it had seen; a granting op of the target dated inside the span it closes and named nowhere is void at its own point (`crdt/voids.rs`, AR-11 narrowed). A member's own leave carries none.
+
+**Device proof (track C, never folded as state):**
+- `DeviceRetired { device, ops: Vec<OpRef>, posts_until_ms, restore }`: `device` stops counting; the author's ops it names (by clock and content id, at most `MAX_RETIRED_REFS` = 256) stay counted as that device wrote them. `posts_until_ms` is the device's post window (the newest date of what it proved that the remover holds OR a clear of ours took, `channel_cleared_devices`, 7555cddd; a remover whose history starts later sets it low, AR-41). `restore` = a member's lost-or-stolen retire's restore checkpoint; it endorses nothing. Carried by checkpoints; a held retire survives a restart.
+- `SettleSign { stamp }`: one owner device's signature of a settling (a child of the current base built by `crdt/settle.rs` from a restore point first folded before T); stored with the stamp's parent checkpoint as its mark.
+- `FloorMark { cp }`: a member's record of the server as it held it when it heard of a recovery that dropped the only checkpoint writer; the oldest counted mark on one line is the floor (`crdt/hold.rs`: the hold keeps every member's seat and leaf until the recovery ends, grants no authority).
+- Owner re-fold of a lost device's lane (`crdt/refold.rs`): only that device's own HLC lane is reverted; AUTO for what the member could write again, UNPUBLISH for a channel it made public after T, REVIEW (the owner's Lost devices page) for the rest.
 - `MemberBanned { peer_id: String }` — sets `banned_members[peer_id] = true` via AdminLwwReg merge, then removes the peer from all member maps (same cleanup as MemberRemoved). Ban = kick + prevent rejoin.
 - `MemberUnbanned { peer_id: String }` — sets `banned_members[peer_id] = false` via AdminLwwReg merge. Does NOT re-add the member; they must rejoin.
 
@@ -424,7 +437,7 @@ The core convergence function. Every mutation to ServerState goes through this s
 
 ## Range Digest Sync (`digest.rs`, `node/op_sync.rs`, 0.13)
 
-Catch-up sync between 0.13 devices compares SETS, not per-author tips. The asker sends
+Catch-up sync (0.13 on; since 0.14 the ONLY form for a self-certifying id) compares SETS, not per-author tips. The asker sends
 about log2(ops) ranges of its retained ops plus the unread ops `crdt_resync` keeps (by fold
 MILLISECOND, filtered by its own checkpoint `base`), each as (count, wrapping sum of one
 AES-128 block per op id under a salt the asker picks per peer), and "everything at or after
@@ -477,7 +490,7 @@ The protocol is symmetric — either peer can initiate:
 
 ### Op Log Size and Sync Window
 
-The op_log is compacted to 1000 entries in `apply_op()`. This means the sync protocol can only compute deltas for the most recent 1000 operations per server. Because op logs can't be trusted for full reconstruction (compaction + pre-persistence history loss), the server-join flow sends a full state snapshot: `HavenMessage::ServerStateSnapshot { server_id, state_json }`, sent by the `ServerJoinRequest` responder BEFORE the op-log `SyncResponse`. The joiner adopts it only while its join is pending.
+Only a `Legacy`-anchored server keeps the 1000-op cap (`LEGACY_OP_LOG_CAP`); anchored logs are never count-capped (see Retention below), and their catch-up is the range digest. Because op logs can't be trusted for full reconstruction (compaction + pre-persistence history loss), the server-join flow sends a full state snapshot: `HavenMessage::ServerStateSnapshot { server_id, state_json }`, sent by the `ServerJoinRequest` responder BEFORE the op-log `SyncResponse`. The joiner adopts it only while its join is pending.
 
 ---
 
@@ -488,6 +501,10 @@ There is no separate `store.rs` module. Op persistence and compaction are handle
 **Storage:** The `op_log: Vec<CrdtOp>` field is `#[serde(default, skip_serializing)]` — it is NOT in the persisted state JSON. Ops persist ONLY via the `crdt_ops` SQLCipher table (`insert_crdt_op`, INSERT OR IGNORE keyed by server_id+hlc+author) and are restored at startup via `restore_op_log()`. CRITICAL: every code path that applies RECEIVED ops must also insert them (all three sync-merge sites do); saving the state JSON alone silently loses history on restart. The HLC field is `#[serde(skip)]` and must be restored via `set_hlc()` after deserialization.
 
 **The fold (design E, 2026-09-27; `crdt/fold.rs`).** Remote ops enter ONLY through `ServerState::ingest_remote`: signature, clock bound, dedup, then the state is a pure function of the retained ops folded in HLC order, each judged by `op_allowed` at its own point. Newer than the tail = tail apply; older = `fold_in` rebuilds from the anchor (`reset_materialized` + every retained and held op). `apply_op` is now only the tail-apply primitive for our own ops (`author_checked` judges them first) and the legacy path; `apply_payload` is the pure state change the fold replays. Anchors (`Anchor`): `Genesis` (40-hex self-certifying id, `crdt/anchor.rs`, founding op carries the `nonce`), `Checkpoint` (rebased on the owner's `ServerCheckpoint`, `checkpoint_hlc`), `Legacy` (32-hex id not yet checkpointed: arrival-order apply, capped). `owner_pin` is the anchor owner; `member_record` the membership spans (E4).
+
+**Byte bounds at the door (0.14):** `fold::MAX_OP_BYTES` = 1 MiB per op, `MAX_CHECKPOINT_BYTES` = 16 MiB per checkpoint; the owner measures a checkpoint before signing it and backs off when it cannot be kept.
+
+**Leaves that land (0.14, 24224155, b68d97cf):** the leaving device keeps its signed leave, the room and the door (`node/leave_book.rs`: 32 leaves, 30 days, saved) until the owner's own answer shows the membership closed, re-handing it whenever an owner device comes online. A sibling that hears its identity's own signed leave records it and ends a join it was ANNOUNCED (never one the person asked for). Late leaves (a member's own leave behind a checkpoint already counting it) are derived from the fold, never stored or sent; the checkpoint coverage fold below now decides them.
 
 **Retention and compaction (0.14, checkpoint coverage, `security_write_gates` §59):** the fold is founding op, then the BASE (the greatest owner checkpoint by generation, op clock, content hash whose named parent is held), then every op the base does not dominate, in HLC order, each judged by `op_allowed` on top (today's authority). `crdt/dominance.rs` holds the one exhaustive match: stamps (`Stamps`: channel fields incl. `is_public`, pins, labels, assignments, emotes, stickers, layout; LWW registers date themselves; unban/unmute/grant-revoke keep tombstones) and member EVENTS (`crdt/members.rs`, `member_events`; `member_record` spans are derived, ask-once and F9 inside). A 0.13 checkpoint (no `cp_stamped`) decides everything at or below its `covers`. Rows: folded (`op_log`), the parent (`RowKind::Parent`), DORMANT (decided by the base but not by its parent, plus rival checkpoints between them), PARKED (once admitted, refused now by authority or quota, 30 days, `crdt_ops.parked_until`). `Ingested` carries `rows` + `dropped`; the store applies them in one savepoint (`persist_op_delta`). Restart picks the base from the rows and skips the refold when `retained_print` matches. Equivocation keeps the lower content hash everywhere (digest id included). Quota: 128 MiB per server, max-min over charge groups (member roots), only when the undecided bytes pass it. Option A's late leaves and `refold_for_standing` are gone. Writer rule and the silent re-ask: §59. Units in `crdt::fold::tests` (`t14-cover` block), `crdt::members::tests`, `digest::tests::digest_entries_agree_across_bases_and_include_the_dormant_set`. Only `Anchor::Legacy` keeps `LEGACY_OP_LOG_CAP = 1000` in RAM and the 30-minute `prune_legacy_ops`.
 
@@ -523,7 +540,7 @@ The CRDT system guarantees eventual consistency through these properties:
 
 **Dart side:** `server_state_provider.dart` holds `ServerState` objects per server. CRDT ops are created via FFI calls to `create_op()`, broadcast to peers via the MLS-encrypted channel, and applied locally. Incoming ops from peers go through `apply_op()` via `sync_handler.rs:handle_envelope_crdt_op()`.
 
-**Sync trigger:** When a peer joins a WS room, `sync_handler.rs` exchanges StateVectors and applies deltas. This is the primary convergence mechanism.
+**Sync trigger:** When a peer joins a WS room, `sync_handler.rs` sends its catch-up ask (range digest; a state vector only where `op_sync::reads_vector` allows, i.e. a legacy id) and folds the answer. This is the primary convergence mechanism.
 
 **Event emission:** New CrdtPayload variants that affect permissions, channels, labels, or bans MUST emit `NetworkEvent::ServerUpdated` in both `handle_envelope_crdt_op()` (sync_handler.rs) and `handle_incoming_request()` (swarm.rs). Falling into the `_ =>` wildcard emits `SyncCompleted` instead, which does NOT trigger provider invalidation on the Dart side. `ChannelPublicChanged` is listed in both `ServerUpdated` emit blocks and in the `MANAGE_CHANNELS` permission check block.
 

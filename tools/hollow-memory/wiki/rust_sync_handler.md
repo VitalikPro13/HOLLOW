@@ -232,6 +232,9 @@ Design: `design_A_frame_authority.md` "BUILT (session 16, the join lock)"; memor
 - `recent_join_of` / `note_completed_join` / `recent_join_answer`: for 5 min after completion, a sync answer sealed to our reply key from the verified door still merges (a real admission overtakes a stale one).
 - `reask_join_locks` (batch tick) re-asks every 15 s while a join has no lock or holds answers; `send_pending_request` asks for the lock when a device appears and nothing could be sealed yet.
 - Member side: answers are sealed from `state.join_lock.newest_door()`; a member's parked ask sealed after its admission (`member_since`) is served again.
+- **0.14 member side.** Every ask passes one verdict shared with the answer before anything is written (HOL-SEC-192, d42cad43): only the member that answers stores the asker's roster and card; one that steps aside holds them in `node/join_stash.rs` (RAM, bounded per ask, count and bytes, fair per server) and lands them once the asker's admission folds in. A member back from away judges no ask while the relay's newest door is not one its state holds (`join_hold`, at most the relay's 60 s grace). An away device answers no door ask and serves no hidden first join ask (d0c101a2: its view is frozen); a hidden sender reaches at most three provers per broadcast, picked per frame from its seal head, and members answer door asks only when the frame picked them (d75229ee).
+- **Invite reset (2f06e8ed).** The owner's `JoinKeySet` retires the old key (newest 8 kept) and moves the lock at once. The joiner's ask names its invite key (`hollow-join-ask2`); `join_verdict::link_refusal` refuses an old link FIRST, before any gate that names the server (`invite_reset`; a pre-reset joiner build gets `invite_outdated`); a box a retired key opens is refused as reset whatever it asks. `sets_missing_join_key` lets only the lowest caught-up owner device in the room, not away, with no join or whole-log fetch under way, set a missing key.
+- **Join lock writes are device-bound (5af8f7b7, 898b145c).** Every lock link carries a device proof (`hollow-lock-dev1`); change keys are sealed to the devices the stored roster counts (8 per identity, closest to the phrase first) once the fold accepts device grants. Removing any member identity's device moves the lock (a mod remover moves first; settled only by a door minted after no MLS group of the server lists the removed leaf, at most once per identity and server per 10 min). An owner whose offers the relay never keeps (a 0.13 relay drops the proof) backs off after each miss up to 10 min. A recovery that drops a device moves the lock in every server of that identity. A stranger joiner of a cut server parks the lock op until the owner's roster lands (92c504bf); a hidden member's door ask waits for the relay's chain read (or 15 s), re-reads the chain every 20 s and asks again when it shows a lock past its door (9dca9022).
 
 ## send_join_rejection()
 
@@ -311,6 +314,8 @@ Flow:
 9. Leave WS relay room: `WsCommand::LeaveRoom`
 10. Delete server state from SQLCipher
 11. Emit `NetworkEvent::ServerDeleted { server_id }` — same event as deletion, Dart side handles identically (server disappears from UI)
+
+**0.14: the leave lands (24224155, `node/leave_book.rs`).** The leave op is kept in the `LeaveBook` (32 leaves, 30 days, saved), and this device keeps the server's room and door until the owner's own answer shows the membership closed; it re-hands the op whenever an owner device comes online. A sibling that hears its identity's own signed leave records it and ends a join it was ANNOUNCED, judged by the leave's clock. The book also keeps the EARLIEST leave since the ask that opened the membership (`opened_by`, `AskFloor`), which a later rejoin's ask names (d0c101a2). While the relay refuses the server a pending leave waits and lands on the lift (`unsent_ops`).
 
 ## handle_ban_member()
 
@@ -538,20 +543,15 @@ Broadcasts via plaintext `HavenMessage::CrdtOpBroadcast`.
 
 (`handle_check_pending_join_timeout()` moved — see the section right after `handle_join_server()` above; it now PARKS instead of failing.)
 
-## flush_pending_sync_requests()
+## build_channel_sync_batch() (the ONE channel-sync responder)
 
-`sync_handler.rs:flush_pending_sync_requests()` — Retries previously failed channel sync responses after Olm session re-establishment.
+`sync_handler.rs:build_channel_sync_batch(store, sid, cid, since, sender_timestamps, gap, partial_ok, until)` builds one page (at most 200 messages): per-sender query when watermarks exist else the legacy single timestamp; `channel_sync_items()` packs `SyncMessageItem`s with reactions, file metadata (one `IN (...)` query) and link previews, stamps `total` + `has_more`. `channel_sync_items` is the channel twin of swarm's `build_dm_sync_items`; both return `SyncPage { items, truncated }` and **every responder must OR `truncated` into its `has_more`** (see `rust_types.md` § Sync Batches).
 
-Parameters: `pending_sync_requests: &mut HashMap<String, Vec<(String, String, i64)>>` — maps peer_id to list of `(server_id, channel_id, since_timestamp)` tuples.
+Callers: the `ChannelSyncRequest` arm in swarm.rs (Olm or plaintext), which first asks `crypto_handler::sync_partner(state, peer, Some(channel))`: a device of a CURRENT member who may see the channel, not revoked (HOL-SEC-194, c7caff62: a member page carries deleted posts' text, so a public channel's other readers get only the guest page, and a member device the responder cannot place yet is refused until its roster lands, then gets its whole history on the retry). The never-filled `pending_sync_requests` queue and `flush_pending_sync_requests` are GONE (their flush served the page with no check), as are the MLS `SyncReq`/`SyncResp`/`ChannelSyncReq`/`ChannelProbe` envelope handlers: catch-up asks ride Olm (`Carried`).
 
-Called when an Olm session is established with a peer who had pending sync requests that failed due to missing encryption session.
+**Held from X (AR-39, e45c0bec, wiki `security_write_gates` §65).** A device lacking part of a channel (it cleared it, or its history begins later) serves only rows from ONE held-from row X picked by one rule from its own rows (`MessageStore::channel_held_from`), and says so with `held_from`, so a cleared holder and a late one answer alike and no ask finds the floor. A 0.14 asker sends `partial_ok: true` (and `until` to bound what it asks of a partial holder), takes those rows and asks other holders for the rest; an older asker whose ask reaches below X gets an empty page with more to come (`Page::Stuck`) and asks another holder. A device that held nothing notes what it lacks as a hole before the rows land (`note_held_page`) and asks for it after catching up. A cleared device counts what its clear took as held per sender and per day (`count_cleared_batch`, `channel_cleared_*` tables; `channel_ask_spans`/`channel_gap_anchor`), so its asks match the ones it would have sent without the clear and it still gets the posts it missed while away. Dart reads `channel_history_cleared` for the empty-state copy ("Older messages were cleared from this device." / "Older messages aren't on this device yet.").
 
-Flow per entry:
-1. Emit `NetworkEvent::MessageSyncStarted { server_id, peer_id }`
-2. Re-query per-sender timestamps at flush time (DB may have changed since original request)
-3. `build_channel_sync_batch(&store, sid, cid, since, &sender_ts)` — the SHARED responder helper (also used by `handle_envelope_channel_sync_req` and swarm.rs's plaintext `ChannelSyncRequest` arm): per-sender query when watermarks exist else legacy single-timestamp (limit 200), `channel_sync_items()` packs `SyncMessageItem`s with reactions (`load_reactions_for_sync`) + file metadata (`get_file_metadata_batch`, one `IN (...)` query) + link previews, stamps `total` + `has_more`, returns the ready `MessageEnvelope::ChannelSyncBatch` + item count. `channel_sync_items` is the channel twin of swarm's `build_dm_sync_items`; both return `SyncPage { items, truncated }` and **every responder must OR `truncated` into its `has_more`** (see `rust_types.md` § Sync Batches for the preview budget and the `MIN_ITEMS_BEFORE_TRUNCATION` floor that keeps pagination live).
-4. Send via `send_encrypted_message()` (Olm)
-5. If send fails again, emit `NetworkEvent::MessageSyncFailed { server_id, error: "Retry after re-key also failed" }`
+**Server clear (ef4f4ac2).** Settings > Files & storage > Clean up clears every server; a server's own Files & storage page clears that server only. Cleared history stays gone on every path (relay replay, push, synced item, file card, reactions, paging below the floor); a post from a member whose clock trails ours lands if the clear never held it. A clear cut short finishes at the next start. Each clear batch also keeps, before its rows go, the newest proven date per (server, sender, device) in `channel_cleared_devices` (`count_cleared_proofs`; at most 64 devices per sender, 4,096 pairs per server), so a later retire's post window never drops below it (7555cddd).
 
 ## handle_envelope_crdt_op()
 
@@ -637,61 +637,9 @@ On valid kick:
 3. Remove MLS group + persist
 4. Emit `NetworkEvent::ServerDeleted` — same event as leaving/deletion (server disappears from UI)
 
-## handle_envelope_sync_req()
+## CRDT catch-up (op sync)
 
-`sync_handler.rs:handle_envelope_sync_req()` — Processes incoming `MessageEnvelope::SyncReq` via MLS. Responds with missing CRDT ops.
-
-Parameters include `state_vector_json` — the requester's state vector describing what ops they already have.
-
-Flow:
-1. Deserialize their `StateVector` from JSON
-2. Compute delta via `crate::crdt::sync::compute_delta(&state.op_log, &their_vector)` — finds ops in our log that they're missing
-3. If delta is non-empty: serialize ops, wrap in `MessageEnvelope::SyncResp { sid, ops_json, target: None }`
-4. Send via Olm (`send_encrypted_message`) + `SendDirect` to the requesting peer
-
-## handle_envelope_sync_resp()
-
-`sync_handler.rs:handle_envelope_sync_resp()` — Processes incoming `MessageEnvelope::SyncResp` via MLS. Applies received CRDT ops.
-
-Flow:
-1. Deserialize `Vec<CrdtOp>` from `ops_json`
-2. **Persist every incoming op with matching `server_id` via `crdt_store.insert_op()`** (INSERT OR IGNORE, idempotent). CRITICAL: `op_log` is `#[serde(skip_serializing)]` — the state JSON alone loses history on restart; without per-op persistence a member serves near-empty op logs to future joiners. ALL THREE sync-merge sites do this (this MLS path, plus the plaintext `SyncResponse` and Olm `SyncResp` handlers in swarm.rs).
-3. Merge via `crate::crdt::sync::merge_ops(state, &incoming_ops)` — takes a slice; SKIPS ops that fail `apply_op` (one foreign op must not abort the merge); returns count of newly applied ops
-4. If any applied: persist state to SQLCipher
-5. Emit `NetworkEvent::SyncCompleted { server_id, ops_applied }`
-
-## handle_envelope_channel_sync_req()
-
-`sync_handler.rs:handle_envelope_channel_sync_req()` — Processes incoming `MessageEnvelope::ChannelSyncReq` via MLS. Responds with channel messages.
-
-Parameters: `sid`, `cid`, `since_timestamp`, `sender_timestamps: HashMap<String, i64>`
-
-Flow:
-1. Guard: server must exist in `server_states`
-2. `build_channel_sync_batch()` (shared responder helper — see `flush_pending_sync_requests`)
-3. Skip if the batch is empty; else send via `send_encrypted_message` to the requesting peer
-
-## handle_envelope_channel_probe()
-
-`sync_handler.rs:handle_envelope_channel_probe()` — Responds to a channel probe with local latest timestamp and message count.
-
-Purpose: Lightweight check to determine if the requester needs a full sync. The probe response lets the requester compare their state against the responder's without transferring any messages.
-
-Flow:
-1. Query `our_latest` timestamp and `our_count` from DB
-2. Respond with `MessageEnvelope::ChannelProbeResp { sid, cid, their_latest: our_latest, msg_count: our_count, target: None }`
-3. Send via MLS; if MLS fails, fall back to Olm
-
-## handle_envelope_channel_probe_resp()
-
-`sync_handler.rs:handle_envelope_channel_probe_resp()` — Processes a channel probe response and triggers sync if needed.
-
-Flow:
-1. Dedup check: skip if same channel synced within 5 seconds
-2. Query local latest timestamp from DB
-3. If `their_latest > our_latest` OR the peer holds more rows (`msg_count > ours`, #90): trigger a sync
-4. Insert dedup key
-5. Send `channel_sync_request(store, sid, cid, true)` (plaintext, not MLS): per-sender timestamps plus the gap digest
+The MLS `SyncReq`/`SyncResp` handlers are gone. CRDT catch-up is the salted range digest (`node/op_sync.rs`, `crdt/digest.rs`; wiki `rust_crdt` § Range Digest Sync), asked over Olm with `SyncRequest`. Since 0.14 (550d6b01) the per-device form detection (the `dg` mark, vector re-asks, old-build test mode) and the mesh hand-on of an older author's op are deleted. The state vector, which loses ops (HOL-SEC-175), is read only where `op_sync::reads_vector(server_id)` holds (a legacy, non-self-certifying id) by replicas still on the legacy anchor; a vector ask for a 40-hex id is answered with nothing, and on a legacy server the vector serves the op log only to members. A stranger's sync ask gets silence; roster asks (`op_sync::roster_ask`, `want_rosters`) carry no digest or vector and are paced per asker and in all.
 
 ## handle_envelope_channel_sync_batch()
 
@@ -743,9 +691,9 @@ Tier-gated operations (require outranking the target):
 | `ServerJoinParked` | `handle_check_pending_join_timeout` (no `ServerJoinFailed` emitter exists anywhere any more) |
 | `PendingJoinUpdated` | `handle_discard_pending_join` (`discarded`), `handle_join_refused` (`discarded` on an interactive reason, else `rejected`); `admitted`/`ready` are emitted from `swarm.rs` (join completion and the `MlsWelcome` arm respectively), not this module |
 | `SyncCompleted` | `handle_envelope_crdt_op` (wildcard `_ =>`), `handle_envelope_sync_resp` |
-| `MessageSyncStarted` | `flush_pending_sync_requests` |
+| `MessageSyncStarted` | swarm.rs channel catch-up ask |
 | `MessageSyncCompleted` | `handle_envelope_channel_sync_batch` |
-| `MessageSyncFailed` | `flush_pending_sync_requests` |
+| `MessageSyncFailed` | swarm.rs channel catch-up send failure |
 | `MessagePinned` | `handle_pin_message` |
 | `MessageUnpinned` | `handle_unpin_message` |
 | `MlsEpochChanged` | `handle_kick_member`, `handle_ban_member` |

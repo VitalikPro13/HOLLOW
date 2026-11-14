@@ -190,6 +190,19 @@ db_passphrase) -> Vec<FetchedDm>`.
 - **Persists the advanced Olm session + inserts message rows after each decrypt**
   (`persist_olm_session` / `persist_crypto_state`). On Android the bg isolate, and
   on iOS the NSE when force-killed, are the SOLE DB writer — single-writer-safe.
+- **Which relay (HOL-SEC-204, 0.14):** a push process (the NSE, a cold Android fetch
+  process) never heard Dart's `set_relay_url`, so callers pass "" and
+  `fetch::fetch_relay_domain` dials the relay given, else this install's saved
+  `relay_domain`; only a database that reads and holds no choice means the official
+  relay, and any read error refuses the fetch. Before this, a self-hosted install's
+  UnifiedPush wake with the app killed dialled the official relay with its device key.
+- **Age-restricted servers on a phone (0.14):** a wake for a server the phone hides
+  fetches nothing (`wake_age_hidden`); `push_channel_meta_in` treats a hidden server as
+  one we do not hold, the NSE shows a neutral banner for a hidden server
+  (`hollow_push_server_hidden`), and asks `hollow_push_server_age_restricted` so a wake
+  whose posts could not be read names nothing (no server ids in userInfo) when the
+  server is flagged 18+ or not yet known not to be. A denied login (`account_denied`,
+  `network_denied`) is a quiet empty fetch.
 
 ## FFI surface — api/network.rs
 

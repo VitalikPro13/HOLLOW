@@ -74,9 +74,11 @@ One row for every page, desktop and phone:
   store builds. All edits live in `profileDraftProvider` (text controllers, staged
   images with pick generations, frame), which survives leaving the page.
 - **Security**: App lock (desktop password or phone PIN/biometric), Recovery (phrase, backup
-  file export with its options inside the export dialog), Privacy, People (verified,
+  file export with its options inside the export dialog; while a phrase recovery's restore is
+  pending, a row that reopens the restore chooser, 0.14), Privacy, People (verified,
   blocked as expand rows), Advanced (check a message proof, a dialog), Danger zone.
 - **Devices**: device rows (`titleTrailing` "This device" badge; others in a More menu),
+  Remove asks retired or lost or stolen first (0.14, wiki `ui_dialogs` "Removing a device"),
   Link another device (the page's filled), Advanced (sync check, reset the device list).
 - **Appearance**, **Accessibility**, **Notifications**, **Audio & video** (call quality
   spells out the bitrate), **Shortcuts** (desktop only), **Network** (relay row with Change,
@@ -84,6 +86,8 @@ One row for every page, desktop and phone:
   **Files & storage** (usage, downloads, image quality, data folder + profiles, Advanced
   caches), **About** (header, Updates incl. What's new and Earlier versions, contact with
   hollow.anonlisten.com, legal).
+- **Age-restricted servers** (0.14, `AgeRestrictedSection` in `network_section.dart`): on a computer "Allow age-restricted servers on my phones" (the identity's choice, `confirmAllowOnPhones` first); on a sideloaded Android phone "Allow age-restricted servers" for this phone (`confirmAllowOnThisPhone`); absent on an iPhone and a store Android. After this computer's own 18+ join `offerAgeGateForPhones` offers the phones' setting once. Wiki `ui_mobile` "Age-restricted servers on phones".
+- **Get help** (0.14, `settings/pages/get_help_page.dart`, lifeBuoy icon): stands apart with About at the END of the rail (`SettingsCategory.help`, no group). Emergency numbers and hotlines from a bundled list, never fetched; wiki `ui_help` "Get help".
 
 ## Phone (`mobile/tabs/mobile_settings_tab.dart`)
 

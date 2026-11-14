@@ -18,6 +18,11 @@ Boundary:    TB-1, TB-2
 Traces to:   track I (t14-ident) review of A/B; shipped in 0.13
 Attacker:    P-03 stranger (any identity that knows our master id or holds an invite link)
 Found:       2026-11-04 (hostile review of track I, probe on main 8350841b)
+Affected:    unbounded pending incoming requests in every release through 0.13.0; the
+             roster, card and key-bundle writes since 0.12.0
+Fix commit:  d42cad43 (security/0.14, 2026-11-05)
+Embargo:     EMBARGOED until the 0.14 release (local branch security/0.14, never pushed);
+             advisory with the 0.14 GHSAs
 ```
 
 ## Description

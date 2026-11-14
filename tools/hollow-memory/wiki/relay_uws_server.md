@@ -351,8 +351,11 @@ and `test_auth_frame.cpp` to the Rust client's `relay_session.rs` tests.
   it, the address share holding the most sessions (the newcomer counted; a tie goes against the
   newcomer's own share) gives one up: a session in grace before a live one, then the one closest to
   its end. It ends as on expiry; a live victim's socket closes 1000 `session_lost`.
-- **Per-IP slots**: a grace session keeps its socket's slot under `MAX_CONNS_PER_IP` (34) until
-  gone. In `.open` the rate check (10 new per minute) runs first; at the cap a socket comes in only
+- **Per-IP slots**: a grace session keeps its socket's slot under its family's open cap
+  (`conn_limits::Limits`, operator settings since 0.14: `CONN_LIMIT_IPV4` 512 per address,
+  `CONN_LIMIT_IPV6` 128 per /64) until gone. In `.open` the rate check (a token bucket,
+  `conn_rate::Gcra`: `CONN_RATE_IPV4` 120 / `CONN_RATE_IPV6` 30 new a minute after a burst as
+  large as the open cap) runs first; at the cap a socket comes in only
   while the address has more grace slots than sockets over the cap (`admits`), and ends nobody
   then. Once its signature is checked and BEFORE any state changes (no session resumed or ended,
   no supersede), `session_bounds::settle_login` judges every login (fresh, resume from anywhere,
@@ -363,7 +366,8 @@ and `test_auth_frame.cpp` to the Rust client's `relay_session.rs` tests.
   `IpState::takeovers`); otherwise the login closes `1008 ip_limit` before any answer (0.12.2 backs
   off on it). AR-36, g13; HOL-SEC-172 kept: a device coming back takes back its own slot. `data->ip_key` is set only once the slot is taken,
   so a refused socket gives nothing back on close. Restored sessions hold no slot (addresses are
-  never snapshotted). The live tests build the relay with `-DHOLLOW_RELAY_TEST_CONNS_PER_IP=3`.
+  never snapshotted). The live tests run the relay with `CONN_LIMIT_IPV4=3` and friends plus
+  `HOLLOW_RELAY_TEST_CONN_BURST` (`run_live.sh`).
 - **Grace length**: `--session-grace-secs` (Docker `SESSION_GRACE_SECS`, `SELF_HOSTING.md`
   "Dropped connections"), default 120, held to 30..600 (`parse_grace_secs`, clamped again in
   `setup_ws_handler`). The test-only define `-DHOLLOW_RELAY_TEST_GRACE_SECS=5` (`test/run_live.sh`)
@@ -419,11 +423,43 @@ Reads CLI flags sequentially. `TURN_SECRET` is loaded from the environment varia
 
 | Constant | Value | Description |
 |----------|-------|-------------|
-| `MAX_CONNS_PER_IP` | 34 | Max simultaneous WS connections per IP |
-| `MAX_NEW_CONNS_PER_MIN_PER_IP` | 10 | Max new connections per minute per IP (sliding window) |
+| `MAX_GRACE_TAKEOVERS_PER_MIN_PER_IP` | 3 | Grace sessions a login may push out per address a minute |
 | `MAX_GUEST_ROOMS` | 3 | Max rooms a guest can join |
 | `GUEST_IDLE_SECS` | 1800 | Guest idle timeout (30 min no binary activity) |
 | `GUEST_BINARY_PER_MIN` | 10 | Max 0x03 binary frames per minute for guests |
+
+### Connection limits are operator settings (0.14, `conn_limits.h`, `login_window.h`, `conn_book.h`)
+
+Read once at start from the environment (the one `.env` / `relay.env`, never a flag), each held
+to its range: a value that is not a number keeps the default, one outside the range takes the
+nearer end, and the start line names each such value. `hollow-relay --check-limits` prints what is
+in force and exits non-zero when a value was not taken as written; `check-host.sh` and the setup's
+**Advanced: connection limits** screen run it. SELF_HOSTING.md "Connection limits" has the table.
+
+| Setting | Default | What it limits |
+|---|---|---|
+| `CONN_LIMIT_IPV4` / `CONN_LIMIT_IPV6` | 512 / 128 | Open sockets per IPv4 address / per IPv6 /64 |
+| `CONN_RATE_IPV4` / `CONN_RATE_IPV6` | 120 / 30 | New sockets a minute, after a burst of the open cap (GCRA) |
+| `LOGIN_WINDOW_PER_BLOCK` | 256 | Sockets not logged in yet per v4 /24 or v6 /48 (soft) |
+| `LOGIN_WINDOW_TOTAL` | 10,000 | Sockets not logged in yet on the whole relay |
+| `CONNECTED_LIMIT` | a quarter of RAM at 32 KB a socket (65,536 on 8 GB) | Open sockets of every kind |
+| `BREAKER_MODE` | `enforce` | `shadow` counts trips and closes nothing |
+
+- **Login window** (`login_window.h`): only a LATER login stage counts as progress (a repeated
+  `auth_hello` is no step). Past a window, the sockets that took no step for `STALL_MS` (5 s) go
+  first, from the share holding the most of them; a moving burst from one carrier NAT is never cut
+  while anyone is stalled. The victim closes `1008 login_busy`.
+- **Connected book** (`conn_book.h`): every open socket is charged to its address share; past
+  `CONNECTED_LIMIT` the heaviest share gives way (its oldest not-logged-in socket, else one holding
+  no session, else a session socket, which resumes), closing `1008 relay_full`; a newcomer whose own
+  share is the heaviest is refused instead.
+- **Every limit refusal closes 1008** (`ip_limit`, `rate_limit`, `login_busy`, `relay_full`), never
+  1013: a 1013 is the breaker's "come back" close only. The fresh-start floor of a share block
+  refills at the operator's rate and burst for that block's family (`Limits::floor_rate`).
+- `handle_auth` returns whether the socket still stands, so nothing reads its user data after an
+  `end()`.
+- Proven with 300 devices behind one address on the test relay: fresh logins, zombie resumes and a
+  restart, no refusal and no lost session.
 
 ### Per-IP keying: `ip_limit_key()` (`src/ip_key.h`, with `share_block`; unit-tested in `test_conn_rate_exempt`)
 
@@ -490,7 +526,7 @@ In-memory only — never logged, never persisted (a restart gives every address 
 | `active_count` | `uint32_t` | Currently open connections from this IP (a grace session's held slot counts) |
 | `recent_connects` | `conn_rate::Window<30>` | The last admitted connects within 60 s, a fixed array (`src/conn_rate.h`) |
 
-**Rate (2026-10-16, s43 bug):** an address holding a socket opens `MAX_NEW_CONNS_PER_MIN_PER_IP` (10) new sockets a minute; one holding none `MAX_NEW_CONNS_PER_MIN_PER_IDLE_IP` (30: a phone killed in the background opens a fetch socket per push wake). A refusal (`1008 "rate_limit"`) takes nothing. The entry is NOT erased at `active_count == 0` while its window holds connects (before, close-then-open churn was never counted): it waits in `RelayState::ip_idle` (`conn_rate::IdleBook`), bounded at `conn_rate::MAX_IDLE` = 65,536 and fair (`fair_share.h`, share = the exact v4 address or v6 /48 of the key, no hash: the table holds the keys already); a full book forgets the least recently idled address of the heaviest block, which only lets that address in sooner. Measured worst case (every entry its own /48): about 61 MB at the bound, about 980 bytes per idle entry. Swept once the window ends. Tests: `test_conn_rate` (window, shares, book bound and expiry), `test_session_bounds` `test_rate_limit_idle_address`, `test_relay_live` `test_rate_limit_idle_address` (`RELAY_LIVE_ONLY=rate`).
+**Rate (0.14):** `IpState::rate` is a token bucket (`conn_rate::Gcra`) at the family's `CONN_RATE_*` with a burst of the open cap, replacing the 0.13 sliding window (10 a minute holding a socket, 30 holding none). A refusal (`1008 "rate_limit"`) takes nothing. The entry is NOT erased at `active_count == 0` while its window holds connects (before, close-then-open churn was never counted): it waits in `RelayState::ip_idle` (`conn_rate::IdleBook`), bounded at `conn_rate::MAX_IDLE` = 65,536 and fair (`fair_share.h`, share = the exact v4 address or v6 /48 of the key, no hash: the table holds the keys already); a full book forgets the least recently idled address of the heaviest block, which only lets that address in sooner. Measured worst case (every entry its own /48): about 61 MB at the bound, about 980 bytes per idle entry. Swept once the window ends. Tests: `test_conn_rate` (window, shares, book bound and expiry), `test_session_bounds` `test_rate_limit_idle_address`, `test_relay_live` `test_rate_limit_idle_address` (`RELAY_LIVE_ONLY=rate`).
 
 **Rate exemption (`HOLLOW_CONN_RATE_EXEMPT`, `src/conn_rate_exempt.h`, 2026-10-09):** an operator's own addresses, comma/space separated, read from the ENVIRONMENT only (root-only `EnvironmentFile`, never `Environment=` or a flag, never in the repo/memory/logs). Entries normalize through `ip_limit_key` (v4, v4-mapped -> its v4, v6 -> its /64, or `addr/64`); anything else is ignored and counted, and so is an address no client connects from (0/8, 127/8, 224/4, 240/4 incl. broadcast, ::/64 incl. `::`/`::1`, ff00::/8; v4-mapped judged as its v4), since loopback behind a proxy on the box would exempt everybody. Only the loopback test build (`HOLLOW_RELAY_TEST_LOOPBACK`, `config.h` passes `allow_loopback`) keeps v4 loopback entries; a rejected entry is skipped, never fatal. A listed key skips ONLY the per-minute check in `.open` and keeps no window; `MAX_CONNS_PER_IP`/`admits`, fair share, auth, door rooms and every frame rule still apply. Startup prints only `[config] New-connection rate exemption: N address block(s), M entry(s) ignored`, and nothing when unset or empty; no per-connection line ever. No wire or snapshot change. Tests: `test_conn_rate_exempt` (parse + normalization) and `test_relay_live` `RELAY_LIVE_ONLY=rate|rate_exempt` (run_live.sh's third relay run, which also greps the log for the count line and for the absence of the address). Official box: Vitalik's address in `/etc/hollow-relay/relay.env`.
 
@@ -639,7 +675,7 @@ Everything the relay holds is RAM. A service restart used to empty it: three day
 
 **What is in the snapshot:** `offline_buffer` (room, frame, sender, age, is_image, is_channel, seq), `offline_optin`, `topic_buffers` (key, accepting, retention_secs, registered age, frames), `push_tokens`, `push_prefs`. Not: rooms and sockets, nickname and link-code claims (relay-scoped by design), push debounce counters, the two files. Since VERSION 9 also every resumable session, which carries its own rooms, subscriptions, nickname and link code (see Resumable sessions).
 
-**`snapshot_codec.h`** (header-only, no uWS, unit test `test/test_snapshot_codec.cpp`): `snapshot::Data` plus `encode`/`decode`. Magic `HRSN`, `VERSION` (9 since 2026-10-06; the header comment lists what each version added), six counted sections (the sixth is the kill list, read only at version 2 or later; a version 1 snapshot decodes with an empty kill list, so a deploy keeps the live buffers), trailer `HRSE`; little-endian fixed-width ints, u32-length strings capped at 64 MB, flags must be 0/1, a count larger than the remaining bytes is refused. `decode` is all-or-nothing: any truncation, bad byte or a version outside the accepted range returns false and leaves the output untouched. Timestamps travel as AGES in seconds; the reader rebuilds `at = now - age`.
+**`snapshot_codec.h`** (header-only, no uWS, unit test `test/test_snapshot_codec.cpp`): `snapshot::Data` plus `encode`/`decode`. Magic `HRSN`, `VERSION` (12 since 0.14, t14-deny; the header comment lists what each version added), six counted sections (the sixth is the kill list, read only at version 2 or later; a version 1 snapshot decodes with an empty kill list, so a deploy keeps the live buffers), trailer `HRSE`; little-endian fixed-width ints, u32-length strings capped at 64 MB, flags must be 0/1, a count larger than the remaining bytes is refused. `decode` is all-or-nothing: any truncation, bad byte or a version outside the accepted range returns false and leaves the output untouched. Timestamps travel as AGES in seconds; the reader rebuilds `at = now - age`.
 
 **`sd_fdstore.h`** (header-only): `store(fd, name)` sends `FDSTORE=1\nFDNAME=name` with the fd as SCM_RIGHTS over `NOTIFY_SOCKET` (abstract `@` paths handled); `remove(name)` sends `FDSTOREREMOVE=1`; `take(name)` parses `LISTEN_PID`/`LISTEN_FDS`/`LISTEN_FDNAMES`, marks every passed fd close-on-exec, closes the ones not taken, clears the variables. No libsystemd (its dev package is not on the box).
 
@@ -969,6 +1005,20 @@ No soft limit — sends unconditionally. `maxBackpressure` (64 MB) is the only s
    ```
 
 Room creation is implicit — joining a room that doesn't exist creates it.
+
+**Presence batching (0.14, `presence_batch.h`).** A socket whose first join says `pv:2` (every
+0.14 client) learns other peers' joins and leaves as `{"type":"presence","room":..,"ev":["+id","-id",..]}`
+frames instead of one `peer_joined`/`peer_left` each, so a mass join no longer costs the square of
+the room size. Each room keeps a log of exactly the per-peer sequence (in order, never cancelled),
+flushed after `WINDOW_MS` (100 ms), at `MAX_EVENTS` (256) per frame, or when all logs together pass
+`TOTAL_BYTES` (32 MiB). `announce_door_change` is the ONE place a join or leave notice is made
+(`test_presence_batch` guards it); a `fwd:` room is pairwise and never batched. A join that sends
+`have:true` (the client holds a told view) from a batching, visible, on-screen socket gets the SHORT
+answer `{"type":"members","room":..,"digest":..,"count":..}` (the `presence_view.h` digest) instead
+of the list. A room leaves the table ONLY through `erase_room`, which also drops what its log put
+in the subject table (else that table grows without bound); a session restored from a snapshot
+that turns to batched presence is stamped in its rooms so no change reaches it twice. Client side:
+`rust_networking` "Presence batches and the short members answer".
 
 ### ws_handler.cpp:leave_room() — Room leave
 
@@ -1322,7 +1372,7 @@ Returns real-time server resource utilization. Cached for 5 seconds.
 ```json
 {
   "license_required": true,
-  "version": "0.11.1",
+  "version": "0.14.0",
   "turn": true,
   "forwarder": true
 }
@@ -1330,7 +1380,7 @@ Returns real-time server resource utilization. Cached for 5 seconds.
 
 The Dart client checks this endpoint on startup. If `license_required` is true and the user hasn't cached a key, the app shows the license key input dialog.
 
-`version` is `HOLLOW_RELAY_VERSION` in `src/version.h`; it read `"0.1.0"` from the day the endpoint was written until 0.11.1. `turn` is `!turn_secret.empty()` and `forwarder` is `!forwarder_peer_id.empty()`, so both report what this relay is CONFIGURED with, not whether coturn or the forwarder process is actually alive. That is the honest signal the app has: a self-hoster who runs without coturn is told to leave `TURN_SECRET` empty so the two agree. `setup_http_handlers` takes `const Config&` for exactly this (the parameter existed unused before).
+`version` is `HOLLOW_RELAY_VERSION` in `src/version.h`; it read `"0.1.0"` from the day the endpoint was written until 0.11.1, and reads `"0.14.0"` since 0.14 (so 0.14 owners stop seeing the old-relay note, which keys on it). `turn` is `!turn_secret.empty()` and `forwarder` is `!forwarder_peer_id.empty()`, so both report what this relay is CONFIGURED with, not whether coturn or the forwarder process is actually alive. That is the honest signal the app has: a self-hoster who runs without coturn is told to leave `TURN_SECRET` empty so the two agree. `setup_http_handlers` takes `const Config&` for exactly this (the parameter existed unused before).
 
 ---
 
@@ -1423,9 +1473,11 @@ ulimit -n 500000
 
 `relay-uws/SELF_HOSTING.md` is THE user guide (rewritten 2026-10-23 around the installer: what a relay is + island rule, choose setup, address, prepare, the setup screen by screen, adopt, path A Docker / path B systemd by hand, optional parts, connect, check, day to day, troubleshooting, reference, operator changelog). Memory `project_relay_installer_plan`.
 
-**The installer** (`relay-uws/install.sh` + `deploy/lib/{common,ui,preflight,questions,address,ssh_keys,native,docker,manage,host,adopt,release_feed}.sh`): whiptail (plain fallback `--plain`, answer files `--answers`, `--dry-run`), Ubuntu 22.04+ / Debian 12+ on x86_64/aarch64 only (`os_supported`). Flow: preflight (`preflight_run`: OS, RAM >= 450 MB, public IPv4, NAT/CGNAT, 443/80, clock) -> mode (native recommended / docker) -> binaries (prebuilt from the signed `relay.json` feed, or source; docker always source) -> address (DuckDNS / IP / domain; DNS checked before certbot) -> TURN, push (native only, docker always), forwarder, members-only, grace -> SSH question -> plan screen -> apply -> confirmed-key SSH switch -> 80x24 summary screens. No Let's Encrypt email (LE keeps none; an old `email=` is ignored). Native layout = the official box's: accounts `hollow-relay`/`hollow-turn`/`hollow-push`/`hollow-fwd`/`hollow-ddns`(/`hollow-build`), programs in `/usr/local/bin`, settings `/etc/hollow-*`, state `/var/lib/hollow-relay` + `/var/lib/hollow-forwarder`, its own copy in `/usr/local/lib/hollow-relay/installer` (units + certbot hooks call scripts there), linked as `/usr/local/sbin/hollow-relay-setup`; answers (no secrets) in `/etc/hollow-relay/install.conf`, whose presence makes a re-run the status menu (`manage_main`: update/downgrade/rebuild, change a setting, keys, SSH off, add another computer's SSH key, check, uninstall). Docker mode runs a root-owned copy in `/opt/hollow-relay-docker`, project `hollow-relay`. Certbot: distro for names, snap or a pinned venv (`/opt/hollow-certbot` + `hollow-certbot-renew.timer`) for IP certs. SSH: only key logins that begin AFTER the prompt count, each confirmed by the person (journal lines from root's sshd only), 10-minute undo timer, drop-in `/etc/ssh/sshd_config.d/10-hollow-relay.conf`. Suites: `relay-uws/test/installer/` (Linux bash only; macOS bash 3.2 fails on empty arrays).
+**The installer** (`relay-uws/install.sh` + `deploy/lib/{common,ui,preflight,questions,address,ssh_keys,native,docker,manage,host,adopt,release_feed}.sh`): whiptail (plain fallback `--plain`, answer files `--answers`, `--dry-run`), Ubuntu 22.04+ / Debian 12+ on x86_64/aarch64 only (`os_supported`). Flow: preflight (`preflight_run`: OS, RAM >= 450 MB, public IPv4, NAT/CGNAT, 443/80, clock) -> mode (native recommended / docker) -> binaries (prebuilt from the signed `relay.json` feed, or source; docker always source) -> address (DuckDNS / IP / domain; DNS checked before certbot) -> TURN, push (native only, docker always), forwarder, members-only, grace -> SSH question -> plan screen -> apply -> confirmed-key SSH switch -> 80x24 summary screens. No Let's Encrypt email (LE keeps none; an old `email=` is ignored). Native layout = the official box's: accounts `hollow-relay`/`hollow-turn`/`hollow-push`/`hollow-fwd`/`hollow-ddns`(/`hollow-build`), programs in `/usr/local/bin`, settings `/etc/hollow-*`, state `/var/lib/hollow-relay` + `/var/lib/hollow-forwarder`, its own copy in `/usr/local/lib/hollow-relay/installer` (units + certbot hooks call scripts there), linked as `/usr/local/sbin/hollow-relay-setup`; answers (no secrets) in `/etc/hollow-relay/install.conf`, whose presence makes a re-run the status menu (`manage_main`: update/downgrade/rebuild, change a setting, keys, SSH off, add another computer's SSH key, check, uninstall). Docker mode runs a root-owned copy in `/opt/hollow-relay-docker`, project `hollow-relay`. Certbot: distro for names, snap or a venv of hash-pinned wheels from `deploy/certbot-requirements.txt` (`/opt/hollow-certbot`
++ the sandboxed `hollow-certbot-renew.timer`; regenerate the file with uv, its header says how; an
+older unpinned venv is made again, `check-host.sh` "Certificate renewal" checks the unit, HOL-SEC-199) for IP certs. SSH: only key logins that begin AFTER the prompt count, each confirmed by the person (journal lines from root's sshd only), 10-minute undo timer, drop-in `/etc/ssh/sshd_config.d/10-hollow-relay.conf`. Suites: `relay-uws/test/installer/` (Linux bash only; macOS bash 3.2 fails on empty arrays).
 
-**Adopt** (`deploy/lib/adopt.sh`): a relay this setup did not install (a `hollow-relay` unit not written by install.sh, or a compose project from `*/relay-uws`) is shown, then taken over (keeps address, cert + renewal, keys, reports + key, TURN secret, push token, forwarder identity; backup + rollback in `/root/hollow-relay-adopt-*`; Docker stays Docker; always hardens) or left alone (hardening offered, `--no-firewall` option). An interrupted take over is detected first (`adopt_interrupted`).
+**Adopt** (`deploy/lib/adopt.sh`): a relay this setup did not install (a `hollow-relay` unit not written by install.sh, or a compose project from `*/relay-uws`) is shown, then taken over (keeps address, cert + renewal, keys, reports + key, TURN secret, push token, forwarder identity; backup + rollback in `/root/hollow-relay-adopt-*`; Docker stays Docker; always hardens) or left alone (hardening offered, `--no-firewall` option). An interrupted take over is detected first (`adopt_interrupted`). The old services still run during a take over, so the backup is copied and restored through checked descriptors (`fd_plain`, `plain_copy`, `land_file`: one open, judged through `/proc/self/fd`, never a name read twice; HOL-SEC-196), and the stage carries the old report counts and forwarder identity only from the backup's own copy of a file root or the old service's account owned (HOL-SEC-197); uninstall names the backup (it holds the old relay's secrets) and deletes it zeroed on a yes (`remove_backup` in answer files, HOL-SEC-198). Since 0.14 a relay on release programs also offers "Rebuild from this copy" (kept as the choice), a clone older than the running relay asks before it rebuilds, "Go back to signed releases" undoes a source build, the change menu can leave the Let's Encrypt staging service, a token file may name `DUCKDNS_TOKEN=`, CAKE fair share is set up on self-hosted relays (a setup copy without the CAKE unit never goes live) and `--deny` runs without a terminal.
 
 **Docker by hand** (`relay-uws/docker-compose.yml`, ONE `.env`): services `certbot-init` (one-shot, host net, `deploy/certbot/issue.sh`; everything waits on `service_completed_successfully`, so a failed issuance stops `docker compose up`), `certbot-renew` (`renew-loop.sh`, 12 h), `duckdns` (updater, exits 0 without a DuckDNS name), `relay` (journald logging, curl healthcheck, keys dir mounted read-only), `push` (shares the relay's netns, always runs, UnifiedPush only), `coturn` (`profiles: [turn]`, `user: 65999:65999, `CERT_DIR=/certs/turn``), `forwarder` (`profiles: [forwarder]`, host net, UDP 40000-40199, `fwd-data` volume). Forwarder id: `docker compose run --rm --no-deps forwarder --print-peer-id` (reads the stored id, never mints; start the stack once first) into `FORWARDER_PEER_ID`. No boot unit needed: `restart: unless-stopped` survives a reboot (proven); `deploy/hollow-relay-docker-compose.service` is obsolete.
 
@@ -1453,8 +1505,12 @@ Traps kept from the September bring-up:
 | License key required but missing | `license_key_required`, connection closed 1008 |
 | License key invalid | `invalid_license_key`, connection closed 1008 |
 | License key already held by 5 other peers | `license_key_in_use`, connection closed 1008; the client keeps retrying with backoff and keeps its key |
-| IP has ≥34 active connections | `ip_limit`, connection closed 1008 (pre-auth) |
-| IP opened ≥10 connections in last 60s | `rate_limit`, connection closed 1008 (pre-auth) |
+| Address at its open cap (`CONN_LIMIT_IPV4` 512, `CONN_LIMIT_IPV6` 128 per /64) | `ip_limit`, connection closed 1008 (pre-auth) |
+| Address out of new-connection tokens (`CONN_RATE_*`) | `rate_limit`, connection closed 1008 (pre-auth) |
+| Too many logins in progress, this socket stalled in the heaviest share | `login_busy`, closed 1008 |
+| Relay at `CONNECTED_LIMIT`, this socket in the heaviest share | `relay_full`, closed 1008 |
+| Address on the operator denylist | `network_denied`, closed 1008 (at the challenge) |
+| Identity or a device its fold counts on the denylist | `account_denied`, closed 1008 (after the signature) |
 | Guest joins > 3 rooms | `{"type":"error","error":"Guest room limit reached"}` |
 | Guest sends 0x04 (SendDirect) | Silently dropped |
 | Guest sends >10 binary 0x03 frames/min | Silently dropped |
@@ -1545,6 +1601,14 @@ iOS build/config: classic non-UIScene AppDelegate + firebase pinned below the iO
 
 `lock_get {locks:[{server, owner}]}` answers one `lock_chain {server, owner, links}` per entry (empty when none; guests refused). `lock_put {server, owner, links}` offers a chain or next links; the answer is `lock_chain` with the chain held afterwards and `put: true` when the submitted newest lock is now the relay's (guests and fetch sockets refused). Rules in `join_lock::relay_put`, verification via libsodium (`verify_ed25519`, `derive_peer_id`, `genesis_server_id`). Records keyed by server id (40-hex) or server|owner; at most 256 links, 100,000 records, least recently used evicted. Rides the restart snapshot (codec v4, `Lock{key, links_json}`). Test: `test/test_join_lock.cpp` (a signed vector pinned with the Rust test). Deployed 2026-09-29; older clients never send these.
 
+**Device-bound (0.14, track R, DEVICE_PROOF_DESIGN section 12; `security_write_gates` §61).** Every link carries a device proof (`dev`: the device key, the identity it names, a `hollow-lock-dev1` signature by that device). The master key alone proves nothing: an owner base, or any new link after a proof link, is taken only from a device the relay's ROSTER AUTHORITY counts (the removal walk over the held roster, `Roster::authority()`, cached in the roster book until that roster changes and charged to the breaker; not the inbox fold, so after a mutual removal the device closest to the phrase still moves the lock). A broken proof is a forgery. A link whose proof names a device the relay no longer counts is DEAD: only a counted device of the owner, or of the dead link's own identity, holding the change key before it may extend an older lock past it (a stolen device's sibling recovers; an ex-mod's older change key moves nothing); a link without a proof is never dead. Resets jump at most `RESET_STEP` (2^20) past the newest lock, and a lock past `FROZEN_FROM` gives way to a counted owner device's new start. A put is priced at two signature checks per link plus the checks of the held chain it is judged against. `join_lock.rs` and `join_lock.h` stay twins with pinned vectors on both sides. Clients seal change keys per counted device (8 per identity, closest to the phrase first) once the fold accepts device grants, move the lock on ANY member device removal (a mod remover moves first, ahead of its own removal), and back off an owner whose offers the relay never keeps (a 0.13 relay drops the proof) up to ten minutes. 0.13 clients lose the door of a server once a 0.14 device moves its lock (AR-38).
+
+**Hidden members' door asks (0.14).** A member the relay hides asks for its door only after the relay's chain read lands, or 15 s (a grant that beat the read was dropped; answerers hand one device a door only every 20 s), re-reads the chain every 20 s and asks again when it shows a lock past the door it holds (a settler that moved the lock on a kick before settling left such members hidden for good). Away (backgrounded) devices answer no door ask and serve no hidden join ask: they decide from a frozen view (`door_room.h` ReachPicks: only on-screen clients answer).
+
+## Roster check (`roster_check.h`, 0.14, design ROSTER-CHECK)
+
+`{"type":"roster_check","room","master","device","n"}` asks for the statements the relay's roster book holds for one identity, so a member can judge a co-member's device by a second source before it hands that device a KeyPackage or takes its Welcome. The answer is `roster_checked {room, master, device, n, roster}`: statements, never a verdict; every refusal answers the same `roster: null`, so it tells nothing about why, and only shape-checked fields are echoed. It is a counted stream frame (`send_stream`). The relay answers only a FULL socket (never fetch or guest) holding its slot in a room named like a server (legacy 32-hex or 40-hex; where the relay holds the room's join lock, only a holder of the newest door, never one in grace), about a device presence lists to the asker there AND its own fold places (a consent alone places nothing). So the query names nothing a stranger could not already hear. `auth_ok` and `resumed` carry `roster_check: true`. Priced at the lookup and fold plus 1 W per KiB of the largest answer; the dump is cached per record version. `test/test_roster_check.cpp` replays `roster_check_vectors.json`, which the client's harness relay reads too. Residual: the relay cannot tell a pair's DM room from a legacy server room, so a pending friend request's target can read the requester's current roster there. Client side: `node/roster_check.rs` (`rust_swarm_event_loop` "Relay-facing books").
+
 ## Security properties
 
 - **Zero-knowledge routing:** The relay never decrypts message content. All payloads are opaque bytes.
@@ -1552,16 +1616,16 @@ iOS build/config: classic non-UIScene AppDelegate + firebase pinned below the iO
 - **No metadata logging (source-enforced, 2026-06-23):** NO log statement in the relay prints a peer_id, room, push target/sender, channel, server, or push token. The entire `[push]` family (buffer/replay/send-push/token-register/prefs/channel-push/direct-not-in-room) and `[license] Key revoked for peer <id>` were stripped — the relay must not record who-talks-to-whom (a truncated `12D3KooW…` prefix still fingerprints). Only aggregate counts (`Swept N`, `Loaded N key(s)`), config-file paths in parse errors, and `[main]` startup/shutdown banners remain. peer_ids in `state.*` maps / protocol `send_json` responses / signature strings are routing logic, NOT logging. See `feedback_relay_no_metadata_logging.md`.
 - **Sender identity injection:** For binary types 0x02/0x03/0x04, the relay replaces/injects the sender's peer_id — peers cannot spoof their identity to the relay.
 - **Auth anti-replay:** the per-socket one-use nonce (v2/v3); the 60-second skew window binds only the legacy signed HTTP requests (v1 frames are refused since 0.12). The client stamps relay-judged statements (login, ring control, nickname claims) with the relay's time (`node/relay_clock.rs`); anything a peer judges stays on the device clock.
-- **No rate limiting:** Removed — Ed25519 auth + license keys are the DoS protection layer.
+- **No per-message rate limit or byte quota (AR-01):** flood protection is the operator's connection limits (per address, login window, connected book), the send budget and the circuit breaker, enforced by default since 0.14.
 - **Room isolation:** Peers can only send to rooms they've joined. Non-members are silently rejected.
 - **License revocation:** Active connections can be terminated within 30 seconds by removing their key from `keys.json`.
 
-## Send budget and circuit breaker (0.13)
+## Send budget and circuit breaker (0.13, enforced in 0.14)
 
 Two separate limits, neither of them a per-message rate limit (AR-01). Write gates: `security_write_gates` §52.
 
 - **Send budget** (`send_budget.h`): bounds the bytes the relay holds for slow readers, so a few addresses sending large broadcasts can no longer exhaust the box's memory (uWS used to buffer whole frames past `maxBackpressure`). At most 64 MB per socket, a global budget of a quarter of RAM (floor 512 MiB, `HOLLOW_SEND_BUDGET_BYTES` overrides), charged per address share. Under pressure the least progressed reader of the heaviest share is closed. Memory safety, not a volume quota. `/server-stats` shows `send_budget_bytes`.
-- **Circuit breaker** (`breaker.h`, `msg_plan.h`): charges every frame in work units W (frames + the writes they cause + 6 per signature check + 4 per door proof + members/32) against per-session buckets (`breaker::Limits`: start 400k, cap 800k, refill 1,000 W/s; joins start 2,500, cap 5,000, 2 a second; at most 50,000 distinct stranger targets per 10 minutes; fresh starts get 400k, 100k or 24k by how often their address block starts fresh sessions; a 1.2M pool per address block). A frame the bucket cannot pay for closes the socket 1013 with a reconnect hint (`close_once`, grace, resume); the frame is uncounted and resent, never dropped. The device ladder (1 m, 5 m, 30 m, 2 h, 24 h, one level forgotten per 6 h without a trip) steps only when a session overspends the whole honest budget within 10 minutes (cap plus 10 minutes of refill, 1.4M W); any other trip is a pause. A hidden sender reaches at most three provers per broadcast and writes no ring but `~join` (0.14, `security_write_gates` §55c), and is charged for those.
-- **Shadow mode** is the 0.13 default: the relay counts would-be trips and closes nothing; build with `HOLLOW_BREAKER_ENFORCE` to enforce (0.14 at the latest, once the shadow counters show no honest trips). `auth_ok`/`resumed` carry the credit and `enforced`; clients mirror the buckets (`relay_pace.rs`, `breaker_vectors.json`, change both) and wait only when `enforced`.
+- **Circuit breaker** (`breaker.h`, `msg_plan.h`): charges every frame in work units W (frames + the writes they cause + 6 per signature check + 4 per door proof + members/32) against per-session buckets (`breaker::Limits`: start 400k, cap 800k, refill 1,000 W/s; joins start 2,500, cap 5,000, 2 a second; at most 50,000 distinct stranger targets per 10 minutes; fresh starts get 400k, 100k or 24k by how often their address block starts fresh sessions; a 1.2M pool per address block). A frame the bucket cannot pay for closes the socket 1013 with a reconnect hint (`close_once`, grace, resume); the frame is uncounted and resent, never dropped. The device ladder (1 m, 5 m, 30 m, 2 h, 24 h, one level forgotten per 6 h without a trip) steps only when a session overspends the whole honest budget within 10 minutes (cap plus 10 minutes of refill, 1.4M W); any other trip is a pause. A hidden sender reaches at most three provers per broadcast and writes no ring but `~join` (0.14, `security_write_gates` §55c), and is charged for those. The relay builds a hidden sender's picks once per frame and charges the room walk on top of the deliveries; the judged price of lock moves and leaves is pinned by plan-level tests (`test_breaker`), and guest refusals run before the send budget.
+- **Enforced by default since 0.14** (`BREAKER_MODE=enforce`, `conn_limits.h`; 0.13 shipped shadow). `BREAKER_MODE=shadow` is the operator's escape hatch: every trip is booked exactly as enforcement would and nothing closes; the setup shows "count only" only then. A live-test build compiles `HOLLOW_BREAKER_ENFORCE=0` to make shadow its default. `auth_ok`/`resumed` carry the credit and `enforced`; clients mirror the buckets (`relay_pace.rs`, `breaker_vectors.json`, change both) and wait only when `enforced`.
 - `/server-stats` carries a coarse `breaker` block (anonymous trip totals) while `PUBLIC_STATS` is on; `PUBLIC_STATS=off` drops it. An operator cannot lower the compiled-in numbers.
 - Tests: `test_breaker`, `test_send_budget`, `test_door_room`, `test_fair_share`; live suites `breaker_shadow`, `breaker_enforce`, `oom` (plain and SANITIZE).

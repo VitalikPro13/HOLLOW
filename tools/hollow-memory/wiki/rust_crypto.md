@@ -28,6 +28,14 @@ outside `crypto/`:
   models it too), so a device whose roster was behind at connect owned nothing in its own
   inbox until reconnect: `swarm::reprove_own_inbox` re-sends `JoinInbox` whenever ingest
   changes our own roster (`a_device_behind_on_its_roster_proves_its_inbox_once_it_catches_up`).
+  0.14: the vouch cap judges each vouch by its signer's validity under the removal walk
+  (HOL-SEC-189): only tier-0 signers' removals void a vouch (a master-key pending join never
+  demotes one); each valid device keeps its vouch from its nearest valid voucher, then the
+  walk's support paths, then the plain rank tree, so compacting twice changes nothing;
+  standing is ranked over the best `MAX_CONSENTS` consents first. Server authority reads
+  `Roster::authority()` (the removal walk with reserved slots). `roster.rs` and the relay's
+  `roster.h` stay twins; `roster_vectors.json` pins the flood, pending-join and
+  consent-overflow cases. Every device re-shows its roster to the relay every 30 minutes.
 - `node/link_pake.rs`: the link channel. SPAKE2 (RustCrypto `spake2` 0.4, Ed25519 group,
   identities `hollow-link1:{rendezvous}:joiner|presenter`) on the code's 4-char secret part;
   HKDF-SHA256 with the rendezvous as salt gives a key per direction plus a confirm key; the
@@ -107,11 +115,15 @@ Fire-and-forget persistence of both account state and the specific peer session.
 
 Called after every encrypt/decrypt operation to ensure the ratchet state survives crashes.
 
+**Olm pickles in RAM (HOL-SEC-200, 0.14):** pickles are `olm_manager::Pickle` (`Zeroizing<String>`) end to end: serialization, the CryptoStore channel, the SQL bind and every read back. Build them only via `pickle_json` (measures the JSON first and writes into a buffer of exactly that size; a write past it fails instead of growing); never put an account pickle through `serde_json::Value` (the account row is written straight from the pickle and read back as two typed views). Every process entry (app init, node start, push fetch, the iOS NSE, the forwarder) calls `crash_dumps::keep_secrets_out` (RLIMIT_CORE 0 on Unix, heap out of Windows Error Reporting dumps). Never `PR_SET_DUMPABLE=0` on Linux: xdg-desktop-portal and PipeWire identify a flatpak client through /proc/PID/root and the flatpak loses them.
+
 ### MLS State Persistence
 
 `crypto_handler:persist_mls_state(mls, crypto_store)`
 
-Sends the CryptoStore actor an `MlsSave`: the signer, the credential and ONLY the store rows that changed since the last save (0.13, G1 scale fix 5; it used to write the whole store, every group, per sent message: 5 MB at a 1k server). `crypto/mls_storage.rs` `TrackedStorage` wraps `openmls_memory_storage` and notes the row key every write touches (a test-only check after each write fails if any other row changed). A failed save raises `CryptoStore::take_mls_resync`, and the next save is a whole one. `persist_mls_state_awaited` returns the save's `MlsSaved`: the watch plus its TAKE number (`MlsManager::taken`, counted per take, failed builds included). A landed save at take N means the state of every frame encrypted before take N is on disk: an incremental save lands only while no earlier one failed (the actor refuses changes while broken), a whole one holds everything.
+Sends the CryptoStore actor an `MlsSave`: the signer, the credential and ONLY the store rows that changed since the last save (0.13, G1 scale fix 5; it used to write the whole store, every group, per sent message: 5 MB at a 1k server). `crypto/mls_storage.rs` `TrackedStorage` wraps `openmls_memory_storage` and notes the row key every write touches. It does NOT delegate every write (HOL-SEC-201, 0.14): rows of the key-material labels (message and epoch secrets, resumption PSK, group state, HPKE, signature and epoch key pairs, KeyPackages, PSKs) are written and deleted by `TrackedStorage::put`/`remove` themselves, in one pass into a buffer that wipes what it outgrows (`wiped::json_wiped`), wiping the row each write replaces or deletes; only public rows and the read-modify-write lists go through `track` to the memory store. A NEW key-material write goes through `put`/`remove` too. In tests every `put`/`remove` is held to the memory store's own key and bytes (`verify::same_write_as_theirs`, `same_delete_as_theirs`), so a drifting key shape fails every MLS test, and `track` still checks that no other row changed. A failed save raises `CryptoStore::take_mls_resync`, and the next save is a whole one. `persist_mls_state_awaited` returns the save's `MlsSaved`: the watch plus its TAKE number (`MlsManager::taken`, counted per take, failed builds included). A landed save at take N means the state of every frame encrypted before take N is on disk: an incremental save lands only while no earlier one failed (the actor refuses changes while broken), a whole one holds everything.
+
+**Key material in RAM (HOL-SEC-201, 0.14):** save rows, the signer, a pre-0.13 blob and every row read back are `wiped::SecretBytes` from the take through the CryptoStore channel to the SQL bind and back; rows from disk MOVE into the store (`load_rows`), never copied; a store let go wipes every row. The signer is written by `MlsManager::signer_bytes` (`sized_json`, exact size) and read by `signer_from_row`, which deserializes the row into its own `SignerRow { private, public, signature_scheme }` (private through `wiped::secret_bytes`) and rebuilds it with `SignatureKeyPair::from_raw`. Those field names are the ones OpenMLS's `SignatureKeyPair` serializes: an OpenMLS bump that renames or adds a required field breaks signer load (test `the_signer_reads_back_as_the_crate_reads_it`). Helpers in `crypto/wiped.rs`: `sized_json` (exact), `json_wiped`/`WipingWriter` (one pass, wipes what it outgrows), `read_to_end_wiped`, `secret_bytes` (serde reader). Cost: about 20-25 us per 46 KB message-secrets write at 1k members (the wipe of the replaced row). Not wiped: OpenMLS's own serde_json parse of a row it reads, the public rows the memory store writes, the past-epoch compressor's window, SQLite's copies and page cache (`cipher_memory_security` stays off: 8-22x slower reads on the Mac, stack overflow on Windows), stack copies.
 
 **CRITICAL:** Must be called after every MLS encrypt AND decrypt. The MLS secret tree advances on encrypt — if not persisted, app restart reuses the old generation, causing `SecretReuseError` on the receiving peer. `send_mls_broadcast_in`, `send_mls_broadcast_topic` and the meeting chat (`conference::send_group_line`) send their frame as `WsCommand::AfterMlsSave`: the sealing stage releases it only once the save is on disk; when it FAILS the sealer asks the node for a whole save (`WsCommand::MlsSaveAgain { after }`, answered by `crypto_handler::mls_save_again`: a whole save queued after `after` that has not failed is reused, else a new one) and gives the frame up only after 3 such asks failed (an ask answered later than 10 s counts as one); a save still PENDING is waited on, never replaced, up to `MLS_SAVE_PATIENCE` (60 s) per frame. `olm_lane::MlsReleases` keeps the newest landed take: any frame whose take is at or below it goes at once without asking (g13 s2f: a burst of N frames behind one failure costs ONE whole save, one more per further failure), and copies of a given-up frame (same take) follow it. The offline 0x09 copies of a post carry the same `MlsSaved`. The MLS twin of AR-30. In the CryptoStore each save is one SAVEPOINT, and after a failed one every later save taken as a change is refused until a whole save lands; a lost save raises the resync flag only when no whole save taken after it is queued (`MlsShared::lost`), so refusals behind a queued whole save never cost a second one.
 
@@ -174,6 +186,14 @@ Security property: only MLS group members participate — non-members cannot bec
 Convenience wrapper: checks if a group exists for `server_id`, gets the member list via `mls.group_members(server_id)`, then calls `elect_coordinator` and compares the result to `local_peer`.
 
 The coordinator is responsible for processing MLS membership changes (adding/removing members via commits).
+
+**0.14: lowest-id is the LEGACY rule only.** `standing::rule(mls, state, group_key)` decides per group: an anchored server (any non-Legacy anchor) leads every group by STANDING (`Rule::Standing`: the first online leaf holder by role tier, fold position, id; `standing::first_by_standing`); a Legacy-anchored server keeps the lowest-id election above (`Rule::Old`) until a checkpoint anchors it, or abstains when its tree already declares the tally. A leaf that predates the tally stands only while no online leaf declares it ("online" = a presence list or this device itself), so one fresh joiner never captures or freezes leadership. The ratchet (`ratchet_on`) refuses any commit writing a tally-less leaf in an anchored server, the owner's included, and groups founded from 0.14 put the tally in their context (meetings excepted). A responder is unfit only when none of its leaves declares the tally. Wiki `security_write_gates` §51.
+
+**KeyPackages ride Olm (c0410f9d, closes standing residual R6).** `MlsKeyPackage`, its forward and its ack go ONLY through `crypto_handler::carry_key_package` (Lane::Carried; a source scan test fails on any other send in swarm.rs), and `send_key_package_to_identity_of` fans that to every online device of the identity. The relay never reads a package, so it cannot hand one to a colluding member. A package that reached us inside a forward gets no ack in that dispatch. Every send passes `roster_check::gate` first (5103eeed, below). 0.13 and 0.14 no longer exchange KeyPackages.
+
+**The leafless walk (`walk_leaf_ask`, `standing::walk_order`).** A leafless asker walks the leaf holders by standing; a target that neither acks nor seats it within `WALK_STEP` (6 s) is passed; a pass that asked everyone restarts with a fresh package only after `pass_gap` (6 s doubling to `PASS_EVERY`, 60 s), so two leafless joiners answering each other Cannot settle at one package a minute (c643e872). Before its Welcome a joiner holds co-members' rosters only in the server's authority view, never in the resolver, so the walk ALSO places a device in the server's room through `standing::view_master` (exactly one counted roster lists it, none we hold places it; never a revoked device, one any view entry removed, one two rosters count, or an id named as a master). Only the walk reads the view; every other leader search and the stale-leaf repair keep the resolver, and the repair checks its target is reachable before minting. A walk serves one membership; an owner device that asks its siblings ends its walk. A joiner's Welcome is judged by the view for a leaf no held roster places: removed = refused, not counted yet = waits. Legacy servers keep the 0.12.2 rule.
+
+**Relay roster check (5103eeed, `node/roster_check.rs`).** Co-member rosters a joiner holds may predate a removal, so a member asks the relay (`roster_check`) for the statements its fold holds about the identity behind a device seen in a server room, verifies them and merges them under the recovery key its OWN rosters chose (the copy never picks one for a roster held without it). No KeyPackage reaches a foreign device the merge does not count (Legacy re-bootstrap included); a package for a device not judged yet is held, fair per server and package owner, and dropped only when the merge removes the device. Every server Welcome waits for its sender to be confirmed and is refused when the merge removes one of its leaves. A first-sight roster from a server room is held until the relay's copy merges in (only when it counts its own deliverer); a null answer judges only the device it named. The relay answers only a full socket in a server-shaped room (the newest door where locked) about a device it lists there and its fold places. A relay without the check keeps the old rule. Every device re-shows its roster to the relay every 30 minutes; a restarted node loop starts with an empty check book. Open: the target of a pending outgoing friend request can read the requester's current roster from the pair's DM room.
 
 **ONE device per identity FOUNDS a group (2026-10-08, 0.12.1).** A device holding no copy of a
 server group or subgroup never creates one while another device of its identity is online:
@@ -250,7 +270,7 @@ leaf" branch drops the stale one sharing our credential in the SAME commit.
 
 **KeyPackage handler exception:** When processing an incoming KeyPackage, the sender is excluded from coordinator election (they sent it because they lost their group). The handler builds a custom candidate list filtering out `peer_str` instead of using `is_mls_coordinator()`. Without this, the lowest-peer-ID member losing their group creates a permanent recovery deadlock.
 
-**A new device's leaf (session 24, fleet `device_link` G7).** The sender is ALSO excluded by the master certified in its KeyPackage (`sender_leaf.master`): a just-linked device's KeyPackage rides the Relay lane and outruns its roster, which rides Olm, so the receiver's resolver could not yet tie it to the owner, kept the owner (the sender's own identity) as the preferred committer and skipped the KeyPackage; the owner never saw it. Nothing asked again without channel traffic, so the new device stayed leafless: friends' posts reached it only as hints and its own posts took the Olm fallback, which skipped its own siblings. Three fixes: batch-tick phase 0b re-asks for any server group a CRDT member does not hold once `MLS_BOOTSTRAP_TIMEOUT` lapses (`request_server_leaf`: the owner, our own siblings when the owner is our identity, they re-add a sibling, else the lowest online member); the receiver exclusion above; `olm_fanout_channel_envelope` no longer skips our own identity (our device is never in `ws_room_peers`). Harness `a_new_device_whose_first_leaf_ask_is_lost_asks_again`, `a_leafless_devices_post_reaches_its_sibling`, `the_owners_new_device_gets_its_leaf_and_every_post`.
+**A new device's leaf (session 24, fleet `device_link` G7).** The sender is ALSO excluded by the master certified in its KeyPackage (`sender_leaf.master`): a just-linked device's KeyPackage rode the Relay lane then (it rides Olm since 0.14) and outran its roster, so the receiver's resolver could not yet tie it to the owner, kept the owner (the sender's own identity) as the preferred committer and skipped the KeyPackage; the owner never saw it. Nothing asked again without channel traffic, so the new device stayed leafless: friends' posts reached it only as hints and its own posts took the Olm fallback, which skipped its own siblings. Three fixes: batch-tick phase 0b re-asks for any server group a CRDT member does not hold once `MLS_BOOTSTRAP_TIMEOUT` lapses (`request_server_leaf`: the owner, our own siblings when the owner is our identity, they re-add a sibling, else the lowest online member); the receiver exclusion above; `olm_fanout_channel_envelope` no longer skips our own identity (our device is never in `ws_room_peers`). Harness `a_new_device_whose_first_leaf_ask_is_lost_asks_again`, `a_leafless_devices_post_reaches_its_sibling`, `the_owners_new_device_gets_its_leaf_and_every_post`.
 
 ### Unit Tests
 
@@ -315,7 +335,7 @@ Creates an outbound session using:
 - The peer's Curve25519 identity key
 - The peer's one-time key (consumed)
 
-Uses `SessionConfig::version_2()` (latest vodozemac session protocol). Inserts the session into the `sessions` map and marks the peer in `outbound_only`.
+Uses `SessionConfig::version_2()` (vodozemac 0.11.2 with the `experimental-session-config` feature; outbound setup is fallible). Refuses a small-order identity key or one-time key first (`small_order`). Inserts the session into the `sessions` map and marks the peer in `outbound_only`.
 
 **Outbound-only behavior:** All messages encrypted on this session produce PreKey (type 0) messages. This continues until the session is replaced by an inbound session (when the peer responds). This is vodozemac's behavior — the ratchet needs a response to advance past the PreKey stage.
 
@@ -326,7 +346,7 @@ Uses `SessionConfig::version_2()` (latest vodozemac session protocol). Inserts t
 Creates an inbound session from a received PreKey message. Steps:
 1. Decode the peer's identity key from base64.
 2. Parse `pre_key_message_bytes` as `OlmMessage::PreKey` (type 0). Errors if it's a Normal message.
-3. Call `account.create_inbound_session(their_identity_key, &pre_key_msg)` — returns the new session plus the decrypted plaintext.
+3. Call `account.create_inbound_session(SessionConfig::version_2(), their_identity_key, &pre_key_msg)` (HOL-SEC-161: `open_prekey` first refuses a PreKey whose wire version is not v2's, a small-order key, and since 0.14 a small-order INNER ratchet key, which vodozemac would only refuse at our first send, leaving a session that never answers): returns the new session plus the decrypted plaintext.
 4. Insert the session (replaces any existing session for this peer).
 5. Remove peer from `outbound_only` — inbound-derived sessions produce Normal (type 1) messages.
 
@@ -340,7 +360,7 @@ Encrypts plaintext for a peer. Returns `(message_type, ciphertext_bytes)`:
 - `message_type = 0` — PreKey message (contains session establishment data)
 - `message_type = 1` — Normal message (Double Ratchet)
 
-Fails with error if no session exists for the peer.
+Fails with error if no session exists for the peer. Since vodozemac 0.11 encrypt is fallible: a session whose encrypt fails is RETIRED at once (`retire_session`, counted as a send), so the next send re-keys and no stored copy of it comes back (test `a_session_that_cannot_encrypt_is_retired_so_the_next_send_re_keys`).
 
 `OlmManager:decrypt(peer_id, message_type, ciphertext_bytes) -> Result<Vec<u8>, String>`
 
@@ -370,9 +390,9 @@ When both peers simultaneously send `KeyRequest` and respond with `KeyBundle`, b
 
 ### Serialization for Persistence
 
-`OlmManager:account_pickle_json() -> Result<String, String>` — serializes the account to JSON via vodozemac's pickle format.
+`OlmManager:account_pickle_json() -> Result<Pickle, String>`: serializes the account via `pickle_json` (sized, wiped on drop).
 
-`OlmManager:session_pickle_json(peer_id) -> Result<Option<String>, String>` — serializes a specific session to JSON. Returns `None` if no session exists.
+`OlmManager:session_pickle_json(peer_id) -> Result<Option<Pickle>, String>`: serializes a specific session. Returns `None` if no session exists.
 
 ### Base64 Utilities
 
@@ -654,8 +674,9 @@ The `CryptoStore` is a fire-and-forget persistence actor that runs on a `spawn_b
 
 ```rust
 pub(crate) enum CryptoStoreCmd {
-    SaveAccount(String),                         // account pickle JSON
-    SaveSession { peer_id: String, pickle: String },  // session pickle JSON
+    SaveAccount(Pickle),                         // account pickle (Zeroizing)
+    SaveSession { peer_id, pickle: Pickle, version: SessionVersion, saved: Option<watch::Sender<Saved>> },  // max-wins (AR-30)
+    // ... MLS saves and the rest: see crypto/store.rs
 }
 ```
 
@@ -709,7 +730,7 @@ On startup, `MlsManager::load_from(store, group_keys)` restores the rows (laid o
 |-------|-------|-----------|--------------|---------|
 | Message signing | All messages | Ed25519 | N/A (identity keys) | ed25519-dalek (via NativeKeypair) |
 | DM encryption | 1:1 DMs | Olm Double Ratchet (Curve25519) | PreKey bundle (identity + OTK) | vodozemac |
-| Server encryption | Server channels | MLS (X25519 + AES-128-GCM) | KeyPackage + Welcome | OpenMLS 0.8 |
+| Server encryption | Server channels | MLS (X25519 + AES-128-GCM) | KeyPackage + Welcome | OpenMLS 0.9 |
 | Voice/video encryption | Media streams | SFrame (AES-128-GCM) | Derived from MLS epoch secret | Custom (export_secret) |
 
 ### Key Security Properties

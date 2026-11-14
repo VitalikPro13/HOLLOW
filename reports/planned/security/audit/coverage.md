@@ -297,6 +297,9 @@ the Android certificate were confirmed from code and memory, not re-run (EF/dist
 for the lead"). The self-hosted relay setup wizard and its signed `relay.json` feed (commit
 `41080e0d`, inside the scope commit) have no audit or hostile-review record in the sources read;
 the commit message notes the first real `relay.json` publish still waits for approval.
+Since then (2026-11-07, 0.14) the wizard had its own hostile review, which filed HOL-SEC-196
+to 199, and one fix round (3d62ce35); those finding files and requirements R-RS-09 to
+R-RS-11 are its record.
 
 ## WP6. Push, FCM, UnifiedPush, iOS NSE, channel push
 

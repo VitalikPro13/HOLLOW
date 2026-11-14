@@ -1,8 +1,8 @@
 # HOL-SEC-189: A removed device's vouch flood could uncount a device another voucher holds
 
 ```
-ID:          HOL-SEC-189                 Status: Fixed in worktree t14-ident (2026-11-04), uncommitted,
-                                         EMBARGOED until the 0.14 release
+ID:          HOL-SEC-189                 Status: Fixed on local branch security/0.14
+                                          (23891904, 2026-11-04), retest at release
 Severity:    Medium                      (Impact M: an honest linked device stops counting at every
                                           contact, in DMs and at the relay's inbox fold, until the
                                           phrase re-roots it; Exploitability M: needs a removed
@@ -13,6 +13,11 @@ Boundary:    TB-3 (own identity and its devices), TB-2 (peer and peer)
 Traces to:   HOL-SEC-079, HOL-SEC-080; DEVICE_PROOF_DESIGN rev 3.2 R31-4, RECHECK_REV32 RC32-10
 Attacker:    a removed (stolen) device
 Found:       2026-11-01 (REVIEW_REV31, R31-4)
+Affected:    every release from 0.12.0 (the signer-rank cap of HOL-SEC-079) through 0.13.0,
+             and every relay since ID-1R (2026-10-02)
+Embargo:     EMBARGOED until the 0.14 release (local branch security/0.14, never pushed);
+             the relay half deploys with the 0.14 relay, before clients; advisory with the
+             0.14 GHSAs
 ```
 
 ## Description

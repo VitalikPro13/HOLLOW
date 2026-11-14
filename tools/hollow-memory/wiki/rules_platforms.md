@@ -31,6 +31,18 @@ release pipeline is the `release` skill.
   `ios/Flutter/Variant-{prod,dev}.xcconfig`; a new id goes there, never as a literal.
   BUILDING.md "iOS dev variant", `feedback_pixel8_debug_flutter_run_only`.
 
+## Process secrets and stacks (0.14)
+
+- Every process entry (app init, node start, push fetch, the iOS extension, the forwarder)
+  calls `crash_dumps::keep_secrets_out` (RLIMIT_CORE 0 on Unix, heap out of Windows Error
+  Reporting dumps). Never `PR_SET_DUMPABLE=0` on Linux: xdg-desktop-portal and PipeWire
+  identify a flatpak client through /proc/PID/root, and the flatpak loses them (HOL-SEC-200).
+- Windows debug builds: tokio workers have a 2048 KiB stack and a debug poll frame keeps
+  every future built in it (`Box::pin(f(..))` still builds `f` in the caller). A new swarm
+  loop or request arm builds its future in a short non-async helper returning `BoxedStep`,
+  runs store calls via `off_worker_stack`, and gets a Windows debug harness run on the PC;
+  `0xc00000fd` = stack, not logic (74dae4d6, wiki `rust_swarm_event_loop`).
+
 ## Rendering
 
 - Windows + Linux run SKIA, not Impeller (`ImpellerSwitch::Disabled` /
@@ -109,6 +121,27 @@ release pipeline is the `release` skill.
   `MainFlutterWindow.awakeFromNib`. Wiki `security_write_gates` §43b.
 - Library validation on means no legacy DAL camera plug-ins in Hollow (macOS 12/13 only;
   14.1+ dropped them everywhere); Camera Extensions run out of process and still work.
+
+## Toolchain pins (0.14)
+
+- Flutter 3.47.9 everywhere (CI, `release-apple.yml`, BUILDING.md, and the old iMac that signs
+  Apple builds). Bump all of them together. Wiki `couplings_gotchas` "Flutter 3.47.9
+  upgrade leftovers".
+- mdk (fvp's media engine) = the 0.39.0 release asset pinned by SHA-256 on Windows, Linux and
+  Android (`FVP_DEPS_URL` + `FVP_DEPS_SHA256`; a wrong digest fails the build); Apple takes it
+  through fvp's checksummed Swift package, never a CocoaPods pin (it embedded mdk twice).
+  Never let fvp fall back to the SourceForge nightly.
+- `build_release.ps1` refuses to build with any `NATIVEAPI_*` variable set (tray_manager 0.7
+  would bundle a WinUI runtime). Linux build deps are the X11 and Xi headers (libx11-dev,
+  libxi-dev), not AppIndicator (the flatpak still carries its AppIndicator module).
+- tray_manager 0.7: ONE native menu, items refreshed in place before the right-click opens
+  it; the menu's modal loop never runs inside a Dart callback.
+- A Windows `hollow://` launch the running copy did not take is retried once.
+- SQLCipher 4.20.0 on SQLite 3.54.1 via rusqlite 0.42 (`sqlcipher-src`); every bump runs
+  `scripts/sqlcipher_amalgamation_diff.py` against the upstream tag and reopens a database
+  the old build wrote (WAL row included). zip 9.5.1: the ignored replay test opens every zip
+  kind an older build wrote through its real import path. Wiki `rust_storage_db` "Bumping
+  rusqlite / SQLCipher", `rust_archive`.
 
 ## Android build
 

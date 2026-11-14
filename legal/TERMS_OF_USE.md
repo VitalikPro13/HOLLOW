@@ -1,6 +1,6 @@
 # Hollow: Terms of Use
 
-**Last updated: October 19, 2026**
+**Last updated: November 14, 2026**
 
 These Terms of Use ("Terms") govern your access to and use of the Hollow application and related services ("Services") provided by AnonListen ("we", "us", "our"). By using Hollow, you agree to these Terms. Hollow asks you to agree to them before you create, restore or link an identity.
 
@@ -13,6 +13,8 @@ Hollow is a distributed, end-to-end encrypted communication application. Message
 You must be at least 13 years old (or the applicable age of majority in your jurisdiction, whichever is higher) to use Hollow. By using Hollow, you represent that you meet this requirement.
 
 If you are using Hollow on behalf of an organization, you represent that you have authority to bind that organization to these Terms.
+
+A server's owner can mark it as age-restricted (18+). Only join or use such a server if you are 18 or older. On iPhone, and on Android when Hollow came from an app store, age-restricted servers stay hidden until you allow them from Hollow on a computer, and they never have public channels.
 
 ## 3. Your account
 
@@ -56,7 +58,7 @@ If you become aware of any use of Hollow that violates these Terms, you may repo
 
 ### How we enforce these Terms
 
-We cannot read your messages, so we act on accounts, never on content. Where reports, block counts or other signals show that an account breaks these Terms, we may ban that account from the relays we operate. A count on its own never bans anyone automatically. An account named in repeated valid notices of infringement, including copyright notices, is banned from our relays. A ban reaches only the relays we operate. It does not touch the copy of Hollow on anyone's device (Section 6), and server owners keep moderating their own servers.
+We cannot read your messages, so we act on accounts, never on content. Where reports, block counts or other signals show that an account breaks these Terms, we may ban that account from the relays we operate. A count on its own never bans anyone automatically. An account named in repeated valid notices of infringement, including copyright notices, is banned from our relays. We act only on a notice that comes with evidence, and we can refuse three things: an account with its devices, a server, or a network address. A refused account's app says on every device that the relay does not accept it, and the relay drops the encrypted traffic it was holding for that account and its push tokens. Servers the account created are not refused with it. The members of a refused server see that it is not available on this relay. Their messages and files stay on their devices and stay readable, they can still leave the server or clear its messages, and their direct messages and other servers keep working. A ban reaches only the relays we operate. It does not touch the copy of Hollow on anyone's device (Section 6), and server owners keep moderating their own servers. A relay someone else runs sets its own rules, and Hollow says so when it shows that relay's refusal. Write to **privacy@anonlisten.com** to send us a notice.
 
 ## 6. Software ownership and your rights
 
@@ -65,6 +67,10 @@ Hollow is open-source software. The client application and core library are lice
 For commercial use without AGPL obligations (proprietary modifications, embedding, or enterprise deployments), a separate commercial license is available. Contact **collab@anonlisten.com**.
 
 The Hollow name, trademarks, logos, and associated branding are the property of AnonListen (Vitalii Rovinskyi) and are not covered by the open-source licenses.
+
+### Art from the Hollow shop
+
+Hollow shows art from the [Hollow shop](https://shop.anonlisten.com). You buy a piece on the artist's own Ko-fi page, outside Hollow, under the shop's own terms and refunds pages, which the piece's window in the app links to. Under EU consumer law you can usually cancel an online purchase within 14 days. For a digital item delivered at once, that right ends when delivery begins, provided you agreed to the immediate delivery and to losing the right. In the app you give that agreement by ticking the box beside Buy on Ko-fi before you pay, separately for each piece. Hollow installed from an app store shows no prices and no way to buy.
 
 **You own your copy of Hollow.** Once you download Hollow, it is yours. We cannot remotely disable, lock, or revoke your installed copy of the application. Your data, your keys, and your messages belong to you, not to us.
 

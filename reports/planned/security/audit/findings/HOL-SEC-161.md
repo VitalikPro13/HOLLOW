@@ -24,10 +24,21 @@ small order is refused before any session is built, inbound or outbound.
 
 ## Residual risk
 
-The ratchet keys of later messages are not checked; vodozemac rejects nothing there either,
-and L-02 found no way to use one.
+Since 0.14 (vodozemac 0.11.2) a PreKey's inner ratchet key is refused when it has small order
+too: vodozemac refuses a non-contributory ratchet step only at our first send, so a session
+built on one would install and could never answer. A session that fails to encrypt is
+retired, so the next send re-keys. The ratchet keys of later messages are refused by
+vodozemac itself since 0.10 (the ratchet step fails to decrypt), and its own 3DH refuses
+small-order keys and a v1 PreKey under the v2 config; Hollow's checks run first and keep their
+own reason.
 
 ## Test
 
 `a_prekey_with_a_truncated_mac_never_opens_a_session`,
-`a_small_order_key_never_starts_a_session`.
+`a_small_order_key_never_starts_a_session`,
+`a_prekey_with_a_small_order_ratchet_key_never_opens_a_session`,
+`the_crafted_prekey_with_an_honest_ratchet_key_opens_and_answers`,
+`a_session_that_cannot_encrypt_is_retired_so_the_next_send_re_keys`,
+`vodozemac_alone_refuses_a_v1_prekey_under_the_v2_config`,
+`vodozemac_alone_refuses_an_outbound_session_on_a_small_order_key`. Since 0.14 the two
+original tests also check that the refusal is Hollow's own, not vodozemac's.

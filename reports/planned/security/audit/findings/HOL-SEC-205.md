@@ -1,8 +1,8 @@
 # HOL-SEC-205: A received sticker pack was unpacked with no size limit as soon as its card showed
 
 ```
-ID:          HOL-SEC-205                 Status: Fixed in worktree t14-zipbomb (2026-11-14), uncommitted,
-                                         EMBARGOED until the 0.14 release
+ID:          HOL-SEC-205                 Status: Fixed on local branch security/0.14
+                                          (89d3a85d, 2026-11-14), retest at release
 Severity:    High                        (Impact M-H: every member who views the conversation
                                           runs out of memory and the app aborts, again on every
                                           open while the attachment stays; nothing is read or
@@ -16,6 +16,11 @@ Boundary:    TB-2 (peer and peer), TB-3 (server members)
 Traces to:   CLAUDE.md zip rule (enclosed_name + allowlist + size budget, HOL-SEC-129)
 Attacker:    any friend or server member who can send a file
 Found:       2026-11-14 (hostile review of track t14-deps, finding 1)
+Affected:    every release with sticker packs, from 0.10.0-beta (603853b5, 2026-08-01)
+             through 0.13.0 (the pack card); the shards import in every release through 0.13.0
+Fix commit:  89d3a85d (security/0.14, 2026-11-14)
+Embargo:     EMBARGOED until the 0.14 release (local branch security/0.14, never pushed);
+             advisory with the 0.14 GHSAs
 ```
 
 ## Description
@@ -63,9 +68,15 @@ check), `a_pack_whose_index_lists_more_entries_than_a_pack_holds_is_refused`,
 `a_shard_that_unpacks_past_its_bundle_refuses_the_bundle`,
 `shards_together_stop_at_the_bundle_budget` (all failed on the old code);
 `a_blob_that_inflates_past_the_sticker_cap_costs_only_the_cap`, `a_real_pack_still_imports`,
-`a_real_bundle_still_imports`, the `zip_budget` unit tests, the `.hollowpack` sweep tests
+`a_real_bundle_from_our_own_export_still_imports`, the `zip_budget` unit tests, the `.hollowpack` sweep tests
 `a_manifest_that_unpacks_past_its_cap_is_refused` and
 `a_file_that_inflates_past_its_cap_is_refused_before_it_is_hashed`, and the widget test
 "a pack that cannot be read shows a calm state and is read once", "a failure that is not
 the file is read again on the next open" and "packs are read one at a time". Mutation
-pass: see the track report.
+passes: 14 of 14 Rust and 2 of 2 Dart mutants killed, then 14 of 14 and 3 of 3 for the
+review fix round.
+
+## Residual risk
+
+None known. A pack inside its budget still costs the viewer up to that budget, about
+60 MiB, while its card reads it, and a bundle up to its own.

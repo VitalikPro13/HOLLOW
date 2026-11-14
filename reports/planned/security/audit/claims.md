@@ -26,7 +26,7 @@ Columns:
 |---|---|---|---|---|
 | C-01 | Only a current device of mine or my recovery phrase adds or removes my devices; the master key alone admits nothing. No message from any other identity changes which devices count as mine, or which devices count as someone else's. | P-01, all peers, P-08, P-09 | WP 3.2, 23.1 | Fixed on local main (HOL-SEC-001, HOL-SEC-077; reworded with design ID-1, 2026-10-01; HOL-SEC-082: a backup the phrase left out rejoined on its old seven days), retest at release |
 | C-02 | Nothing another identity sends can wipe, lock or destroy data on my devices. Only my recovery phrase (or a permission it signed for one device) orders my devices destroyed remotely; my own duress secret typed on a device wipes that device. | P-01, all peers, P-08 | WP 23.1 | Fixed on local main (HOL-SEC-001, HOL-SEC-077; reworded with design ID-1), retest at release |
-| C-03 | A removed device stops getting anything at once: everyone who has seen the removal stops sending it DMs, server messages and media keys, and its old sessions are dropped. It locks, and erases itself after three days unless the recovery phrase is typed on it. | P-01, P-08 | WP 3.6 | Fixed on local main (HOL-SEC-077, design ID-1; note 1), retest at release |
+| C-03 | A removed device stops getting anything at once: everyone who has seen the removal stops sending it DMs, server messages and media keys, and its old sessions are dropped. It locks, and erases itself after three days unless the recovery phrase is typed on it. | P-01, P-08 | WP 3.6 | Fixed on local main (HOL-SEC-077, design ID-1; note 1), retest at release; 0.14: a removed device also writes no server history, posts or edits past a server's cut (HOL-SEC-188, fixed on local security/0.14) |
 | C-04 | A replayed older roster never brings back a removed device. | P-01, all peers | WP 3.2 | Fixed on local main (HOL-SEC-079: a flood of anyone's statements pushed removals out; HOL-SEC-080: a removed device's own vouchee kept itself; the relay holds removals too, HOL-SEC-078), retest at release |
 | C-05 | Linking a new device hands my identity only to that device, and only after I confirm on a device I already hold. The relay never holds a secret that opens a link transfer; a relay that answers the code gets one guess. | P-01, P-02, all peers | WP 3.4 | Fixed on local main (HOL-SEC-002, reworded 2026-10-01; HOL-SEC-162: the code screens now say the code is only for a device you hold), retest at release |
 | C-06 | A copy of my identity file is useless without my machine (keychain mode) or my password (password mode). | P-09 | WP 2.3, 23.1 | Believed; "no protection" mode excluded by design |
@@ -48,7 +48,7 @@ Columns:
 | ID | Claim | Against | Source | Status |
 |---|---|---|---|---|
 | C-14 | Server content is readable only by current members. A removed or banned member cannot read anything sent after the removal. | P-01, P-05 | WP 5, 23.1 | Believed |
-| C-15 | Only holders of the required role can change server state (roles, channels, permissions, bans, kicks, ownership), and an operation claiming a false author is rejected by every client. | P-01, P-05 | WP 11, 23.1 | Believed |
+| C-15 | Only holders of the required role can change server state (roles, channels, permissions, bans, kicks, ownership), and an operation claiming a false author is rejected by every client. | P-01, P-05 | WP 11, 23.1 | Believed; 0.14: an op counts past the cut only from a device its author's roster counts (HOL-SEC-188) |
 | C-16 | Only the owner can delete a server. | P-01, P-05 | server delete tombstone | Believed |
 | C-17 | Nobody can post, edit, delete or react as someone else, and mutes and bans are enforced by every receiving client. | P-01, P-05 | WP 15, moderation | Believed |
 | C-18 | A restricted channel's messages, live and historical, reach only the people allowed to see that channel. | P-01, P-05 | #32, backfill gate | Believed |
@@ -67,7 +67,7 @@ Columns:
 
 | ID | Claim | Against | Source | Status |
 |---|---|---|---|---|
-| C-24 | A fully malicious relay sees routing metadata only: device peer ids, which rooms they are in, and the timing and size of traffic. From that it can tell which devices belong together and who talks to whom. It never reads content, profiles, names, server or channel details, friend lists, read state or any other data. | P-01 | WP 3.1, 23.1 | Reworded 2026-09-28 (Vitalii); held for 0.12 with HOL-SEC-062 (design A-D1) and HOL-SEC-072 (meetings), see note 2 |
+| C-24 | A fully malicious relay sees routing metadata only: device peer ids, which rooms they are in, and the timing and size of traffic. From that it can tell which devices belong together and who talks to whom. It never reads content, profiles, names, server or channel details, friend lists, read state or any other data. | P-01 | WP 3.1, 23.1 | Reworded 2026-09-28 (Vitalii); held for 0.12 with HOL-SEC-062 (design A-D1) and HOL-SEC-072 (meetings), see note 2; 0.14: a computer's sibling mutes let the relay infer which of its identity's servers are age-restricted (R-RS-16, accepted by Vitalii 2026-11-12), and a self-hosted install's push fetch no longer dials the official relay (HOL-SEC-204) |
 | C-25 | A malicious relay can delay or drop traffic, but cannot forge a message, a server change, a device list, a friend accept or a destroy order. | P-01 | WP 23.1 | Believed |
 | C-26 | Apple, Google and UnifiedPush distributors never receive message content. A wake's sender device id and, for a channel, server and channel ids and mention flag reach them only encrypted to the device (RFC 8291 on every path). | P-11 | WP 13 | Reworded 2026-10-04 (Vitalii, AR-26): the old wording left out the channel fields (C-RP-05). FCM/APNs wakes sealed 2026-10-18 (0.12.2, track B6, AR-26 closed), with no APNs collapse id and a seal time the phone checks (24 h + 10 min either side of its clock, once per reader); 0.12.1 phones keep the plain block until they update. Test: `push-sidecar/test/fcm_message.test.js`, `push_seal_*` |
 | C-27 | Reading a message with a link preview makes no request from my device to the linked site. | P-12 | WP 23.1 | Believed |
@@ -96,6 +96,8 @@ Columns:
 | C-35 | With App Lock on, no message content, name or notification is visible until unlock, and nothing appears above the lock screen. | P-09 | app lock | Fixed on local main (HOL-SEC-155: notifications showed content and a reply box, a link could open above the lock), retest at release |
 | C-36 | Someone who copies my locked phone's app data pays an Argon2id derivation for every App Lock PIN guess, and a new PIN has at least six digits; a passphrase puts guessing out of reach. | P-09 | WP 2.6 | Decided 2026-10-04 (Vitalii): six-digit minimum (HOL-SEC-159), offline guessing without hardware limits accepted as AR-24 |
 | C-37 | Logs never contain message content, keys, codes or passphrases. | P-09, support channels | logging rules | Fixed on local main (HOL-SEC-142: call keys reached the debug log; HOL-SEC-160: log lines and the support export held names and the link code), the C++ log filter checked in the regression pass |
+| C-38 | A post its author deleted stays only with the server's members, kept as evidence; Hollow never serves it to guests or anyone outside the server. Copies delivered before the deletion cannot be recalled. | P-03, P-04, P-06 (any non-member: guests, ex-members) | public channels, channel sync, file requests | Added 2026-11-05 (Vitalii, from HOL-SEC-194); fixed on local security/0.14 c7caff62 |
+| C-39 | Clearing a channel's history on my device stays on my device: other members keep their copies, and what my device serves never shows when or whether I cleared it. | P-03, P-05 (any member or guest my device answers) | Settings > Storage, Clear messages | Added 2026-11-05 (Vitalii, from AR-39); holds on local security/0.14 e45c0bec; residuals in AR-39 |
 
 ## What we do not promise
 
@@ -114,6 +116,8 @@ adds):
   most daily and less often in large servers, and a device that is rarely online or
   runs 0.12.x keeps its leaf longer, so a one-time copy reads until then (AR-25).
 - Apple and Google see when a phone is woken and how often (AR-26 residual).
+- A profile's name, picture and other fields are signed by the master key alone, so a
+  stolen device can change them until the person signs them again (AR-42).
 
 ## Notes
 

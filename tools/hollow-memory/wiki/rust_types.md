@@ -367,11 +367,21 @@ The plaintext wire protocol enum. Serialized as JSON with `#[serde(tag = "type")
 - **`Encrypted { message_type, body, identity_key }`** — `"encrypted"` — Olm-encrypted payload. `message_type` is 0 (PreKey) or 1 (Normal). `body` is base64 ciphertext. `identity_key` present for PreKey messages.
 - **`Ack`** — `"ack"` — acknowledgment (generic).
 
+### 0.14 additions (variants and events)
+
+- **`AgeGateSync { entry }`** (`"age_gate_sync"`, Carried/Olm, own devices only, also deposited in our own inbox): the identity's age-restricted choice for its phones.
+- **`SharedServers { ask, servers, part, pad }`** (`"shared_servers"`, Olm only, DEVICE_PROOF_DESIGN 8.7): which servers a friend shares with our identity, asked by a fresh install after a phrase recovery and answered in four frames of one size by a friend device that counts the asker.
+- **`VoiceChannelFwdWant`** (`"vc_fwd_want"`, targeted, Olm): a leg's ask for forwarded voices (gossip forwarding ships OFF).
+- **`MlsKeyPackage` / its forward / `MlsKeyPackageAck`** now ride Olm only (Lane::Carried), sent only via `crypto_handler::carry_key_package`.
+- **`MemberAdded.ask`** carries the joiner's `JoinAsk` (`hollow-join-ask2` names the invite key); **`MemberRemoved.seen`** the kicker's seen grants; **`CrdtOp.dev`** the device proof (wiki `rust_crdt`).
+- NetworkEvents: `AgeGateChanged { allowed }`, `ServerUnavailable { server_id }` / `ServerAvailable { server_id }` (relay refusal and lift), `RelayDenied { kind }` (`account_denied` / `network_denied`).
+- NodeCommands: `ResetInviteLink`, `AgeGateChanged`, `RevokeDevice { device_peer_id, mode: RemoveMode, with_dependents }` (retire vs lost or stolen), `RetryRelayDenials`, `RetryRelayDenial { room }`, `ChooseRestore`, `RefoldReviews`, `AnswerRefold`.
+
 ### CRDT Sync (Plaintext Path)
 
 These are the plaintext variants used before MLS is established or as fallback. MLS path uses `MessageEnvelope` equivalents.
 
-- **`SyncRequest { server_id, state_vector_json }`** — `"sync_request"` — request CRDT ops the peer has that we don't. `state_vector_json` is our CRDT state vector.
+- **`SyncRequest { server_id, state_vector_json, mls_epoch, nonce, full, digest, x }`** (`"sync_request"`): CRDT catch-up ask. `digest` (range digest) is the form for every self-certifying id; `state_vector_json` is read ONLY for a legacy id (`op_sync::reads_vector`, 0.14: the `dg` mark and vector re-asks are deleted; a vector ask for a 40-hex id is answered with nothing). `full` = one page of the whole log (`crdt_resync`); `x: Option<Box<sync_ext::AskExt>>` carries rosters (`want_rosters`), the floor round and the witness ask (track C); `nonce` is echoed by the answer.
 - **`SyncResponse { server_id, ops_json }`** — `"sync_response"` — response with missing CRDT ops.
 - **`CrdtOpBroadcast { server_id, op_json }`** — `"crdt_op"` — broadcast a single CRDT operation to all server members.
 - **`ServerJoinRequest { server_id, twitch_proof_json, nsfw_confirmed, requested_at, device_list, parked, key_package }`** (`"join_request"`): request to join a server. `twitch_proof_json` optional for Twitch-gated servers. **Pending joins rung 1 (2026-08-29), all `#[serde(default)]` for backward compat:** `nsfw_confirmed: bool` (set after the joiner accepts the NSFW prompt); `requested_at: i64` (Unix ms, the request NONCE, since every answer names it so a ring-replayed copy can never resolve a newer request; `0` means a pre-rung-1 client); `device_list: Option<SignedDeviceList>` (the joiner's OWN master-signed device list, since a member serving a PARKED copy has never been online with the joiner, so `resolve(sender_device)` alone would attribute the join to the wrong DEVICE id; absent means pre-rung-1, falls back to the resolver); `parked: bool` (true ONLY on the copy deposited into the room's `~join` ring, held to stricter rules than the live unicast copy: no coordinator-gate bypass, no interactive rejection written back into the ring).
@@ -383,7 +393,7 @@ These are the plaintext variants used before MLS is established or as fallback. 
 
 ### Channel Sync
 
-- **`ChannelSyncRequest { server_id, channel_id, since_timestamp, sender_timestamps, gap }`** — `"ch_sync_req"` — request channel messages since timestamp. `sender_timestamps: HashMap<String, i64>` for per-sender sync (empty = legacy fallback). `gap: Option<GapDigest>` (`#[serde(default)]`, #90) = what the requester holds behind its watermarks; the MLS twin `ChannelSyncReq` carries the same field.
+- **`ChannelSyncRequest { server_id, channel_id, since_timestamp, sender_timestamps, gap, partial_ok, until }`** (0.14 AR-39: `partial_ok` = the asker honours a page's `held_from`; `until` = nothing at or after this is wanted, the ask for a stretch it still lacks; the batch answer carries `held_from`): `"ch_sync_req"`: request channel messages since timestamp. `sender_timestamps: HashMap<String, i64>` for per-sender sync (empty = legacy fallback). `gap: Option<GapDigest>` (`#[serde(default)]`, #90) = what the requester holds behind its watermarks; the MLS twin `ChannelSyncReq` carries the same field.
 - **`ChannelSyncProbe { server_id, channel_id, our_latest, msg_count }`** — `"ch_sync_probe"` — lightweight probe asking "what's your latest timestamp for this channel?" Used to skip channels with no new messages before full sync.
 - **`ChannelSyncProbeResponse { server_id, channel_id, their_latest, msg_count }`** — `"ch_sync_probe_resp"` — response to a sync probe with the peer's latest timestamp and count.
 - **`DmSyncRequest { since_timestamp, both_directions, gap }`** — `"dm_sync_req"` — request missed DMs from a peer since timestamp; `gap: Option<GapDigest>` (#90) covers the rows behind it. `DmSiblingSyncRequest` carries `gaps: HashMap<convo, GapDigest>`.

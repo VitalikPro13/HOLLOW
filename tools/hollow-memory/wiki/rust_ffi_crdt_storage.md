@@ -65,6 +65,17 @@ A join whose members are ALL offline no longer fails after 15s -- it PARKS: `joi
 
 Events: `ServerJoinParked { server_id }` (the live window elapsed, now parked) and `PendingJoinUpdated { server_id, state, reason }` (`state` = `rejected` / `admitted` / `ready` / `discarded`), see `rust_types.md`.
 
+### crdt.rs:reset_server_invite_link() (0.14, 2f06e8ed)
+Signature: `fn reset_server_invite_link(server_id: String) -> Result<(), String>`. Owner only (Server settings > Access, with a confirm). Writes a new `JoinKeySet`: every invite link made before stops working, asks made with one are refused (`invite_reset`), people already in stay; the join lock moves at once. See `rust_crdt` § Join key and lock.
+
+### Device proof screens (`api/device_proof.rs`, 0.14 track C, dcce6b29)
+- `server_recovery(server_id) -> ServerRecovery`: the strip under a server chat's header (owner restoring, member removed meanwhile, owner with lost-device reviews). Refresh on `ServerUpdated` and app resume.
+- `refold_reviews(server_id) -> RefoldReviews` / `answer_refold_review(...)`: the owner's Lost devices page (REVIEW items of `crdt/refold.rs`); an answer is final.
+- `restore_choices() -> Restores` (poll every 2 s while open) / `choose_restore(server_id, cp: Option<String>)`: the restore chooser after a phrase recovery; `None` = "I don't know".
+
+### Age gate (`api/age_gate.rs`, 0.14, bef48c7d + 5965e6b9)
+`age_gate_status()`, `age_hidden_servers()` (every joined server this device hides; empty on a computer or an open gate), `server_age_hidden(server_id) -> Option<bool>` (push-isolate safe, opens the store itself; `None` while locked), `mark_age_gate_asked()`, `set_age_gate_for_phones(allow)` (a computer only; rides carried `AgeGateSync` to every own device), `set_age_gate_on_this_phone(allow)` (sideloaded Android only), `set_age_gate_store_install(bool)` (an Android build says at start whether a store installed it). Wiki `security_write_gates` §68, §71.
+
 ## Channel CRUD (crdt.rs)
 
 ### crdt.rs:create_channel()
@@ -310,6 +321,12 @@ Signature: `fn count_channel_messages_ffi(server_id: String, channel_id: String)
 
 ### storage.rs:search_channel_messages()
 Signature: `fn search_channel_messages(server_id: String, channel_id: String, query: String, limit: i32) -> Result<Vec<StoredChannelMessage>, String>`. Full-text search within a specific channel. Delegates to `ms.search_channel_messages()`.
+
+### storage.rs:clear_server_messages() (0.14, ef4f4ac2)
+Signature: `fn clear_server_messages(server_id: Option<String>) -> Result<ClearedMessages, String>`. Clears one server's channel history (`Some`) or every server's (`None`) from THIS device and keeps it cleared (channel floors: sync and backfill never store it again). DMs stay, nothing is sent; other members keep their copies. A clear cut short finishes at the next start.
+
+### storage.rs:channel_history_cleared() / channel_history_begins_later() (0.14, f0805308, e45c0bec)
+Both `fn (server_id, channel_id) -> Result<bool, String>`: the empty state's copy ("Older messages were cleared from this device." / "Older messages aren't on this device yet.") instead of claiming the channel starts there.
 
 ## Edit History (storage.rs)
 

@@ -1,13 +1,14 @@
 # HOL-SEC-187: The macOS app could load code from directories outside its bundle
 
 ```
-ID:          HOL-SEC-187                 Status: Partially fixed on local branch
-                                          security/0.14-mac-dylib (2026-10-31): load paths and
-                                          the library validation waiver fixed; the keychain
-                                          item old builds open moves to the data-protection
-                                          keychain in 0.14 (design approved 2026-10-31, built
-                                          on security/0.14-keychain 2026-11-01); retest on the
-                                          signed build (release-apple.yml macos-keychain-check)
+ID:          HOL-SEC-187                 Status: Fixed on local branch security/0.14:
+                                          load paths and the library validation waiver
+                                          (d957c635, 2026-10-31), the keychain item old
+                                          builds open moved to the data-protection keychain
+                                          (design 2fc4dc44, build b8b64d15, 2026-11-01), an
+                                          App Lock entry kept through a cut-short class move
+                                          (5da98071, 2026-11-05); retest on the notarized
+                                          0.14 build before release
 Severity:    High                        (Impact H: code running inside the signed app holds what
                                           the app holds: the keychain slot that opens without a
                                           prompt for Hollow's signature, the identity in memory,
@@ -26,6 +27,9 @@ Attacker:    another process running as the same macOS user
 Found:       2026-10-31 (review of the installed 0.12.2 app, confirmed by the lead)
 Affected:    every macOS release from 0.5.0, the first shipped macOS build (the macOS port,
              commit a7bb7ec0), through 0.13.0
+Embargo:     EMBARGOED until the 0.14 release (local branch security/0.14, never pushed);
+             the CI sign-stage patch applies only at the 0.14 release; advisory with the
+             0.14 GHSAs
 ```
 
 ## Description

@@ -15,7 +15,7 @@
 ### What was reviewed
 
 Hollow is a distributed, end-to-end encrypted chat and voice application: Rust core
-(`rust/hollow_core`), Flutter app on six platforms, and a C++ WebSocket relay
+(`rust/hollow_core`), Flutter app on five platforms (Windows, macOS, Linux, Android, iOS), and a C++ WebSocket relay
 (`relay-uws`) that members or Hollow run. This review covered the Rust core, the relay and
 its host, the parts of the Flutter app that make security decisions or handle untrusted
 input, the push path, and the release and update signing. It ran from 2026-09-26 to

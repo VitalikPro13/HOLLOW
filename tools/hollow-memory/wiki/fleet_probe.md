@@ -1001,6 +1001,15 @@ Redirect every run to a file (`> .team/x.log 2>&1`), as on Linux.
   audio, camera and screen share no (`calls_after`, `calls_record`, `regress_voice3`,
   `regress_media`, `dm_call_seam` for real): run those on Windows peers (`windows:<letter>` from
   the Mac) or the phones.
+  **Nor a relay on the LAN directly (2026-11-12):** a peer launched over ssh gets "No route to
+  host" to hollowsrv (192.168.18.36 since 11-13) while the mini's own shell reaches it: macOS Local Network
+  privacy refuses the app, and the same ssh attribution means no prompt ever grants it. Route
+  macOS peers through the fleet proxy (`-NetProxy` with `FLEET_RELAY_CONNECT=192.168.18.36:443`;
+  without it the proxy's upstream defaults to the PRODUCTION relay) or use Windows peers.
+  The proxy is shared and routes only the peers it started with (2026-11-13): `-Stop -Peers m`
+  stops it too (restart the others with `-Live -ReuseData -KeepOthers -NetProxy`), and a peer
+  started later with `-KeepOthers` gets no route and stays offline (stop all, start them together).
+  `-Build` boots the peers WITHOUT `-ReuseData`: their data goes back to the fixtures.
   Checked with `lsappinfo front` every 0.25 s and the on-screen window order
   (`CGWindowListCopyWindowInfo`, layer 0, no Screen Recording grant needed) every 0.2 s, plus
   `log show` for `SETFRONT` and tccd `AUTHREQ_ATTRIBUTION`.
@@ -1060,6 +1069,12 @@ on `Start-FreshFleet` / `fleet_send.ps1`. Media: see "What a macOS peer cannot c
 (no prompt, no captured audio); the screen-share audio helper is not built by `-Build`
 (`scripts/build_screen_audio.sh`). A launch while someone USES the mini: "Never the person's
 foreground" above (2026-10-17; every earlier proof ran with the screen locked).
+
+**A LAN relay (hollowsrv) from macOS peers (2026-11-07).** macOS Local Network privacy blocks
+the ad hoc signed peer app from a LAN address ("No route to host (os error 65)") while a shell
+reaches it. Run the lane with `-NetProxy` and `FLEET_RELAY_CONNECT=<hollowsrv LAN IP>:443`: the
+app dials the loopback proxy, TLS and the auth domain stay `hollowtest.duckdns.org`. The IP
+follows hollowsrv's DHCP lease.
 
 ## The device-link journey (`fleet_device_link.ps1`, 2026-09-10)
 
@@ -1150,7 +1165,9 @@ carry the same word, so `Invoke-TopDialogTap` reads the match count first and ta
 routes are pushed in tree order. `capture` grew `from: "count"` for exactly this: how many widgets
 a target matches, as a value a script can branch on. The provider snapshot grew `relayDomain`, so
 `wait_for provider:relayDomain` and `capture from:provider key:relayDomain` both answer "which relay
-is this instance actually on", which the screen only shows in one settings row.
+is this instance actually on", which the screen only shows in one settings row. `ageGateHeld` /
+`ageGateAllowed` say whether a phone is holding its 18+ servers until the relay has delivered (only
+once the shell built the gate; absent otherwise).
 
 **How the second relay was addressed for this proof.** The DuckDNS name was pointed BY HAND at a LAN
 address, the machine that forwards 443 into the VM, so the fleet on the Windows box resolves it
@@ -1559,3 +1576,80 @@ any relay session exists and turns the network back after 5 s: the earliest a pe
   every reconnect after it fails on that lock: kill the server by the pid in
   `.team\agent-pc-win\pid`.
 - Measured: about 11 min a cell (dead 150 s, fetch wait, 45 s absence window).
+
+## The relay denylist on a test relay (`relay_deny`, t14-deny, 2026-11-11)
+
+`deny_server.json`, `deny_identity.json`, `deny_network.json` and `deny_meeting.json` prove the
+operator's denylist (`relay-uws/src/deny_list.h`) on real peers. They need a THROWAWAY relay
+(hollowsrv, memory `reference_test_relay_vm_hollowsrv`) and identities onboarded FRESH onto it.
+
+- **`relay_deny` op** (`fleet_lifecycle.ps1` `Invoke-FleetRelayDeny`, dispatched first in
+  `Send-FleetStep`, runs on the driver whatever peer the step names):
+  `{"peer":"a","op":"relay_deny","value":"add server ${SID}"}`. Values: `check` or
+  `add|remove server|identity|network <entry>`; anything else refuses. It runs
+  `sudo hollow-relay-setup --plain --deny <value>` over ssh on `FLEET_RELAY_SSH` (user@host or an
+  ssh config name, e.g. `hollowsrv`). It can never reach production (`Resolve-FleetRelayDenyTarget`):
+  `FLEET_RELAY_SSH_OPTS` may hold only `-o Port=`, `-o ConnectTimeout=`, `-o HostKeyAlias=`
+  (ignored); `ssh -G` resolves the endpoint, which must have no ProxyJump/ProxyCommand, name no
+  `anonlisten` host, resolve to private addresses only and none of relay.anonlisten.com's or
+  141.227.186.209; the connection pins the test relay's ed25519 host key (a temp known_hosts,
+  `StrictHostKeyChecking=yes`; `FLEET_TEST_RELAY_HOSTKEY` replaces it for another test VM, e.g.
+  after a reinstall). Proof: `.team/m3_probe.ps1` in t14-denyproof (16 cases). `${NAME}` takes captures, then the
+  driver's environment. `allowMiss` passes a remove of an entry not listed (cleanups). The relay
+  rereads the file within about 2 s: time the effect with a `wait_for` right after.
+- **Identity entries are MASTER ids**: the probe's `peerId` provider is the master; the relay
+  refuses the devices its fold of that identity's rosters counts.
+- **The relay journal is the evidence that nothing passed** (`[deny] loaded: N servers` at add
+  and lift, nothing else). hollowsrv's journald keeps 1 h in RAM: tail it during the run
+  (`journalctl -u hollow-relay -f -n 0 -o short-iso` into a local file).
+- **macOS peers reach a LAN relay through the proxy only**: `FLEET_RELAY_CONNECT=192.168.18.37:443`
+  with `-NetProxy`; the iPhone simulator and Windows peers dial the relay's name directly.
+- **A running proxy routes only the peers it started with.** `Start-FleetProxy` now returns the
+  peers it routes; `fleet.ps1` writes `relay_connect` only for those and clears it for the rest
+  (`Clear-PeerRelayConnect`), so `-Live -KeepOthers -NetProxy -Peers ios:p` beside a running
+  macOS proxy dials directly ("the running proxy has no route for p") instead of never connecting.
+- **Stagger server joins**: each joiner seated (a message from it reached the owner) before the
+  next asks. Two leafless joiners at once (an iPhone and an Android, run 74) could miss the
+  Welcome, an MLS fix of its own, not a denylist failure.
+- **A bare `text:Try again` behind a dialog taps the modal barrier**, which closes the dialog
+  and asks nothing (run 76): name the dialog's button `dialog > text:Try again`.
+- **A toast lasts 3 s**: judge it with a `wait_for` right after the tap, then shoot; a fixed
+  wait, a shot and an `expect_count` (each a round trip through a phone agent) ran past it (run 75).
+- **Shots off the phones**: Android `adb exec-out run-as com.anonlisten.hollow cat
+  app_flutter/probe_out/<name>.png`; iPhone `xcrun simctl get_app_container <udid>
+  com.anonlisten.hollow data`/Documents/probe_out; Windows from the PC copy's `build/fleet_out/<letter>`.
+- **The installer's `--deny` asks nothing** (`UI_MODE=plain`), so it runs from ssh and cron; before
+  that fix it died with "there is no terminal to ask questions on" (`--plain` in the op covers
+  an older setup copy).
+- **`-Attach` sees only this machine's peers** (`Get-LivePeers` lists local folders): a fleet of
+  remote peers only (`windows:p,windows:q` from the mini) fails with "-Attach found no running
+  instances". Run it without `-Attach`, with `-ReuseData` to keep the onboarded identities
+  (`deny_lift`, 2026-11-12). A lift scenario waits 40 s before the lift: a sync ask still resending
+  (5 s, then 10 s) would otherwise fetch the change and hide a missing catch-up.
+
+## Keeping 0.14 fleets off the production relay (2026-11-12/14, OPEN pre-freeze item)
+
+Every fleet default still points at PRODUCTION (`relay.anonlisten.com`): an onboarding without
+`-Relay` leaves the welcome dialog's relay field empty (`Get-RelayWelcomeSteps` writes no steps, so
+the fixture is stamped with the official relay), and `Start-FleetProxy`'s upstream defaults to
+`relay.anonlisten.com:443` unless `FLEET_RELAY_CONNECT` is set. Only the `relay_deny` op refuses
+production by itself (`Resolve-FleetRelayDenyTarget`, above). A hard guard in the fleet tooling
+(refuse production unless an explicit flag says so) is a PRE-FREEZE item for 0.14 and not built yet;
+until it lands:
+
+- **Onboard every 0.14 identity with `-Relay <test relay>`** (hollowsrv / `hollowtest.duckdns.org`,
+  memory `reference_test_relay_vm_hollowsrv`). On 11-12 the t14-rostercheck fleet try 3 onboarded
+  throwaways r, s, u WITHOUT `-Relay`: they authenticated to production and created a server
+  there, and another try's proxy had no `FLEET_RELAY_CONNECT`, so its upstream went to production
+  (refused at TLS). A 0.14 client on the 0.13 production relay also hammers it: an owner made join
+  locks about 25 a second (2,985 in 2 min) on 11-05 because the relay never kept them.
+- **Never mix Mac and VM peers in one run** (`-Peers a=d,b=linux:q` from the mini). On 11-14 the VM
+  peer's TLS to hollowtest was answered with relay.anonlisten.com's certificate ("certificate not
+  valid for name hollowtest.duckdns.org"): the Mac side's proxy environment leaked into the remote
+  agent. The name check refused it, so nothing connected, but the route led to production. Run
+  VM-only fleets for Linux; they reach hollowtest correctly.
+- **Prove it in every digest**: each peer's first connect names the test relay, and
+  `relay.anonlisten.com` appears 0 times in every peer log (the t14-deps and t14-iospush runners
+  checked this). A runner that finds it reports the run void.
+- **Production cleanup** after a leak (a server or identity left there) is the lead's call; never
+  run `fleet_relay_restart` (it restarts PRODUCTION) as a fix.

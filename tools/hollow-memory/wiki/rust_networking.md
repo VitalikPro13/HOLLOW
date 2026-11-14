@@ -48,7 +48,12 @@ written itself, joins of that room prove it), `LeaveRoom`, `Subscribe { room_cod
 (0x09), `Carry` (writes nothing here: the sealing stage hands it to the node's Olm lane). Control:
 `CheckPeers`, `DiscoverPeers`, `GetTurnCredentials`, `GetMediaForwarder`, `Claim/Release/ResolveNickname`,
 `Claim/Release/ResolveLinkCode`, `RegisterPushToken`, `UnregisterPushToken`, `SetPushPrefs`,
-`SetTopicBuffer`, `TopicCatchup`, `KillDeposit`, `KillAck`, `LockGet`, `LockPut`, `ReportUser`.
+`SetTopicBuffer`, `TopicCatchup`, `KillDeposit`, `KillAck`, `LockGet`, `LockPut`, `ReportUser`,
+`RosterCheck { room_code, master, device, n }` (0.14, the relay's roster fold as a second source).
+Node-only, never written to the relay (0.14 denylist): `RefuseRoom { room }` (the node confirms a
+`room_denied` for one of ITS servers or meetings: leave it everywhere, write nothing more for it) and
+`RetryDenied { room }` (forget a refusal, every one incl. our login's for `None`, so the next join
+asks again: the person's Try again and the 6 h retry).
 
 `CheckPeers { peers, rooms }` feeds the 60 s peer liveness timer (3 s under `cfg(test)`; friends
 only). Reachability is `peer_is_reachable` (device-aware) and the query names
@@ -73,6 +78,15 @@ relay only ever sees DEVICE ids.
 - `LicenseError { reason }`, `RoomBudgetUpdate { joined, limit }`, `RoomCapHit { room }`,
   `PeerStatus`, `DiscoveredPeers`, `TurnCredentials`, `MediaForwarderInfo`, the nickname and link
   code events, `KillSignal { blob, signal }`, `LockChain`.
+- 0.14: `RoomDenied { room }` (a `room_denied` for a server or meeting room we joined or whose lock we
+  asked for, spelled as we joined it; `deniable_ask` drops every other room, so a relay cannot use it
+  to cut an inbox, DM, own-device, forwarder, link or share room; nothing changes until the node
+  answers `RefuseRoom`), `RelayDenied { kind }` (`account_denied` or `network_denied` at login:
+  `on_login_denied` emits it once, loses any session, and sets the next dial to
+  `relay_denial::retry_at`, 6 h plus up to 30 min of jitter; never a relay switch), `RelayRosterCheck
+  { answers }` (sent before a fresh or resumed session's own events: whether this relay answers
+  `roster_check`; a relay without it keeps the old rule), `RosterChecked { .. }` (the answer; a
+  non-object roster reads as none).
 
 **Orders** (`relay_session::on_drop`, `on_established`, `on_resume_refused`; pinned by
 `events_follow_the_order_of_section_9_8` and the wire tests):
@@ -290,10 +304,12 @@ dialled, so it counts as the relay's) whether it differs from the live socket's 
   are inside the relay's grace counted from our own `Suspended` (`suspended_at`, 120 s,
   `Timing::grace`), so a path that comes back by itself (router or ISP flap, a zombie that thaws:
   no OS event, no nudge) is resumed within seconds; otherwise 30 s. **A refusal brings the 30 s cap
-  back at once** (`refused`: a 1008 close, in the handshake (`rate_limit`, `ip_limit`, `bad_auth`)
-  or on a live socket, an `auth_failed`, a license refusal; `ConnectError::Refused`): each refused
-  socket spends the relay's 10-new-a-minute budget of the address, an unreachable path costs
-  nothing. Cleared when a socket is up. While `realtime_active()` (a call, voice channel or
+  back at once** (`refused`: a 1008 close, in the handshake (`rate_limit`, `ip_limit`, `login_busy`,
+  `relay_full`, `bad_auth`) or on a live socket, an `auth_failed`, a license refusal;
+  `ConnectError::Refused`): each refused socket spends the address's new-connection tokens at the
+  relay (`CONN_RATE_*`, an operator setting since 0.14), an unreachable path costs nothing. An
+  operator denial (`account_denied`, `network_denied`) is no ordinary refusal: no dial at all until
+  the jittered 6 h retry or the person's Try again (`RelayDenied` above). Cleared when a socket is up. While `realtime_active()` (a call, voice channel or
   conference is live) a steady 1 s (`Timing::realtime_retry`) and no climb, so an ICE restart offer
   can reach the relay inside the call's hold-open window. The attempt count resets on every
   success and every nudge.
@@ -334,13 +350,16 @@ error and takes the normal drop path. Never add a raw `write.send(...)` here. Me
 
 **ClientMsg** (serde-tagged JSON): `AuthHello`; `Auth { v, peer_id, public_key, timestamp, nonce,
 domain, signature, license_key?, fetch?, session?, in_h? }`; `Join { room, inbox_roster?,
-door_proof? }`; `Leave { room }`. Every other command is built by `command_frame()` as a JSON value
+door_proof?, pv?, have? }` (0.14: `pv: 2` on every join asks for batched presence; `have: true` when
+`presence_audit` holds a told view of the room, see below); `Leave { room }`. Every other command is built by `command_frame()` as a JSON value
 or a binary frame; the session frames come from `relay_session` (`hb_frame`, `ack_frame`,
 `INACTIVE`, `ACTIVE`, `END`).
 
-**ServerMsg** (serde-tagged JSON): `PeerJoined`, `PeerLeft`, `Members { room, peers, proved? }`
-(emits `DoorStatus` first; `proved` absent = an open room = true), `TopicCatchupDone`, `PeerStatus`,
-`DiscoveredPeers`, `TurnCredentials` (URIs naming any host but the relay's are dropped,
+**ServerMsg** (serde-tagged JSON): `PeerJoined`, `PeerLeft`, `Presence { room, ev }` (0.14
+batches), `Members { room, peers, proved?, digest?, count? }` (emits `DoorStatus` first; `proved`
+absent = an open room = true; digest and count = the short answer), `TopicCatchupDone`,
+`PeerStatus`, `DiscoveredPeers { room, digest, count, joined }` (0.14: never a list; a list from a
+relay before 0.13 adds no presence), `RoomDenied`, `RosterChecked`, `TurnCredentials` (URIs naming any host but the relay's are dropped,
 `turn_uris_on_relay`), `MediaForwarder`, `Error` ("Too many rooms" rolls back the last join),
 the nickname and link code answers, `KillSignal`, `KillDeposited`, `LockChain`, `HbAck { h }` and
 `Ack { h }` (both ack the outbound queue), `Reconnect { after_ms }` (the drain hint).
@@ -370,6 +389,21 @@ Layouts pinned by `commands_keep_their_wire_layout`.
 | `0x08` | `[0x08][room][0x00][topic][0x00][from][0x00][payload]` | `WsEvent::Message` |
 
 Parsing: `parse_binary_relay_frame()` (room, from, payload) and `dispatch_binary()`.
+
+### Presence batches and the short members answer (0.14, relay `presence_batch.h`)
+
+Every join says `pv: 2`, so the relay sends joins and leaves as `presence { room, ev: ["+id","-id"] }`
+frames (`ServerMsg::Presence`). `expand_presence` turns one into exactly the single `PeerJoined` /
+`PeerLeft` events it stands for, in order, each also fed to `presence_audit` (`on_joined` /
+`on_left`); ONE entry that does not read voids the whole frame and the room is asked for the full
+list (`Rooms::ask_full`), never applied in part. A join carries `have: true` when the audit holds a
+record of the room and no drift re-join is waiting (`asks_short`); the relay may then answer
+`members { digest, count }` instead of the list, and `told_matching` returns the told roster only if
+its digest and count match. Any difference (a lost frame, or a wrong relay) drops the record and
+re-joins without `have` for the full list (`rejoin_for_full_lists`, run after every handled frame,
+for every room kind, inbox rooms via `JoinInbox`); a change read after the record was dropped brings
+no record back. Wire tests in `ws_client_wire_tests.rs`; harness `t14relay_*` and the 300-device
+run on the test relay.
 
 ### Room Budget Tracking
 
@@ -507,7 +541,7 @@ Returned when all bytes received:
 `node/signaling.rs` (HTTP register/heartbeat/bootstrap against the relay) was **deleted** in July 2026. Peer discovery is fully WS-native:
 
 - **Join-time**: joining a WS room returns the authoritative `Members` snapshot and live `PeerJoined`/`PeerLeft` events.
-- **Periodic**: the swarm's 30s re-bootstrap timer sends `WsCommand::DiscoverPeers { room_code }` for the active DM room + every server room; the relay answers `discovered_peers` from its live room map (one map lookup, no fresh TLS handshake — the HTTP poll's handshake could stall under WS bursts and produced the perennial "[HOLLOW-SIGNALING] Bootstrap failed, non-fatal" noise).
+- **Periodic**: the swarm's 30s re-bootstrap timer sends `WsCommand::DiscoverPeers { room_code }` for the active DM room + every server room; the relay answers `discovered_peers` with the presence DIGEST and count of who it would list (never an id since 0.14; `joined: false` for a room this socket does not hold), which `presence_audit` compares with what it was told (`PresenceDrift` on a miss) (one map lookup, no fresh TLS handshake: the HTTP poll's handshake could stall under WS bursts and produced the perennial "[HOLLOW-SIGNALING] Bootstrap failed, non-fatal" noise).
 
 The relay KEEPS its `/register`, `/unregister`, `/bootstrap/:room_code` HTTP endpoints for pre-2026-07 clients only; current clients never call them. The retired register heartbeat had registered an EMPTY address list anyway (a libp2p multiaddr leftover), so the HTTP path carried no unique information.
 
@@ -1014,7 +1048,7 @@ Error messages include the channel name for user-friendly display.
 
 1. Joining a WS room returns the authoritative `Members` snapshot; live `PeerJoined`/`PeerLeft` events follow
 2. The swarm's 30s re-bootstrap timer sends `WsCommand::DiscoverPeers` for the active DM room + all server rooms
-3. The relay answers `discovered_peers` from its live room map; the swarm emits `PeerDiscovered` for peers not already tracked
+3. The relay answers `discovered_peers` with a presence digest and count only (0.14); a mismatch with the told roster re-joins the room for a fresh `members`, so peers are learned only from `members` and presence frames
 4. All sources feed the swarm's peer tracking (`ws_room_peers`, `synced_peers`)
 5. (HTTP signaling register/bootstrap RETIRED 2026-07 — see the HTTP Signaling section)
 

@@ -789,6 +789,12 @@ In-memory cache of server avatar bytes. State is `Map<String, Uint8List>` keyed 
 
 ---
 
+## 0.14 server-scoped providers
+
+- **Relay refusal** (`relay_denial_provider.dart`, 5e2c62ab/874767c6): `relayDeniedServersProvider` (RAM set of server ids and `conf:` ids the relay operator refuses; a new launch asks again), `serverRelayDeniedProvider(serverId)`, `relayLoginDenialProvider` (`account_denied` / `network_denied`, else null). A refused server stays read-only: the composer becomes a notice (reason, Try again = `retry_relay_denial(room)`, Terms of use, Clear messages, Leave server), members show offline, a voice room or meeting in it is left; nothing is deleted. `overallConnectionProvider` gains `refused` ("Refused by this relay", tap opens the dialog, which waits for the App Lock). A refusal counts only for our own servers, pending joins, guest rooms and meetings, never inbox/DM/own-device/forwarder/link/share rooms.
+- **Age gate** (`lib/src/core/age_gate.dart`, bef48c7d/5965e6b9): `ageGateProvider` (`AgeGateNotifier`: mode + the hidden set Rust last gave), `serverAgeHiddenProvider(serverId)`: read it at EVERY surface that opens, names, counts or notifies for a server outside the server list (unread counts, badges, mention previews, banners, push taps, Storage, voice rooms). Rust's own filter keeps a hidden server off `serverListProvider` before the first load. A push isolate or a pre-app tap router uses the Rust verdict (`server_age_hidden`, fails closed on a phone). Flagged servers stay off a phone's list until the relay confirms it delivered what it held. Server names carry one NSFW badge.
+- **Device proof** (`device_proof_provider.dart`, dcce6b29): `serverRecoveryProvider(serverId)` (the header strip; a failed read shows no banner), `refoldReviewsProvider(serverId)` (owner's Lost devices page; a failed read is an error so the page never looks answered), `restoreChoicesProvider` (polled every 2 s while the chooser is open), `restoreChooserAskProvider` (the shell offers the chooser only once the roster counts the device and the App Lock cover is down, never reopening one the person closed in the same run). All refresh on `ServerUpdated` and app resume.
+
 ## Provider Dependency Graph
 
 ```

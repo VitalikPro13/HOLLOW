@@ -798,6 +798,10 @@ let _ = state.apply_op(&op);
 
 **How:** on every fvp bump, read its `cmake/deps.cmake` for the package name it asks for (Windows asks for `mdk-sdk-windows-x64.7z`, which GitHub releases name `mdk-sdk-windows-x64-vs2026.7z`; `mdk_pin.cmake` fetches the release asset under fvp's name and hands it over through a `file://` URL), take each digest from `gh api repos/wang-bin/mdk-sdk/releases/tags/vX.Y.Z`, and keep the version inside what fvp's podspec/Package.swift asks for on Apple.
 
+### Flutter 3.47.9 upgrade leftovers (0.14, 1e550fdc)
+
+**Rule:** Hollow builds with Flutter 3.47.9 (CI, `release-apple.yml`, BUILDING.md name it). tray_manager 0.7 reads `NATIVEAPI_ENABLE_WINUI3`, `NATIVEAPI_WINAPPSDK_DIR`, `NATIVEAPI_CPPWINRT_EXE` and `NATIVEAPI_WEBVIEW2_DIR` from the build environment and would switch its menus to WinUI 3 and bundle the Windows App SDK bootstrap DLL, so `scripts/build_release.ps1` refuses to build while any is set. Linux builds need `libx11-dev` + `libxi-dev` (nativeapi) instead of AppIndicator; `flatpak/build-flatpak.sh` still carries the AppIndicator module until a flatpak built without it is shown to start and post notifications (ldd over the 0.14 bundle finds no user). A Windows `hollow://` launch whose running copy did not take the link within app_links' 5 s (hung or elevated) waits 1 s and tries once more (`IsLinkLaunch` in `windows/runner/main.cpp`); a link still refused is lost when the Dart PID lock ends the second process.
+
 ### record package Linux backend requires parecord
 
 **Rule:** The `record` Dart package (`record_linux` v1.3.0) shells out to `parecord` from `pulseaudio-utils`. This is not installed on PipeWire-only systems (modern Ubuntu 24.04+, Fedora). Anything that must work on Linux has to capture via WebRTC `getUserMedia` instead (libwebrtc talks to PipeWire directly).

@@ -89,6 +89,8 @@ Desktop-only, for the same reason the Settings card is (sandboxed mobile roots; 
 ### The receiving side of Link a device (`dialogs/device_link_dialog.dart`)
 After Welcome pops `'link_device'` the node starts (the "Connecting" placeholder, `_ConnectingContent`), then `DeviceLinkMode.enterCode` runs. Every phase draws in `WelcomeFrame` so it reads as the same card; the mechanism is unchanged (the dialog pops `true` to go back to Welcome, the import runs pre-node-start after a restart, `relaunchApp()` does the restart, never an in-place import). Code entry = `LinkCodeField`: six mono slots over one invisible `TextField` (paste works, letters and digits only, case-insensitive, Enter submits, the `hint:ABC123` probe target still resolves); Link is neutral-disabled until 6. Offline: a spinner line "Connecting to the relay. You can type the code meanwhile." and Link goes loading when pressed, submitting once the relay connects. Then waiting (spinner, approve on the other device), receiving (`HollowProgressBar` + a tabular "41 of 66 MB" line), importing (spinner), failed (the reason, ghost Back + filled Try again), Linked (counts down from 3, then restarts; filled Restart now). The SENDING side keeps its own dialogs (session 24 polish). Tests: `test/widget/device_link_dialog_test.dart`, `test/widget/welcome_link_code_copy_test.dart`; renders `test/screenshots/redesign_after_welcome_screenshot_test.dart`.
 
+**The first-run link never becomes an account (#123, 0.14, eeb0e8b1).** `shell/first_run_link.dart::runFirstRunLink` runs the launch on the throwaway identity up to the node, then opens the enter-code dialog only once the relay's access-key prompt (if open) is answered, else it would cover it. Only a landed link stays in this process (it restarts Hollow); Back, a closed dialog, an unanswered key prompt, a refusal or an error all go through `abandonFirstRunLink` back to Welcome, queueing the throwaway's wipe for the next launch (the running node still holds its database). Rust marks the throwaway by a digest of its key file the moment it exists (`mark_link_throwaway`) and the next launch wipes it only while that key is still in place and no link was stashed (`settle_link_throwaway`, `finishBootWipe`). Traps: the "Connecting" placeholder is dismissed by ITS OWN route (`navigator.removeRoute`, guarded by `isActive`), never by popping the top route, since the key prompt can sit above it; the placeholder, the link dialog and the link-mode key prompt wrap their content in `PopScope(canPop: false)` and close with `Navigator.pop`, never `maybePop`; in link mode the key prompt says "Enter the one your other device uses." A relay switch during a link ends the process on phones. Tests `test/widget/first_run_link_test.dart`.
+
 ---
 
 ## CreateServerDialog -- Add a server (join or create)
@@ -228,6 +230,20 @@ After Welcome pops `'link_device'` the node starts (the "Connecting" placeholder
 - Filled "Connect".
 
 ### No key FFI here -- the caller passes the key to `set_license_key()`.
+
+---
+
+## RelayDeniedDialog -- the relay refuses our login (0.14)
+
+**File:** `lib/src/ui/dialogs/relay_denied_dialog.dart`. **Trigger:** `WsEvent::RelayDenied` with `account_denied` or `network_denied` (the operator's denylist), once per refusal, and a tap on the connection status. Title "Refused by this relay"; body "This relay does not accept this account." or "...connections from your network.", then "Nothing is sent or received through this relay until it lets you in again." and "Archive, export and Settings keep working." Two ways out: another relay in Relay settings, or ask this one again (`retryRelayDenials`; the node otherwise waits a jittered 6 h). NEVER switches relays itself, never shows above the App Lock (a refusal that lands while locked waits for the unlock), one at a time (`_OpenMark` clears its mark even when the dialog goes without a pop, since the phone's status card stays above it). Every "offline" surface reads `linkDownProvider` (`link_down_provider.dart`) and says "Refused by this relay" instead, since a refusal is no reconnect away. Before a destroy order that cannot leave this device, the duress section warns. Copy in `relay_denial_provider.dart`.
+
+## RestoreChooserDialog -- after a phrase recovery (0.14, track C)
+
+**File:** `lib/src/ui/dialogs/restore_chooser.dart` (DEVICE_PROOF_DESIGN 8.4). Per server, what its members remember (restore points) and who confirmed them (our name for them, else their card name, else "a member" and the end of the id), dates with the year only when it is not this one, nothing preselected, rows as `HollowListRow(wrap: true)`. A normal screen, never an alarm; closing it chooses nothing. It re-reads `restoreChoicesProvider` every 2 s, and a pick dies with its point or its stage, so Restore never acts on a point the person can no longer see. "Hollow doesn't know your servers yet" shows only on the roster lock's path (`fresh`), on a device holding no server. **Offers** (`RestoreChooserOffers`): the shell offers it only once the roster counts this device and the App Lock cover is down, checks both again right before it shows, waits behind the start's own dialogs, one at a time, and never reopens one the person closed in this run; a start offers it only on a device the roster counted when the start began. Security > Recovery keeps a row while a restore is pending.
+
+## Removing a device: retired or lost (0.14, 060ca581)
+
+`settings/device_management_shared.dart`: removing one of our devices (and "remove every other device") asks, nothing picked first, "I'm retiring this device" (Replaced, sold or no longer used) or "It was lost or stolen" (Someone else may have it now), and for lost "When did you last have it?" (`LastHadAnswer`; `lostSinceMs` judges from the EARLIEST moment of the answer, so a vague answer undoes more, never less; "Not sure" is 0 until restore points exist; DEVICE_PROOF_DESIGN 8.1). Under the choice a line says what it does ("Changes it made in your servers after you last had it can be undone." / "What it did in your servers stays. If someone else could still use it, pick lost or stolen."). Retiring re-signs everything the device's removals removed; lost or stolen re-signs only what this device saw from it before that time, takes the devices it linked afterwards with it, and offers the older ones. A recovery asks the same "last had" question about the other devices. Owners on a 0.13 relay see that it needs an update before the join lock keeps removed devices out.
 
 ---
 
@@ -521,7 +537,7 @@ There is deliberately no "yours / theirs" split: a single shared number removes 
 
 ### No camera scanning
 
-`mobile_scanner` has no Windows or Linux support, so a scan flow could never be the primary path on the platform Hollow is developed and tested on. Paste-compare works identically on all six platforms. Revisit only if the mobile story demands it.
+`mobile_scanner` has no Windows or Linux support, so a scan flow could never be the primary path on the platform Hollow is developed and tested on. Paste-compare works identically on all five platforms. Revisit only if the mobile story demands it.
 
 ---
 

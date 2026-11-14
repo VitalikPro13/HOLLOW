@@ -321,6 +321,11 @@ own X25519 uses; and check whether a newer vodozemac release adds the check.
   - No other non-test caller of `create_outbound_session` / `open_prekey` exists (grep).
 - What a low-order key still allows: only a party that signs its OWN zero key, making its own
   session readable by others, which equals leaking its own traffic.
+- 0.14 recheck (vodozemac 0.11.2, 2026-11-07): the 3DH, outbound session setup and every
+  ratchet step now refuse non-contributory agreements. A PreKey's inner ratchet key is first
+  used in a DH at our first send, so Hollow refuses a small-order one at `open_prekey` and
+  retires a session whose encrypt fails (`a_prekey_with_a_small_order_ratchet_key_never_opens_a_session`,
+  `a_session_that_cannot_encrypt_is_retired_so_the_next_send_re_keys`; HOL-SEC-161).
 
 ### L-04 Ed25519 strictness: holds
 

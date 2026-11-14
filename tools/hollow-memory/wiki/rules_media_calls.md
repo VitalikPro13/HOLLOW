@@ -6,7 +6,36 @@ calls, voice channels, meetings, WebRTC, audio capture or playback, screen share
 the media forwarder or the forked `flutter_webrtc`. Each rule names the memory that
 holds its story. The privacy and crypto rules for media (SFrame, the forwarder's zero
 ICE servers, Always relay, opt-in screen shares, `origin` checks, the signal
-whitelist) stay in CLAUDE.md.
+whitelist, receiver-keyed voices) stay in CLAUDE.md. Moved here in the 0.14 docs pass:
+the signal whitelist's four touches, the stream overlay consent detail, share badges.
+
+## Moved from CLAUDE.md (0.14)
+
+- A new call/VC signal type needs 4 touches, else it is silently dropped or misrouted: the
+  `types.rs` variant (`#[serde(default)]` fields), the send match arm, the `swarm.rs`
+  dispatch arm, and `call_id_of` (else it routes to the wrong device). 1:1 `Call*` ride
+  Olm-encrypted `MessageEnvelope::CallSignal`, plaintext REJECTED.
+  `feedback_mobile_call_audio_route`.
+- Stream overlay (#97, `node/overlay*.rs`): consent = the `stream_overlay` field with its
+  OWN master signature (never folded into profile or card signatures); looks ride Carried
+  ask/answer only to own siblings, friends or devices seated with us, accepted only while
+  their field says share; overlay images live ONLY in `overlay_blobs`, never the asset
+  rail; the 127.0.0.1 server starts LOCKED, Host + Origin + token gated, and projects
+  (drops off, blocked and us). Wiki `stream_overlay`, `project_stream_overlay`.
+- Screen share badges never auto-focus or flip the stage (#38).
+  `project_issue38_watch_gate_ptt_grid`.
+- A re-offer narrows EVERY video section to VP8 (`_offerVideoAsVp8Only`): a section the far
+  side's camera opened never passed `_constrainCameraCodecs`, so a re-offer would offer
+  H.265/AV1 and the iOS answerer fails. A 1:1 camera carries SFrame:
+  `_bindSframeVideoSender`/`_bindSframeVideoReceiver` on every camera add, device switch,
+  onTrack, key apply, heal and rebuild (0.14, 58c79ce8).
+- Voice gossip forwarding ships OFF (`gossipForwardingEnabled = false`: a re-sent remote
+  track races the capture thread and aborts libwebrtc on Windows); a voice channel stays a
+  full mesh to 16 (`VOICE_GOSSIP_THRESHOLD_UP/DOWN` = 17, `maxVoicePcs` 15). Never lower the
+  threshold while forwarding is off: members above it hear only their neighbours.
+- The call route badge (Direct, Relayed, Forwarded, Partly relayed) reads the transport's
+  SELECTED pair (`ice_route_probe`) from the link watchdog's existing stats sample; never add
+  a separate getStats poll for it, and never show it in the desktop VC dock (4099fdd4).
 
 ## Call surfaces
 

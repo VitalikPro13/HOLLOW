@@ -64,9 +64,30 @@ device, device targeting, channel push fan-out, the NSE) stay in CLAUDE.md; wiki
   keychain call names its group (Dart via `hollow/keychain_groups`, Swift via Info.plist
   `HollowKeysGroup`/`HollowAppIdGroup`); an unnamed query matches EVERY group. Moves copy,
   read back, then delete. Wiki `security_write_gates` §43b.
+- App Lock (moved from CLAUDE.md, 0.14): the cover route + `appLockedProvider`; the unlock
+  secret lives in the OS keystore (`hollow_app_lock_launch_secret`) and the cover is the
+  ONLY prompt; "Ask before Hollow starts" is an advanced opt-in (duress local-only).
+  Locked: no cards or toasts, EVERY raw OverlayEntry host registers with `OverlayHosts`,
+  NOTHING routes above the cover. Wiki `security_write_gates` §13.
+- An App Lock entry that changes keychain class (macOS, and iOS builds without the keys
+  group) is first COPIED under a staged name and read back; only then is the old one
+  replaced. Every start finishes a staged copy and deletes it only once an entry reads
+  back, every delete takes the staged copy first, and a clear waits for a migration under
+  way (5da98071, `app_lock_keychain_groups_test`).
+- An 18+ server a phone hides (age gate, Apple 1.2) is hidden on EVERY surface: every
+  widget that opens, names, counts or notifies for a server outside the server list reads
+  `serverAgeHiddenProvider`; a push isolate uses `server_age_hidden` (fails closed on a
+  phone); banners name no hidden server. Wiki `security_write_gates` §68, §71.
 
 ## Notifications
 
+- The relay buffers offline DMs in RAM and replays them on the DM-room join (moved from
+  CLAUDE.md, 0.14). The push fetch (iOS NSE, a cold Android process) dials the relay this
+  install uses and refuses when it cannot read that choice (HOL-SEC-204): a push process
+  never heard `set_relay_url`, so it passes "" and `fetch::fetch_relay_domain` reads the
+  install's relay; never hardcode the official relay there.
+- A wake for an 18+ server the phone hides, or one it cannot read yet, names nothing; a
+  computer's `mute_siblings` marks keep a sleeping phone from waking at all (5965e6b9).
 - Local notifications (distinct from FCM): ONE surface per message; a desktop toast when
   hidden/unfocused, the in-app card only when visible AND focused; mobile foreground =
   `MobileInChatBanner` only. macOS toasts = `MacOSFlutterLocalNotificationsPlugin`

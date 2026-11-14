@@ -1,0 +1,54 @@
+{
+  "_": [
+    "t14-hidden across platforms: a (a DESKTOP, Windows or macOS) makes a server, b (a PHONE, iOS or Android) joins by its invite;",
+    "a posts, b must see it, b answers, a posts again. Fresh onboarding first.",
+    "",
+    "run (on the Mac mini), e.g. Windows owner + iOS joiner:",
+    "  FLEET_BACKEND=macos pwsh -NoProfile -File scripts/fleet.ps1 -Scenario t14_hidden_joiner_desk_phone -Peers a=windows:g,b=ios:t",
+    "  macOS owner + Android joiner: ... -Peers a=e,b=android:a"
+  ],
+  "peers": ["a", "b"],
+  "steps": [
+    { "peer": "all", "op": "wait_for", "provider": "connection", "equals": "connected", "timeout_ms": 120000 },
+    { "peer": "a", "op": "tap", "target": "semantics:Create a server" },
+    { "peer": "a", "op": "enter_text", "target": "hint:My Awesome Server", "value": "t14x-${RUN}" },
+    { "peer": "a", "op": "tap", "target": "text:Create", "index": 0 },
+    { "peer": "a", "op": "wait_for", "target": "server:t14x-${RUN}", "timeout_ms": 30000 },
+    { "peer": "a", "op": "open_server", "name": "t14x-${RUN}" },
+    { "peer": "a", "op": "wait_for", "target": "channel:general", "timeout_ms": 30000 },
+    { "peer": "a", "op": "right_click", "target": "server:t14x-${RUN}" },
+    { "peer": "a", "op": "tap", "target": "menu > text:Invite people" },
+    { "peer": "a", "op": "wait_for", "target": "type:HollowCopyField", "timeout_ms": 20000 },
+    { "peer": "a", "op": "capture", "target": "type:HollowCopyField", "as": "INVITE" },
+    { "peer": "a", "op": "key", "value": "escape" },
+    { "peer": "a", "op": "open_channel", "name": "general" },
+
+    { "peer": "b", "op": "tap", "target": "semantics:Chats", "index": 0, "soft": true },
+    { "peer": "b", "op": "tap", "target": "semantics:Add a server", "index": 0 },
+    { "peer": "b", "op": "wait", "ms": 1000 },
+    { "peer": "b", "op": "enter_text", "target": "hint:Invite link", "value": "${INVITE}" },
+    { "peer": "b", "op": "tap", "target": "text:Join", "index": 0 },
+    { "peer": "b", "op": "tap", "target": "semantics:Chats", "index": 0, "soft": true },
+    { "peer": "b", "op": "wait_for", "target": "text:t14x-${RUN}", "timeout_ms": 90000 },
+    { "peer": "b", "op": "wait", "ms": 2000 },
+    { "peer": "b", "op": "tap", "target": "text:t14x-${RUN}" },
+    { "peer": "b", "op": "wait", "ms": 1200 },
+    { "peer": "b", "op": "tap", "target": "text:general" },
+    { "peer": "b", "op": "wait_for", "target": "field", "timeout_ms": 30000 },
+
+    { "peer": "a", "op": "enter_text", "target": "field", "value": "owner posts ${RUN}" },
+    { "peer": "a", "op": "key", "value": "enter" },
+    { "peer": "b", "op": "wait_for", "target": "text:owner posts ${RUN}", "timeout_ms": 60000 },
+    { "peer": "b", "op": "tap", "target": "field", "index": 0 },
+    { "peer": "b", "op": "enter_text", "target": "field", "value": "joiner answers ${RUN}" },
+    { "peer": "b", "op": "tap", "target": "semantics:Send message", "index": 0 },
+    { "peer": "a", "op": "wait_for", "target": "text:joiner answers ${RUN}", "timeout_ms": 60000 },
+    { "peer": "a", "op": "enter_text", "target": "field", "value": "owner again ${RUN}" },
+    { "peer": "a", "op": "key", "value": "enter" },
+    { "peer": "b", "op": "wait_for", "target": "text:owner again ${RUN}", "timeout_ms": 60000 },
+
+    { "peer": "all", "op": "wait", "ms": 1000 },
+    { "peer": "all", "op": "shot", "name": "t14hx-joined" },
+    { "peer": "all", "op": "dump", "name": "t14hx-converged" }
+  ]
+}

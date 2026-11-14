@@ -1,8 +1,8 @@
 # HOL-SEC-206: Importing a shards bundle could replace a vault file's key or store shards no manifest names
 
 ```
-ID:          HOL-SEC-206                 Status: Fixed in worktree t14-zipbomb (2026-11-14), uncommitted,
-                                         EMBARGOED until the 0.14 release
+ID:          HOL-SEC-206                 Status: Fixed on local branch security/0.14
+                                          (89d3a85d, 2026-11-14), retest at release
 Severity:    Medium                      (Impact H: a held vault file's manifest (its key,
                                           name and content id) is replaced, so the file a
                                           member recovers is someone else's bytes, and junk
@@ -16,6 +16,11 @@ Traces to:   CLAUDE.md "Vault writes/serves/deletes/manifests ONLY via the vault
              wiki security_write_gates §14
 Attacker:    anyone who can hand the person a file
 Found:       2026-11-14 (track t14-zipbomb, HOL-SEC-205 sweep)
+Affected:    every release with the evidence recovery pool (shard export and import,
+             e63446bf, 2026-04-13) through 0.13.0
+Fix commit:  89d3a85d (security/0.14, 2026-11-14)
+Embargo:     EMBARGOED until the 0.14 release (local branch security/0.14, never pushed);
+             advisory with the 0.14 GHSAs
 ```
 
 ## Description
@@ -54,4 +59,10 @@ erasure parameters come from the held manifest.
 `an_ex_members_bundle_restores_only_the_shards_of_manifests_it_holds`,
 `review_t14_a_bundle_manifest_cannot_squat_another_creators_content`,
 `a_fill_never_replaces_a_manifest_that_landed_first`, and the control
-`a_real_bundle_from_our_own_export_still_imports`. Mutation pass: see the track report.
+`a_real_bundle_from_our_own_export_still_imports`. Mutation pass: 11 of 12 killed; the
+survivor is equivalent.
+
+## Residual risk
+
+An ex-member's bundle restores only the shards of manifests the device still holds; a
+vault file whose manifest never reached this device cannot come back from a bundle.

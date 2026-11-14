@@ -1,0 +1,53 @@
+{
+  "_": [
+    "t14-hidden across platforms: a (a PHONE, iOS or Android) makes a server, b (a DESKTOP, Windows or macOS) joins by its invite;",
+    "a posts, b must see it, b answers, a posts again. Fresh onboarding first.",
+    "",
+    "run (on the Mac mini), e.g. Android owner + Windows joiner:",
+    "  FLEET_BACKEND=macos pwsh -NoProfile -File scripts/fleet.ps1 -Scenario t14_hidden_joiner_phone_desk -Peers a=android:a,b=windows:h"
+  ],
+  "peers": ["a", "b"],
+  "steps": [
+    { "peer": "all", "op": "wait_for", "provider": "connection", "equals": "connected", "timeout_ms": 120000 },
+    { "peer": "all", "op": "wait", "ms": 2000 },
+    { "peer": "a", "op": "tap", "target": "semantics:Add a server", "index": 0 },
+    { "peer": "a", "op": "wait", "ms": 1000 },
+    { "peer": "a", "op": "enter_text", "target": "hint:My Awesome Server", "value": "t14y-${RUN}" },
+    { "peer": "a", "op": "tap", "target": "text:Create", "index": 0 },
+    { "peer": "a", "op": "wait_for", "target": "text:t14y-${RUN}", "timeout_ms": 30000 },
+    { "peer": "a", "op": "wait", "ms": 1500 },
+    { "peer": "a", "op": "long_press", "target": "text:t14y-${RUN}", "index": 0 },
+    { "peer": "a", "op": "wait", "ms": 1000 },
+    { "peer": "a", "op": "tap", "target": "text:Invite people", "index": 0 },
+    { "peer": "a", "op": "wait_for", "target": "type:HollowCopyField", "timeout_ms": 20000 },
+    { "peer": "a", "op": "capture", "target": "type:HollowCopyField", "as": "INVITE" },
+    { "peer": "a", "op": "tap", "target": "dialog > semantics:Close", "index": 0 },
+
+    { "peer": "b", "op": "tap", "target": "semantics:Create a server" },
+    { "peer": "b", "op": "enter_text", "target": "hint:Invite link", "value": "${INVITE}" },
+    { "peer": "b", "op": "tap", "target": "text:Join", "index": 0 },
+    { "peer": "b", "op": "wait_for", "target": "server:t14y-${RUN}", "timeout_ms": 90000 },
+    { "peer": "b", "op": "open_server", "name": "t14y-${RUN}" },
+    { "peer": "b", "op": "open_channel", "name": "general" },
+
+    { "peer": "a", "op": "tap", "target": "text:t14y-${RUN}" },
+    { "peer": "a", "op": "wait", "ms": 1200 },
+    { "peer": "a", "op": "tap", "target": "text:general" },
+    { "peer": "a", "op": "wait_for", "target": "field", "timeout_ms": 30000 },
+    { "peer": "a", "op": "tap", "target": "field", "index": 0 },
+    { "peer": "a", "op": "enter_text", "target": "field", "value": "owner posts ${RUN}" },
+    { "peer": "a", "op": "tap", "target": "semantics:Send message", "index": 0 },
+    { "peer": "b", "op": "wait_for", "target": "text:owner posts ${RUN}", "timeout_ms": 60000 },
+    { "peer": "b", "op": "enter_text", "target": "field", "value": "joiner answers ${RUN}" },
+    { "peer": "b", "op": "key", "value": "enter" },
+    { "peer": "a", "op": "wait_for", "target": "text:joiner answers ${RUN}", "timeout_ms": 60000 },
+    { "peer": "a", "op": "tap", "target": "field", "index": 0 },
+    { "peer": "a", "op": "enter_text", "target": "field", "value": "owner again ${RUN}" },
+    { "peer": "a", "op": "tap", "target": "semantics:Send message", "index": 0 },
+    { "peer": "b", "op": "wait_for", "target": "text:owner again ${RUN}", "timeout_ms": 60000 },
+
+    { "peer": "all", "op": "wait", "ms": 1000 },
+    { "peer": "all", "op": "shot", "name": "t14hy-joined" },
+    { "peer": "all", "op": "dump", "name": "t14hy-converged" }
+  ]
+}

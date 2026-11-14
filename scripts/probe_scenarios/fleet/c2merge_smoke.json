@@ -1,0 +1,57 @@
+{
+ "_": [
+  "C2 UI merged into track C (t14-c1): the device-proof screens on the REAL FFI bodies, throwaway peers g (owner) and h (member), test relay hollowtest.duckdns.org.",
+  "Nobody lost a device, so no banner, owner notice, Lost devices page or Restore row may appear; the app must boot and every screen render while the real server_recovery / refold_reviews / restore_choices answer."
+ ],
+ "peers": ["g", "h"],
+ "steps": [
+  {"peer": "all", "op": "wait_for", "provider": "connection", "equals": "connected", "timeout_ms": 120000},
+  {"peer": "all", "op": "wait", "ms": 2000},
+
+  {"peer": "g", "op": "tap", "target": "semantics:Settings"},
+  {"peer": "g", "op": "wait", "ms": 1200},
+  {"peer": "g", "op": "tap", "target": "text:Security", "index": 0},
+  {"peer": "g", "op": "wait", "ms": 1200},
+  {"peer": "g", "op": "reveal", "target": "text:Remove devices with your recovery phrase"},
+  {"peer": "g", "op": "expect_no_text", "value": "Restore your servers"},
+  {"peer": "g", "op": "shot", "name": "m-01-security-recovery"},
+  {"peer": "g", "op": "key", "value": "escape"},
+  {"peer": "g", "op": "wait", "ms": 800},
+
+  {"peer": "g", "op": "tap", "target": "semantics:Create a server"},
+  {"peer": "g", "op": "enter_text", "target": "hint:My Awesome Server", "value": "c2-merge"},
+  {"peer": "g", "op": "tap", "target": "text:Create", "index": 0},
+  {"peer": "g", "op": "wait_for", "target": "server:c2-merge", "timeout_ms": 30000},
+  {"peer": "g", "op": "right_click", "target": "server:c2-merge"},
+  {"peer": "g", "op": "tap", "target": "menu > text:Invite people"},
+  {"peer": "g", "op": "wait_for", "target": "type:HollowCopyField", "timeout_ms": 20000},
+  {"peer": "g", "op": "capture", "target": "type:HollowCopyField", "as": "INVITE"},
+  {"peer": "g", "op": "key", "value": "escape"},
+  {"peer": "h", "op": "tap", "target": "semantics:Create a server"},
+  {"peer": "h", "op": "enter_text", "target": "hint:Invite link", "value": "${INVITE}"},
+  {"peer": "h", "op": "tap", "target": "text:Join", "index": 0},
+  {"peer": "h", "op": "wait_for", "target": "server:c2-merge", "timeout_ms": 90000},
+
+  {"peer": "g", "op": "open_server", "name": "c2-merge"},
+  {"peer": "g", "op": "open_channel", "name": "general"},
+  {"peer": "g", "op": "wait", "ms": 2000},
+  {"peer": "g", "op": "expect_no_text", "value": "reported a lost device"},
+  {"peer": "g", "op": "shot", "name": "m-02-owner-channel"},
+  {"peer": "h", "op": "open_server", "name": "c2-merge"},
+  {"peer": "h", "op": "open_channel", "name": "general"},
+  {"peer": "h", "op": "wait", "ms": 2000},
+  {"peer": "h", "op": "expect_no_text", "value": "is restoring it"},
+  {"peer": "h", "op": "expect_no_text", "value": "while the owner restores this server"},
+  {"peer": "h", "op": "enter_text", "target": "hint:Message #general", "value": "hello from h"},
+  {"peer": "h", "op": "key", "value": "enter"},
+  {"peer": "g", "op": "wait_for", "target": "text:hello from h", "timeout_ms": 30000},
+  {"peer": "h", "op": "shot", "name": "m-03-member-channel"},
+  {"peer": "g", "op": "shot", "name": "m-04-owner-sees-post"},
+
+  {"peer": "g", "op": "tap", "target": "semantics:Server settings", "index": 0},
+  {"peer": "g", "op": "wait", "ms": 1500},
+  {"peer": "g", "op": "expect_no_text", "value": "Lost devices"},
+  {"peer": "g", "op": "shot", "name": "m-05-server-settings-rail"},
+  {"peer": "g", "op": "key", "value": "escape"}
+ ]
+}

@@ -90,6 +90,7 @@ The `VoiceChannelNotifier` holds significant mutable state beyond the immutable 
 
 **`joinChannel(serverId, channelId)`**
 1. Blocks if local user is in a 1:1 call (`callProvider.status != idle`).
+1b. Blocks with a toast when the relay refuses the server or meeting (`serverRelayDeniedProvider`, 0.14; `voice_room_switch.dart` does the same before it asks to leave the room we are in, so a refused target keeps the current room).
 2. If already in a voice channel, calls `leaveChannel()` first.
 3. Sends `voiceChannelJoin` FFI to Rust.
 4. Does NOT update state here -- waits for the local join event to call `onLocalJoined`.
@@ -139,7 +140,7 @@ Called by event_provider on the `VoiceChannelLeft` event for the local peer. Two
 
 **`toggleDeafen()`** -- flips `isDeafened` (which also forces mute), calls `_service.setMuted()` and `_service.setDeafened()` (fire-and-forget, so it carries its own `.catchError`), broadcasts audio state.
 
-**`setPeerVolume(peerId, volume)`** -- stores in `peerVolumes` map, calls `_service.setRemoteVolume()`.
+**`setPeerVolume(peerId, volume)`** -- stores in `peerVolumes` map, calls `_service.setRemoteVolume()` (receiver-keyed, HOL-SEC-190; only recorded while deafened).
 
 **`_broadcastAudioState()`** -- sends `audio_state` signal (JSON with `muted` and `deafened`) to every peer in the current channel via `voiceChannelSendSignal` FFI.
 
@@ -160,7 +161,8 @@ Called by event_provider on the `VoiceChannelLeft` event for the local peer. Two
 ### Methods: Screen Sharing
 
 **`startScreenShare(sourceId, width, height, fps, {shareAudio})`**
-1. Guards: must be in voice channel, not leaving, not already sharing, not sharing in DM call.
+1. Guards: must be in voice channel, not leaving, not already sharing, not sharing in DM call, no start already at its picker (`_shareStarting`).
+1b. Mints `_shareSessionId` (HOL-SEC-195, 0.14). Everything the start opens stays local until its last await; `_shareStartLost(session)` (a stop, leave, kick, channel delete or newer start took the session) closes the capture and preview and returns. A stop during the picker cancels the start; a join into another room ends any share left over first. On a Windows entire-screen share with audio the voice redirect arms here (`_armVoiceRedirect(session)`, one arm at a time).
 2. Captures screen via `navigator.mediaDevices.getDisplayMedia()`.
 3. Creates local preview renderer tied to capture stream.
 4. Builds quality label from resolution map (360p/480p/720p/1080p/1440p/4K + fps).
@@ -231,6 +233,11 @@ Handles voice topology changes:
 - **mesh -> gossip:** Closes audio PCs to non-neighbor peers, ensures PCs to all gossip neighbors. Sets `_service.gossipMode = true`.
 - **gossip -> mesh:** Reconnects to all participants. Sets `_service.gossipMode = false`.
 - **gossip neighbor update (same mode):** Closes PCs to removed neighbors, connects to new ones.
+- Gossip mode only starts at 17 participants (0.14): a channel is a full mesh up to 16, the voice leg cap plus us, because gossip forwards no voices yet (`gossipForwardingEnabled = false`). Wiki `services_voice_webrtc`, "Gossip Mode".
+
+**Leaving a room the server can no longer carry (0.14):**
+- Relay refusal: `event_provider.leaveRefusedVoice(ref, serverId)` runs when the relay starts refusing a server or meeting. A voice channel there is left through `leaveChannel()`; a meeting through `conferenceProvider.leaveRefusedMeeting(confId)` at any stage (seated, stepped out, waiting, joining; a host ends it), never a bare `leaveChannel`. A toast says why. A phone stays out of a refused server's voice room.
+- Age gate: `event_provider._onAgeGateChanged` leaves a voice room in a server the gate now hides on this phone (`leaveChannel()`, toast "This server is now age-restricted and hidden on this device."). Meetings are no listed server, so the gate never hides one.
 
 ### Signal Dispatch: handleSignal()
 
@@ -380,6 +387,7 @@ The `_service` getter lazily creates `VoiceService` with `localPeerId` and `iceC
 ### Methods: Screen Sharing
 
 **`startScreenShare({sourceId, width, height, fps, shareAudio})`**
+0. Same start guard as the voice channel, per call (HOL-SEC-195, 0.14): `_dmShareStarting` refuses a second picker, and a teardown counter bumped by every share teardown tells a start still at its picker that it lost the share.
 1. Creates outgoing `ScreenShareService`.
 2. Wires ICE candidates as `screen_ice` signals with `role: 'offerer'`.
 3. Wires `onScreenShareEnded` to auto-stop.

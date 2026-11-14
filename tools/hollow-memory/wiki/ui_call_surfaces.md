@@ -33,6 +33,16 @@ The same adapters feed the phone: `MobileCallScreen` builds `DmCallStageSource(m
 - **Incoming** (`MobileIncomingCallOverlay`, mounted in `app.dart`'s mobile Stack in place of the desktop card): full screen canvas, avatar 128 (its frame kept: a ringing screen has no speaking cue), the name in `display` in their colour, "Voice call" / "Video call", the leave-the-room warning, a red Decline and a teal Accept (72, labels under). Accept answers AND opens the call screen through `hollowNavigatorKey` (B3). No countdown dial, no glow. The ringtone is `CallRingtone` (`call/call_ringtone.dart`), shared with the desktop card.
 - Wakelock while video or a share is on screen; both screens close themselves (`removeRoute` when not on top) when the call or room ends.
 
+## Route badge (0.14)
+
+A quiet `HollowBadge` with a tooltip says how the media actually reaches us, read from the pair libwebrtc selected (wiki `services_voice_webrtc`, "Media route"), never guessed. `call_route.dart`: `mediaRouteLabel` (Direct, Relayed, Forwarded; both forwarder kinds read Forwarded, a forwarder leg has zero ICE servers so there is no "relayed forwarder"), `dmRouteWords`, `shareRouteWords`, `roomRouteWords` (one line for a room: the route every leg shares, else "Partly relayed" with a tooltip naming who is reached which way, each PERSON once however many devices they bring, our own other device as "your other device"), `CallRouteIndicator(DmCallRoute | RoomCallRoute)`, nothing until the first leg settles.
+
+- Where: the desktop stage bar beside the timer (`call_stage_bar.dart`, only once the call started), `DmCallRow`, the phone DM call screen and room subtitle (`mobile_call_video_view.dart`, `mobile_voice_channel_route.dart`), a watched share's title (`share_tile.dart`). Never on the dock line (Vitalik 11-07).
+- A share another member's app or the relay's forwarder passes along says Forwarded; a share our own app forwards shows nothing.
+- Tight space: `components/drop_when_tight.dart` (`DropWhenTight(lead, extra)`) drops the badge WHOLE when it and the timer or title do not both fit; the timer stays. `lead` must report intrinsic widths (no LayoutBuilder inside it). The phone call bar grows with large text instead of overflowing.
+- "Always relay calls" on = the next call reads Relayed.
+- Tests: `test/media_route_test.dart`, `test/share_route_test.dart`, `test/widget/call_route_test.dart`, `test/widget/drop_when_tight_test.dart`; fleet `t14_route_badge_{dm,vc,mobile}.json`.
+
 ## Call record line (5.7)
 
 LOCAL rows in a separate `call_records` table, rendered by `CallRecordRow` between messages. Full description in wiki `ui_chat_dm`, "The call record line".

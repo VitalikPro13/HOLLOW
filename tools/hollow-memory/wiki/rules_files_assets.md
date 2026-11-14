@@ -7,6 +7,32 @@ file SECURITY rules (`file_header_refused`, `file_asks`, self-certifying ids, at
 encryption, the auto-download gate, `safe_file_name`) and the asset-rail privacy rules
 stay in CLAUDE.md. Wiki `rust_file_handler`, `emotes`, `hollowpack`.
 
+## At-rest writes and zips from others (0.14)
+
+- Every at-rest byte change (replace, chunked create, remove, move, the boot sweep's swap)
+  runs under `at_rest::swap_lock` together with the read of the key it retires; each write
+  seals into a temp named by its own key; a read takes the header and the bytes from ONE
+  handle. Two writers sharing one temp lost a file's key and a member was told "gone" for a
+  file the poster held (9dca9022).
+- A zip from someone else goes through `zip_budget.rs`: a per-entry cap plus a whole-file
+  budget counted in the bytes entries YIELD, and the index walked from the tail and refused
+  before `ZipArchive::new` (HOL-SEC-205). A shards bundle names no sender: manifests only
+  fill where none is held, shards land only through the vault's shard-write checks
+  (HOL-SEC-206). Wiki `security_write_gates` §73.
+
+## Packs, support credentials, shop codes (moved from CLAUDE.md, 0.14)
+
+- `.hollowpack`: identity = sha256 of the PROCESSED bytes; `import_hollowpack` verifies,
+  NEVER re-encodes. `support_creds`: ONE validator `sanitize_incoming_support_creds`
+  (OFFLINE against the PINNED root, chain + THIS master, BEFORE spending) and a master
+  signature REQUIRED, unsigned = REFUSE and preserve; `support_creds_own` is PER DEVICE
+  (UNION minus tombstones). Twitch = the SAME credential: chip t=3, join gate t=4 against
+  the joiner's MASTER; one CREDENTIAL per listing. Shop codes are minted by the artist's
+  Ko-fi webhook (`kofi.js`): `redeem_codes` = the authority, `burnKey` = ONE lock; a live
+  listing needs `kofi_code`. `project_shop_kofi_code_model`,
+  `project_support_credentials_phase2`, `project_twitch_signed_credential`; wiki
+  `hollowpack`, `support_credentials`.
+
 ## File transfer mechanics
 
 - The sender side needs the `FileCompleted` emit too: a new `FileHeader`/`StoredFile`
