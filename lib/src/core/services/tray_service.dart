@@ -4,7 +4,7 @@ import 'dart:io';
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:tray_manager/tray_manager.dart';
+import 'package:tray_manager/tray_manager.dart' as tray;
 import 'package:window_manager/window_manager.dart';
 
 import 'package:hollow/src/core/providers/call_provider.dart';
@@ -15,6 +15,7 @@ import 'package:hollow/src/core/providers/member_panel_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
 import 'package:hollow/src/core/shared_tickers.dart';
+import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/core/providers/settings_place_provider.dart';
 import 'package:hollow/src/ui/shell/conference_actions.dart'
     show endOrLeaveConferenceMeetingOf;
@@ -27,6 +28,21 @@ final _trayUnreadProvider = Provider<bool>((ref) =>
     ref.watch(unreadProvider
         .select((u) => u.channelUnreadCounts.values.any((c) => c > 0))));
 
+/// One row of the tray menu: a [key] the click handler dispatches on, or a
+/// separator. [checked] is null for a plain item, else the checkbox state.
+@immutable
+class TrayEntry {
+  const TrayEntry(String this.key, this.label, {this.checked});
+  const TrayEntry.separator()
+      : key = null,
+        label = '',
+        checked = null;
+
+  final String? key;
+  final String label;
+  final bool? checked;
+}
+
 /// Always-visible Windows system tray icon (issue #50).
 ///
 /// The icon stays for the whole app lifetime, not just while hidden, so users
@@ -34,7 +50,7 @@ final _trayUnreadProvider = Provider<bool>((ref) =>
 /// design: macOS keeps the native Dock idiom and Linux skips the tray, since
 /// AppIndicator needs a shell extension most distros do not ship.
 /// [restoreWindow] is still shared by every desktop platform.
-class TrayService with TrayListener {
+class TrayService {
   TrayService._();
   static final TrayService instance = TrayService._();
 
@@ -48,6 +64,17 @@ class TrayService with TrayListener {
   bool _unreadShown = false;
   final Map<bool, String> _iconPaths = {};
 
+  // Held for as long as they are shown: a collected wrapper frees its native
+  // handle, and a freed tray icon disappears.
+  tray.TrayIcon? _icon;
+  tray.Image? _image;
+  // One menu for the icon's life, items created once with one listener each:
+  // nativeapi keeps every listener's trampoline forever, so the menu is
+  // refreshed in place, never rebuilt per click.
+  tray.Menu? _menu;
+  final Map<String, tray.MenuItem> _menuItems = {};
+  int _nativeListeners = 0;
+
   /// Called once from main() on desktop, right after the container exists.
   /// Creates the tray icon immediately on Windows; other platforms only get
   /// [restoreWindow].
@@ -59,7 +86,6 @@ class TrayService with TrayListener {
     _quitApp = quitApp;
     if (!Platform.isWindows) return;
 
-    trayManager.addListener(this);
     await ensureIcon();
 
     // Attached after the first frame so these provider chains initialize
@@ -83,15 +109,125 @@ class TrayService with TrayListener {
     if (!Platform.isWindows) return;
     final iconPath = await _resolveIconPath(unread: _unreadShown);
     if (iconPath == null) return;
-    await trayManager.setIcon(iconPath);
-    await trayManager.setContextMenu(_buildMenu());
-    _iconVisible = true;
+    try {
+      final icon = _icon ?? _createIcon();
+      if (icon == null) return;
+      _setImage(icon, iconPath);
+      icon.setVisible(true);
+      _iconVisible = true;
+    } catch (e) {
+      // The window and the app work without a tray; a later hide retries.
+      debugPrint('[HOLLOW-TRAY] Tray icon unavailable: $e');
+    }
+  }
+
+  tray.TrayIcon? _createIcon() {
+    final icon = tray.TrayIcon.create();
+    if (icon == null) return null;
+    // The right-click event reaches us before the native side opens the
+    // menu itself, so the refresh lands first and the popup's modal loop never
+    // runs inside a Dart callback.
+    final menu = _createMenu();
+    if (menu != null) icon.setContextMenu(menu);
+    icon.setContextMenuTrigger(tray.ContextMenuTrigger.rightClicked);
+    _nativeListeners++;
+    icon.addListener((event) {
+      switch (event) {
+        case tray.TrayIconClickedEvent():
+          unawaited(restoreWindow());
+        case tray.TrayIconRightClickedEvent():
+          _refreshMenu();
+        case tray.TrayIconDoubleClickedEvent():
+          break;
+      }
+    });
+    return _icon = icon;
+  }
+
+  static const _checkboxKeys = {'mute', 'deafen'};
+  static const _menuKeys = ['show', 'mute', 'deafen', 'leave', 'settings', 'quit'];
+
+  tray.Menu? _createMenu() {
+    final menu = tray.Menu.create();
+    if (menu == null) return null;
+    for (final key in _menuKeys) {
+      final item = tray.MenuItem.createWithLabelAndType(
+          key,
+          _checkboxKeys.contains(key)
+              ? tray.MenuItemType.checkbox
+              : tray.MenuItemType.normal);
+      if (item == null) continue;
+      _nativeListeners++;
+      item.addListener((event) {
+        if (event is tray.MenuItemClickedEvent) handleMenuKey(key);
+      });
+      _menuItems[key] = item;
+    }
+    _menu = menu;
+    _refreshMenu();
+    return menu;
+  }
+
+  /// Lays the held items out for the state at this instant, so checkmarks and
+  /// the voice section are current with no listeners on the call providers.
+  void _refreshMenu() {
+    final menu = _menu;
+    if (menu == null) return;
+    try {
+      menu.clear();
+      for (final entry in _buildMenu()) {
+        final key = entry.key;
+        final item = key == null ? null : _menuItems[key];
+        if (item == null) {
+          menu.addSeparator();
+          continue;
+        }
+        item.label = entry.label;
+        final checked = entry.checked;
+        if (checked != null) {
+          item.state = checked
+              ? tray.MenuItemState.checked
+              : tray.MenuItemState.unchecked;
+        }
+        menu.addItem(item);
+      }
+      // A release build's only witness that right-clicks add no listeners.
+      unawaited(network_api
+          .logFromDart(
+              message: '[HOLLOW-TRAY] menu refreshed, '
+                  '$_nativeListeners native listeners')
+          .catchError((_) {}));
+    } catch (e) {
+      debugPrint('[HOLLOW-TRAY] Menu refresh failed: $e');
+    }
+  }
+
+  void _setImage(tray.TrayIcon icon, String path) {
+    final image = tray.Image.fromFile(path);
+    if (image == null) throw ArgumentError.value(path, 'path', 'not an image');
+    icon.icon = image;
+    _image?.dispose();
+    _image = image;
   }
 
   /// Remove the tray icon — quit paths only.
   Future<void> destroyIcon() async {
     _iconVisible = false;
-    await trayManager.destroy();
+    final icon = _icon;
+    _icon = null;
+    try {
+      icon?.dispose();
+      for (final item in _menuItems.values) {
+        item.dispose();
+      }
+      _menuItems.clear();
+      _menu?.dispose();
+      _menu = null;
+      _image?.dispose();
+      _image = null;
+    } catch (e) {
+      debugPrint('[HOLLOW-TRAY] Tray icon teardown failed: $e');
+    }
   }
 
   /// Shared desktop restore: bring the window back from tray, minimized or
@@ -108,11 +244,9 @@ class TrayService with TrayListener {
 
   void _updateTooltip(OverallConnection status) {
     if (!_iconVisible) return;
-    unawaited(
-      trayManager
-          .setToolTip('Hollow: ${status.label}')
-          .catchError((_) {}),
-    );
+    try {
+      _icon?.setTooltip('Hollow: ${status.label}');
+    } catch (_) {}
   }
 
   void _updateIcon(bool unread) {
@@ -121,8 +255,9 @@ class TrayService with TrayListener {
     if (!_iconVisible) return;
     unawaited(() async {
       final path = await _resolveIconPath(unread: unread);
-      if (path != null && _unreadShown == unread) {
-        await trayManager.setIcon(path);
+      final icon = _icon;
+      if (path != null && icon != null && _unreadShown == unread) {
+        _setImage(icon, path);
       }
     }()
         .catchError((_) {}));
@@ -159,7 +294,7 @@ class TrayService with TrayListener {
   }
 
   @visibleForTesting
-  Menu debugMenu() => _buildMenu();
+  List<TrayEntry> debugMenu() => _buildMenu();
 
   /// The UI probe's way in: it never runs main(), so it hands over its own
   /// container, and its window must not be driven by window_manager.
@@ -172,7 +307,7 @@ class TrayService with TrayListener {
 
   Future<void> Function()? _showWindow;
 
-  Menu _buildMenu() {
+  List<TrayEntry> _buildMenu() {
     // Voice items only render while actually in a call or VC, and never
     // before login: reading the call providers pre-identity would spin up
     // their dependency chains too early.
@@ -200,42 +335,24 @@ class TrayService with TrayListener {
       }
     }
 
-    return Menu(items: [
-      MenuItem(key: 'show', label: 'Open Hollow'),
-      MenuItem.separator(),
+    return [
+      const TrayEntry('show', 'Open Hollow'),
+      const TrayEntry.separator(),
       if (inVoice) ...[
-        MenuItem.checkbox(key: 'mute', label: 'Mute Microphone', checked: muted),
-        MenuItem.checkbox(key: 'deafen', label: 'Deafen', checked: deafened),
-        MenuItem(key: 'leave', label: leaveLabel),
-        MenuItem.separator(),
+        TrayEntry('mute', 'Mute Microphone', checked: muted),
+        TrayEntry('deafen', 'Deafen', checked: deafened),
+        TrayEntry('leave', leaveLabel),
+        const TrayEntry.separator(),
       ],
-      MenuItem(key: 'settings', label: 'Settings'),
-      MenuItem.separator(),
-      MenuItem(key: 'quit', label: 'Quit Hollow'),
-    ]);
+      const TrayEntry('settings', 'Settings'),
+      const TrayEntry.separator(),
+      const TrayEntry('quit', 'Quit Hollow'),
+    ];
   }
 
-  @override
-  void onTrayIconMouseDown() {
-    unawaited(restoreWindow());
-  }
-
-  @override
-  void onTrayIconRightMouseDown() {
-    unawaited(() async {
-      // Rebuild right before showing so checkmarks and the voice section
-      // reflect the state at this instant, with no listeners needed.
-      await trayManager.setContextMenu(_buildMenu());
-      await trayManager.popUpContextMenu();
-    }()
-        .catchError((Object e) {
-      debugPrint('[HOLLOW-TRAY] Menu popup failed: $e');
-    }));
-  }
-
-  @override
-  void onTrayMenuItemClick(MenuItem menuItem) {
-    switch (menuItem.key) {
+  /// The action behind a tray menu item; the UI probe clicks through here.
+  void handleMenuKey(String key) {
+    switch (key) {
       case 'show':
         unawaited(restoreWindow());
       case 'mute':

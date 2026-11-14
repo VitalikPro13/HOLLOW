@@ -53,6 +53,9 @@ add_subdirectory(${FLUTTER_MANAGED_DIR})
 add_subdirectory("runner")
 
 
+# Pins fvp's mdk download; must precede the plugins.
+include("${CMAKE_CURRENT_SOURCE_DIR}/../third_party/mdk/mdk_pin.cmake")
+
 # Generated plugin build rules, which manage building the plugins and adding
 # them to the application.
 include(flutter/generated_plugins.cmake)

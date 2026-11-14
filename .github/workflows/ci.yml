@@ -84,7 +84,7 @@ jobs:
           save-if: ${{ github.event_name != 'pull_request' }}
 
       - name: Install cargo-llvm-cov & cargo-nextest
-        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+        uses: taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14b # v2.89.0
         with:
           tool: cargo-llvm-cov,cargo-nextest
 
@@ -123,7 +123,7 @@ jobs:
           rustup default stable
 
       - name: Install cargo-llvm-cov & cargo-nextest
-        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+        uses: taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14b # v2.89.0
         with:
           tool: cargo-llvm-cov,cargo-nextest
 
@@ -197,7 +197,7 @@ jobs:
           rustup default stable
 
       - name: Install cargo-llvm-cov & cargo-nextest
-        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+        uses: taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14b # v2.89.0
         with:
           tool: cargo-llvm-cov,cargo-nextest
 
@@ -295,7 +295,7 @@ jobs:
           persist-credentials: false
 
       - name: Install cargo-deny, osv-scanner and zizmor
-        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2.87.31
+        uses: taiki-e/install-action@1919c4a95903d2c33e4a221102edca87309fc14b # v2.89.0
         with:
           tool: cargo-deny@0.20.2,osv-scanner@2.5.1,zizmor@1.30.1
 
@@ -323,6 +323,7 @@ jobs:
           -L rust/hollow_dfn/Cargo.lock
           -L rust/hollow_art/Cargo.lock
           -L rust/hollow_manifest/Cargo.lock
+          -L rust/hollow_core/fuzz/Cargo.lock
 
       # The release binary, checked against the digest its release published.
       - name: gitleaks (whole history)
@@ -399,7 +400,7 @@ jobs:
         with:
           # Pinned to the version the project develops on. Bump both this and
           # the sonar job's pin together on a Flutter upgrade.
-          flutter-version: 3.47.0
+          flutter-version: 3.47.9
           channel: stable
           cache: true
 
@@ -454,7 +455,7 @@ jobs:
       - name: Install Flutter
         uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
         with:
-          flutter-version: 3.47.0
+          flutter-version: 3.47.9
           channel: stable
           cache: true
 
@@ -467,6 +468,6 @@ jobs:
       # by the SonarQube Cloud GitHub App, not by GITHUB_TOKEN, so the job
       # stays on the workflow's read-only default.
       - name: SonarQube scan
-        uses: SonarSource/sonarqube-scan-action@d209202bc7d53ff1cc128f7f907dac145c9d6ae9 # v8.3.0
+        uses: SonarSource/sonarqube-scan-action@4d1dc0c91ee400dcf8a6dddf2f705ac36542e304 # v8.4.0
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}

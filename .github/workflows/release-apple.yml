@@ -66,8 +66,8 @@ concurrency:
 permissions: {}
 
 env:
-  FLUTTER_VERSION: "3.47.0"
-  FLUTTER_COMMIT: 4cf24164269a5ebf0c16a028a00727d0e77bbb05
+  FLUTTER_VERSION: "3.47.9"
+  FLUTTER_COMMIT: c197ca5199e9ee5661e865596c9c07294dfab51c
   XCODE_APP: /Applications/Xcode_26.6.app
   # cargokit compiles hollow_core with exactly this rustc (rust_builder/cargokit).
   HOLLOW_RUST_TOOLCHAIN: "1.99.1"
@@ -186,9 +186,10 @@ jobs:
       - name: hollow_core built by the pinned rustc
         run: bash scripts/apple_ci_rustc_check.sh build/macos/Build/Products/Release/Hollow.app/Contents/Frameworks/hollow_core.framework/Versions/A/hollow_core
 
-      # pub get runs --enforce-lockfile, cargo --locked, the Podfile pins mdk and
-      # WebRTC-SDK by sha256: a lock that moved means the build resolved
-      # something the commit did not name.
+      # pub get runs --enforce-lockfile, cargo --locked, the Podfile pins
+      # WebRTC-SDK by sha256 and fvp's Swift package pins mdk by checksum: a
+      # lock that moved means the build resolved something the commit did not
+      # name.
       - name: Locks unchanged
         run: git diff --exit-code -- pubspec.lock rust/hollow_core/Cargo.lock macos/Podfile.lock
 

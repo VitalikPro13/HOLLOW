@@ -133,7 +133,7 @@ files with the two hashes `macos-release` wrote to the run's summary page.
 | Input | Pin |
 |---|---|
 | Xcode | `/Applications/Xcode_26.6.app` on `macos-26` (the `XCODE_APP` env) |
-| Flutter | tag `3.47.0`, checked against commit `4cf24164...` (`FLUTTER_COMMIT`) |
+| Flutter | tag `3.47.9`, checked against commit `c197ca51...` (`FLUTTER_COMMIT`) |
 | Rust | `HOLLOW_RUST_TOOLCHAIN = 1.99.1`: the job installs exactly it and checks `rustc --version`; cargokit (`rust_builder/cargokit`) builds hollow_core with it (an installed exact version counts as installed, so it is never fetched again); after the build `scripts/apple_ci_rustc_check.sh` requires every `/rustc/<commit>/` path in the built hollow_core to name that rustc's commit |
 | Dart packages | `flutter pub get --enforce-lockfile`, then `git diff --exit-code pubspec.lock` |
 | Crates | `--locked` on release builds (`rust/hollow_core/cargokit.yaml`), then `git diff --exit-code Cargo.lock` |

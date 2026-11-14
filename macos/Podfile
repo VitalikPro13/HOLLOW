@@ -29,9 +29,9 @@ flutter_macos_podfile_setup
 target 'Runner' do
   use_frameworks!
 
-  # The trunk specs fetch these binaries with no checksum (mdk from a moving
-  # nightly URL), so both come from tagged releases pinned by sha256.
-  pod 'mdk', :podspec => '../third_party/apple_pods/mdk.podspec.json'
+  # The trunk spec fetches this binary with no checksum, so it comes from a
+  # tagged release pinned by sha256. mdk arrives through fvp's Swift package,
+  # which pins its tagged release by checksum.
   pod 'WebRTC-SDK', :podspec => '../third_party/apple_pods/WebRTC-SDK.podspec.json'
   flutter_install_all_macos_pods File.dirname(File.realpath(__FILE__))
   target 'RunnerTests' do

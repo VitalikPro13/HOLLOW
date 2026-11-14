@@ -3,36 +3,23 @@ PODS:
     - FlutterMacOS
     - WebRTC-SDK (= 144.7559.09)
   - FlutterMacOS (1.0.0)
-  - fvp (0.35.2):
-    - Flutter
-    - FlutterMacOS
-    - mdk (~> 0.35.1)
   - hollow_core (0.0.1):
     - FlutterMacOS
   - irondash_engine_context (0.0.1):
     - FlutterMacOS
   - local_notifier (0.1.0):
     - FlutterMacOS
-  - mdk (0.35.1)
-  - screen_retriever_macos (0.0.1):
-    - FlutterMacOS
   - super_native_extensions (0.0.1):
-    - FlutterMacOS
-  - tray_manager (0.0.1):
     - FlutterMacOS
   - WebRTC-SDK (144.7559.09)
 
 DEPENDENCIES:
   - flutter_webrtc (from `Flutter/ephemeral/.symlinks/plugins/flutter_webrtc/macos`)
   - FlutterMacOS (from `Flutter/ephemeral`)
-  - fvp (from `Flutter/ephemeral/.symlinks/plugins/fvp/darwin`)
   - hollow_core (from `Flutter/ephemeral/.symlinks/plugins/hollow_core/macos`)
   - irondash_engine_context (from `Flutter/ephemeral/.symlinks/plugins/irondash_engine_context/macos`)
   - local_notifier (from `Flutter/ephemeral/.symlinks/plugins/local_notifier/macos`)
-  - mdk (from `../third_party/apple_pods/mdk.podspec.json`)
-  - screen_retriever_macos (from `Flutter/ephemeral/.symlinks/plugins/screen_retriever_macos/macos`)
   - super_native_extensions (from `Flutter/ephemeral/.symlinks/plugins/super_native_extensions/macos`)
-  - tray_manager (from `Flutter/ephemeral/.symlinks/plugins/tray_manager/macos`)
   - WebRTC-SDK (from `../third_party/apple_pods/WebRTC-SDK.podspec.json`)
 
 EXTERNAL SOURCES:
@@ -40,38 +27,26 @@ EXTERNAL SOURCES:
     :path: Flutter/ephemeral/.symlinks/plugins/flutter_webrtc/macos
   FlutterMacOS:
     :path: Flutter/ephemeral
-  fvp:
-    :path: Flutter/ephemeral/.symlinks/plugins/fvp/darwin
   hollow_core:
     :path: Flutter/ephemeral/.symlinks/plugins/hollow_core/macos
   irondash_engine_context:
     :path: Flutter/ephemeral/.symlinks/plugins/irondash_engine_context/macos
   local_notifier:
     :path: Flutter/ephemeral/.symlinks/plugins/local_notifier/macos
-  mdk:
-    :podspec: "../third_party/apple_pods/mdk.podspec.json"
-  screen_retriever_macos:
-    :path: Flutter/ephemeral/.symlinks/plugins/screen_retriever_macos/macos
   super_native_extensions:
     :path: Flutter/ephemeral/.symlinks/plugins/super_native_extensions/macos
-  tray_manager:
-    :path: Flutter/ephemeral/.symlinks/plugins/tray_manager/macos
   WebRTC-SDK:
     :podspec: "../third_party/apple_pods/WebRTC-SDK.podspec.json"
 
 SPEC CHECKSUMS:
   flutter_webrtc: fec3dc9284a1f6d21ec2caa91c90bb4c1824eb04
   FlutterMacOS: c232990155153907050900a2e175c7773903ba4e
-  fvp: 4fe77c2b30122233a57f425dafd219ed35565809
   hollow_core: e0b3856b50b8769ee432152cbb070c1076d37941
   irondash_engine_context: 893c7d96d20ce361d7e996f39d360c4c2f9869ba
   local_notifier: ebf072651e35ae5e47280ad52e2707375cb2ae4e
-  mdk: c0af7ebf8a547462b4e315cfd2e7e1c6bb3ddeaa
-  screen_retriever_macos: 452e51764a9e1cdb74b3c541238795849f21557f
   super_native_extensions: c2795d6d9aedf4a79fae25cb6160b71b50549189
-  tray_manager: a104b5c81b578d83f3c3d0f40a997c8b10810166
   WebRTC-SDK: 2bdf437ed0754d13d78ee15696e4deb74318697d
 
-PODFILE CHECKSUM: 8eed6bbb21416fc6560099d1abf3b3cfc33a7de1
+PODFILE CHECKSUM: 380cbcbc037b9b87cf0fa28d1cc3497237b4ac7d
 
 COCOAPODS: 1.17.0

@@ -3,15 +3,10 @@ PODS:
   - flutter_webrtc (1.4.0):
     - Flutter
     - WebRTC-SDK (= 144.7559.09)
-  - fvp (0.35.2):
-    - Flutter
-    - FlutterMacOS
-    - mdk (~> 0.35.1)
   - hollow_core (0.0.1):
     - Flutter
   - irondash_engine_context (0.0.1):
     - Flutter
-  - mdk (0.35.1)
   - proximity_sensor (0.0.1):
     - Flutter
   - super_native_extensions (0.0.1):
@@ -21,10 +16,8 @@ PODS:
 DEPENDENCIES:
   - Flutter (from `Flutter`)
   - flutter_webrtc (from `.symlinks/plugins/flutter_webrtc/ios`)
-  - fvp (from `.symlinks/plugins/fvp/darwin`)
   - hollow_core (from `.symlinks/plugins/hollow_core/ios`)
   - irondash_engine_context (from `.symlinks/plugins/irondash_engine_context/ios`)
-  - mdk (from `../third_party/apple_pods/mdk.podspec.json`)
   - proximity_sensor (from `.symlinks/plugins/proximity_sensor/ios`)
   - super_native_extensions (from `.symlinks/plugins/super_native_extensions/ios`)
   - WebRTC-SDK (from `../third_party/apple_pods/WebRTC-SDK.podspec.json`)
@@ -34,14 +27,10 @@ EXTERNAL SOURCES:
     :path: Flutter
   flutter_webrtc:
     :path: ".symlinks/plugins/flutter_webrtc/ios"
-  fvp:
-    :path: ".symlinks/plugins/fvp/darwin"
   hollow_core:
     :path: ".symlinks/plugins/hollow_core/ios"
   irondash_engine_context:
     :path: ".symlinks/plugins/irondash_engine_context/ios"
-  mdk:
-    :podspec: "../third_party/apple_pods/mdk.podspec.json"
   proximity_sensor:
     :path: ".symlinks/plugins/proximity_sensor/ios"
   super_native_extensions:
@@ -52,14 +41,12 @@ EXTERNAL SOURCES:
 SPEC CHECKSUMS:
   Flutter: 71a624a5bc0c04062bf19101d501e466baf2fb47
   flutter_webrtc: 3ee86aa10e0313c38c93fdb215dd86e77014f96a
-  fvp: 4fe77c2b30122233a57f425dafd219ed35565809
   hollow_core: 2961c66623031f2236c18450a6f661e5d86e645f
   irondash_engine_context: 8e58ca8e0212ee9d1c7dc6a42121849986c88486
-  mdk: c0af7ebf8a547462b4e315cfd2e7e1c6bb3ddeaa
   proximity_sensor: 2aef59f90cf0382935faf58ad0a79e1e860773bd
   super_native_extensions: b763c02dc3a8fd078389f410bf15149179020cb4
   WebRTC-SDK: 2bdf437ed0754d13d78ee15696e4deb74318697d
 
-PODFILE CHECKSUM: dc1d49103b8544b4a1e899c357c4aa04499889f2
+PODFILE CHECKSUM: edeadee55edc0bc15e6c72ffa2114426b8e79002
 
 COCOAPODS: 1.17.0

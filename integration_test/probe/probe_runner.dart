@@ -43,7 +43,6 @@ import 'package:hollow/src/ui/chat/video_message_bubble.dart'
 import 'package:video_player/video_player.dart' show VideoPlayer;
 import 'package:hollow/src/ui/shop/hollowpack_import.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
-import 'package:tray_manager/tray_manager.dart' show MenuItem;
 
 import 'probe_dump.dart';
 import 'probe_env.dart';
@@ -1552,7 +1551,7 @@ class ProbeRunner {
     if (app == null) throw _ProbeFailure('tray needs the app, not a widget page');
     TrayService.instance
       ..debugAttach(app, showWindow: () async {})
-      ..onTrayMenuItemClick(MenuItem(key: key));
+      ..handleMenuKey(key);
     await settle(frames: 20);
     return 'tray $key clicked';
   }

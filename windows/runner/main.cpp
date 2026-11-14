@@ -2,6 +2,9 @@
 #include <flutter/flutter_view_controller.h>
 #include <windows.h>
 
+#include <cwctype>
+#include <string>
+
 #include "app_links/app_links_plugin_c_api.h"
 #include "flutter_window.h"
 #include "utils.h"
@@ -11,16 +14,33 @@ __declspec(dllexport) unsigned long NvOptimusEnablement = 0x00000001;
 __declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
 }
 
+namespace {
+
+bool IsLinkLaunch(const wchar_t* command_line) {
+  if (command_line == nullptr) return false;
+  std::wstring lower(command_line);
+  for (auto& c : lower) c = static_cast<wchar_t>(::towlower(c));
+  return lower.find(L"hollow://") != std::wstring::npos;
+}
+
+}  // namespace
+
 int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
                       _In_ wchar_t *command_line, _In_ int show_command) {
-  // Single instance: if Hollow is already running, hand our command line
-  // (which carries any hollow:// deep link) to that instance and exit.
-  // app_links 7.x finds the primary instance by matching the owning process's
-  // exe path (EnumWindows + GetModuleFileNameW) and delivers via WM_COPYDATA.
-  // This runs before Flutter boots, so protocol launches never reach the Dart
-  // PID-lock exit path (which would silently drop the link).
+  // Single instance: a running copy of this exe (matched by exe path) gets our
+  // command line, with any hollow:// link, over WM_COPYDATA and we exit before
+  // Flutter boots. app_links answers false both when no copy runs and when the
+  // copy did not take the link within 5 s (hung, or elevated), so a link launch
+  // tries once more; a link still refused is lost when the Dart PID lock ends
+  // this second process.
   if (SendAppLinkToInstance()) {
     return EXIT_SUCCESS;
+  }
+  if (IsLinkLaunch(command_line)) {
+    ::Sleep(1000);
+    if (SendAppLinkToInstance()) {
+      return EXIT_SUCCESS;
+    }
   }
 
   // Attach to console when present (e.g., 'flutter run') or create a

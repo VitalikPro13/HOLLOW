@@ -6,7 +6,7 @@ Run every command below from the repository root.
 
 ## Every platform
 
-- Flutter SDK, stable channel. We build with 3.47.0.
+- Flutter SDK, stable channel. We build with 3.47.9.
 - Rust toolchain, stable, through [rustup](https://rustup.rs).
 - flutter_rust_bridge_codegen 2.11.1, only if you change the Rust API.
 
@@ -89,7 +89,7 @@ For a signed build, copy `macos/Flutter/LocalSigning.xcconfig.example` to `Local
 On Ubuntu or Debian:
 
 ```bash
-sudo apt install -y clang cmake ninja-build pkg-config libgtk-3-dev libsecret-1-dev libssl-dev libnotify-dev libayatana-appindicator3-dev libpulse-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly lld curl build-essential
+sudo apt install -y clang cmake ninja-build pkg-config libgtk-3-dev libsecret-1-dev libssl-dev libnotify-dev libx11-dev libxi-dev libpulse-dev libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly lld curl build-essential
 flutter pub get
 flutter build linux
 ```

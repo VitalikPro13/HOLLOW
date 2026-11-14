@@ -158,7 +158,9 @@ fi
 # These are resolved from the build host (Ubuntu 24.04).
 echo "Bundling system libraries..."
 SYSLIBS=(
-    # AppIndicator (tray_manager_plugin dependency)
+    # AppIndicator. Nothing in the app links these since tray_manager 0.7 (nativeapi;
+    # ldd over the 0.14 bundle finds none). Kept until a flatpak built without them
+    # is shown to start and post notifications.
     libayatana-appindicator3.so.1
     libayatana-indicator3.so.7
     libayatana-ido3-0.4.so.0

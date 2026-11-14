@@ -13,7 +13,6 @@ import 'package:hollow/src/core/providers/voice_channel_provider.dart';
 import 'package:hollow/src/core/services/tray_service.dart';
 import 'package:hollow/src/theme/hollow_theme_data.dart';
 import 'package:hollow/src/ui/app.dart' show hollowNavigatorKey;
-import 'package:tray_manager/tray_manager.dart';
 
 import 'helpers/test_app.dart';
 
@@ -65,18 +64,11 @@ void main() {
       windowCalls.add(call.method);
       return true;
     });
-    // On Windows init() sets the tray icon; an unmocked channel's reply comes
-    // from the engine outside the fake clock, so the test waited 10 minutes.
-    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-        .setMockMethodCallHandler(
-            const MethodChannel('tray_manager'), (call) async => null);
   });
 
   tearDown(() {
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(const MethodChannel('window_manager'), null);
-    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-        .setMockMethodCallHandler(const MethodChannel('tray_manager'), null);
   });
 
   Future<ProviderContainer> pump(
@@ -111,7 +103,7 @@ void main() {
   }
 
   Future<void> clickLeave(WidgetTester tester) async {
-    TrayService.instance.onTrayMenuItemClick(MenuItem(key: 'leave'));
+    TrayService.instance.handleMenuKey('leave');
     await tester.pumpAndSettle();
   }
 
@@ -160,8 +152,7 @@ void main() {
 
   String? leaveLabel() => TrayService.instance
       .debugMenu()
-      .items
-      ?.where((i) => i.key == 'leave')
+      .where((i) => i.key == 'leave')
       .firstOrNull
       ?.label;
 

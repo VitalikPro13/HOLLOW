@@ -3,23 +3,23 @@
 #
 
 list(APPEND FLUTTER_PLUGIN_LIST
+  app_links_linux
   audioplayers_linux
   desktop_drop
   flutter_secure_storage_linux
   flutter_webrtc
   fvp
-  gtk
   irondash_engine_context
   local_notifier
   record_linux
   screen_retriever_linux
   super_native_extensions
-  tray_manager
   url_launcher_linux
   window_manager
 )
 
 list(APPEND FLUTTER_FFI_PLUGIN_LIST
+  cnativeapi
   hollow_core
 )
 

@@ -83,6 +83,14 @@ if ($OnlyPull) { $SkipBuild = $true; $SkipInstaller = $true; $SkipZip = $true; $
 
 function Step($n, $msg) { Write-Host "`n==== [$n] $msg ====" -ForegroundColor Cyan }
 
+# tray_manager's native core reads these from the build environment and would switch
+# its menus to WinUI 3 and bundle the Windows App SDK bootstrap DLL.
+foreach ($nativeVar in 'NATIVEAPI_ENABLE_WINUI3', 'NATIVEAPI_WINAPPSDK_DIR', 'NATIVEAPI_CPPWINRT_EXE', 'NATIVEAPI_WEBVIEW2_DIR') {
+    if ([Environment]::GetEnvironmentVariable($nativeVar)) {
+        throw "$nativeVar is set in this environment; a release build must not see it. Unset it and run again."
+    }
+}
+
 # --- Load machine config (scripts\release.local.env) ---
 function Read-EnvFile($path) {
     $h = @{}
