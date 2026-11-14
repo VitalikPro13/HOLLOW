@@ -324,6 +324,18 @@ with no ongoing relationship. And it is the personal vault's ONLY backup story
   "refuse" — anyone may author a pack and no authority could say otherwise.
 - **No pre-import thumbnail** — previewing would hand un-validated bytes to an
   image decoder before a single check has run.
+- **Every pack is unpacked under a budget** (`open_pack`, HOL-SEC-205): the pack
+  card previews every RECEIVED pack before anyone taps Add, so the file is
+  bounded first (the budget plus 1 MiB), the manifest at 128 KiB, each blob at
+  the 512 KB sticker cap and the whole pack at manifest + 120 full stickers,
+  counting bytes actually inflated (`zip_budget::UnpackBudget`), never header
+  sizes, and its zip index is walked from the file's tail first (at most 128
+  entries), since the zip reader allocates a record per declared entry. Past
+  the budget the rest is reported rejected. The card reads one pack at a time,
+  each file ONCE per run (`_previewOnce`; a refusal of the file is remembered,
+  any other failure is read again when a card next opens), and a pack it cannot
+  read shows "Can't open this pack" with no Add button. Wiki
+  `security_write_gates` §73.
 - **UI**: import via "Add pack" on the Mine tab, a file picker filtered to
   `.hollow-pack` + `.zip` (a pack IS a zip, and one that has been through a
   mail client often comes back renamed). A received pack renders as

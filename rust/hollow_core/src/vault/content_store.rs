@@ -648,14 +648,38 @@ impl ContentStore {
         channel_id: &str,
         manifest: &super::pipeline::VaultManifest,
     ) -> Result<(), String> {
+        self.write_manifest("INSERT OR REPLACE", server_id, channel_id, manifest).map(|_| ())
+    }
+
+    /// Add a manifest only where none is held for its content id, in one statement, so a
+    /// manifest that lands between a check and this write is never replaced. True when
+    /// a row was added.
+    pub fn fill_manifest(
+        &self,
+        server_id: &str,
+        channel_id: &str,
+        manifest: &super::pipeline::VaultManifest,
+    ) -> Result<bool, String> {
+        self.write_manifest("INSERT OR IGNORE", server_id, channel_id, manifest).map(|n| n > 0)
+    }
+
+    fn write_manifest(
+        &self,
+        verb: &str,
+        server_id: &str,
+        channel_id: &str,
+        manifest: &super::pipeline::VaultManifest,
+    ) -> Result<usize, String> {
         let json = serde_json::to_string(manifest)
             .map_err(|e| format!("Failed to serialize manifest: {e}"))?;
         self.conn
             .execute(
-                "INSERT OR REPLACE INTO vault_manifests
-                 (content_id, server_id, channel_id, manifest_json, k, m,
-                  original_size, storage_tier, created_at, creator_peer_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                &format!(
+                    "{verb} INTO vault_manifests
+                     (content_id, server_id, channel_id, manifest_json, k, m,
+                      original_size, storage_tier, created_at, creator_peer_id)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)"
+                ),
                 params![
                     manifest.content_id,
                     server_id,
@@ -669,8 +693,7 @@ impl ContentStore {
                     manifest.creator_peer_id,
                 ],
             )
-            .map_err(|e| format!("Failed to save manifest: {e}"))?;
-        Ok(())
+            .map_err(|e| format!("Failed to save manifest: {e}"))
     }
 
     /// Where a manifest lives: `(server_id, channel_id, creator_peer_id)`.

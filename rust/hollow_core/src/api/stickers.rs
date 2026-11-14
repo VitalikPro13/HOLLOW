@@ -368,6 +368,27 @@ pub fn sticker_fetch_and_store(
 
 const PACK_FORMAT_VERSION: u32 = 1;
 
+/// A full pack's manifest (120 items, longest names, signed) stays under 64 KB.
+const MAX_PACK_MANIFEST_BYTES: u64 = 128 << 10;
+
+/// One blob, the size the asset rail takes a sticker at.
+fn pack_blob_cap() -> u64 {
+    node::assets::AssetKind::Sticker.recv_cap() as u64
+}
+
+/// Everything one pack may unpack to: its manifest and a full pack of stickers.
+fn pack_unpack_budget() -> u64 {
+    MAX_PACK_MANIFEST_BYTES + MAX_STICKERS_PER_PACK as u64 * pack_blob_cap()
+}
+
+/// Entries a pack's index may list: its manifest, a full pack, and a few a zip tool adds.
+const MAX_PACK_ENTRIES: u64 = 1 + MAX_STICKERS_PER_PACK as u64 + 7;
+
+/// The pack file itself, read whole before it is opened: its budget plus zip framing.
+fn max_pack_file_bytes() -> u64 {
+    pack_unpack_budget() + (1 << 20)
+}
+
 /// One sticker in a `.hollow-pack` manifest.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct PackItem {
@@ -532,7 +553,7 @@ pub fn export_personal_sticker_pack(
 /// Read a `.hollow-pack` manifest without importing anything.
 #[frb]
 pub fn preview_sticker_pack(path: String) -> Result<StickerPackPreview, String> {
-    let manifest = read_pack_manifest(&path)?;
+    let manifest = open_pack(&path)?.manifest;
     let verified = pack_signature_is_valid(&manifest);
     Ok(StickerPackPreview {
         pack: manifest.pack,
@@ -546,24 +567,41 @@ pub fn preview_sticker_pack(path: String) -> Result<StickerPackPreview, String> 
     })
 }
 
-fn read_pack_manifest(path: &str) -> Result<PackManifest, String> {
-    use std::io::Read;
+/// A pack opened for reading, with what it may still unpack to.
+struct OpenPack {
+    manifest: PackManifest,
+    archive: zip::ZipArchive<std::io::Cursor<Vec<u8>>>,
+    budget: crate::zip_budget::UnpackBudget,
+}
 
-    let zip_bytes = crate::node::at_rest::read_all(std::path::Path::new(path))?;
-    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&zip_bytes))
+/// Open a pack and read its manifest, each under its own bound: the chat card does this
+/// for every pack it shows, before anyone asks to import it.
+fn open_pack(path: &str) -> Result<OpenPack, String> {
+    let path = std::path::Path::new(path);
+    if crate::node::at_rest::plaintext_len(path)? > max_pack_file_bytes() {
+        return Err("That sticker pack is too large to open".into());
+    }
+    let zip_bytes = crate::node::at_rest::read_all(path)?;
+    if let Some(reason) = crate::zip_budget::index_refused(&zip_bytes, MAX_PACK_ENTRIES) {
+        return Err(format!("Not a valid pack file: {reason}"));
+    }
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(zip_bytes))
         .map_err(|e| format!("Not a valid pack file: {e}"))?;
-    let mut raw = String::new();
-    archive
-        .by_name("manifest.json")
-        .map_err(|_| "Pack is missing its manifest".to_string())?
-        .read_to_string(&mut raw)
-        .map_err(|e| format!("Failed to read pack manifest: {e}"))?;
-    let manifest: PackManifest = serde_json::from_str(&raw)
+    let mut budget = crate::zip_budget::UnpackBudget::new(pack_unpack_budget());
+    let raw = {
+        let entry = archive
+            .by_name("manifest.json")
+            .map_err(|_| "Pack is missing its manifest".to_string())?;
+        budget
+            .read(entry, MAX_PACK_MANIFEST_BYTES)
+            .map_err(|_| "The pack manifest is too large to be real".to_string())?
+    };
+    let manifest: PackManifest = serde_json::from_slice(&raw)
         .map_err(|e| format!("Failed to parse pack manifest: {e}"))?;
     if manifest.format_version > PACK_FORMAT_VERSION {
         return Err("That pack was made by a newer version of Hollow".into());
     }
-    Ok(manifest)
+    Ok(OpenPack { manifest, archive, budget })
 }
 
 /// Attribution check. False for anything unsigned, malformed or mismatched —
@@ -600,15 +638,14 @@ fn pack_signature_is_valid(manifest: &PackManifest) -> bool {
 /// claimed name is rejected, `w`/`h` are re-derived from the decoded image because
 /// they go straight into the wire token, entry paths are never joined, and the vault
 /// caps are enforced per row so a huge pack fills to the limit and reports the rest
-/// as rejected rather than failing whole.
+/// as rejected rather than failing whole. Every blob is unpacked under the sticker cap
+/// and one budget for the whole pack, so its bytes, not its headers, bound the work.
 #[frb]
 pub fn import_sticker_pack(
     path: String,
     into_pack: String,
 ) -> Result<StickerPackImportResult, String> {
-    use std::io::Read;
-
-    let manifest = read_pack_manifest(&path)?;
+    let OpenPack { manifest, mut archive, mut budget } = open_pack(&path)?;
     let target = {
         let requested = into_pack.trim();
         let name = if requested.is_empty() {
@@ -619,29 +656,32 @@ pub fn import_sticker_pack(
         clean_label(name)?
     };
 
-    let zip_bytes = crate::node::at_rest::read_all(std::path::Path::new(&path))?;
-    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&zip_bytes))
-        .map_err(|e| format!("Not a valid pack file: {e}"))?;
-
     let mut added = 0u32;
     let mut skipped = 0u32;
     let mut rejected = 0u32;
 
-    for item in &manifest.items {
+    for (i, item) in manifest.items.iter().enumerate() {
         if !crate::crdt::valid_emote_hash(&item.hash) {
             rejected += 1;
             continue;
         }
         // The hash names the entry, so an attacker-supplied path is never joined.
-        let mut bytes = Vec::new();
-        let read_ok = archive
-            .by_name(&format!("blobs/{}.webp", item.hash))
-            .map(|mut f| f.read_to_end(&mut bytes))
-            .is_ok();
-        if !read_ok || bytes.is_empty() {
-            rejected += 1;
-            continue;
-        }
+        let read = match archive.by_name(&format!("blobs/{}.webp", item.hash)) {
+            Ok(entry) => budget.read(entry, pack_blob_cap()),
+            Err(_) => Err(crate::zip_budget::Unpack::Unreadable(String::new())),
+        };
+        let bytes = match read {
+            Ok(bytes) if !bytes.is_empty() => bytes,
+            // Partial by design: what landed stays, the rest is reported.
+            Err(crate::zip_budget::Unpack::OverBudget) => {
+                rejected += (manifest.items.len() - i) as u32;
+                break;
+            }
+            _ => {
+                rejected += 1;
+                continue;
+            }
+        };
         // Content-address check: the bytes ARE the identity.
         let actual = hex::encode(Sha256::digest(&bytes));
         if actual != item.hash {
@@ -837,5 +877,234 @@ mod tests {
             sig_b64: String::new(),
         };
         assert!(!pack_signature_is_valid(&m));
+    }
+
+    // t14-zipbomb: how much a received pack may unpack to (HOL-SEC-205)
+
+    use std::io::Write;
+
+    /// A pack zip of `manifest.json` plus `blobs`, every entry deflated so a run of one
+    /// byte costs almost nothing on the wire.
+    fn pack_zip(manifest: &[u8], blobs: &[(String, Vec<u8>)]) -> Vec<u8> {
+        let mut out = std::io::Cursor::new(Vec::new());
+        let mut z = zip::ZipWriter::new(&mut out);
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        z.start_file("manifest.json", opts).unwrap();
+        z.write_all(manifest).unwrap();
+        for (name, bytes) in blobs {
+            z.start_file(name.as_str(), opts).unwrap();
+            z.write_all(bytes).unwrap();
+        }
+        z.finish().unwrap();
+        out.into_inner()
+    }
+
+    fn manifest_naming(hashes: &[&str]) -> Vec<u8> {
+        let items: Vec<PackItem> = hashes
+            .iter()
+            .map(|h| PackItem { hash: h.to_string(), name: String::new(), animated: false, w: 64, h: 64 })
+            .collect();
+        serde_json::to_vec(&PackManifest {
+            format_version: PACK_FORMAT_VERSION,
+            pack: "budget".into(),
+            author: String::new(),
+            author_pubkey_b64: String::new(),
+            created_at: 0,
+            items,
+            sig_b64: String::new(),
+        })
+        .unwrap()
+    }
+
+    fn blob_entry(bytes: Vec<u8>) -> (String, String, Vec<u8>) {
+        let hash = hex::encode(Sha256::digest(&bytes));
+        (hash.clone(), format!("blobs/{hash}.webp"), bytes)
+    }
+
+    fn real_sticker() -> Vec<u8> {
+        let mut img = image::RgbaImage::from_pixel(96, 64, image::Rgba([0, 0, 0, 0]));
+        for y in 0..64 {
+            for x in 48..96 {
+                img.put_pixel(x, y, image::Rgba([40, 200, 90, 255]));
+            }
+        }
+        let mut png = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+        crate::node::image_convert::process_sticker_for_send(&png).unwrap().0
+    }
+
+    fn write_pack(dir: &std::path::Path, bytes: &[u8]) -> String {
+        let path = dir.join("p.hollow-pack");
+        std::fs::write(&path, bytes).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    /// An in-memory store, the one the import writes its rows to.
+    fn pack_store() -> std::sync::MutexGuard<'static, ()> {
+        let lock = crate::api::storage::store_test_lock();
+        crate::api::storage::set_test_store(
+            crate::storage::MessageStore::open(":memory:", &"cd".repeat(32)).unwrap(),
+        );
+        lock
+    }
+
+    #[test]
+    fn a_pack_whose_manifest_unpacks_past_its_cap_is_refused() {
+        let _s = pack_store();
+        let work = crate::test_tmp::tempdir().unwrap();
+        // Inside the pack's whole budget, so only the manifest's own cap refuses it.
+        let mut manifest = manifest_naming(&[]);
+        manifest.extend(std::iter::repeat_n(b' ', 32 << 20));
+        let bytes = pack_zip(&manifest, &[]);
+        assert!(bytes.len() < 128 << 10, "the fixture is small on the wire: {}", bytes.len());
+        let path = write_pack(work.path(), &bytes);
+        // The chat card previews every received pack before anyone taps Add.
+        assert!(preview_sticker_pack(path.clone()).is_err(), "a 32 MiB manifest was read whole");
+        assert!(import_sticker_pack(path, String::new()).is_err());
+    }
+
+    #[test]
+    fn a_manifest_at_its_cap_still_previews() {
+        let work = crate::test_tmp::tempdir().unwrap();
+        let mut manifest = manifest_naming(&[]);
+        manifest.resize(MAX_PACK_MANIFEST_BYTES as usize, b' ');
+        let path = write_pack(work.path(), &pack_zip(&manifest, &[]));
+        assert_eq!(preview_sticker_pack(path).unwrap().pack, "budget");
+    }
+
+    #[test]
+    fn a_pack_file_past_its_size_is_refused_before_it_is_read() {
+        let work = crate::test_tmp::tempdir().unwrap();
+        let path = work.path().join("big.hollow-pack");
+        std::fs::File::create(&path).unwrap().set_len(max_pack_file_bytes() + 1).unwrap();
+        let err = preview_sticker_pack(path.to_string_lossy().into_owned()).err().expect("refused");
+        assert!(err.contains("too large"), "{err}");
+    }
+
+    #[test]
+    fn a_blob_that_inflates_past_the_sticker_cap_costs_only_the_cap() {
+        let _s = pack_store();
+        let work = crate::test_tmp::tempdir().unwrap();
+        let (bomb_hash, bomb_name, bomb) = blob_entry(vec![0u8; 64 << 20]);
+        let (real_hash, real_name, real) = blob_entry(real_sticker());
+        let manifest = manifest_naming(&[&bomb_hash, &real_hash]);
+        let path = write_pack(work.path(), &pack_zip(&manifest, &[(bomb_name, bomb), (real_name, real)]));
+        let got = import_sticker_pack(path, String::new()).unwrap();
+        assert_eq!((got.added, got.rejected), (1, 1), "the bomb is refused alone and the real sticker after it lands");
+    }
+
+    #[test]
+    fn a_pack_stops_unpacking_once_its_budget_is_spent() {
+        let _s = pack_store();
+        let work = crate::test_tmp::tempdir().unwrap();
+        // At the per-sticker cap exactly, so every read of it passes that check.
+        let (junk_hash, junk_name, junk) = blob_entry(vec![0u8; pack_blob_cap() as usize]);
+        let (real_hash, real_name, real) = blob_entry(real_sticker());
+        let mut names = vec![junk_hash.as_str(); MAX_STICKERS_PER_PACK + 2];
+        names.push(&real_hash);
+        let manifest = manifest_naming(&names);
+        let path = write_pack(work.path(), &pack_zip(&manifest, &[(junk_name, junk), (real_name, real)]));
+        let got = import_sticker_pack(path, String::new()).unwrap();
+        assert_eq!(got.added, 0, "an entry read past the pack's budget landed");
+        assert_eq!(got.rejected as usize, names.len());
+    }
+
+    #[test]
+    fn a_real_pack_still_imports() {
+        let _s = pack_store();
+        let work = crate::test_tmp::tempdir().unwrap();
+        let (real_hash, real_name, real) = blob_entry(real_sticker());
+        let manifest = manifest_naming(&[&real_hash]);
+        let path = write_pack(work.path(), &pack_zip(&manifest, &[(real_name, real)]));
+        assert_eq!(preview_sticker_pack(path.clone()).unwrap().count, 1);
+        let got = import_sticker_pack(path, String::new()).unwrap();
+        assert_eq!((got.added, got.rejected), (1, 0));
+    }
+
+    /// A real one-sticker pack for a fleet run: `HOLLOW_FIXTURE_OUT=<path> cargo test --lib
+    /// -- --ignored write_a_real_pack_for_the_fleet`.
+    #[test]
+    #[ignore = "writes a fleet fixture"]
+    fn write_a_real_pack_for_the_fleet() {
+        let out = std::env::var("HOLLOW_FIXTURE_OUT").expect("HOLLOW_FIXTURE_OUT");
+        let (hash, name, bytes) = blob_entry(real_sticker());
+        let mut manifest: PackManifest = serde_json::from_slice(&manifest_naming(&[&hash])).unwrap();
+        manifest.pack = "Fleet leaves".into();
+        std::fs::write(out, pack_zip(&serde_json::to_vec(&manifest).unwrap(), &[(name, bytes)])).unwrap();
+    }
+
+    #[test]
+    fn the_pack_caps_match_what_a_pack_may_hold() {
+        assert_eq!(pack_blob_cap(), node::assets::AssetKind::Sticker.recv_cap() as u64);
+        assert!(pack_unpack_budget() >= MAX_PACK_MANIFEST_BYTES + MAX_STICKERS_PER_PACK as u64 * pack_blob_cap());
+        assert!(max_pack_file_bytes() > pack_unpack_budget());
+        // The largest manifest an export writes fits under its cap with room to spare.
+        let kp = NativeKeypair::from_secret_bytes(&[7u8; 32]);
+        let longest = "\u{1F600}".repeat(MAX_STICKER_LABEL);
+        let items = (0..MAX_STICKERS_PER_PACK)
+            .map(|i| PackItem { hash: hex::encode([i as u8; 32]), name: longest.clone(), animated: true, w: 4096, h: 4096 })
+            .collect();
+        let full = serde_json::to_vec_pretty(&signed_manifest(&kp, &longest, items)).unwrap();
+        assert!((full.len() as u64) * 2 < MAX_PACK_MANIFEST_BYTES, "{} bytes", full.len());
+    }
+
+    // t14-zipbomb review round: the zip index is bounded too
+
+    /// A `.hollow-pack` whose index lists `n` entries, all one real, readable manifest.
+    fn pack_with_entries(n: usize) -> Vec<u8> {
+        crate::zip_budget::zip_listing(n, "manifest.json", br#"{"format_version":1,"pack":"index","items":[]}"#)
+    }
+
+    #[test]
+    fn a_pack_whose_index_lists_more_entries_than_a_pack_holds_is_refused() {
+        let work = crate::test_tmp::tempdir().unwrap();
+        let fits = write_pack(work.path(), &pack_with_entries(MAX_PACK_ENTRIES as usize));
+        assert_eq!(preview_sticker_pack(fits).unwrap().pack, "index");
+        let path = work.path().join("over.hollow-pack");
+        std::fs::write(&path, pack_with_entries(MAX_PACK_ENTRIES as usize + 1)).unwrap();
+        assert!(preview_sticker_pack(path.to_string_lossy().into_owned()).is_err(), "an index one past a full pack was read");
+    }
+
+    /// This process's peak resident memory; 0 where `getrusage` does not exist.
+    #[cfg(not(unix))]
+    fn peak_rss_mib() -> u64 {
+        0
+    }
+
+    #[cfg(unix)]
+    fn peak_rss_mib() -> u64 {
+        // SAFETY: getrusage only writes the struct it is given.
+        let mut u: libc::rusage = unsafe { std::mem::zeroed() };
+        unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut u) };
+        let raw = u.ru_maxrss as u64;
+        if cfg!(target_os = "macos") { raw >> 20 } else { raw >> 10 }
+    }
+
+    /// A pack holds a manifest and at most 120 stickers, yet the card opens (and indexes)
+    /// any zip under the file cap: a 61 MiB pack listing 1.25 million entries costs every
+    /// viewer about 8 times its size, unasked, once per pack card in view.
+    #[test]
+    fn review_t14_a_pack_listing_far_more_entries_than_a_pack_holds_is_refused() {
+        let work = crate::test_tmp::tempdir().unwrap();
+        let bytes = pack_with_entries(1_250_000);
+        let file_cap = (128u64 << 10) + 120 * 524_288 + (1 << 20);
+        assert!((bytes.len() as u64) < file_cap, "the fixture is under the pack file cap: {}", bytes.len());
+        let path = work.path().join("index.hollow-pack");
+        std::fs::write(&path, &bytes).unwrap();
+        drop(bytes);
+        let before = peak_rss_mib();
+        let got = preview_sticker_pack(path.to_string_lossy().into_owned());
+        let after = peak_rss_mib();
+        assert!(
+            got.is_err(),
+            "a pack listing 1.25M zip entries was opened and previewed (peak RSS {before} -> {after} MiB)"
+        );
+        // The peak is process-wide, so it is this test's alone only when nextest gives
+        // each test its own process; under a shared `cargo test` process another test
+        // could raise it.
+        if std::env::var("NEXTEST_EXECUTION_MODE").as_deref() == Ok("process-per-test") {
+            assert!(after.saturating_sub(before) < 96, "previewing the refused pack raised peak RSS {before} -> {after} MiB");
+        }
     }
 }

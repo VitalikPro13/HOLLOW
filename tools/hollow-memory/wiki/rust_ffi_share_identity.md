@@ -411,18 +411,12 @@ Exports all vault shards for a server as a `.hollow-shards` ZIP bundle. Opens th
 
 #### `import_server_shards(archive_path: String) -> Result<ShardImportResultFfi, String>`
 
-Imports a `.hollow-shards` ZIP bundle. Processing:
-1. Reads and opens the ZIP, parses `manifest.json` to extract `server_id`.
-2. Opens the local `ContentStore` with the same passphrase derivation as export.
-3. Imports manifests: deserializes each `VaultManifest` from the bundle's `manifests` array and calls `content_store.save_manifest()`.
-4. Imports shards: iterates all `shards/{content_id}/{shard_index}.shard` entries. For each:
-   - Generates the shard key via `content_store::shard_key(content_id, shard_index)`.
-   - Skips if `content_store.has_shard()` returns true (already present).
-   - Looks up the manifest entry for this content_id to get `k`, `m`, `total_data_size`, and `storage_tier`.
-   - Calls `content_store.store_shard()` with the extracted data.
-   - Shards without a matching manifest are skipped entirely.
-5. Counts newly reconstructable files: iterates all manifests, checks if local shard count >= `k` (minimum for reconstruction).
-6. Returns `ShardImportResultFfi` with all counts.
+Imports a `.hollow-shards` ZIP bundle. A bundle names no sender, so nothing in it is believed; it is judged against what this device holds (HOL-SEC-205, HOL-SEC-206; wiki `security_write_gates` §73, authz row files:A-V12):
+1. `check_shard_bundle` bounds it whole before anything is stored: the zip index (`zip_budget::index_refused`, at most 65536 entries, read from the file's tail before the zip reader parses it), the manifest (16 MiB), each shard (no larger than the bundle) and the total (max(64 MiB, 4 x size)), counted in bytes inflated.
+2. Our master must be a member of a server we hold (`held_server_state`). Then each manifest only FILLS (`ContentStore::fill_manifest`, `INSERT OR IGNORE`, counted only when a row was added) after `bundle_manifest_refused`: content id well formed, creator a current member who sent the file card we hold for its `message_id` (`card_is_creators`, the live relink rule), its channel one of the server's that we may read, never a restricted one, never over a manifest we hold. It relinks no file card.
+3. For a server we do not hold (an ex-member, the offline fallback bundles exist for) no manifest is added at all.
+4. Each `shards/{content_id}/{shard_index}.shard` lands only when a manifest WE hold names that server as its home; a member's write also passes `vault_ops::shard_write_refused` (pledge, never over a held shard); every write passes `shard_bytes_refused(.., pulling = true)`, so only the bytes the held manifest pins are stored. k, m, size and tier come from the held manifest.
+5. Counts newly reconstructable files and returns `ShardImportResultFfi`.
 
 ### Content store passphrase derivation
 

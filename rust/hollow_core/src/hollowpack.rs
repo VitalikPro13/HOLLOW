@@ -1748,4 +1748,48 @@ mod tests {
         let err = verify_pack(&zip_bytes).expect_err("a still role must not animate");
         assert!(err.contains("has to be a still"), "got: {err}");
     }
+
+    // t14-zipbomb: a small pack that unpacks large (HOL-SEC-205 sweep)
+
+    #[test]
+    fn a_manifest_that_unpacks_past_its_cap_is_refused() {
+        use std::io::Write;
+        let mut json = serde_json::to_vec(&PackManifest { format: FORMAT.into(), version: VERSION, ..Default::default() }).unwrap();
+        json.extend(std::iter::repeat_n(b' ', 64 << 20));
+        let mut out = Vec::new();
+        {
+            let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut out));
+            zip.start_file(MANIFEST_NAME, zip::write::SimpleFileOptions::default()).unwrap();
+            zip.write_all(&json).unwrap();
+            zip.finish().unwrap();
+        }
+        assert!(out.len() < 256 << 10, "{}", out.len());
+        let err = read_manifest(&out).expect_err("a 64 MiB manifest was read");
+        assert!(err.contains("too large"), "got: {err}");
+        assert!(verify_pack(&out).is_err());
+    }
+
+    #[test]
+    fn a_file_that_inflates_past_its_cap_is_refused_before_it_is_hashed() {
+        let zeros = vec![0u8; 64 << 20];
+        let hash = hash_hex(&zeros);
+        let manifest = PackManifest {
+            format: FORMAT.into(),
+            version: VERSION,
+            files: vec![PackFile {
+                role: "avatar".into(),
+                path: format!("files/{hash}.webp"),
+                sha256: hash.clone(),
+                bytes: zeros.len() as u64,
+                w: image_convert::AVATAR_DIM,
+                h: image_convert::AVATAR_DIM,
+                animated: false,
+            }],
+            ..Default::default()
+        };
+        let zip_bytes = raw_pack(&manifest, &[(hash, zeros)]);
+        assert!(zip_bytes.len() < 1 << 20, "{}", zip_bytes.len());
+        let err = verify_pack(&zip_bytes).expect_err("a 64 MiB file was read");
+        assert!(err.contains("limit"), "got: {err}");
+    }
 }

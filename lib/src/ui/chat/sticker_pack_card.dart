@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -19,6 +21,72 @@ const String kStickerPackExtension = 'hollow-pack';
 /// Whether [fileName] names a shared sticker pack.
 bool isStickerPackFile(String fileName) =>
     fileName.toLowerCase().endsWith('.$kStickerPackExtension');
+
+/// Reads a pack's manifest. Replaced in widget tests.
+@visibleForTesting
+Future<stickers_api.StickerPackPreview> Function(String path)
+    stickerPackPreviewer =
+    (path) => stickers_api.previewStickerPack(path: path);
+
+/// One read per pack file per run: a card is rebuilt every time its conversation opens
+/// or it scrolls back into view, and a pack file's bytes never change once complete. A
+/// refusal of the file itself is remembered; any other failure (the store or a file key
+/// not ready yet) is tried again the next time a card for it opens, never in a loop.
+final Map<String, Future<stickers_api.StickerPackPreview?>> _previews = {};
+const int _maxRememberedPreviews = 64;
+
+/// One pack is read at a time, so a conversation full of packs never reads them all at
+/// once.
+bool _previewRunning = false;
+final List<void Function()> _previewsWaiting = [];
+
+Future<T> _oneAtATime<T>(Future<T> Function() job) {
+  final done = Completer<T>();
+  void start() {
+    _previewRunning = true;
+    Future.sync(job).then(done.complete, onError: done.completeError).whenComplete(() {
+      _previewRunning = false;
+      if (_previewsWaiting.isNotEmpty) _previewsWaiting.removeAt(0)();
+    });
+  }
+
+  _previewRunning ? _previewsWaiting.add(start) : start();
+  return done.future;
+}
+
+/// What `open_pack` (rust/hollow_core/src/api/stickers.rs) says when the FILE is refused.
+const List<String> _packRefusals = [
+  'too large to open',
+  'Not a valid pack file',
+  'missing its manifest',
+  'too large to be real',
+  'Failed to parse pack manifest',
+  'made by a newer version',
+];
+
+Future<stickers_api.StickerPackPreview?> _previewOnce(String path) {
+  final known = _previews.remove(path);
+  if (known != null) return _previews[path] = known;
+  late final Future<stickers_api.StickerPackPreview?> read;
+  read = _oneAtATime(() => stickerPackPreviewer(path))
+      .then<stickers_api.StickerPackPreview?>((p) => p, onError: (Object e) {
+    final refused = _packRefusals.any(e.toString().contains);
+    if (!refused && identical(_previews[path], read)) _previews.remove(path);
+    return null;
+  });
+  _previews[path] = read;
+  while (_previews.length > _maxRememberedPreviews) {
+    _previews.remove(_previews.keys.first);
+  }
+  return read;
+}
+
+@visibleForTesting
+void forgetStickerPackPreviews() {
+  _previews.clear();
+  _previewRunning = false;
+  _previewsWaiting.clear();
+}
 
 /// A received `.hollow-pack`, rendered as an "add this pack" card instead of a
 /// generic file row. Only a nicer face on an ordinary attachment: transfer,
@@ -69,7 +137,7 @@ class _StickerPackCardState extends ConsumerState<StickerPackCard> {
   stickers_api.StickerPackPreview? _preview;
   bool _busy = false;
   bool _done = false;
-  String? _error;
+  bool _unreadable = false;
 
   @override
   void initState() {
@@ -86,15 +154,12 @@ class _StickerPackCardState extends ConsumerState<StickerPackCard> {
   Future<void> _loadPreview() async {
     final path = widget.diskPath;
     if (path == null) return;
-    try {
-      final preview = await stickers_api.previewStickerPack(path: path);
-      if (mounted) setState(() => _preview = preview);
-    } catch (e) {
-      if (mounted) {
-        setState(() => _error = friendlyError(e,
-            fallback: "This sticker pack couldn't be read."));
-      }
-    }
+    final preview = await _previewOnce(path);
+    if (!mounted || widget.diskPath != path) return;
+    setState(() {
+      _preview = preview;
+      _unreadable = preview == null;
+    });
   }
 
   Future<void> _add() async {
@@ -152,7 +217,7 @@ class _StickerPackCardState extends ConsumerState<StickerPackCard> {
   bool get _needsDownload => widget.diskPath == null && !widget.isDownloading;
 
   String get _subtitle {
-    if (_error != null) return _error!;
+    if (_unreadable) return "Can't open this pack";
     final preview = _preview;
     if (preview == null) {
       if (widget.diskPath != null) return 'Reading pack…';
@@ -177,7 +242,7 @@ class _StickerPackCardState extends ConsumerState<StickerPackCard> {
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
-    final ready = widget.diskPath != null && _error == null;
+    final ready = widget.diskPath != null && !_unreadable;
 
     return Container(
       constraints: const BoxConstraints(maxWidth: 280),
@@ -212,11 +277,8 @@ class _StickerPackCardState extends ConsumerState<StickerPackCard> {
                       const SizedBox(height: HollowSpacing.xxs),
                       Text(
                         _subtitle,
-                        style: HollowTypography.caption.copyWith(
-                          color: _error != null
-                              ? hollow.error
-                              : hollow.textSecondary,
-                        ),
+                        style: HollowTypography.caption
+                            .copyWith(color: hollow.textSecondary),
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
                       ),
