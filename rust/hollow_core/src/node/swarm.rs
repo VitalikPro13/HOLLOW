@@ -11524,27 +11524,27 @@ async fn handle_incoming_request_inner(
                         return;
                     }
                     let already_complete = file_handler::file_bytes_on_disk(&store, &fid);
-                    drop(store);
-                    // The stream this header's bytes ride from its sender to us.
-                    let stream_id = file_handler::file_stream_id(&fid, peer_str, device_peer_id);
                     // A committed card belongs to the author its id names, whoever delivered it.
                     let card_owner = match author.as_deref() {
                         Some(a) if super::file_commit::is_committed_id(&fid) => a.to_string(),
                         _ => peer_str.to_string(),
                     };
+                    let digest = super::post_proof::file_meta_digest(&fid, &mime, img, w, h, thumb.as_deref());
+                    let place = sid.as_deref().zip(cid.as_deref()).zip(mid.as_deref());
+                    let Ok(meta_proof) = file_handler::header_meta_judged(
+                        &store, server_states, place, &card_owner, ts, &digest, meta_dev, asked.then_some(fid.as_str()),
+                    ) else { return };
+                    drop(store);
+                    // The stream this header's bytes ride from its sender to us.
+                    let stream_id = file_handler::file_stream_id(&fid, peer_str, device_peer_id);
 
-                    // Explicit pull (manual Download / sweep / guest request)?
-                    // Consumes the receipt; bypasses the size cap AND the
-                    // auto-download gate — we asked for exactly this file.
+                    // Explicit pull (manual Download / sweep / guest request)? Bypasses the
+                    // size cap AND the auto-download gate: we asked for exactly this file.
+                    // The receipt and the ask end only once every gate below passed, so a
+                    // refused answer leaves the ask in flight for the sweep to move on.
                     let explicitly_requested = requested_file_receipts
-                        .remove(&fid)
-                        .map(|t| t.elapsed() < std::time::Duration::from_secs(300))
-                        .unwrap_or(false);
-                    if explicitly_requested {
-                        declined_file_ids.remove(&fid);
-                    }
-                    // The answer to a queued pull arrived: the ask is over.
-                    file_asks::retire(pending_file_asks, &fid);
+                        .get(&fid)
+                        .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(300));
 
                     // SECURITY: validate file size against the server limit (the send limit for
                     // DMs). Explicit pulls skip it: their fallback re-serve carries no share_ref.
@@ -11605,6 +11605,11 @@ async fn handle_incoming_request_inner(
                     {
                         return;
                     }
+                    requested_file_receipts.remove(&fid);
+                    if explicitly_requested {
+                        declined_file_ids.remove(&fid);
+                    }
+                    file_asks::retire(pending_file_asks, &fid);
                     // Multi-device: a DM file's conversation key MUST be the sender's MASTER id,
                     // where the DM message row itself is stored, not the raw sender DEVICE id.
                     // Otherwise the metadata is filed under the device while the message is
@@ -11620,9 +11625,6 @@ async fn handle_incoming_request_inner(
                     // not that the `file_id` inside is theirs to relabel.
                     let mut meta_written = false;
                     if let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) {
-                        let digest = super::post_proof::file_meta_digest(&fid, &mime, img, w, h, thumb.as_deref());
-                        let place = sid.as_deref().zip(cid.as_deref()).zip(mid.as_deref());
-                        let Ok(meta_proof) = file_handler::header_meta_judged(&store, server_states, place, &card_owner, ts, &digest, meta_dev) else { return };
                         meta_written = file_handler::file_meta_write_allowed(&store, &fid, peer_str)
                             && !file_handler::meta_swap_refused(&store, &fid, meta_proof.is_some());
                         if meta_written {
@@ -16320,9 +16322,16 @@ async fn handle_incoming_request_inner(
                                     (None, None)
                                 };
                                 if requester_is_member {
+                                    // A member past the cut takes a channel card only with
+                                    // its author device's proof (section 13): serve the one
+                                    // the card keeps.
+                                    let meta_dev = resp_sid
+                                        .is_some()
+                                        .then(|| store.change_proofs(&[], &[file_id.as_str()]).files.remove(&file_id).map(Box::new))
+                                        .flatten();
                                     // Members / DM parties: Olm-wrapped header (existing path).
                                     let header = MessageEnvelope::FileHeader {
-                                        inner: Box::new(FileHeaderPayload { meta_dev: None,
+                                        inner: Box::new(FileHeaderPayload { meta_dev,
                                             fid: file_id.clone(),
                                             name: file_meta.file_name.clone(),
                                             ext: file_meta.file_ext.clone(),

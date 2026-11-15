@@ -28116,7 +28116,10 @@ fn harness_fixed_sleep_budget_does_not_grow() {
     // 2026-11-12: t14-rostercheck added two absence proofs, a KeyPackage a removed device
     // never gets and none past a silent relay, three 100 ms poll steps, no KeyPackage
     // before a held answer, and no key a later answer adds (20.7 s; scan 1242.4 s).
-    const BUDGET_MS: u64 = 1_242_500;
+    // 2026-11-15: t14-chanfile's pull tests added one spawn stagger, one absence (no bytes
+    // from a refused answer) and one settle on a running holder's DB, whose own catch-up
+    // can rewrite the proof a test sets (5.5 s; scan 1247.9 s).
+    const BUDGET_MS: u64 = 1_248_900;
 
     let src = include_str!("test_harness.rs");
     // Built from pieces so this scan does not count its own source text.
@@ -69057,4 +69060,197 @@ async fn dbfix_reopen_after_upgrade() {
     drain_events(&mut o);
     report.push("live: MLS channel message + 2 Olm DMs delivered and stored".into());
     std::fs::write(fix.join("reopen_results.txt"), report.join("\n") + "\n").unwrap();
+}
+
+// t14-chanfile
+
+/// On a server past the cut a member that declined a channel file's push pulls its
+/// bytes from the author later: the answer's card carries the author device's proof
+/// (DEVICE_PROOF_DESIGN section 13), so the member's live gate takes it and the bytes
+/// land, even when the member keeps no proof of its own.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn t14_a_pulled_channel_file_lands_past_the_cut() {
+    let _g = test_guard();
+    let W3c1Cut { relay: _relay, master: _master, mut d1, d2: _d2, mut j, server_id, _tmp } =
+        w3c1_cut_server([211, 212, 213, 214, 215]).await;
+    super::file_handler::set_auto_download_conf(169, std::collections::HashMap::from([(format!("server:{server_id}"), false)]));
+    let plaintext = fanout_bytes();
+    let src = _tmp.path().join("cut-pull.bin");
+    std::fs::write(&src, &plaintext).expect("write the file");
+    let fid = post_fanout_file(&mut d1, &server_id, &src, "cut-pull").await;
+    let declined = wait_event(&mut j, std::time::Duration::from_secs(20), |ev| {
+        matches!(ev, NetworkEvent::FileFailed { file_id, error } if *file_id == fid && error == "auto_download_off")
+    })
+    .await;
+    assert!(declined, "J keeps the card and declines the push");
+    assert!(j.store().change_proofs(&[], &[&fid]).files.contains_key(&fid), "J keeps the card's proof");
+    // Only the answer's proof may carry the card: J's own would judge a proof-less one.
+    j.store().set_file_meta_dev(&fid, None).unwrap();
+
+    j.cmd_tx
+        .send(NodeCommand::RequestFile { file_id: fid.clone(), peer_id: d1.master_id.clone(), chunks: Vec::new() })
+        .await
+        .unwrap();
+    expect_file_lands(&mut j, &fid, &plaintext).await;
+    super::file_handler::set_auto_download_conf(169, std::collections::HashMap::new());
+}
+
+/// Puts the process-wide auto-download config back however the test ends.
+struct T14AutoDl;
+
+impl Drop for T14AutoDl {
+    fn drop(&mut self) {
+        super::file_handler::set_auto_download_conf(169, std::collections::HashMap::new());
+    }
+}
+
+/// d1 posts a file into the cut server with auto-download off there, and J keeps the
+/// proven card without the bytes: (file id, bytes, the config guard).
+async fn t14_post_declined(cut: &mut W3c1Cut, mid: &str) -> (String, Vec<u8>, T14AutoDl) {
+    super::file_handler::set_auto_download_conf(169, std::collections::HashMap::from([(format!("server:{}", cut.server_id), false)]));
+    let conf = T14AutoDl;
+    let plaintext = fanout_bytes();
+    let src = cut._tmp.path().join(format!("{mid}.bin"));
+    std::fs::write(&src, &plaintext).expect("write the file");
+    let fid = post_fanout_file(&mut cut.d1, &cut.server_id, &src, mid).await;
+    let declined = wait_event(&mut cut.j, std::time::Duration::from_secs(20), |ev| {
+        matches!(ev, NetworkEvent::FileFailed { file_id, error } if *file_id == fid && error == "auto_download_off")
+    })
+    .await;
+    assert!(declined, "J keeps the card and declines the push");
+    assert!(cut.j.store().change_proofs(&[], &[&fid]).files.contains_key(&fid), "J keeps the card's proof");
+    (fid, plaintext, conf)
+}
+
+/// `node` holds `fid`'s bytes: kept from the push, else pulled from `author`.
+async fn t14_hold_bytes(node: &mut TestNode, author: &TestNode, fid: &str, plaintext: &[u8]) {
+    let complete = |n: &TestNode| n.file_meta(fid).is_some_and(|m| m.completed_at.is_some());
+    wait_until(10, async || complete(node)).await;
+    if !complete(node) {
+        node.cmd_tx
+            .send(NodeCommand::RequestFile { file_id: fid.to_string(), peer_id: author.device_id.clone(), chunks: Vec::new() })
+            .await
+            .unwrap();
+        expect_file_lands(node, fid, plaintext).await;
+    }
+}
+
+/// `holder` keeps `proof` (or none) for `fid`'s card, so its `FileRequest` answer serves
+/// it. Its own channel catch-up may still rewrite the row with the true proof, so set it
+/// until it holds through a quiet spell.
+async fn t14_serve_proof(holder: &TestNode, fid: &str, proof: Option<&crate::crdt::operations::DevProof>) {
+    for _ in 0..10 {
+        holder.store().set_file_meta_dev(fid, proof).unwrap();
+        // A settle whose only signal is a running node's DB.
+        sleep_ms(2000).await;
+        if holder.store().change_proofs(&[], &[fid]).files.get(fid) == proof {
+            return;
+        }
+    }
+    panic!("{} never kept the proof set for {fid}", holder.device_id);
+}
+
+/// J asks for `fid` the way the Download button does.
+async fn t14_pull(cut: &W3c1Cut, fid: &str) {
+    cut.j
+        .cmd_tx
+        .send(NodeCommand::RequestFile { file_id: fid.to_string(), peer_id: cut.d1.master_id.clone(), chunks: Vec::new() })
+        .await
+        .unwrap();
+}
+
+/// With the author away, its sibling device answers the pull and the bytes land.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn t14_a_pulled_channel_file_lands_from_the_authors_sibling() {
+    let _g = test_guard();
+    let mut cut = w3c1_cut_server([221, 222, 223, 224, 225]).await;
+    let (fid, plaintext, _conf) = t14_post_declined(&mut cut, "sib-pull").await;
+    t14_hold_bytes(&mut cut.d2, &cut.d1, &fid, &plaintext).await;
+    go_offline(&cut.relay, &cut.d1, &cut.server_id).await;
+
+    t14_pull(&cut, &fid).await;
+    expect_file_lands(&mut cut.j, &fid, &plaintext).await;
+}
+
+/// With every device of the author away, another member that holds the bytes answers
+/// the pull and they land.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn t14_a_pulled_channel_file_lands_from_another_member() {
+    let _g = test_guard();
+    let k_tag = 231u8;
+    let mut cut = w3c1_cut_server([226, 227, 228, 229, 230]).await;
+    let m_id = cut.master.peer_id();
+    let k_master = tag_kp(k_tag).peer_id();
+    let mut k = spawn_node_with_friends(&cut.relay, k_tag, k_tag, &[&m_id]).await;
+    // Spawn stagger.
+    sleep_ms(1500).await;
+    k.cmd_tx
+        .send(NodeCommand::JoinServer { server_id: cut.server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&cut.server_id) })
+        .await
+        .unwrap();
+    assert!(wait_until(30, async || k.live_server_state(&cut.server_id).await.is_some_and(|s| s.is_member(&k_master))).await, "precondition: K joined");
+    assert!(wait_until(15, async || cut.j.live_server_state(&cut.server_id).await.is_some_and(|s| s.is_member(&k_master))).await, "precondition: J holds K");
+    assert!(wait_until(15, async || cut.d1.live_server_state(&cut.server_id).await.is_some_and(|s| s.is_member(&k_master))).await, "precondition: the author holds K");
+
+    let (fid, plaintext, _conf) = t14_post_declined(&mut cut, "member-pull").await;
+    t14_hold_bytes(&mut k, &cut.d1, &fid, &plaintext).await;
+    go_offline(&cut.relay, &cut.d1, &cut.server_id).await;
+    go_offline(&cut.relay, &cut.d2, &cut.server_id).await;
+
+    t14_pull(&cut, &fid).await;
+    expect_file_lands(&mut cut.j, &fid, &plaintext).await;
+}
+
+/// A holder that serves the card without a proof (a 0.13 member) while J holds the
+/// proven card: J judges the answer by the proof it keeps, and the bytes land.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn t14_a_proofless_answer_lands_by_the_proof_the_asker_keeps() {
+    let _g = test_guard();
+    let mut cut = w3c1_cut_server([232, 233, 234, 235, 236]).await;
+    let (fid, plaintext, _conf) = t14_post_declined(&mut cut, "proofless-pull").await;
+    let held = cut.j.store().change_proofs(&[], &[&fid]).files.remove(&fid);
+    t14_hold_bytes(&mut cut.d2, &cut.d1, &fid, &plaintext).await;
+    go_offline(&cut.relay, &cut.d1, &cut.server_id).await;
+    // A 0.13 holder serves no proof.
+    t14_serve_proof(&cut.d2, &fid, None).await;
+
+    t14_pull(&cut, &fid).await;
+    expect_file_lands(&mut cut.j, &fid, &plaintext).await;
+    assert_eq!(cut.j.store().change_proofs(&[], &[&fid]).files.remove(&fid), held, "the card keeps its own proof");
+}
+
+/// A holder that serves the card with a wrong proof is refused: no bytes land from it,
+/// the card keeps its own proof, and the pull stays open, so the author coming back is
+/// asked and its bytes land.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn t14_a_wrong_proof_answer_is_refused_and_the_pull_goes_on() {
+    let _g = test_guard();
+    let mut cut = w3c1_cut_server([237, 238, 239, 240, 246]).await;
+    let (fid, plaintext, _conf) = t14_post_declined(&mut cut, "wrong-proof-pull").await;
+    let held = cut.j.store().change_proofs(&[], &[&fid]).files.remove(&fid);
+    t14_hold_bytes(&mut cut.d2, &cut.d1, &fid, &plaintext).await;
+    go_offline(&cut.relay, &cut.d1, &cut.server_id).await;
+    let mut wrong = cut.d2.store().change_proofs(&[], &[&fid]).files.remove(&fid).expect("the holder keeps the proof");
+    let swapped = if wrong.sig.starts_with('a') { "b" } else { "a" };
+    wrong.sig.replace_range(..1, swapped);
+    t14_serve_proof(&cut.d2, &fid, Some(&wrong)).await;
+
+    t14_pull(&cut, &fid).await;
+    let waiting = wait_event(&mut cut.j, std::time::Duration::from_secs(20), |ev| {
+        matches!(ev, NetworkEvent::FileAvailability { file_id, state, .. } if *file_id == fid && state == "waiting")
+    })
+    .await;
+    assert!(waiting, "the refused answer leaves the pull open and the card says it waits");
+    // Absence: nothing marks bytes that never land.
+    sleep_ms(2000).await;
+    assert!(cut.j.file_meta(&fid).is_some_and(|m| m.completed_at.is_none() && m.disk_path.is_none()), "no bytes land from a refused answer");
+    assert_eq!(cut.j.store().change_proofs(&[], &[&fid]).files.remove(&fid), held, "the card keeps its own proof");
+
+    cut.relay.set_online(&cut.d1.device_id, true);
+    expect_file_lands(&mut cut.j, &fid, &plaintext).await;
 }

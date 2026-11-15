@@ -783,11 +783,37 @@ mod tests {
         let master = keys(20).1;
         let judged = |tag: u8| {
             let dev = sign_change(&keys(tag).0, &Change { sid: "srv", cid: "ch", signer: &master, mid: "a", at: 7, kind: ChangeKind::FileMeta { digest: "d" } });
-            super::super::file_handler::header_meta_judged(&store, &states, Some((("srv", "ch"), "a")), &master, 7, "d", dev)
+            super::super::file_handler::header_meta_judged(&store, &states, Some((("srv", "ch"), "a")), &master, 7, "d", dev, None)
         };
         assert!(judged(22).is_err(), "a removed device's file card");
         assert_eq!(judged(21).ok().flatten().map(|d| d.device), Some(keys(21).1));
-        assert!(super::super::file_handler::header_meta_judged(&store, &states, None, &master, 7, "d", None).is_ok());
+        assert!(super::super::file_handler::header_meta_judged(&store, &states, None, &master, 7, "d", None, None).is_ok());
+    }
+
+    /// An answer to our pull that serves no proof (a 0.13 holder) is judged by the proof
+    /// we keep, which counts only for the very card it signs; an unasked header gets no
+    /// such help, and a wrong proof is refused, never swapped for ours.
+    #[test]
+    fn a_pulled_card_without_a_proof_is_judged_by_the_proof_we_keep() {
+        use super::super::file_handler::{header_meta_judged, keep_meta_proof};
+        let store = crate::storage::MessageStore::open(":memory:", &"ab".repeat(32)).unwrap();
+        let states = std::collections::HashMap::from([("srv".to_string(), cut_state(true))]);
+        let master = keys(20).1;
+        store.insert_file_metadata("f", "n", "png", "image/png", 1, 0, true, Some(4), Some(4), Some("a"), "channel", "srv:ch", &master, false, 7, None, None, None).unwrap();
+        let digest = file_meta_digest("f", "image/png", true, Some(4), Some(4), None);
+        let kept = sign_change(&keys(21).0, &Change { sid: "srv", cid: "ch", signer: &master, mid: "a", at: 7, kind: ChangeKind::FileMeta { digest: &digest } });
+        keep_meta_proof(&store, "f", &digest, kept.as_deref());
+        let judged = |digest: &str, ts: i64, dev: Option<Box<DevProof>>, pulled: Option<&str>| {
+            header_meta_judged(&store, &states, Some((("srv", "ch"), "a")), &master, ts, digest, dev, pulled)
+        };
+        assert_eq!(judged(&digest, 7, None, Some("f")).ok().flatten(), kept, "the kept proof judges a proof-less answer");
+        assert!(judged(&digest, 7, None, None).is_err(), "an unasked proof-less card");
+        assert!(judged("another digest", 7, None, Some("f")).is_err(), "the kept proof signs another card");
+        assert!(judged(&digest, 8, None, Some("f")).is_err(), "the kept proof signs another date");
+        let mut wrong = kept.clone().expect("a proof");
+        let swapped = if wrong.sig.starts_with('a') { "b" } else { "a" };
+        wrong.sig.replace_range(..1, swapped);
+        assert!(judged(&digest, 7, Some(wrong), Some("f")).is_err(), "a wrong proof is refused, never swapped for ours");
     }
 
     /// A row that holds no proof takes the proof of the version it holds when that

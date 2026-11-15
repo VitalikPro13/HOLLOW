@@ -510,7 +510,7 @@ widgets, not copy, wherever one exists:
   `type:_MemberRow` keyed `member:<master>`; device rows `type:_DeviceRow`.
 - link: 10-char code regex `([A-Z2-9](?: [A-Z2-9]){5} - [A-Z2-9](?: [A-Z2-9]){3})`, prompt
   `Add this device?` / `Add device`; destroy-everywhere also types the fixture phrase.
-- GIFs: `semantics:Emoji, GIFs and stickers` then `semantics:GIFs`; a channel's Public
+- GIFs: `semantics:Emoji, GIFs and stickers` then `semantics:GIFs`; `reveal` a `type:_GifCell` index before its tap (the masonry fills column by column and the trending feed changes daily, so a tall first GIF puts index 1 under the panel's fold); a channel's Public
   switch: Server settings > Channels > `semantics:<name>. Open its settings` > `semantics:Public`.
 - An edited message is ONE text `body (edited)`: wait with `contains:`, and a reply's quote
   repeats the original, so `contains:` on it hits the quote first.

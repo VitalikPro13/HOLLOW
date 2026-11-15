@@ -296,6 +296,11 @@ pub(crate) fn meta_swap_refused(store: &crate::storage::MessageStore, fid: &str,
 /// A channel file card is its author's change (section 13): judged at its post's date
 /// (`place` = ((server, channel), post); `None` judges nothing). `Err` = refused, else
 /// the proof to keep when it verifies.
+///
+/// `pulled` names the file when the header answers a holder we asked: one serving no
+/// proof (a 0.13 member) is judged by the proof we keep for it, which counts only if it
+/// signs this very card.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn header_meta_judged(
     store: &crate::storage::MessageStore,
     server_states: &HashMap<String, ServerState>,
@@ -304,8 +309,10 @@ pub(crate) fn header_meta_judged(
     ts: i64,
     digest: &str,
     dev: Option<Box<crate::crdt::operations::DevProof>>,
+    pulled: Option<&str>,
 ) -> Result<Option<Box<crate::crdt::operations::DevProof>>, ()> {
     let Some(((sid, cid), mid)) = place else { return Ok(None) };
+    let dev = dev.or_else(|| pulled.and_then(|fid| store.change_proofs(&[], &[fid]).files.remove(fid)).map(Box::new));
     let author = super::resolver::resolve(card_owner);
     let change = super::post_proof::Change { sid, cid, signer: &author, mid, at: ts, kind: super::post_proof::ChangeKind::FileMeta { digest } };
     let post_ts = store.get_channel_message_sig_row(mid).map_or(ts, |r| r.timestamp);
@@ -3618,15 +3625,10 @@ pub(crate) async fn handle_envelope_file_header(
         _ => sender_peer_id.clone(),
     };
 
-    // Explicit pull — bypasses the size cap and the auto-download gate
-    // (mirrors the DM/Olm header arm in swarm.rs; issue #41).
-    let explicitly_requested = requested_file_receipts
-        .remove(&fid)
-        .map(|t| t.elapsed() < std::time::Duration::from_secs(300))
-        .unwrap_or(false);
-    if explicitly_requested {
-        declined_file_ids.remove(&fid);
-    }
+    // Explicit pull: bypasses the size cap and the auto-download gate (mirrors the
+    // DM/Olm header arm in swarm.rs; issue #41). Spent only once every gate below
+    // passed, so a refused push leaves the pull's answer its receipt.
+    let explicitly_requested = requested_file_receipts.get(&fid).is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(300));
 
     if share_ref.is_none()
         && !explicitly_requested
@@ -3649,7 +3651,11 @@ pub(crate) async fn handle_envelope_file_header(
 
     let meta_digest = super::post_proof::file_meta_digest(&fid, &mime, img, w, h, thumb.as_deref());
     let place = if from_guest_pull { None } else { sid.as_deref().zip(cid.as_deref()).zip(mid.as_deref()) };
-    let Ok(meta_proof) = header_meta_judged(&store, server_states, place, &card_owner, ts, &meta_digest, meta_dev) else { return };
+    let Ok(meta_proof) = header_meta_judged(&store, server_states, place, &card_owner, ts, &meta_digest, meta_dev, None) else { return };
+    requested_file_receipts.remove(&fid);
+    if explicitly_requested {
+        declined_file_ids.remove(&fid);
+    }
 
     // Envelope-borne thumb: image blur placeholder or video poster,
     // size-capped — see accept_header_thumb.
@@ -3970,6 +3976,51 @@ mod tests {
         ).await;
     }
 
+    /// A push the card gate refuses past the cut leaves the pull's receipt and its
+    /// decline pin alone, so the asked holder's answer still passes the auto-download
+    /// gate; a push that passes every gate spends them.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // the resolver guard is process-global
+    async fn a_refused_mls_push_keeps_the_pull_receipt() {
+        use crate::crdt::authority::{AuthorityView, ViewEntry};
+        use crate::crdt::testkeys::keys;
+        let _g = super::super::resolver::test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let path = tmp.path().join("pull.db").to_string_lossy().into_owned();
+        let pass = "ab".repeat(32);
+        drop(crate::storage::MessageStore::open(&path, &pass).unwrap());
+        let (mut state, owner) = crate::crdt::testkeys::owned_state("srv", "S", 20);
+        let auth = crate::identity::roster::Authority { key: "k".into(), counted: [keys(21).1].into(), ..Default::default() };
+        let mut view = AuthorityView::judging();
+        view.insert(owner.clone(), ViewEntry { key: Some("k".into()), auth: Some(auth) });
+        state.authority = std::sync::Arc::new(view);
+        state.cut = true;
+        let states = HashMap::from([("srv".to_string(), state)]);
+        let digest = super::super::post_proof::file_meta_digest("f1", "image/png", true, None, None, None);
+        let card = super::super::post_proof::Change { sid: "srv", cid: "srv-general", signer: &owner, mid: "m1", at: 1, kind: super::super::post_proof::ChangeKind::FileMeta { digest: &digest } };
+        let (tx, _rx) = mpsc::channel(64);
+        let (ws_tx, _ws_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (mut pending, mut early) = (HashMap::new(), HashMap::new());
+        let mut receipts = HashMap::from([("f1".to_string(), std::time::Instant::now())]);
+        let mut declined = std::collections::HashSet::from(["f1".to_string()]);
+        for meta_dev in [None, super::super::post_proof::sign_change(&keys(21).0, &card)] {
+            let proven = meta_dev.is_some();
+            handle_envelope_file_header(
+                &states, &mut pending, &mut HashMap::new(), &mut early,
+                &crate::identity::native_identity::NativeKeypair::from_secret_bytes(&[9; 32]), &tx,
+                "srv", owner.clone(),
+                "f1".into(), "a.png".into(), "png".into(), "image/png".into(), 10, 0, true, None, None,
+                Some("m1".into()), Some("srv".into()), Some("srv-general".into()), 1,
+                Some("11".repeat(32)), Some("22".repeat(12)), None, None, None, false, None, None, meta_dev, false,
+                &mut receipts, &mut declined, &ws_tx, &HashMap::new(),
+                "us", &path, &pass,
+            ).await;
+            assert_eq!(pending.contains_key("f1"), proven, "only the proven card registers a stream");
+            assert_eq!(receipts.contains_key("f1"), !proven, "the receipt is spent only by a push that passes");
+            assert_eq!(declined.contains("f1"), !proven, "the decline pin clears only for a push that passes");
+        }
+    }
+
     /// The Olm and push header arms run the same gate before anything else: the
     /// unit test above drives only the MLS handler.
     #[test]
@@ -3984,11 +4035,27 @@ mod tests {
         };
         let olm = arm(&swarm, "Ok(MessageEnvelope::FileHeader { inner }) => {", "requested_file_receipts");
         assert!(olm.contains("file_handler::file_header_refused("), "swarm.rs: the Olm header arm skips the gate");
+        // A refused answer to our pull leaves the ask in flight, so the sweep moves it on.
+        let spent = arm(&swarm, "Ok(MessageEnvelope::FileHeader { inner }) => {", "requested_file_receipts.remove(&fid)");
+        for gate in ["file_handler::header_meta_judged(", "header_size_refused(", "is_muted(", "live_channel_change_refusal(", "is_channel_media_only(", "blocklist::is_blocked("] {
+            assert!(spent.contains(gate), "swarm.rs: the Olm header arm ends a pull before {gate}");
+        }
+        let retired = arm(&swarm, "Ok(MessageEnvelope::FileHeader { inner }) => {", "file_asks::retire(");
+        assert!(retired.contains("requested_file_receipts.remove(&fid)"), "swarm.rs: the Olm header arm ends a pull before its gates");
+        assert!(retired.contains("meta_dev, asked.then_some(fid.as_str()),"), "swarm.rs: a header we did not ask for is judged by the proof we keep");
+        assert!(read("file_handler.rs").contains("&meta_digest, meta_dev, None)"), "file_handler.rs: an MLS push is judged by the proof we keep");
         let push = arm(&fetch, "fn handle_file_header(", "inline_bytes.is_some()");
         assert!(push.contains("file_header_refused(") && push.contains("file_bytes_on_disk("), "fetch.rs: the push header skips the gate");
         let sized = arm(&swarm, "Ok(MessageEnvelope::FileHeader { inner }) => {", "insert_file_metadata(");
         assert!(sized.contains("file_handler::header_size_refused("), "A-T06: the Olm header arm skips the size gate");
         assert!(push.contains("header_size_refused("), "A-T06: the push header skips the size gate");
+        let mls_arm = |to: &str| arm(&read("file_handler.rs"), "pub(crate) async fn handle_envelope_file_header(", to);
+        for to in ["requested_file_receipts.remove(&fid)", "declined_file_ids.remove(&fid)"] {
+            let before = mls_arm(to);
+            for gate in ["file_header_refused(", "mls_file_header_exceeds_cap(", "mls_file_header_dropped(", "header_meta_judged("] {
+                assert!(before.contains(gate), "file_handler.rs: the MLS header arm reaches {to} before {gate}");
+            }
+        }
         let mls = arm(&read("file_handler.rs"), "fn mls_file_header_exceeds_cap(", "\n}");
         assert!(mls.contains("header_size_refused("), "A-T06: the MLS header skips the size gate");
     }

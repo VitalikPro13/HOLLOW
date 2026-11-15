@@ -130,6 +130,9 @@ function Send-Gif($peer, $caption, $cell = 0) {
     Step $peer @{ op = 'wait_for'; target = 'semantics:GIFs'; timeout_ms = 15000 }
     Step $peer @{ op = 'tap'; target = 'semantics:GIFs'; index = 0 }
     Step $peer @{ op = 'wait_for'; target = 'type:_GifCell'; timeout_ms = 60000 }
+    # The trending feed changes daily: a tall first GIF pushes the cell below
+    # it under the panel's fold, so scroll it into view before the tap.
+    Step $peer @{ op = 'reveal'; target = 'type:_GifCell'; index = $cell }
     Step $peer @{ op = 'tap'; target = 'type:_GifCell'; index = $cell }
     # The row FIRST, and only then the dismiss: the pick downloads and
     # re-encodes before it hands the token over, and it checks `mounted` on
@@ -243,11 +246,9 @@ try {
     Say '4/4 b closes, a sends a second GIF, then a closes too - THE TEST'
     Stop-Peer b
     # A DIFFERENT cell: see Send-Gif. The same hash would already be cached on
-    # the receiver and there would be nothing to wait for. Index 1 and not
-    # something further down the list: the grid is a two-column masonry laid
-    # out column by column, so tree index 1 is the cell directly BELOW the
-    # first one and still inside the panel, while index 3 is under the fold
-    # and cannot be clicked.
+    # the receiver and there would be nothing to wait for. The grid is a
+    # two-column masonry laid out column by column, so tree index 1 is the
+    # cell directly BELOW the first one; Send-Gif reveals it before the tap.
     Send-Gif a 'gif two ${RUN}' 1
     # The row is optimistic and no widget says the send has left the process,
     # so the row is re-checked and the send given a moment before a goes.
