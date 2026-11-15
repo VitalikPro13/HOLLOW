@@ -395,14 +395,14 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Flutter
-        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+      - name: Cache Flutter
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          # Pinned to the version the project develops on. Bump both this and
-          # the sonar job's pin together on a Flutter upgrade.
-          flutter-version: 3.47.9
-          channel: stable
-          cache: true
+          path: ~/flutter
+          key: flutter-${{ runner.os }}-${{ hashFiles('scripts/ci_install_flutter.sh') }}
+
+      - name: Install Flutter
+        run: bash scripts/ci_install_flutter.sh
 
       - name: Flutter pub get
         run: flutter pub get
@@ -452,12 +452,14 @@ jobs:
         with:
           name: rust-clippy
 
-      - name: Install Flutter
-        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
+      - name: Cache Flutter
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          flutter-version: 3.47.9
-          channel: stable
-          cache: true
+          path: ~/flutter
+          key: flutter-${{ runner.os }}-${{ hashFiles('scripts/ci_install_flutter.sh') }}
+
+      - name: Install Flutter
+        run: bash scripts/ci_install_flutter.sh
 
       # Resolve package imports so the Dart analyzer doesn't emit
       # phantom "URI doesn't exist" issues for every dependency.
