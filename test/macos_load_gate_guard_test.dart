@@ -139,7 +139,8 @@ void main() {
     expect(seal, greaterThan(nestedSigns.last),
         reason: 'a nested signature after the seal changes a sealed hash');
     final embed = firstWhere(
-      (l) => RegExp(r'^\s*cp "\$MAC_PROVISION_PROFILE" "\$APP/Contents/embedded\.provisionprofile"').hasMatch(l),
+      // -X: a downloaded profile's quarantine marks fail the DMG's exact-tree check.
+      (l) => RegExp(r'^\s*cp -X "\$MAC_PROVISION_PROFILE" "\$APP/Contents/embedded\.provisionprofile"').hasMatch(l),
     );
     expect(embed, allOf(isNot(-1), lessThan(appSign)));
   });
