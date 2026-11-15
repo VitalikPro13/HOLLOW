@@ -1,8 +1,9 @@
 # Device proof: only a device the roster counts writes server history
 
 Design FROZEN, revision 3.5 + build notes (2026-11-05: section 4's vouch-cap item 1 as track
-I built it, and the final re-check's build-time list in section 17), 2026-11-04. EMBARGOED with the 0.14 security release
-(local branch `security/0.14`, base `c5d7bcf4`). It replaces section 10 of
+I built it, and the final re-check's build-time list in section 17), 2026-11-04. Built in
+0.14 as three tracks: R (5af8f7b7), I (060ca581) and C (11d2619f, dcce6b29). EMBARGOED with
+0.14 until it ships (local branch `security/0.14`, base `c5d7bcf4`). It replaces section 10 of
 `CHECKPOINT_COVERAGE_DESIGN.md` (rev 2). Reviews:
 
 - `.team/review2/REVIEW_REV2.md` refused that section 10 (C1, C2, C3, H1, H4, H5).

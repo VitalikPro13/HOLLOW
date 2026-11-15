@@ -1,9 +1,9 @@
 # Checkpoint coverage: a checkpoint replaces only what its owner folded
 
-Design for approval, revision 2, 2026-11-01; built, with the fix round of code review rev 3 (2026-11-04). EMBARGOED with the 0.14 security release
-(local branch `security/0.14`, base `c5d7bcf4`; the build starts from the option A fix
-round in `~/dev/wt/rev-014-fold` once it merges). No product code is written until the
-second hostile review and Vitalik's approval. Review of revision 1:
+Design, revision 2, 2026-11-01; approved and built in 0.14 (56587ca2, track t14-cover,
+2026-11-05), with the fix round of code review rev 3 (2026-11-04). EMBARGOED with 0.14
+until it ships (local branch `security/0.14`, base `c5d7bcf4`). Section 10 is replaced by
+`DEVICE_PROOF_DESIGN.md`. Review of revision 1:
 `.team/review/REVIEW_REV1.md` (findings F1 to F13, probes in `probes_fold_tests.rs`).
 
 Scope: design E's owner checkpoint (`crdt/fold.rs`, `crdt/server_state.rs`), every path that

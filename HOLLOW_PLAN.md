@@ -2140,7 +2140,7 @@ Release time: 100ms
     - [x] Get help page in Settings; shop item dialog matches the website and asks before Buy (`HollowCheckbox`).
     - [x] Dependencies: Flutter 3.47.9 with the held Dart packages, mdk 0.39.0 pinned by SHA-256, SQLCipher 4.20 (rusqlite 0.42), zip 9.5.1, every open advisory cleared.
     - [x] Docs pass: wiki, WHITEPAPER, audit record (2026-11-14).
-    - [ ] Pre-freeze: HOL-SEC-187 signed-build proof (notarize on the old iMac, run the app on the mini: launch, video, camera, share).
+    - [x] Pre-freeze: HOL-SEC-187 signed-build proof (notarize on the old iMac, run the app on the mini: launch, video, camera, share). Done by hand 2026-11-15 on a notarized build of b887e706: keychain-only re-key and `0x03` re-salt PASS, 0.13 locked out of both, screen share PASS (video, camera, App Lock 11-14). The automated signed job (`macos_keychain_check.sh`) has never run.
     - [ ] Pre-freeze: full PC suite (nextest + flutter) and fleets on every platform on the final tree.
     - [ ] Pre-freeze: the fleet tool's production-relay guard (wiki `fleet_probe`, "Keeping 0.14 fleets off the production relay").
     - [ ] Release: local commits onto main, signed `v0.14.0` tag, the `release` skill pipeline, then the OSTIF application.

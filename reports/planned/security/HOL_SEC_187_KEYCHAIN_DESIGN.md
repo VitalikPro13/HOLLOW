@@ -1,9 +1,10 @@
 # HOL-SEC-187 follow-up: where Apple keychain secrets live
 
-Design for approval, revision 2 (after the hostile review
-`HOL_SEC_187_KEYCHAIN_DESIGN_REVIEW.md` and Vitalik's answers of 2026-10-31). EMBARGOED
-with HOL-SEC-187 (local branch `security/0.14-mac-dylib`, base `55a5c4f3`). No product
-code is written until Vitalik approves.
+Design, revision 2 (after the hostile review `HOL_SEC_187_KEYCHAIN_DESIGN_REVIEW.md` and
+Vitalik's answers of 2026-10-31), approved 2026-10-31 and built in 0.14: b8b64d15
+(2026-11-01), 6fec99e7 (2026-11-14) and the re-key b887e706 (2026-11-15, section 3.2 c).
+Signed proof by hand on 2026-11-15 (section 6). EMBARGOED with HOL-SEC-187 until 0.14
+ships.
 
 Scope: the macOS identity key that every old signed build still opens without a prompt,
 and the Apple team transfer (old team `NWPBHZX7DT` to new team `XMTJT2AV6F`), which
@@ -264,7 +265,8 @@ process's queries reach. Its stage 1 seeds the login item from a helper of the s
 item's maker, `SecItemAdd` with an access list trusting both apps), so 0.14 may read it and
 may not delete it, and REQUIRES the item to stay, the re-key line, and the item's key to
 open nothing: an item 0.14 could delete is "field case not reproduced", a FAIL (review R6).
-The signed job has not run yet (its repo variables were unset on 11-05).
+The signed job has never run (its repo variables were never set, and 0.14's Apple builds
+are signed outside CI); the signed proof that did run is by hand (section 6).
 
 Deleting the old item is NOT enough, because it does not happen: on the signed 0.14 build
 (2026-11-14, macOS 26) every delete of 0.13's login item answered `errSecInvalidOwnerEdit`
@@ -481,7 +483,7 @@ keychain, delete by persistent reference inside the source group, service and ac
 would keep the item, logged, never lose it), every launch while any of our accounts sits in the app-ID
 group and the keys group is writable. It lets a Mac that refused the keys group (or a later
 macOS that starts accepting it) promote its items before the transfer. In 0.14, so the
-frozen tag carries it.
+release carries it.
 
 Conflict copies are named after the source account, so `A.m.<hash>` belongs to A's root
 (`wrapping_key.<suffix>.m.<hash>`, or `wrapping_key.m.<hash>` for the machine slot). The
@@ -654,7 +656,7 @@ Vitalik's phone.
 
 ## 5. Sequencing (was Q7)
 
-One concrete sequence, robust to the drill landing after the 0.14 freeze: **0.14 contains
+One concrete sequence, robust to the drill landing after the 0.14 release: **0.14 contains
 every mover and every fallback, and the drill gates only the transfer.**
 
 - 0.14 writes the keys group wherever the OS accepts it and the app-ID group elsewhere,
@@ -667,7 +669,7 @@ every mover and every fallback, and the drill gates only the transfer.**
   survive a move at all, the transfer waits (or the team change goes without it, with the
   phrase), and nothing in 0.14 has to change.
 - After 0.14 the only old-team work is the status notice (signed feed content, not code).
-  The automatic copy is dropped, so no wipe path changes after the frozen tag.
+  The automatic copy is dropped, so no wipe path changes after the 0.14 tag.
 
 The prerequisite is step 0 before the 0.14 build: the keys group and the Developer ID
 profile must exist on the old team, which needs the same old-Mac visit as the certificate
@@ -700,7 +702,8 @@ that enforces them (Rust store, Swift self-check, load gate).
 | the transfer note shows even after the 0.12.2 note | Dart `the_transfer_note_shows_even_after_the_0122_note` | `flutter test` |
 | every Apple keychain call names a group; the extensions never claim the keys group; Debug never takes the release identity | Dart source guards over `AppDelegate.swift`, `app_lock_service.dart`, the iOS entitlements, `macos/Flutter/*.xcconfig` (`flutter_debug_config_never_takes_the_release_identity`) | `flutter test` |
 | the shipped Mac app embeds a valid profile, a complete sealed-image list and no debug engine | `macos_load_gate_test.sh` new cases (missing, wrong team, expired, unauthorised claim, a Mach-O missing from or mismatching `HollowSealedImages`, a JIT engine) + `macos_load_gate_guard_test.dart` | CI, scratch bundles |
-| signed 0.14 moves the key; signed 0.13 cannot read it, even with a dylib; a swapped framework reads nothing | install 0.13, make a throwaway keychain identity, install 0.14, launch (legacy gone, identity opens), relaunch 0.13 (key-missing in the log), an injected dylib's protected query returns `errSecMissingEntitlement`; copy signed 0.14, swap one framework for 0.13's, launch: no protected read, the log names the refusal, nothing deleted; the macOS launch secret reads back after a restart (U9); `launchctl procinfo` shows "entitlements validated" | GitHub macOS runner, throwaway user keychain (U11) |
+| signed 0.14 moves the key; signed 0.13 cannot read it, even with a dylib; a swapped framework reads nothing | install 0.13, make a throwaway keychain identity, install 0.14, launch (legacy gone, identity opens), relaunch 0.13 (key-missing in the log), an injected dylib's protected query returns `errSecMissingEntitlement`; copy signed 0.14, swap one framework for 0.13's, launch: no protected read, the log names the refusal, nothing deleted; the macOS launch secret reads back after a restart (U9); `launchctl procinfo` shows "entitlements validated" | GitHub macOS runner, throwaway user keychain (U11): NEVER RUN (the repo variables `MAC_PREVIOUS_RELEASE_ZIP_URL` / `_SHA256` were never set; 0.14 is signed outside CI) |
+| signed 0.14 re-keys off a login item it may not delete, and re-salts a cached password key; signed 0.13 opens neither afterwards | by hand on the Mac mini (macOS 26), 2026-11-15, notarized Developer ID build of b887e706 (`spctl` "Notarized Developer ID", staple valid), throwaway identity on the test relay. Keychain only (`0x02`): 0.13 new identity, then 0.14 logged "Keychain re-key: this identity now opens only with a new key in the protected keychain; 1 old login item(s) stay but no longer open it"; 0.14 again silent; 0.13 `keychain_key_missing`, files untouched. Password with the cache (`0x03`, ask-before-start off): 0.14 at the typed App Lock password logged "Keychain re-key: the password key moved under a new salt; 1 old login item(s) stay but no longer open it" (salt changed, both files rewritten, still `0x03`, no extra dialog: the typed unlock did it, so the one ask did not show); 0.14 again silent; 0.13 could not open from the login item, asked for the password and opened with it, files untouched; 0.14 after that had nothing to re-salt. Screen share (permission, own share never full screen) passed on the same build; launch, video, camera and the App Lock password on the signed build of 2026-11-14. PASS | Vitalik's hands on the mini; the build signed on the old iMac |
 | transfer mechanics, history across the real transfer | D1 to D3; step 4 | Vitalik's iPhone, runners, the old Mac |
 
 Agents never run keychain, codesign or notarytool commands on the mini or the PC (the
@@ -761,7 +764,7 @@ enclave key re-group or re-bind. Nothing here is remote-reachable.
 | U3 | `SecItemUpdate` can re-group an enclave key, and it then works from another team's app | D2: PASS on iOS 18.7.8 (2026-11-01, Vitalik's iPhone 13 mini): status 0, same ECDH before and after, and a new-team app got identical ECDH outputs after the group moved teams; a key made directly in the group survived the move too. Other iOS versions stay on the runtime fallback (re-bind) |
 | U4 | group container files survive the group transfer | D2/D3 (file): PASS on iOS 18.7.8 and macOS 15.7.4 (2026-11-01), the new-team app read the file and the old-team app kept reading everything; step 4 still checks the real app |
 | U5 | the portal offers App Groups for a Developer ID profile of `com.anonlisten.hollow` | PASS (2026-11-01 drill) |
-| U6 | an old-team Developer ID app keeps launching after its App ID and group leave the team | D3 F1 case: PASS at 0 h only on macOS 15.7.4 (launch, read, file; Gatekeeper "accepted, source=Developer ID") and on iOS (ad-hoc A); the restart and 48 h cases were NOT run (the old Mac could not restart). DTS question still open |
+| U6 | an old-team Developer ID app keeps launching after its App ID and group leave the team | D3 F1 case: PASS at 0 h on macOS 15.7.4 (launch, read, file; Gatekeeper "accepted, source=Developer ID") and on iOS (ad-hoc A); PASS after a restart and 82 h on macOS 15.7.4 (2026-11-04: launch, group keychain read, container file; the group was deleted on both teams, stricter than a real transfer). DTS question still open |
 | (drill) | the new team can register a group name the old team deleted | accepted at once, no waiting window (2026-11-01); the back-to-back rule of 4.2 still holds |
 | U7 | a new-team re-grant replaces TCC's stored requirement | after step 4 |
 | U8 | `AfterFirstUnlockThisDeviceOnly` items on macOS survive a locked-screen restart and do not restore elsewhere | signed runner; Migration Assistant if a spare Mac exists |

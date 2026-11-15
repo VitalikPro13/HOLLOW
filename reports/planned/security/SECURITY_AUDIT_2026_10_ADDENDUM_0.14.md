@@ -3,8 +3,8 @@
 This addendum carries the 0.14 findings into `SECURITY_AUDIT_2026_10.md`. It is EMBARGOED
 until 0.14 ships. On release day each part below goes where its heading says, and the PDF
 is rebuilt (`PLANNED_TO_SHIPPED_0.14.md`, section 4). Written 2026-11-05 and brought up to
-date on 2026-11-14 from the finding files and the commits on the local branch
-`security/0.14`, up to `89d3a85d`.
+date on 2026-11-15 from the finding files and the commits on the local branch
+`security/0.14`, up to `ad38a14e`.
 
 ---
 
@@ -53,7 +53,7 @@ before the 0.14 clients.
 
 | ID | Title | Severity | Class | Status | Fixed in |
 |---------|------------------------------|--------|----|------|--------|
-| HOL-SEC-187 | The macOS app could load code from directories outside its bundle | High | C | Fixed | 0.14 (d957c635, b8b64d15, 5da98071) |
+| HOL-SEC-187 | The macOS app could load code from directories outside its bundle | High | C | Fixed | 0.14 (d957c635, b8b64d15, 5da98071, 6fec99e7, b887e706) |
 | HOL-SEC-188 | A device its roster removed could still write server history with the master key | High | C | Fixed | 0.14 (5af8f7b7, 060ca581, 11d2619f, dcce6b29) |
 | HOL-SEC-189 | A removed device's vouch flood could uncount a device another voucher holds | Medium | C | Fixed | 0.14 (23891904) |
 | HOL-SEC-190 | A received voice's volume was looked up by the track id its sender chose | Medium | C | Fixed | 0.14 (33024bdb) |
@@ -80,17 +80,17 @@ before the 0.14 clients.
 
 ### HOL-SEC-187: The macOS app could load code from directories outside its bundle
 
-**Severity:** High (Impact H, Exploitability M). **Class:** C. **Fixed in:** 0.14 (d957c635, b8b64d15, 5da98071). **Affected:** every macOS release from 0.5.0 through 0.13.0.
+**Severity:** High (Impact H, Exploitability M). **Class:** C. **Fixed in:** 0.14 (d957c635, b8b64d15, 5da98071, 6fec99e7, b887e706). **Affected:** every macOS release from 0.5.0 through 0.13.0.
 
 **Impact.** Code planted by another program running as the same user could run inside the signed app, with its keychain access, its camera, microphone and screen grants, and the identity in memory.
 
 **Description.** The release carried library search paths that point outside the app (Homebrew's and `/usr/local` folders, an Xcode toolchain path) and was signed with library validation turned off, so the loader took user-writable libraries into the app. Every signed build could also open the identity key's keychain item without a prompt, so an old build carrying a planted library still reached the key after the load fix.
 
-**Fix.** A release gate strips every search path that leaves the bundle, refuses any that remains, and checks after signing that no executable waives library validation; the shipped signature no longer waives it. The identity key moves into a keychain group that only builds with a validated Developer ID profile can read, after a self-check of the bundle's own signature and loaded images; the first 0.14 start moves the old item and deletes nothing it cannot read back. An App Lock entry moved to its new keychain class is copied under a staging name and read back before the old one goes, so a stop in between loses no secret.
+**Fix.** A release gate strips every search path that leaves the bundle, refuses any that remains, and checks after signing that no executable waives library validation; the shipped signature no longer waives it. The identity key moves into a keychain group that only builds with a validated Developer ID profile can read, after a self-check of the bundle's own signature and loaded images. macOS lets only the app that made a login keychain item delete it, so 0.14 cannot delete the item 0.13 made. Instead the first 0.14 start moves the identity onto a fresh key kept only in the protected keychain and re-encrypts its files, the pair a phrase restore set aside included, so the old item stays but opens nothing. A password identity whose key the keychain caches changes key under a fresh salt at the first typed unlock, and a Mac where the password is never typed asks once ("Finish securing your key"). The steps are staged so a stored key opens every file at every point, and the start reads the login keychain without prompts. An App Lock entry moved to its new keychain class is copied under a staging name and read back before the old one goes, so a stop in between loses no secret.
 
-**Residual.** Legacy virtual cameras on macOS 12 and 13 stop working (accepted). Until the old team's certificate is revoked, old builds keep the privacy grants. The retest on the notarized 0.14 build runs before release.
+**Residual.** Legacy virtual cameras on macOS 12 and 13 stop working (accepted). Until the old team's certificate is revoked, old builds keep the privacy grants. A cached password key stays readable to old builds until its password is typed once in 0.14, as do a folder kept aside whose identity has a password and a set-aside pair under a password that is not the current one. A backup or Time Machine copy from before the re-key still opens with the old key. The automated signed job has never run, and macOS 12 and 13 have no signed run.
 
-**Test.** `scripts/macos_load_gate_test.sh` (43 cases) with its source guard `test/macos_load_gate_guard_test.dart`; `a_legacy_key_moves_into_the_protected_keychain_then_leaves`, `a_move_cut_short_keeps_both_and_finishes_at_the_next_start`; `test/app_lock_keychain_groups_test.dart` for the App Lock move; the signed-build check `scripts/macos_keychain_check.sh` on throwaway macOS 14, 15 and 26 runners.
+**Test.** `scripts/macos_load_gate_test.sh` (43 cases) with its source guard `test/macos_load_gate_guard_test.dart`; `a_legacy_key_moves_into_the_protected_keychain_then_leaves`, `a_move_cut_short_keeps_both_and_finishes_at_the_next_start`; the re-key `a_login_item_only_its_maker_may_delete_opens_nothing_after_the_first_start`, `a_rekey_killed_at_any_step_still_opens_and_finishes_at_the_next_start`, `the_pair_a_phrase_restore_set_aside_moves_off_the_login_key_too`, `a_start_reads_the_login_keychain_only_without_prompts`; the re-salt `a_password_cached_key_in_a_login_item_opens_nothing_after_a_typed_unlock`, `a_resalt_killed_at_any_step_still_opens_and_finishes`, `the_password_asked_for_once_finishes_the_move_off_the_login_item`, `test/widget/keychain_rekey_ask_test.dart`; on the real login keychain `a_login_item_another_process_made_opens_nothing_after_the_rekey`; `test/app_lock_keychain_groups_test.dart` for the App Lock move. Signed proof by hand on 2026-11-15 with a notarized build of b887e706 on macOS 26: a keychain-only identity from 0.13 re-keyed at the first 0.14 start and 0.13 then found its key missing; a cached password key moved under a new salt at the typed App Lock password and 0.13 then had to ask for the password; each second 0.14 start was silent; screen share passed on the same build. The automated check `scripts/macos_keychain_check.sh` (release-apple job `macos-keychain-check`, macOS 14, 15 and 26 runners) has never run.
 
 ### HOL-SEC-188: A device its roster removed could still write server history with the master key
 
@@ -403,7 +403,7 @@ Add to **Test:** `a_prekey_with_a_small_order_ratchet_key_never_opens_a_session`
   rejoin rule), AR-44 (SQLite's own memory), AR-45 (a sync responder can withhold ops) and
   AR-46 (the rebuild cost of a backdated flood). AR-39 was opened and closed within 0.14.
 
-## Goes in section 6.2, "Open items": state at the 0.14 freeze
+## Goes in section 6.2, "Open items": state at the 0.14 release
 
 - **Circuit breaker.** Enforces by default since 0.14 (4ccb0a10): the official relay's
   shadow counters over 11 days, the G1 scale run and a probe of 300 fresh sessions behind
@@ -416,7 +416,11 @@ Add to **Test:** `a_prekey_with_a_small_order_ratchet_key_never_opens_a_session`
 - **The signed status notice for 0.13** is a release step: it tells 0.13 users to update,
   that they stop seeing servers whose lock a 0.14 device moved, and that their posts past a
   server's cut no longer reach 0.14 members.
-- **HOL-SEC-187's last proof.** The retest on the notarized 0.14 build runs before release.
+- **HOL-SEC-187's signed proof.** Run by hand on 2026-11-15 on a notarized build of
+  b887e706 (macOS 26): the re-key of a keychain-only identity and the re-salt of a cached
+  password key both passed, and 0.13 could no longer open either from its login item. The
+  automated signed check (`scripts/macos_keychain_check.sh`, macOS 14, 15 and 26 runners)
+  has never run, and macOS 12 and 13 have no signed run.
 - **Assurance.** The STRIDE slices for server state, public channels and history sync,
   which the 0.13 pass left out, are written (`audit/phase_ef/crdt.md`,
   `public_channels.md`, `backfill.md`); one of their gaps became HOL-SEC-194. The

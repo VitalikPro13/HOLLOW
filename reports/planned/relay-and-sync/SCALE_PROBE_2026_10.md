@@ -1,8 +1,8 @@
 # Scale Probe, October 2026 (G1)
 
 **Status 2026-10-17: baseline measured on main (18484f7e).** Measurement only, no product
-behaviour changed. The 0.12.2 fixes rerun the same three commands (section 6) and add a
-second column to every table.
+behaviour changed. Reruns use the same three commands (section 6): the merged 0.13 tree in
+section 8, the 0.14 tree (2026-11-08) in section 9.
 
 The question: how large can a Hollow server get? The answer sets two things: the member
 cap of an MLS server (beyond it a server converts to the planned community mode with a
@@ -789,3 +789,247 @@ up to 1.75x noise, and section 8.5 items 2 and 3 are timing effects not yet expl
 cap number above comes from bytes and frame counts, which are exact, multiplied by models
 fitted at 9 to 100 members and extrapolated 15 to 120 times further; part b covers 1k to 10k
 leaves directly.
+
+## 9. Rerun on the 0.14 tree (2026-11-08)
+
+**What ran.** The section 6 commands on `security/0.14` at bef48c7d, HEAD from 11:12 that
+day until 74dae4d6 (13:44, a Windows worker-stack change in `node/swarm.rs`) landed after the
+node ladder had ended; whether the working tree already held that change is not recorded.
+Run on the M4 mini from a plain Terminal with `ulimit -n 10240` (at the default 256 the node
+ladder runs out of file descriptors near 27 members, and the Olm save failures that follow
+look like a product bug). Part a ran 12:42 to 12:59 (1,045 s of test time against 22 min in
+8 and 52 min in October), part b 1k and 10k in 64 s ending 13:06, and the relay was built at
+13:10 from the same tree (its last relay source commit 883aa238) and driven 13:10 to 13:41.
+Not run: the 100k MLS size, the bare-OpenMLS control `mls_scale_probe_message_cost` (so time
+noise has no bound this time), the 4k MLS size and the 50k relay row. How busy the machine
+was is not recorded. **Bytes and frame counts are exact; times are one sample each.** Raw
+data and scripts: `.team/g1/` (`a.log`, `harness.csv`, `b.log`, `mls.csv`, `c1.log` to
+`c7.log`, `relay.jsonl`; `analysis/harness_tab.py`, `analysis/relay_tab.py`,
+`analysis/extrap.py`).
+
+### 9.1 The G1 findings, 0.13 -> 0.14
+
+| finding | measure | October | 0.13 | 0.14 | verdict |
+|---|---|---:|---:|---:|---|
+| 1. removal re-forward | `carried/crdt_op` frames on leave at 100 | 9,918 | 295 | 295 | holds (about 3 per member) |
+| | leave sends, fitted exponent 9 to 100 | 1.89 | 0.99 | 0.94 | |
+| 2. sync state vector | `sync_request` per frame, reconnect at 75 | 20.3 KB | 1.38 KB | 1.61 KB | holds |
+| | `sync_request` bytes, join at 75 / 100 | 3.09 MB / about 5.5 MB | 0.71 MB / 3.75 MB | 0.40 MB / 0.62 MB | fixed on join too: no vector fallback (0 lines against 7,531) |
+| | `sync_response` bytes, join at 100 | not measured | not measured | 2.76 MB | new regression risk, see 9.5 |
+| 3. 30 s discovery | idle frames and bytes per 10 s at 99 | 224, 201 KB | 24, 13.5 KB | 24, 13.5 KB | holds (all `peer_exchange` gossip) |
+| 4. past-epoch window | MLS encrypt / decrypt at 1k | 63 / 63 ms | 0.61 / 0.62 ms | 0.93 / 0.97 ms | holds (no control this run) |
+| | same at 10k | 0.61 / 0.61 s | 4.5 / 6.9 ms | 6.4 / 6.4 ms | |
+| 5. whole-store persist | bytes saved per sent message, 1k / 10k | 5.2 MB / 50 MB | 44 KB / 331 KB | 44 KB / 331 KB | holds, byte for byte |
+| remove commit O(N) | remove commit at 1k / 10k | 87 KB / 825 KB | 87 KB / 825 KB | 87 KB / 825 KB | unchanged |
+| relay presence O(N) | CPU per leave+join cycle at 10k | 131 ms | 121 to 125 ms | 117 to 119 ms | unchanged |
+| relay drops | frames or sockets lost in part c | backpressure drops at 50k | 46,083 sockets at 50k, 33 at 30k | 0 in 44 phases (50k not run) | no drops |
+| phase G breaker | shadow trips, refusals, ladder steps | not reported | not reported | 0, 0, 0 (4 of 7 runs, see 9.4) | no trip |
+
+### 9.2 Part a (real node logic), matching sizes
+
+Columns: node sends, relay deliveries, relay egress bytes, background and mock-only kinds
+removed as in section 2. Each cell reads October -> 0.13 -> 0.14, and the ratio is 0.13 /
+0.14 (below 1.0x, 0.14 moved more).
+
+| phase | members | sends | deliveries | egress bytes |
+|---|---:|---|---|---|
+| join | 9 | 187 -> 199 -> 189 (1.1x) | 240 -> 252 -> 230 (1.1x) | 291 KB -> 277 KB -> 334 KB (0.8x) |
+| join | 50 | 1,036 -> 1,059 -> 1,064 (1.0x) | 1,392 -> 1,415 -> 1,326 (1.1x) | 2.91 MB -> 1.68 MB -> 2.04 MB (0.8x) |
+| join | 75 | 1,532 -> 1,651 -> 1,605 (1.0x) | 2,067 -> 2,186 -> 1,996 (1.1x) | 5.22 MB -> 3.00 MB -> 3.94 MB (0.8x) |
+| join | 100 | 2,036 -> 2,422 -> 2,333 (1.0x) | 2,930 -> 3,382 -> 2,853 (1.2x) | 8.26 MB -> 7.06 MB -> 6.53 MB (1.1x) |
+| message | 9 / 50 / 100 | 2 -> 2 -> 2 | 16 / 98 / 198, same | 12 KB / 71 KB / 143 KB -> same -> 13 KB / 82 KB / 166 KB (0.9x) |
+| reconnect | 9 | 94 -> 94 -> 93 (1.0x) | 121 -> 121 -> 120 (1.0x) | 146 KB -> 113 KB -> 137 KB (0.8x) |
+| reconnect | 50 | 504 -> 424 -> 505 (0.8x) | 666 -> 586 -> 664 (0.9x) | 2.10 MB -> 592 KB -> 1.07 MB (0.6x) |
+| reconnect | 100 | 1,076 -> 1,004 -> 1,005 (1.0x) | 1,576 -> 1,565 -> 1,318 (1.2x) | 6.54 MB -> 1.97 MB -> 2.41 MB (0.8x) |
+| leave | 9 | 111 -> 61 -> 69 (0.9x) | 133 -> 83 -> 91 (0.9x) | 145 KB -> 82 KB -> 110 KB (0.7x) |
+| leave | 50 | 2,662 -> 304 -> 319 (1.0x) | 2,848 -> 490 -> 505 (1.0x) | 3.57 MB -> 869 KB -> 1.01 MB (0.9x) |
+| leave | 100 | 10,298 -> 699 -> 703 (1.0x) | 10,684 -> 1,085 -> 1,089 (1.0x) | 14.19 MB -> 2.62 MB -> 2.99 MB (0.9x) |
+| kick | 50 | 2,613 -> 301 -> 300 (1.0x) | 2,800 -> 488 -> 487 (1.0x) | 3.58 MB -> 875 KB -> 1.01 MB (0.9x) |
+| kick | 100 | 10,305 -> 602 -> 603 (1.0x) | 10,693 -> 989 -> 990 (1.0x) | 14.41 MB -> 2.62 MB -> 2.90 MB (0.9x) |
+
+Fitted exponents, N = 9 to 100 (sends, deliveries, bytes):
+
+| phase | October | 0.13 | 0.14 | verdict |
+|---|---|---|---|---|
+| join | 0.99, 1.03, 1.38 | 1.01, 1.04, 1.23 | 1.03, 1.03, 1.19 | linear in frames; the byte fit hides a step from 75 up (9.5) |
+| second join | 0.95, 0.99, 1.35 | 0.98, 1.02, 1.23 | 1.01, 1.02, 1.18 | same shape |
+| message | 0.00, 1.04, 1.04 | 0.00, 1.05, 1.05 | 0.00, 1.04, 1.04 | unchanged in frames, `ch` frame larger |
+| reconnect | 1.00, 1.03, 1.57 | 0.99, 1.03, 1.16 | 0.99, 0.99, 1.18 | unchanged shape, more bytes |
+| leave | 1.89, 1.82, 1.90 | 0.99, 1.05, 1.43 | 0.94, 1.01, 1.36 | holds |
+| kick | 1.92, 1.85, 1.93 | 1.01, 1.06, 1.44 | 1.00, 1.06, 1.38 | holds |
+
+What is left in each:
+
+- **Join**: per other member about 38 KB (38.1 to 39.1 KB at 9, 50 and 100) with the
+  `sync_response` frames taken out, against 35 KB in 0.13. The `sync_response` frames are
+  2.6 KB per member at 9, 3.2 KB at 50, 15.9 KB at 75 and 27.9 KB at 100 (2.76 MB of the
+  6.53 MB at 100). `sync_request` is 300 frames of 2.06 KB at 100: the joiner sent 201 (2 per
+  member), the members 1 each; at 75 it was 153 frames, about 2N.
+- **Message**: the same 2 sends and 2 deliveries per other member; the `ch` frame is 1,065 B
+  per delivery (845 B in October and 0.13), `ch_hint` the same 601 B.
+- **Reconnect**: per other member about 13.7 KB flat (13.8 KB at 50, 13.7 KB at 100; 12 KB in
+  0.13) plus `ch_sync`, the history page each member gets back: 8.2 KB at 50 and 10.6 KB at
+  100, against 1.1 and 7.0 KB in 0.13.
+- **Leave and kick**: at 100 the MLS remove commit is 1.20 MB (12.3 KB to each of 98), the
+  `room_members` lists of the door re-join 547 KB (N lists of N ids, as in 0.13), and the rest
+  1.24 MB (0.82 MB in 0.13): the carried removal op 590 KB in 295 frames, its MLS copy 458 KB
+  in 2 broadcasts, `lock_chain` 63 KB, a commit catch-up to 6 devices 74 KB and 94 epoch probes
+  29 KB. Model: 11 KB x N + 185 B x N^2 (0.13: 8.5 KB x N + 177 B x N^2). The raw totals at 100
+  are 728 sends, 10,815 deliveries and 4.28 MB; 9,702 of those deliveries (1.28 MB) are the
+  `peer_joined` re-announcements that section 2 counts as mock-only. That label is no longer
+  certain: the 0.14 relay's `relock_room` (`relay-uws/src/ws_handler.cpp`) announces a
+  `peer_joined` for every member whose proof of the moved door opens, which is the N^2 the
+  0.14 relay presence work after this run (4ccb0a10) went after. The tables keep the section 2
+  method so the columns compare.
+- **Background** (2.6): idle at 12 / 49 / 74 / 99 members delivers 0 / 0 / 0 / 24 frames (13.5
+  KB at 99, all `peer_exchange` gossip), with 1 / 2 / 1 / 4 digest asks to the relay; 0.13 had
+  0 / 0 / 24 / 24. The mock still writes no frame for a digest answer.
+- **Settle**: joins settle in 0.8 to 6.4 s (0.13: 1.6 to 8.5 s).
+
+### 9.3 Part b (MLS alone)
+
+| metric | 1k 0.13 -> 0.14 | 10k 0.13 -> 0.14 |
+|---|---|---|
+| KeyPackage / add commit | 516 B / 704 B, same | same |
+| Welcome (add 1) | 415 KB, same (415,371 B) | 4.15 MB, same (4,155,105 B) |
+| member opens Welcome | 0.16 s -> 0.12 s | 2.2 s -> 1.6 s |
+| owner builds add 1 | 0.08 s -> 0.11 s | 1.5 s -> 1.6 s |
+| member processes add 1 / add 50 | 0.08 / 0.09 s -> 0.08 / 0.08 s | 1.1 / 1.25 s -> 1.15 / 1.17 s |
+| remove commit | 87 KB, same (87,033 B) | 825 KB, same (825,146 B) |
+| owner builds / member processes remove | 0.13 / 0.11 s -> 0.12 / 0.10 s | 2.3 / 1.5 s -> 2.4 / 1.4 s |
+| 512 B message encrypt / decrypt | 0.61 / 0.62 ms -> 0.93 / 0.97 ms | 4.5 / 6.9 ms -> 6.4 / 6.4 ms |
+| bytes saved per sent message | 44 KB, same (44,126 B) | 331 KB, same (331,273 B) |
+| persisted member state | 4.3 MB, same | 40.4 MB, same |
+| past-epoch capture per commit | 5.5 ms -> 28 ms, 742 KB packed, same | 67 ms -> 0.28 s, 7.1 MB, same |
+| first late frame of a past epoch | 70 ms -> 0.20 s, 2.7 MB saved, same | 0.57 s -> 13.8 s, 25.6 MB, same |
+| growth to this size, owner time | not given (October 0.6 s) -> 0.6 s | not given (October 26 s) -> 23.9 s (26.3 s with KeyPackages) |
+
+The 4k column of 8.3 was not run. Verdict: every size matches 0.13 to the digits 8.3 gives, and the
+per-message and commit times sit within 1.5x of 0.13's. Two times moved: the past-epoch capture
+(4 to 5 times) and the first late frame (3 times at 1k, 24 times at 10k). Both have the same
+bytes as 0.13, and the late frame's save builds in 3 ms at 10k, so the time is in opening the
+frame, not in the save. One sample with no control, see 9.5.
+
+### 9.4 Part c (relay alone)
+
+| scenario | N | 0.13 | 0.14 | verdict |
+|---|---:|---|---|---|
+| connect: CPU, RSS | 1k / 10k / 30k | 0.52 s, 33 MB / 1.9 s, 257 MB / 5.4 s, 754 MB | 0.25 s, 34 MB / 1.95 s, 263 MB / 5.9 s, 772 MB | unchanged (about 26 KB per socket) |
+| RSS after hidden fill | 30k / 50k | not given / 1.10 GB | 780 MB / not run | |
+| one join: frames, egress, CPU | 1k | 1,027, 170 KB, 8.5 ms | 1,027, 170 KB, 14.5 ms (reply median 1.8 ms) | unchanged (time noise) |
+| one join | 10k | 10,204, 1.69 MB, 64 ms | 10,233, 1.69 MB, 87 ms (reply median 11.4 ms) | unchanged |
+| join storm: frames, egress, CPU | 1k / 2k | 0.50 M, 84 MB, 3.1 s / 2.0 M, 336 MB, 14.0 s | same frames and bytes, 1.5 to 1.6 s / 7.4 s | unchanged |
+| join storm | 5k / 10k | 12.5 M, 2.1 GB, 78 s / 50.3 M, 8.4 GB, 280 s | same, 53 s (both 5k runs) / 50.2 M, 8.4 GB, 253 s (274 s wall) | unchanged |
+| every member re-joins | 1k / 5k | 55 MB, 0.24 s / 1.38 GB, 7.8 s | 55 MB, 0.27 s / 1.38 GB, 5.7 s, no `peer_joined` | unchanged |
+| churn, CPU per leave+join cycle | 1k | 14.0 ms (rejoin), 11.9 to 14.1 ms (toggle) | 23 ms at 10/s, 8.3 ms at 50/s (rejoin); 22 and 7.8 ms (toggle) | see note |
+| churn | 10k | 121 to 125 ms (rejoin), 116 to 177 ms (toggle) | 117 to 119 ms (rejoin), 110 to 116 ms (toggle) | unchanged |
+| broadcast, per delivery, p50 | 1k at 10/s | 10.6 us, 4 ms | 18.8 us, 8 ms | noise (light load) |
+| broadcast | 1k at 100/s | 9.4 us, 4.2 s (saturated) | 5.2 us, 2 ms | 8.5 item 3 did not repeat |
+| topic | 1k at 100/s | 6.3 us, 2 ms | 5.2 us, 2 ms | unchanged |
+| broadcast | 1k at 300/s | not given | 5.1 us, 2.1 s (saturated) | October: 5.7 us, 4.2 s |
+| broadcast | 10k at 10/s / 30/s | 8.1 us, 33 ms / 7.8 us, 4.2 s | 7.9 us, 33 ms / 8.0 us, 4.2 s (saturated) | unchanged |
+| broadcast | 30k at 1/s / 10/s | 7.5 us, 66 ms / not given | 12.2 us, 66 ms / 6.1 us, 4.2 s (saturated) | unchanged |
+| broadcast | 50k at 1/s | 9.0 us, 131 ms | not run | |
+| door room lock move | | not driven | not driven | model 8.6 |
+
+Churn CPU per cycle is the relay CPU of the phase over its cycles; at 1k and 10 cycles a
+second the phase's fixed share (23 s of heartbeats and timers for 201 cycles) dominates, so
+read the 50/s figure, and at 10k the two rates agree. The M4 core saturates at about 175k
+deliveries a second at 1k and 114k at 10k (section 4.3: 155k and 109k); the 30k hidden room
+ran 148k a second at 10 posts a second.
+
+**No drops.** In all 44 measured phases of the seven runs the tool counted 0 dropped frames
+and 0 failed connection attempts, every socket stayed connected, every broadcast and topic
+phase drained with deliveries at or above the expected count, and the sending client stayed
+alive. Where the relay's `SERVER_STATS` came back (the 1k mix, the 2k storm, the 1k re-join
+and the 30k fill), it counted `send_dropped` 0, `budget_closed` and `budget_refused` 0, every
+`fanout_*` counter 0, and the shadow breaker (`enforced: false`) 0 trips, 0 refusals, 0 ladder
+steps and 0 cooling devices; `send_backpressure` counted 373,974, 1,872,156, 350,233 and 0
+events, back-pressure the relay waited out, not a loss. The 5k storm, the 5k re-join and the
+10k mix returned `SERVER_STATS {}` (the stats fetch after a heavy run), so the breaker and
+the relay-side drop counters are not measured there; their client-side counts are 0.
+
+Verdict: the relay did what it did in 0.13, and the saturated 1k broadcast of 8.5 item 3 was
+the machine, not the relay.
+
+### 9.5 Regressions and suspicious results
+
+1. **Join: the `sync_response` frames grow faster than N from 75 up.** At 9 to 50 members
+   they are 2.6 to 3.2 KB per member; at 75 and 100 they are 15.9 and 27.9 KB per member (7.7
+   and 9.2 KB per frame), 2.76 MB of the 6.53 MB join at 100 (`harness.csv`,
+   `join,100,...,carried/sync_response,300,300,2760064`). Without them the join is a flat 38
+   KB per member. What the answers carry is not traced; a joiner pulling the op log from
+   every member it asks would have this shape (N answers of an N-op log). The total is still
+   under 0.13's (6.53 against 7.06 MB at 100), because the vector fallback of 8.5 item 1 is
+   gone: `a.log` has no "state vector" line (0.13: 7,531) and 479 late digest answers dropped
+   (0.13: 7,614). The joiner's second ask per member at 100 is consistent with the unchanged
+   resend of a silent ask (`RESEND_AFTER`, 3 s in tests, `node/op_sync.rs:24`) under load.
+   This term decides whether a join stays linear above 100; trace it before the cap moves.
+2. **MLS late frame and past-epoch capture are slower with the same bytes.** The first late
+   frame of a past epoch opened in 13.8 s at 10k (0.13: 0.57 s) and 0.20 s at 1k (70 ms); the
+   capture per commit took 0.28 s at 10k (67 ms) and 28 ms at 1k (5.5 ms). Saved and packed
+   bytes are identical to 0.13, the save build took 3 ms, and every other time in part b sits
+   at or below 0.13's. One sample, no bare-OpenMLS control, machine load not recorded: worth
+   one quiet rerun with the control before reading it as a code change. If it holds, a late
+   frame at 10k costs a member 14 s of CPU once per epoch.
+3. **More bytes for the same frames.** The `ch` frame of a post grew by 220 B per delivery
+   (845 to 1,065 B), the reconnect's flat part from 12 to 13.7 KB per member, its `ch_sync`
+   history page from 1.1 to 8.2 KB at 50, and the leave and kick linear rest from 0.82 to 1.24
+   MB at 100. None of these is traced to a commit; the frame counts are the same.
+4. **Leave at 75 settled in 23.2 s:** 342 `peer_exchange` gossip frames landed in the window;
+   the leave itself is 505 sends, in line with the other sizes.
+5. **Reconnect logs.** The reconnecting member logs "Decrypt failed ... past the late-delivery
+   window" for 1 to 7 old MLS frames per reconnect (one per earlier growth epoch: epochs 2, 7,
+   12, 18, 25, 34 and 47 at 100) and one "Failed to remove identity from MLS group: No valid
+   membership change to commit"; the ladder passed every check. Not examined further.
+6. **Not measured this time:** the breaker and relay drop counters in three runs (9.4), the
+   50k relay row, the 100k and 4k MLS sizes and the bare-OpenMLS control.
+
+### 9.6 Extrapolation with the 0.14 curves
+
+**Assumptions** as in 8.6 (every device online, one relay core on the M4, 107 MB/s of
+uplink, M = online devices in the server). The post, reconnect and leave or kick models are
+refitted from 9.2; the join is not extrapolated, because the `sync_response` term of 9.5 item
+1 steps up between 50 and 75 and two points above the step do not fix its exponent.
+
+| operation | 0.13 | 0.14 |
+|---|---|---|
+| post | 1.45 KB x M | 1.67 KB x M |
+| join, digest path | 35 KB x M | 38 KB x M plus the `sync_response` term, not modelled |
+| fresh reconnect (session lost) | 20 KB x M | 24 KB x M (13.7 KB plus a history page of 10.6 KB at 100) |
+| leave or kick | 8.5 KB x M + 177 B x M^2 | 11 KB x M + 185 B x M^2 |
+
+| identities | devices each | leaves | post | fresh reconnect | 1 fresh reconnect per device per hour | leave or kick |
+|---:|---:|---:|---|---|---|---|
+| 512 | 1 | 512 | 0.74 -> 0.86 MB | 10 -> 12 MB | 1.5 MB/s (1%) -> 1.7 MB/s (2%) | 51 -> 54 MB |
+| 512 | 2 | 1,024 | 1.5 -> 1.7 MB | 20 -> 25 MB | 5.8 MB/s (5%) -> 7.0 MB/s (7%) | 194 -> 205 MB |
+| 512 | 3 | 1,536 | 2.2 -> 2.6 MB | 31 -> 37 MB | 13 MB/s (12%) -> 16 MB/s (15%) | 431 -> 453 MB |
+| 1024 | 2 | 2,048 | 3.0 -> 3.4 MB | 41 -> 49 MB | 23 MB/s (22%) -> 28 MB/s (26%) | 760 -> 798 MB |
+| 1024 | 3 | 3,072 | 4.5 -> 5.1 MB | 61 -> 74 MB | 52 MB/s (49%) -> 63 MB/s (59%) | 1.7 -> 1.8 GB |
+| 2048 | 2 | 4,096 | 5.9 -> 6.9 MB | 82 -> 98 MB | 93 MB/s (87%) -> 112 MB/s (105%) | 3.0 -> 3.1 GB |
+
+The MLS member table of 8.6 stands for the sizes this run measured (1k and 10k: the same
+bytes, per-message and commit times), except the capture per commit and the first late frame,
+which 9.3 puts at 4 to 24 times 0.13's; it is not redrawn on one uncontrolled sample. The relay
+CPU table of 8.6 stands: a presence cycle at 10k costs 117 to 119 ms, about 12 us x M against
+13 us, and the lock move was not driven.
+
+### 9.7 The member cap
+
+**Recommendation: 512 identities stands for 0.14.** At 512 identities and 3 devices each (1,536
+leaves) the reconnect term is 16 MB/s (15% of the uplink, 0.13: 13 MB/s) and a kick moves 453
+MB (431 MB), still under the top of the section 5 yardstick (19 MB/s), with the margin down from
+about 1.5x to 1.2x. Nothing in this run argues for 1,024: the bytes per operation rose 5 to
+20%, and the join's `sync_response` term is new and not modelled.
+
+Of 8.7's list before 1,024: item 1 is done in part (no vector fallback, `sync_request` at
+about 2 KB, but 3N frames at 100 under load and the `sync_response` term in its place); items 2
+to 5 (a multi-device ladder, fresh reconnects against resumes on real phones, the remove commit
+after self-update turns, both N^2 relay terms on the VPS) were not part of this run. Added
+before 1,024: trace the join `sync_response` term (9.5 item 1) and rerun part b quietly with the
+control (9.5 item 2).
+
+**Honesty notes.** Every cap number comes from bytes and frame counts, which are exact,
+multiplied by models fitted at 9 to 100 members and extrapolated 15 to 41 times further. Times
+are one sample each with no control, so a time ratio here is a pointer, not a finding. Three
+relay runs returned no server counters. Part c ran on the Mac loopback, not the VPS.

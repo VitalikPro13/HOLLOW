@@ -1,14 +1,17 @@
 # HOL-SEC-187: The macOS app could load code from directories outside its bundle
 
 ```
-ID:          HOL-SEC-187                 Status: Fixed on local branch security/0.14:
-                                          load paths and the library validation waiver
-                                          (d957c635, 2026-10-31), the keychain item old
-                                          builds open moved to the data-protection keychain
+ID:          HOL-SEC-187                 Status: Fixed in 0.14: load paths and the library
+                                          validation waiver (d957c635, 2026-10-31), the
+                                          identity key moved to the data-protection keychain
                                           (design 2fc4dc44, build b8b64d15, 2026-11-01), an
                                           App Lock entry kept through a cut-short class move
-                                          (5da98071, 2026-11-05); retest on the notarized
-                                          0.14 build before release
+                                          (5da98071, 2026-11-05), login keychain queries kept
+                                          off the protected copy (6fec99e7, 2026-11-14), the
+                                          identity re-keyed off the old login item macOS will
+                                          not let 0.14 delete (b887e706, 2026-11-15); proven
+                                          by hand on a notarized build of b887e706
+                                          (2026-11-15)
 Severity:    High                        (Impact H: code running inside the signed app holds what
                                           the app holds: the keychain slot that opens without a
                                           prompt for Hollow's signature, the identity in memory,
@@ -97,12 +100,15 @@ signed by our team or Apple is refused even if it were found.
 
 The identity key moves from the login keychain into the data-protection keychain, in an
 access group only builds signed with Hollow's provisioning profile can claim, this device
-only. At the first 0.14 launch each Hollow key in the login keychain is copied there, read
-back, and only then deleted; nothing writes the login keychain again. Builds before 0.14
-claim no keychain group and cannot see the new item. Before it reads a key, the app checks
-that every library it loaded is the one this release shipped, so an old Hollow cannot put
-its own older code into the new one. The certificate that signed the old builds is revoked
-once Macs run builds of the new team.
+only. Builds before 0.14 claim no keychain group and cannot see the new item. macOS lets
+only the app that made a login keychain item delete it, so 0.14 cannot delete the item
+0.13 made; the key it holds is made useless instead. At the first 0.14 start the identity
+moves onto a fresh key that lives only in the protected keychain, and its files are
+re-encrypted under it, so the old login item still exists but opens nothing. Nothing
+writes the login keychain again. Before it reads a key, the app checks that every library
+it loaded is the one this release shipped, so an old Hollow cannot put its own older code
+into the new one. The certificate that signed the old builds is revoked once Macs run
+builds of the new team.
 
 - `identity/platform_keystore.rs`: keys go only to the data-protection keychain, group
   `group.com.anonlisten.hollow.keys` (the app-ID group where a Mac refuses it),
@@ -117,6 +123,32 @@ once Macs run builds of the new team.
   items the same way. Writability is probed and answered three ways (yes, no, unknown);
   the cached-key drop path reads only the root rule. Wipes forget the slot and its copies
   in every keychain, and machine-slot items only where each opens the wiped identity.
+  macOS refuses the delete of a login item another app made (`errSecInvalidOwnerEdit`):
+  that item is held, logged once, and never tried again once its key opens nothing. Every
+  login keychain query sets `kSecUseDataProtectionKeychain` false, so it never reads or
+  deletes the protected copy, and a move counts as done only when the delete answered 0
+  and a new read of the name finds nothing.
+- `identity/keychain_rekey.rs` (FFI `settle_keychain_move`, `keychain_rekey_wants_password`,
+  `finish_keychain_rekey`): the re-key. For this profile folder and every folder a relink
+  kept aside (each under its own instance lock), when a key in one of our login items opens
+  `identity.key`, `identity.device` or the pair a phrase restore set aside
+  (`identity.key.locked`, `identity.device.locked`), those files move onto a new key. A
+  keychain-only identity (flags `0x02`) re-keys at start onto a random key. A password
+  identity whose key the keychain caches (flags `0x03`) can only change its key with the
+  password, so at the first typed unlock (launch prompt, App Lock prompt, a Settings
+  unlock) the password derives the new key under a fresh salt; the duress slot is
+  untouched. On the first 0.14 start such a Mac asks once, "Finish securing your key", and
+  "Not now" asks again at a later start; the ask goes through the one typed-secret gate, so
+  a duress code typed there wipes as at any prompt, and it never shows above the App Lock
+  cover or a roster lock. The steps are staged so a stored key opens every file at every
+  point: the new key is written as `<slot>.rekey` and read back before any file changes,
+  each file is re-sealed, proven, written through a staged rename and read again, the
+  profile slot takes the new key only once every file opens with it, and only then are the
+  staged copy and the old protected key retired and one quiet delete tried per login item
+  that held the old key. A failed write puts back every file the run wrote. The start reads
+  the login keychain only with prompts off and reads this root's slot and the machine slot
+  before any other name, so planted items cannot hide ours. Set-aside files are re-sealed,
+  never deleted.
 - `macos/Runner/BundleSeal.swift`: before the Flutter engine exists, every loaded image
   inside the bundle must match `HollowSealedImages` (cdhash of each slice, written by
   `macos_load_gate.sh seal` before the main signature) by its in-memory code directory
@@ -144,7 +176,9 @@ once Macs run builds of the new team.
 - Until the old team's certificate is revoked, old builds keep the privacy grants (camera,
   microphone, screen) and can show phishing screens. An item a quiet read cannot open
   stays where it is. A Time Machine copy of the login keychain from before 0.14 still
-  holds the key. Whoever holds the keys group registration can read the items (the signing
+  holds the old key, and a backup of the identity files from before the re-key still
+  opens with it; the re-key also does nothing against someone who read the old key before
+  it (the master secret does not change). Whoever holds the keys group registration can read the items (the signing
   team's power). A Mac moved by Migration Assistant after 0.14 asks for the phrase; one
   moved from a 0.13 Mac stays a clone of it.
 - Library validation admits any Mach-O signed by our team, old Hollow libraries included.
@@ -159,8 +193,16 @@ once Macs run builds of the new team.
 - iOS is not affected: the iOS mdk has no absolute run paths, and iOS validates the
   signature of every library it loads. One iOS run path, `@executable_path/../Frameworks`,
   points above the app in the main process; it can never find a library signed for Hollow.
-- The local proof uses ad-hoc signatures. That a Developer ID build launches and plays
-  video with validation on is proven by the first signed build (CI or the release Mac).
+- Password identities the keychain caches (flags `0x03`): until the person types the
+  password once in 0.14 or answers the one ask, the old login item still opens the
+  identity for an old build. A folder a relink kept aside whose identity is `0x03` keeps
+  its cached key in the login item, since its password is only typed if that folder is
+  opened as a profile again. A set-aside password pair whose password is not the current
+  one stays under the login key that opens it. A profile not opened in 0.14 keeps its old
+  key until its first 0.14 start.
+- The signed proof ran by hand on one Mac (macOS 26). The automated signed job
+  (`scripts/macos_keychain_check.sh` on macOS 14, 15 and 26 runners) has never run, and
+  macOS 12 and 13, which 0.14 still supports, have no signed run at all.
 
 ## Test
 
@@ -225,10 +267,72 @@ sealed bundle passes, a sealed library loaded later is accepted, an unsealed one
 process, a swapped library and an Info.plist edited after signing each end the process
 before the engine, old code under a sealed directory fails the page check, a development
 build without a list starts, a build claiming keychain groups without a list ends).
-Signed run: `scripts/macos_keychain_check.sh` on throwaway macOS 14, 15 and 26 runners
-(the move with the login item gone, 0.13 and a library planted in it refused, a framework
-swapped for 0.13's, an edited Info.plist and this team's framework moved outside the
-bundle each ending the start before the engine).
+Re-key (Rust, fake stores with a kill at every step):
+`a_login_item_only_its_maker_may_delete_opens_nothing_after_the_first_start`,
+`a_rekey_killed_at_any_step_still_opens_and_finishes_at_the_next_start`,
+`a_cut_rekey_survives_the_old_login_item_going`,
+`a_file_that_will_not_write_stops_the_rekey_and_loses_nothing`,
+`a_downgrade_that_writes_a_new_login_key_is_rekeyed_again`,
+`another_profiles_login_key_waits_for_that_profile`, `a_password_identity_is_never_rekeyed`,
+`the_pair_a_phrase_restore_set_aside_moves_off_the_login_key_too`,
+`a_set_aside_file_that_will_not_write_puts_every_file_back`,
+`a_staged_key_the_files_need_is_never_unstaged`,
+`planted_login_items_never_hide_ours_from_the_rekey`,
+`a_start_reads_the_login_keychain_only_without_prompts`,
+`a_nested_quiet_call_keeps_prompts_off_until_the_outer_one_ends`,
+`a_finishing_start_with_nothing_left_to_write_still_retires_the_old_key`,
+`a_device_heal_asks_only_when_the_unlock_has_not`,
+`a_device_file_no_key_opens_stops_the_rekey_before_anything_changes`,
+`old_data_kept_aside_moves_off_its_login_key_too`,
+`old_data_kept_aside_open_in_another_hollow_waits_for_a_later_start`,
+`an_unlock_after_a_cut_rekey_never_promotes_the_staged_key`. Re-salt of a cached password
+key: `a_password_cached_key_in_a_login_item_opens_nothing_after_a_typed_unlock`,
+`a_password_cached_key_in_a_login_item_moves_under_a_fresh_salt_at_a_typed_unlock`,
+`a_resalt_killed_at_any_step_still_opens_and_finishes`,
+`a_resalt_cut_between_the_files_still_opens_at_the_silent_start`,
+`a_resalt_changes_only_the_identitys_files`,
+`a_set_aside_password_pair_moves_only_with_its_own_password`,
+`the_password_asked_for_once_finishes_the_move_off_the_login_item`,
+`a_duress_code_at_any_settings_prompt_wipes_like_the_launch_prompt` (the ask is one of its
+prompts); Dart `test/widget/keychain_rekey_ask_test.dart` (nothing asked off macOS or when
+nothing is left, Not now asks again at the next start, a wrong password says so, a duress
+code ends the session and shows nothing). On the macOS login keychain in a test service:
+`a_login_item_another_process_made_opens_nothing_after_the_rekey` (another program made
+the item: the delete is refused with -25244, and after the re-key its key opens nothing),
+`a_login_item_another_process_rewrote_after_the_read_stays`,
+`a_file_keychain_delete_takes_exactly_the_item_object`,
+`the_login_keychain_tests_leave_no_item_behind`. Mutants: 23 of 23 of the re-key build are
+killed; in its fix round 27 of the 32 valid mutants at first, then five of the six rerun
+after new tests (the one left, a read-back after `write_key_file`, is equivalent).
+
+Signed proof, by hand on 2026-11-15 on the Mac mini (macOS 26), with a notarized
+Developer ID build of b887e706 (`spctl`: "Notarized Developer ID", staple valid) against a
+throwaway identity on the test relay, beside the signed 0.13.0 release:
+
+- Keychain only (flags `0x02`). A new identity made in 0.13; 0.14 then logged "Keychain
+  re-key: this identity now opens only with a new key in the protected keychain; 1 old
+  login item(s) stay but no longer open it" and opened. The next 0.14 start was silent (no
+  re-key line). 0.13 again reported `keychain_key_missing` and left the identity files
+  untouched.
+- Password with the keychain cache (flags `0x03`, "Ask before Hollow starts" off). The
+  password was set in 0.13. 0.14 re-salted at the typed App Lock password and logged
+  "Keychain re-key: the password key moved under a new salt; 1 old login item(s) stay but
+  no longer open it". The salt changed, both identity files were rewritten and the flags
+  stayed `0x03`. No extra dialog showed, because the typed unlock had done the work. The
+  next 0.14 start was silent. 0.13 could not open the identity from the login item, asked
+  for the password and opened with it, files untouched; the 0.14 start after that had
+  nothing to re-salt (0.13 had not exposed the key again).
+- On the same build: screen recording permission and our own screen share, which never
+  opens full screen, passed. Video, camera and the App Lock password passed on the signed
+  build of 2026-11-14.
+
+Not run: the automated signed job, `scripts/macos_keychain_check.sh` on throwaway macOS 14,
+15 and 26 runners (release-apple job `macos-keychain-check`: the move with a login item
+only its maker may delete, 0.13 and a library planted in it refused, a framework swapped
+for 0.13's, an edited Info.plist and this team's framework moved outside the bundle each
+ending the start before the engine). Its repository variables
+`MAC_PREVIOUS_RELEASE_ZIP_URL` and `MAC_PREVIOUS_RELEASE_ZIP_SHA256` were never set and
+0.14's Apple builds are signed outside CI, so it has never run.
 
 `check` fails on the installed 0.12.2 app and on a fresh unsigned release build (nine run
 paths each) and passes after `strip`. A probe placed inside that build, signed with the
