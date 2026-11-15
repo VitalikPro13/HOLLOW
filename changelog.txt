@@ -1,3 +1,62 @@
+v0.14 - Lost Device Protection, Invite Link Reset, Call Route Badge & Get Help Page
+
+0.14 is a clean break from 0.13, so everyone in a server should update to keep it working together. A 0.13 app can stop seeing a server that 0.14 members use, and its new posts there may not reach them. Self-hosters, a 0.14 relay still serves 0.13 apps, and updating it brings a denylist, connection limits you can set and fairer upload sharing.
+
+SECURITY
+
+- A device you remove can no longer post, edit or change anything in your servers
+- On macOS, Hollow loads only its own code and keeps your identity key where older versions can't read it
+- Camera video in 1:1 calls gets the same extra end-to-end encryption as voice and screen shares
+- Important security fixes for the relay, servers, calls, friend requests and your devices
+
+VOICE & CALLS
+
+- Calls, voice rooms, meetings and screen shares show whether their media goes Direct, Relayed or Forwarded
+- Fixed calls and voice rooms sometimes failing to connect, most often with "Always relay calls" on
+- Deafen and volume sliders always change the right voice, including during a Windows screen share with audio
+- Your own screen share no longer goes full screen, where it only showed an endless mirror
+- Fixed the tray's Leave button leaving a meeting stuck
+- A meeting host who starts or answers a DM call is asked whether to end the meeting
+
+SERVERS
+
+- Owners can reset a server's invite link, so old links stop working while members stay
+- A new Lost devices page lets an owner decide which changes from a member's lost device to keep
+- After you recover with your phrase, you choose how each of your servers is restored
+- A server's own Files & storage page clears just its messages, and cleared history no longer comes back
+- On iPhone, and on Android from an app store, NSFW servers stay hidden until you allow them on a computer
+- NSFW servers have no public channels
+- When a relay refuses a server, its history stays readable and Hollow says why
+- Fixed leaving a server sometimes being undone
+- Fixed channel files sometimes never downloading, or showing as gone, after you come back online
+- Fixed two people joining a server at the same moment sometimes never getting in
+- Fixed a channel's older messages not loading when the members online had cleared their history
+
+YOUR DEVICES
+
+- Removing a device asks whether you retired or lost it, so a lost device's actions after you last had it don't count
+- On macOS, the first start asks once for your password if your identity has one
+- Fixed an unfinished device link turning into a new account on the next start
+- Fixed App Lock sometimes losing its unlock secret on Apple devices when Hollow stopped at the wrong moment
+
+SETTINGS & SHOP
+
+- A new Get help page in Settings lists emergency numbers and help services for your country
+- The shop's item window now matches the website and shows the artist
+- Buy asks you first to agree that getting your code right away ends your 14-day right to cancel
+
+WINDOWS
+
+- Hollow no longer closes when Windows notifications are unavailable or audio playback fails
+
+SELF-HOSTING
+
+- Your relay can refuse servers, accounts and networks you list in a denylist
+- Connection limits are settings now, with higher defaults, so everyone behind one school or mobile network can reconnect at once
+- The circuit breaker now pauses a device that causes far more work than anyone normally does
+- The setup wizard now shares your upload fairly between addresses and can rebuild from your own copy of the source
+- Phones using your relay now get their background notifications through it, not the official relay
+
 v0.13 - Security Review, Relay Setup Wizard, Bigger Servers & Windows Volume Fix
 
 No breaking changes, so 0.12.2 and 0.13 work together. Self-hosters, update your relay too, so it handles big servers with far less traffic and keeps its memory use within a set limit.
