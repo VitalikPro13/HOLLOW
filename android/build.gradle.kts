@@ -37,6 +37,15 @@ subprojects {
     }
 }
 
+// A tree whose Kotlin was compiled incrementally may hold an empty plugin jar that Gradle
+// still calls up to date (gradle.properties, kotlin.incremental). Changing this input makes
+// every Kotlin task rebuild once in full; bump it if that ever has to happen again.
+subprojects {
+    tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
+        inputs.property("hollowKotlinFullBuild", 1)
+    }
+}
+
 tasks.register<Delete>("clean") {
     delete(rootProject.layout.buildDirectory)
 }

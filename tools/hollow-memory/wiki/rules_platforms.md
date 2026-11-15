@@ -151,6 +151,13 @@ release pipeline is the `release` skill.
   Rust build does NOT fail `flutter build apk`: Gradle packages the STALE `.so`**;
   `build_release.ps1` scans the log for it. Rust TLS uses `webpki-roots`, NEVER
   `native-roots`. `feedback_android_platform`.
+- Kotlin incremental compilation is OFF (`android/gradle.properties`, `kotlin.incremental=false`).
+  Plugin sources live in version-named pub-cache dirs, so a package bump moves every file, and
+  incremental Kotlin then emitted NO class for a moved file whose class kept its name: desktop_drop
+  0.7.0 -> 0.8.4 built an empty jar that Gradle called up to date, and `:app` failed with
+  `GeneratedPluginRegistrant.java: cannot find symbol DesktopDropPlugin` (11-15). The
+  `hollowKotlinFullBuild` input in `android/build.gradle.kts` made every tree rebuild its Kotlin
+  once; bump it to force that again. Never fix it by hand-editing the registrant (regenerated).
 - cargokit's Gradle plugin adds the emulator ABIs (x86, x64) to a DEBUG build only when the
   build names no `--target-platform` (`plugin.gradle`); before session 44 it always did, so the
   fleet's arm64 APK ran three Rust builds (a cold mini build: 19:36 for both phone apps).
