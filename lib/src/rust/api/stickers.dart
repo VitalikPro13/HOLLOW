@@ -7,8 +7,8 @@ import '../frb_generated.dart';
 import 'gifs.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `clean_label`, `pack_signature_is_valid`, `pack_signing_payload`, `read_pack_manifest`, `send_command`
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `PackItem`, `PackManifest`
+// These functions are ignored because they are not marked as `pub`: `clean_label`, `max_pack_file_bytes`, `open_pack`, `pack_blob_cap`, `pack_signature_is_valid`, `pack_signing_payload`, `pack_unpack_budget`, `send_command`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `OpenPack`, `PackItem`, `PackManifest`
 
 /// Wire token for a sticker, as inserted into message text.
 String stickerToken({required String hash, required int w, required int h}) =>
@@ -166,7 +166,8 @@ Future<StickerPackPreview> previewStickerPack({required String path}) =>
 /// claimed name is rejected, `w`/`h` are re-derived from the decoded image because
 /// they go straight into the wire token, entry paths are never joined, and the vault
 /// caps are enforced per row so a huge pack fills to the limit and reports the rest
-/// as rejected rather than failing whole.
+/// as rejected rather than failing whole. Every blob is unpacked under the sticker cap
+/// and one budget for the whole pack, so its bytes, not its headers, bound the work.
 Future<StickerPackImportResult> importStickerPack({
   required String path,
   required String intoPack,

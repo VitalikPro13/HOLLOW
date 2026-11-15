@@ -244,7 +244,7 @@ HOL-SEC-187 there; it is lost at the team change.
 |---|---|
 | Before 0.14 starts | the legacy item, so the whole account (status quo) |
 | During the move (milliseconds, at the first 0.14 launch) | the legacy item until its delete; the new item never |
-| After the move | no keychain item: the legacy items are gone, the new one is outside every group it has (U2), and it cannot get its code into 0.14 (2.5). It gets `keychain_key_missing` |
+| After the move | a legacy item may stay (macOS lets only the app that made a login item delete it), but its key opens nothing: the first 0.14 start re-keyed the identity onto a fresh key (3.2 c). The new key is outside every group it has (U2), and it cannot get its code into 0.14 (2.5). It gets `keychain_key_missing` |
 | After the old team's certificate is revoked | nothing: it does not launch where revocation is checked (U10) |
 
 "Gone" needs two answers: the delete removed an item (status 0), and a new read of the
@@ -259,14 +259,28 @@ beside it, so the object alone picks the item), and every file-based query sets
 the same process can miss what another process just wrote (an in-place update by 0.13
 reads as nothing here while a new process reads the new key), so a delete that answers
 "not found" counts as kept, never moved. The unsigned tests prove the file-keychain
-calls; only the signed run (`scripts/macos_keychain_check.sh`, stage 1b replays this
-field case) proves what an entitled process's queries reach.
+calls; only the signed run (`scripts/macos_keychain_check.sh`) proves what an entitled
+process's queries reach. Its stage 1 seeds the login item from a helper of the script (the
+item's maker, `SecItemAdd` with an access list trusting both apps), so 0.14 may read it and
+may not delete it, and REQUIRES the item to stay, the re-key line, and the item's key to
+open nothing: an item 0.14 could delete is "field case not reproduced", a FAIL (review R6).
+The signed job has not run yet (its repo variables were unset on 11-05).
 
-Deleting the old item is enough for the keychain when: every legacy item of ours is moved
-(all profiles); no build writes the file-based keychain again (source guard); an old build
-cannot recreate a useful item (writing one needs the key). If the PERSON downgrades and
-restores the phrase inside an old build, it writes a new legacy item for a new device;
-the next 0.14 launch moves it.
+Deleting the old item is NOT enough, because it does not happen: on the signed 0.14 build
+(2026-11-14, macOS 26) every delete of 0.13's login item answered `errSecInvalidOwnerEdit`
+(-25244). Only the item's owner, the app that made it, may delete it without asking, and
+0.14 is another app. So the first 0.14 start re-keys (3.2 c): the identity files move onto a
+fresh key kept only in the protected keychain, and the key in the old item opens nothing. A
+login item 0.14 cannot delete is then inert, and no later start tries it again. What stays
+true: no build writes the file-based keychain again (source guard); an old build cannot
+recreate a useful item (writing one needs the new key). If the PERSON downgrades and
+restores the phrase inside an old build, it writes a new legacy item for a new device; the
+next 0.14 launch re-keys off it the same way. A profile not opened in 0.14 keeps its old
+key in its login item, readable by old builds, until it is opened once (re-keying needs its
+files, and a start touches only its own profile). A password identity whose key the
+keychain caches (`0x03`) holds a key derived from the password, so it moves only with the
+password in hand: the first typed unlock re-salts it, and on its first 0.14 start the app
+asks for the password once (3.2 c, review R1, decided by Vitalik 11-15).
 
 What an old build can still do after the move, all residual until revocation:
 
@@ -392,18 +406,74 @@ service is left alone, never moved, never deleted (review F10). For each, prompt
 | Step | Action | If it fails or the process dies here |
 |---|---|---|
 | 1 | Quiet read of bytes L and the item I it came from: in the file-based keychain the item OBJECT (`kSecReturnRef`, a `SecKeychainItem`), never its persistent reference, which resolves by service and account and so names whatever holds the name later; in the protected keychain the persistent reference (a row id a rewrite never reuses). Every file-based query sets `kSecUseDataProtectionKeychain` false. An item that would prompt, is gone by the read, or is not 32 bytes is skipped and logged (status only). | nothing changed |
-| 2 | In the target group: A absent, add A = L (an `errSecDuplicateItem` from a concurrent mover = present). A present and equal, go to 4. A present and different, add `A.m.<16 hex of SHA-256(L)>` = L instead, never touching A. | legacy untouched; retried next launch |
+| 2 | In the target group: A absent, add A = L (an `errSecDuplicateItem` from a concurrent mover = present). A present and equal, go to 4 (a later start goes on only while L still opens one of this profile's files: an item macOS refuses to delete is never tried again once it is inert). A present and different: the login item is left as it is, not copied and not deleted; the profile it belongs to re-keys off it at its own start (c). Only mover b makes conflict copies `A.m.<16 hex of SHA-256(L)>`. | legacy untouched; retried next launch |
 | 3 | Fresh read of what step 2 wrote; it must equal L byte for byte. | legacy untouched; the copy is harmless |
-| 4 | Delete exactly I (review F4): `kSecValueRef` = the object in the file-based keychain, which then ignores the name beside it; the persistent reference plus its group, service and account in the protected keychain. A rewrite by another process in between, by delete+add (a new item) or by an in-place update (the same item, rewritten), makes this delete answer "not found" and the newer key stays. "Not found" = kept and logged: this process's view can be stale, so its own re-read is no proof the name is empty. | both hold L (or the newer key stays); the next launch sees "equal" and deletes, or keeps the newer key as a conflict copy |
+| 4 | Delete exactly I (review F4); `errSecInvalidOwnerEdit` = held (only its maker may delete it), logged once with its copy, made inert by (c): `kSecValueRef` = the object in the file-based keychain, which then ignores the name beside it; the persistent reference plus its group, service and account in the protected keychain. A rewrite by another process in between, by delete+add (a new item) or by an in-place update (the same item, rewritten), makes this delete answer "not found" and the newer key stays. "Not found" = kept and logged: this process's view can be stale, so its own re-read is no proof the name is empty. | both hold L (or the newer key stays); the next launch sees "equal" and deletes, or keeps the newer key as a conflict copy |
 | 5 | Only after a delete that answered 0: a new read of the name must find nothing. Still L there, a newer key there, or an error = kept and logged. Never a check by I: a delete and a check that share one lookup agree on "gone" when that lookup misses the item. The next start's read is the real check (it finds the item again, or nothing). | logged; retried next launch |
 
 An in-place update in THIS process between steps 1 and 4 would be deleted (the item is the
 same), but no build writes the file-based keychain any more, so only another process can
 rewrite it. Neither store is ever without L, a key written by another process during the
-move is never deleted, and no identity file is rewritten, so the identity always opens
-from at least one store. The key is not rotated: rotation adds a file rewrite window and buys nothing against
-an attacker who already read it (the master secret is unchanged), nor against a Time
-Machine copy (which carries the matching old file).
+move is never deleted, and the mover rewrites no identity file, so the identity always
+opens from at least one store.
+
+**c. Re-key off the login keychain (decided 2026-11-14, after the field report; widened
+11-15 after the review).** The first plan did not rotate the key. That held only while the
+delete worked; it does not (2.2), so the identity moves onto a new key. Per profile folder
+(this root, then each folder a relink kept aside from it, each under that folder's instance
+lock, `hollow.lock` byte `1<<30`, and skipped while another Hollow holds it), for an identity
+whose files a key in one of our login items opens, or whose re-key a start or an unlock
+before left half done. The files are `identity.key`, `identity.device` AND the pair a phrase
+restore set aside, `identity.key.locked` / `identity.device.locked` (the same master secret:
+the restore checks the phrase is this identity's). Set-aside files are re-sealed, never
+deleted (they exist for a key that comes back). Two kinds:
+
+- **Keychain-only (`identity.key` flags exactly `0x02`)**: at start, onto a random K2.
+- **Password plus keychain cache (exactly `0x03`)**: the key is Argon2id(password, salt),
+  so only the password can make the cached copy inert. At a typed unlock (the launch
+  prompt, the App Lock prompt, a Settings confirmation that unlocks, or the one ask below)
+  the password derives K2 under a FRESH salt; `identity.key` takes the new salt, the
+  device file keeps its own (its salt is never used to derive), the duress slot keeps its
+  own salt and is untouched. On the first 0.14 start where the start answers `PasswordKey`
+  the app asks once ("Finish securing your key", Not now = asked again at a later start;
+  FFI `keychain_rekey_wants_password` / `finish_keychain_rekey`, the latter through the one
+  typed-secret gate, so a duress code typed there wipes exactly as at any prompt; never
+  above the App Lock cover or a roster lock). A set-aside password master moves only when a
+  login key opens it AND the typed password is its password too (it then takes the live
+  master's new salt, so the same password still opens it); one another password locks is
+  left as it is.
+
+The start reads the login keychain only with prompts off (`settle` runs inside
+`without_prompts`, which counts nested holders so an inner call never turns prompts back on;
+review R3). Login names are read this root's own slot first, then the machine slot, then the
+rest sorted, at most 32 (review R5: planted items that sort earlier never hide ours). At
+every row some stored key opens every file on disk, and unlock tries the staged key right
+after the profile slot:
+
+| Step | Action | If it fails or the process dies here |
+|---|---|---|
+| 1 | Read the four files and every 32-byte key under our names in the login keychain (quiet). A key opens a file only if AES-GCM opens it to a keypair. Plan every movable file not yet on the staged key, each opened with the stored, login or password key that opens it now; a live file no key opens stops the run before anything is staged. | nothing changed |
+| 2 | New key K2 (CSPRNG, or the password under a fresh salt), added as `<slot>.rekey` in the writable protected group (never overwritten; a staged key that opens a file is reused, of several the one that opens a file), then a NEW read must answer it. | files untouched; a staged key no file opens is dropped by the next start |
+| 3 | `identity.key` re-sealed under K2 (same flags; same salt, or the fresh salt for a password master), proven to open, staged, flushed, read back, renamed (`write_key_file`), read again. | the file is old or new, never torn; old = the profile slot opens it, new = the staged key does; a failure puts back every file this run wrote and drops the staged key only if no file opens with it |
+| 4 | `identity.device` the same. | a cut pair: the unlock re-wraps the device file onto the key that opened `identity.key` (`heal_device_file`, any keychain-flagged device file, with or without a password, read back after the write; it may ask only when the unlock's own search read no login item, so it never asks twice); the next start finishes (a password re-salt too: the staged key and `identity.key`'s header carry everything it needs) |
+| 5 | The set-aside pair the same. | as 4; the next start finishes |
+| 6 | The profile slot takes K2 (update in place), read back. | files on K2, opened by the staged key; the unlock never promotes it (the device file may still need the old key), the next start does |
+| 7 | Each staged value no file needs any more is deleted, per store (never one a file opens). | K2 under two names; the next start finishes |
+| 8 | Retire: this root's profile slot in a group that holds a key no file opens, all its conflict copies, a protected machine-slot copy of a key this run replaced that no file opens and no login item mirrors; then one quiet delete per login item holding a replaced key. A refused one stays, inert. Runs on a finishing start with nothing left to write too (review N1). | harmless |
+
+A re-salt cut before `identity.key` took its key cannot be finished at start (the fresh salt
+is lost); the staged key then opens nothing, the start drops it, and the next typed unlock
+or ask starts again. Duress slots are typed secrets and never meet the keychain. A disk
+that will not take a file stops the re-key with every file as it was. Re-keying buys
+nothing against a Time Machine copy taken before it (that copy carries the matching old
+file), nor against an attacker who already read the old key (the master secret is
+unchanged); it ends what every old build can read from now on.
+
+Residual (not closed): a kept-aside folder whose identity is `0x03` keeps its cached key
+in the login item (its password is never typed; only opening that folder as a profile and
+unlocking it there re-salts it); a set-aside password master whose password is not the
+current one stays under a login key that opens it; until a `0x03` person types the
+password once, the cached copy stays readable to old builds.
 
 **b. App-ID group to the keys group (review F7).** Same steps, both ends in the protected
 keychain, delete by persistent reference inside the source group, service and account
@@ -422,16 +492,18 @@ slot then that root's copies first, then the scan) and heals it into the profile
 
 ### 3.3 The special cases
 
-- **Profiles.** All profiles' slots move together, so a profile not opened for months is
-  out of reach of old builds too. Slots stay per profile.
+- **Profiles.** All profiles' slots are copied together, but a login item macOS will not
+  let 0.14 delete keeps a profile not opened in 0.14 readable to old builds until it is
+  opened once and re-keys. Slots stay per profile.
 - **The machine slot** `wrapping_key` moves byte for byte and stays read-only: nothing
   writes it; forget deletes it, and its `.m.` copies, only when the key opens the identity
   being forgotten.
 - **Portable, `HOLLOW_DATA_DIR`, pinned roots.** Never move, never write.
   `drop_cached_key_off_os_root` keeps clearing an older build's cached key, now judged by
   `root_eligible` only; its forget covers both keychains.
-- **Password installs.** `0x01` keeps nothing in the keychain. A `0x03` cached key is an
-  item like any other.
+- **Password installs.** `0x01` keeps nothing in the keychain. A `0x03` cached key moves
+  like any other item; the login item 0.14 may not delete is made inert by the re-salt at
+  the first typed unlock or the one ask (3.2 c).
 - **Duress.** The typed secret still derives both slots and never meets the keychain;
   `identity.duress` is untouched. A duress wipe forgets in both keychains without prompts
   and never runs the move.
@@ -441,7 +513,7 @@ slot then that root's copies first, then the scan) and heals it into the profile
   the protected keychain. One API, so every caller inherits it.
 - **Downgrade by the person.** The old build shows the key-missing screen (deletes
   nothing); a phrase restore there makes a new device with a new legacy item; the next 0.14
-  launch moves it.
+  launch re-keys off it (3.2 c).
 
 ### 3.4 What changes where (for the build after approval)
 
@@ -449,7 +521,9 @@ slot then that root's copies first, then the scan) and heals it into the profile
 |---|---|
 | `rust/hollow_core/Cargo.toml` | `security-framework` features `["OSX_10_15"]` (no new crate) |
 | `identity/platform_keystore.rs` | protected store (two groups, accessibility, update in place, named reads, refuses before the bundle check); legacy reader (read with reference, list, delete by reference); both movers; the three answers of rule 4; forget covers both keychains and `.m.` copies; the fake backend gains a second store, a hook between steps and faults |
-| `api/identity.rs` | `settle_keychain_move` FFI; `password_keychain_allowed`, `default_eligible`, the drop path and `os_keychain_available` read the split answers |
+| `identity/keychain_rekey.rs` (added 2026-11-14) | the re-key (3.2 c): `settle` per profile folder, `resalt` at a typed unlock, `wants_password`, `heal_device_file` at unlock; the keystore side (`login_keys`, `staged_key`, `stage_key`, `unstage`, `retire`, `delete_login_holding`, `<slot>.rekey` read at unlock and forgotten by a wipe, a nesting-safe `without_prompts`) in `platform_keystore.rs`; `recovery::take_instance_lock` for kept folders |
+| `api/identity.rs` | `settle_keychain_move`, `keychain_rekey_wants_password`, `finish_keychain_rekey` FFI; the re-salt in the typed unlock; `password_keychain_allowed`, `default_eligible`, the drop path and `os_keychain_available` read the split answers |
+| `lib/src/ui/dialogs/keychain_protection_dialogs.dart`, `ui/shell/hollow_shell.dart` | the one ask after start (`askToFinishKeychainRekey`, macOS, after the App Lock cover and the roster lock) |
 | `macos/Runner` (Swift) | the bundle self-check and load callback, the `hollow_bundle_checked` switch |
 | `macos/Flutter/Flutter-Debug.xcconfig` | no `LocalSigning.xcconfig` include; Debug stays ad-hoc (review F3) |
 | `scripts/build_macos_release.sh`, CI sign stage (`.team/b14/sign_stage.patch`) | embed `Contents/embedded.provisionprofile`; add the three entitlements to `ENT_SHIP`; write `HollowSealedImages` before the main signature |

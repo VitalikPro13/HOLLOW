@@ -143,9 +143,11 @@ fn keychain_root_for_test(allowed: Option<bool>) {
 /// profile. With several profiles on one machine the legacy slot routinely holds the
 /// OTHER profile's key, and trusting it unverified funnelled users into mnemonic
 /// recovery, which rotates the device key and discards the MLS identity and groups.
-fn keychain_key_that_decrypts(bytes: &[u8]) -> Option<[u8; 32]> {
+/// Also answers whether the search went as far as the login keychain, whose reads can
+/// ask the person.
+fn keychain_key_that_decrypts(bytes: &[u8]) -> Option<([u8; 32], bool)> {
     let root = crate::identity::data_dir().ok()?;
-    keychain_key_that_decrypts_at(&root, bytes, true)
+    keychain_key_found_at(&root, bytes, true).map(|(source, key)| (key, source.came_after_the_login_keychain()))
 }
 
 /// `heal = false` is the read-only form: it answers "can this machine unwrap this
@@ -158,14 +160,25 @@ fn keychain_key_that_decrypts_at(
     bytes: &[u8],
     heal: bool,
 ) -> Option<[u8; 32]> {
+    keychain_key_found_at(root, bytes, heal).map(|(_, key)| key)
+}
+
+fn keychain_key_found_at(
+    root: &std::path::Path,
+    bytes: &[u8],
+    heal: bool,
+) -> Option<(crate::identity::platform_keystore::Source, [u8; 32])> {
     use crate::identity::{encryption, platform_keystore};
     let (source, key) = platform_keystore::key_that_opens(root, bytes)?;
+    let key = *key;
     // A keychain-only lock was the person's own choice for this folder; a cached
     // password key is healed only where it may be cached at all.
     let cached_password = matches!(encryption::detect_format(bytes),
         Ok(encryption::IdentityFormat::Encrypted { flags, .. }) if encryption::flags_has_password(flags));
-    if !heal {
-        return Some(key);
+    // A staged re-key key is the re-key's to promote: its old key may still open
+    // the device file.
+    if !heal || source == platform_keystore::Source::Rekey {
+        return Some((source, key));
     }
     let kept = source == platform_keystore::Source::Profile
         || ((!cached_password || password_keychain_allowed(root))
@@ -179,7 +192,7 @@ fn keychain_key_that_decrypts_at(
     if kept {
         platform_keystore::drop_copies(root);
     }
-    Some(key)
+    Some((source, key))
 }
 
 /// What unlock answers when a keychain-only identity's key cannot be had. Nothing on
@@ -316,7 +329,9 @@ fn unlock_identity_with(password: Option<String>, how: Secret) -> Result<Identit
         }
         encryption::IdentityFormat::Encrypted { flags, salt, .. } => {
             let typed = password.as_deref().filter(|_| encryption::flags_has_password(flags));
-            let wrapping_key = if let Some(secret) = typed {
+            // A login keychain read can ask the person; the device heal below then asks nothing more.
+            let mut asked = false;
+            let mut wrapping_key = if let Some(secret) = typed {
                 match how {
                     Secret::Typed => open_typed_secret(secret, &bytes, &salt)?,
                     Secret::Stored { person_present } => {
@@ -332,7 +347,10 @@ fn unlock_identity_with(password: Option<String>, how: Secret) -> Result<Identit
             {
                 // Password + keychain with nothing typed: the silent unlock.
                 match keychain_key_that_decrypts(&bytes) {
-                    Some(key) => key,
+                    Some((key, from_login)) => {
+                        asked = from_login;
+                        key
+                    }
                     None => {
                         return Err(
                             "Identity is password-protected. Provide a password.".into(),
@@ -343,7 +361,10 @@ fn unlock_identity_with(password: Option<String>, how: Secret) -> Result<Identit
                 return Err("Identity is password-protected. Provide a password.".into());
             } else if encryption::flags_has_os_keychain(flags) {
                 match keychain_key_that_decrypts(&bytes) {
-                    Some(key) => key,
+                    Some((key, from_login)) => {
+                        asked = from_login;
+                        key
+                    }
                     None => return Err(KEYCHAIN_KEY_MISSING.into()),
                 }
             } else {
@@ -353,7 +374,16 @@ fn unlock_identity_with(password: Option<String>, how: Secret) -> Result<Identit
             // Verify the key actually decrypts before storing.
             encryption::decrypt_identity(&bytes, &wrapping_key)?;
             encryption::set_session_key(wrapping_key);
+            if encryption::flags_has_os_keychain(flags) {
+                crate::identity::keychain_rekey::heal_device_file(&dir, &wrapping_key, !asked);
+            }
             if let Some(secret) = typed {
+                let mut bytes = bytes;
+                if let Some(key) = resalt_off_the_login_keychain(&dir, secret) {
+                    wrapping_key = *key;
+                    encryption::set_session_key(wrapping_key);
+                    bytes = std::fs::read(&path).map_err(|e| format!("Failed to read identity file: {e}"))?;
+                }
                 let bytes = drop_cached_key_off_os_root(&dir, flags, &bytes, &wrapping_key).unwrap_or(bytes);
                 if encryption::flags_has_device_bound(flags) {
                     repair_device_file(secret, &salt, &wrapping_key);
@@ -371,6 +401,25 @@ fn unlock_identity_with(password: Option<String>, how: Secret) -> Result<Identit
         device_peer_id: data.device_peer_id,
         mnemonic: data.mnemonic,
     })
+}
+
+/// macOS (HOL-SEC-187): with the password just typed, a cached password key an older
+/// build left in a login keychain item is made inert (`keychain_rekey::resalt`).
+/// Answers the key `identity.key` opens with now, when it changed.
+fn resalt_off_the_login_keychain(root: &std::path::Path, secret: &str) -> Option<zeroize::Zeroizing<[u8; 32]>> {
+    use crate::identity::keychain_rekey::{self, Rekey};
+    let (outcome, now) = keychain_rekey::resalt(root, secret);
+    match &outcome {
+        Rekey::Rekeyed { stay } => hollow_log!(
+            "[HOLLOW-ID] Keychain re-key: the password key moved under a new salt; {stay} old login item(s) stay but no longer open it"
+        ),
+        Rekey::Finished => hollow_log!("[HOLLOW-ID] Keychain re-key: finished the password re-salt an earlier unlock began"),
+        Rekey::Failed(e) => {
+            hollow_log!("[HOLLOW-ID] Keychain re-key of the password key did not finish ({e}); nothing is lost, the next unlock tries again");
+        }
+        Rekey::Nothing | Rekey::PasswordKey | Rekey::Died => {}
+    }
+    now
 }
 
 /// A password key an older build cached in the keychain of a root where no key may be
@@ -1394,23 +1443,121 @@ pub fn settle_keychain_move() -> Result<(), String> {
     Ok(())
 }
 
-fn settle_keychain_move_at(root: &std::path::Path, env_override: Option<&str>) {
-    use crate::identity::{encryption, platform_keystore};
+/// Whether the move and the re-key may touch the keychain for `root` (macOS).
+fn keychain_move_allowed_at(root: &std::path::Path, env_override: Option<&str>) -> bool {
+    use crate::identity::encryption;
     let flagged = std::fs::read(root.join("identity.key")).ok().is_some_and(|b| {
         matches!(encryption::detect_format(&b), Ok(encryption::IdentityFormat::Encrypted { flags, .. })
             if encryption::flags_has_os_keychain(flags))
     });
-    if !keychain_move_allowed(env_override, password_keychain_allowed(root), flagged, debug_defaults_hook()) {
+    (cfg!(target_os = "macos") || cfg!(test))
+        && keychain_move_allowed(env_override, password_keychain_allowed(root), flagged, debug_defaults_hook())
+}
+
+/// macOS (HOL-SEC-187): whether only the password can finish moving this identity off
+/// a key an older build left in a login keychain item: a password key the keychain
+/// caches, still held by such an item. Reads nothing that can ask. The app asks for
+/// the password once per start while this holds.
+#[frb]
+pub fn keychain_rekey_wants_password() -> bool {
+    let Ok(root) = crate::identity::data_dir() else { return false };
+    keychain_rekey_wants_password_at(&root, std::env::var("HOLLOW_DATA_DIR").ok().as_deref())
+}
+
+fn keychain_rekey_wants_password_at(root: &std::path::Path, env_override: Option<&str>) -> bool {
+    use crate::identity::platform_keystore::{protected_writable, Writable};
+    keychain_move_allowed_at(root, env_override)
+        && matches!(protected_writable(), Writable::Yes(_))
+        && crate::identity::keychain_rekey::wants_password(root)
+}
+
+/// macOS (HOL-SEC-187): finishes that move with the password typed now. The typed
+/// secret passes the one gate every prompt uses first (paced; a duress code wipes and
+/// answers "duress"). True once the old login item opens nothing.
+#[frb]
+pub fn finish_keychain_rekey(password: String) -> Result<bool, String> {
+    use crate::identity::{encryption, keychain_rekey::Rekey};
+    let dir = crate::identity::data_dir()?;
+    let bytes = std::fs::read(dir.join("identity.key")).map_err(|e| format!("Failed to read identity file: {e}"))?;
+    let encryption::IdentityFormat::Encrypted { flags, salt, .. } = encryption::detect_format(&bytes)? else {
+        return Err("Identity is not password-protected".into());
+    };
+    if !encryption::flags_has_password(flags) {
+        return Err("Identity is not password-protected".into());
+    }
+    let opened = zeroize::Zeroizing::new(open_typed_secret(&password, &bytes, &salt)?);
+    let (outcome, now) = crate::identity::keychain_rekey::resalt(&dir, &password);
+    match now {
+        Some(key) => encryption::set_session_key(*key),
+        None => encryption::set_session_key(*opened),
+    }
+    match outcome {
+        Rekey::Rekeyed { .. } | Rekey::Finished => Ok(true),
+        Rekey::Failed(e) => {
+            hollow_log!("[HOLLOW-ID] Keychain re-key of the password key did not finish ({e}); nothing is lost");
+            Err(REKEY_NOT_FINISHED.into())
+        }
+        Rekey::Nothing | Rekey::PasswordKey | Rekey::Died => Ok(false),
+    }
+}
+
+const REKEY_NOT_FINISHED: &str = "Hollow couldn't finish securing your key. Nothing is lost, and Hollow asks again the next time it starts.";
+
+fn settle_keychain_move_at(root: &std::path::Path, env_override: Option<&str>) {
+    use crate::identity::keychain_rekey::{self, Rekey};
+    use crate::identity::platform_keystore;
+    if !keychain_move_allowed_at(root, env_override) {
         return;
     }
-    let moved = platform_keystore::settle_move(root);
-    if moved != platform_keystore::Moved::default() {
+    // This profile's folder and the old data a relink kept aside from it: what a
+    // login key of ours can open.
+    let dirs: Vec<std::path::PathBuf> =
+        std::iter::once(root.to_path_buf()).chain(crate::api::recovery::kept_aside(root)).collect();
+    let ours = keychain_rekey::Ours::of(&dirs);
+    let moved = platform_keystore::settle_move_judged(root, &|key| ours.opened_by(key));
+    if moved.news() {
         hollow_log!(
-            "[HOLLOW-ID] Keychain move: {} moved, {} kept for the next start, {} left alone",
+            "[HOLLOW-ID] Keychain move: {} moved, {} kept for the next start, {} left alone, {} stay in the login keychain",
             moved.moved,
             moved.kept,
-            moved.skipped
+            moved.skipped,
+            moved.held
         );
+    }
+    if !matches!(platform_keystore::protected_writable(), platform_keystore::Writable::Yes(_)) {
+        return;
+    }
+    for (i, dir) in dirs.iter().enumerate() {
+        let what = if i == 0 { "this identity" } else { "old data kept aside" };
+        // A profile started in a kept folder runs its own settle on the same files.
+        let _held = if i == 0 {
+            None
+        } else {
+            match crate::api::recovery::take_instance_lock(dir) {
+                Some(lock) => Some(lock),
+                None => {
+                    hollow_log!("[HOLLOW-ID] Keychain re-key: old data kept aside is open in another Hollow; it waits for a later start");
+                    continue;
+                }
+            }
+        };
+        match keychain_rekey::settle(dir) {
+            Rekey::Nothing | Rekey::Died => {}
+            Rekey::Rekeyed { stay: 0 } => {
+                hollow_log!("[HOLLOW-ID] Keychain re-key: {what} now opens only with a new key in the protected keychain");
+            }
+            Rekey::Rekeyed { stay } => hollow_log!(
+                "[HOLLOW-ID] Keychain re-key: {what} now opens only with a new key in the protected keychain; {stay} old login item(s) stay but no longer open it"
+            ),
+            Rekey::Finished => hollow_log!("[HOLLOW-ID] Keychain re-key: finished the one an earlier start began for {what}"),
+            Rekey::PasswordKey if moved.news() => hollow_log!(
+                "[HOLLOW-ID] Keychain re-key: a login item holds {what}'s password key, which changes only with the password"
+            ),
+            Rekey::PasswordKey => {}
+            Rekey::Failed(e) => {
+                hollow_log!("[HOLLOW-ID] Keychain re-key did not finish for {what} ({e}); nothing is lost, the next start tries again");
+            }
+        }
     }
 }
 
@@ -1893,13 +2040,14 @@ mod duress_tests {
     #[test]
     fn a_duress_code_at_any_settings_prompt_wipes_like_the_launch_prompt() {
         type Prompt = fn(&str) -> Result<(), String>;
-        let prompts: [(&str, Prompt); 5] = [
+        let prompts: [(&str, Prompt); 6] = [
             ("change the password", |pw| change_password(pw.into(), "a new password".into())),
             ("turn the password off", |pw| remove_password_protection(pw.into())),
             ("set a duress code", |pw| {
                 set_duress_code(pw.into(), "another code".into(), duress::SCOPE_DEVICE.into(), false, None)
             }),
             ("remove the duress code", |pw| clear_duress_code(pw.into())),
+            ("finish securing the keychain key", |pw| finish_keychain_rekey(pw.into()).map(|_| ())),
             ("erase this profile", |pw| {
                 let root = crate::identity::data_dir()?.to_string_lossy().to_string();
                 verify_identity_password_at(root, Some(pw.into())).map(|_| ())
@@ -3870,16 +4018,298 @@ mod keychain_move_tests {
         assert!(take_reads().is_empty(), "a typed unlock read the keychain");
     }
 
+    /// A login key beside another protected key under its name is never copied: the
+    /// identity it opens moves onto a new key instead, and no copy is left.
     #[test]
-    fn heal_leaves_no_conflict_copy_behind() {
+    fn a_login_key_beside_another_protected_key_is_rekeyed_off_never_copied() {
         let fx = fx();
         lay_down(&fx, &[0x71; 32], [0; 16], 0x02);
         plant(Store::Keys, &fx.slot(), &[0x70; 32]);
         old_build_writes(&fx.slot(), &[0x71; 32]);
+        inject(Fault::LegacyNotOwner);
         settle_keychain_move_at(fx.root(), None);
-        assert!(names_in(Store::Keys).iter().any(|n| n.contains(".m.")), "the move left no copy to heal from");
-        unlock_identity(None).expect("opens from the copy");
-        assert_eq!(held(Store::Keys, &fx.slot()), Some(vec![0x71; 32]), "the proven key was not kept");
-        assert_eq!(names_in(Store::Keys), vec![fx.slot()], "a copy outlived the heal");
+        assert_eq!(names_in(Store::Keys), vec![fx.slot()], "a copy or a staged key stayed");
+        assert!(!opens_with(&fx, &[0x71; 32]), "the login key still opens the identity");
+        unlock_identity(None).expect("opens with the new key");
+        assert_eq!(names_in(Store::Keys), vec![fx.slot()]);
+    }
+
+    /// Whether `key` opens either key file.
+    fn opens_with(fx: &Fx, key: &[u8; 32]) -> bool {
+        ["identity.key", "identity.device"].iter().any(|name| {
+            std::fs::read(fx.root().join(name)).is_ok_and(|b| encryption::decrypt_identity(&b, key).is_ok())
+        })
+    }
+
+    fn peer_of_lay_down() -> String {
+        NativeKeypair::from_secret_bytes(&[0x61; 32]).peer_id()
+    }
+
+    /// Field report (signed 0.14, macOS 26): the login item 0.13 made stays (only its
+    /// maker may delete it), and after the first start its key opens nothing while
+    /// the same identity still opens silently, and the next start writes nothing.
+    #[test]
+    fn the_first_start_leaves_the_old_login_item_opening_nothing() {
+        let fx = fx();
+        lay_down(&fx, &[0x81; 32], [0; 16], 0x02);
+        old_build_writes(&fx.slot(), &[0x81; 32]);
+        inject(Fault::LegacyNotOwner);
+        settle_keychain_move_at(fx.root(), None);
+        assert_eq!(held(Store::Legacy, &fx.slot()), Some(vec![0x81; 32]));
+        assert!(!opens_with(&fx, &[0x81; 32]), "the old login key still opens the identity");
+        assert_eq!(fx.flags(), 0x02, "the protection changed");
+        assert_eq!(unlock_identity(None).expect("silent unlock").peer_id, peer_of_lay_down());
+        encryption::clear_session_key();
+        let _ = take_writes();
+        settle_keychain_move_at(fx.root(), None);
+        assert_eq!(take_writes(), 0, "the second start wrote the keychain");
+        assert_eq!(unlock_identity(None).expect("second start").peer_id, peer_of_lay_down());
+    }
+
+    /// After the re-key a login item's key opens nothing of ours, so no later start
+    /// tries to delete it again (macOS refuses every try at an item only its maker may
+    /// delete), the protected mirror of a shared machine slot included.
+    #[test]
+    fn a_later_start_never_tries_the_old_login_item_again() {
+        let fx = fx();
+        lay_down(&fx, &[0x82; 32], [0; 16], 0x02);
+        old_build_writes(&fx.slot(), &[0x82; 32]);
+        old_build_writes(&machine_slot_name(), &[0x82; 32]);
+        inject(Fault::LegacyNotOwner);
+        settle_keychain_move_at(fx.root(), None);
+        assert!(!opens_with(&fx, &[0x82; 32]));
+        let _ = take_item_deletes();
+        settle_keychain_move_at(fx.root(), None);
+        assert_eq!(take_item_deletes(), 0, "a later start tried an inert login item again");
+    }
+
+    /// A start killed between the two files, then the old login item gone: the
+    /// unlock opens with the staged key and must not make it the profile's key, or the
+    /// old key the device file still needs would be lost.
+    #[test]
+    fn an_unlock_after_a_cut_rekey_never_promotes_the_staged_key() {
+        let fx = fx();
+        lay_down(&fx, &[0x91; 32], [0; 16], 0x02);
+        old_build_writes(&fx.slot(), &[0x91; 32]);
+        inject(Fault::LegacyNotOwner);
+        set_hook(|at, _| at != platform_keystore::Step::RekeyKeyFile);
+        settle_keychain_move_at(fx.root(), None);
+        clear_hook();
+        fake_remove(Store::Legacy, &fx.slot());
+        assert_eq!(held(Store::Keys, &fx.slot()), Some(vec![0x91; 32]), "the move made no protected copy");
+        assert_eq!(unlock_identity(None).expect("the cut pair opens").peer_id, peer_of_lay_down());
+        encryption::clear_session_key();
+        settle_keychain_move_at(fx.root(), None);
+        assert!(!opens_with(&fx, &[0x91; 32]));
+        assert_eq!(names_in(Store::Keys), vec![fx.slot()]);
+        assert_eq!(unlock_identity(None).expect("finished").peer_id, peer_of_lay_down());
+    }
+
+    /// Old data a relink kept aside, whose key 0.13 left in the login keychain, moves
+    /// onto a new key in its own slot too.
+    #[test]
+    fn old_data_kept_aside_moves_off_its_login_key_too() {
+        let fx = fx();
+        lay_down(&fx, &[0xa1; 32], [0; 16], 0x02);
+        set_profile(fx.root(), &[0xa1; 32]);
+        let base = fx.root().file_name().unwrap().to_string_lossy().into_owned();
+        let kept = fx.root().parent().unwrap().join(format!("{base}-old-2026-10-18"));
+        std::fs::create_dir_all(&kept).unwrap();
+        let origin = serde_json::json!({ "root": fx.root().to_string_lossy() }).to_string();
+        std::fs::write(kept.join("relink_origin.json"), origin).unwrap();
+        let plain = NativeKeypair::from_secret_bytes(&[0x63; 32]).to_protobuf_encoding().unwrap();
+        let sealed = encryption::encrypt_identity(&plain, &[0xa2; 32], &[0; 16], false, true).unwrap();
+        std::fs::write(kept.join("identity.key"), &sealed).unwrap();
+        old_build_writes(&profile_slot_name(&kept), &[0xa2; 32]);
+        inject(Fault::LegacyNotOwner);
+        settle_keychain_move_at(fx.root(), None);
+        let now = std::fs::read(kept.join("identity.key")).unwrap();
+        let _ = std::fs::remove_dir_all(&kept);
+        assert!(encryption::decrypt_identity(&now, &[0xa2; 32]).is_err(), "the kept data still opens with the login key");
+        let opened = platform_keystore::key_that_opens(&kept, &now).map(|(s, _)| s);
+        assert_eq!(opened, Some(platform_keystore::Source::Profile));
+        assert_eq!(held(Store::Keys, &fx.slot()), Some(vec![0xa1; 32]), "the live identity's key changed");
+    }
+
+    /// Old data kept aside beside `fx`'s root, sealed under `key`, whose key 0.13 left
+    /// in the login keychain. Answers the folder.
+    fn kept_aside_under_login_key(fx: &Fx, key: &[u8; 32]) -> std::path::PathBuf {
+        let base = fx.root().file_name().unwrap().to_string_lossy().into_owned();
+        let kept = fx.root().parent().unwrap().join(format!("{base}-old-2026-10-19"));
+        std::fs::create_dir_all(&kept).unwrap();
+        let origin = serde_json::json!({ "root": fx.root().to_string_lossy() }).to_string();
+        std::fs::write(kept.join("relink_origin.json"), origin).unwrap();
+        let plain = NativeKeypair::from_secret_bytes(&[0x63; 32]).to_protobuf_encoding().unwrap();
+        let sealed = encryption::encrypt_identity(&plain, key, &[0; 16], false, true).unwrap();
+        std::fs::write(kept.join("identity.key"), &sealed).unwrap();
+        old_build_writes(&profile_slot_name(&kept), key);
+        kept
+    }
+
+    const HOLD_KEPT: &str = "HOLLOW_TEST_HOLD_KEPT_LOCK";
+
+    /// The other Hollow of the test below: takes a folder's instance lock and keeps it
+    /// until released. Does nothing in an ordinary run.
+    #[test]
+    fn holds_a_kept_folder_lock_for_another_test() {
+        let Ok(dir) = std::env::var(HOLD_KEPT) else { return };
+        let dir = std::path::PathBuf::from(dir);
+        let _lock = crate::api::recovery::take_instance_lock(&dir).expect("the holder took the lock");
+        std::fs::write(dir.join("held"), b"1").unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !dir.join("release").exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    /// A Hollow started in a kept folder after the start listed it runs its own
+    /// re-key on the same files: this start leaves that folder for a later one.
+    #[test]
+    fn old_data_kept_aside_open_in_another_hollow_waits_for_a_later_start() {
+        let fx = fx();
+        lay_down(&fx, &[0xa1; 32], [0; 16], 0x02);
+        set_profile(fx.root(), &[0xa1; 32]);
+        let kept = kept_aside_under_login_key(&fx, &[0xa2; 32]);
+        inject(Fault::LegacyNotOwner);
+        let holder: std::rc::Rc<std::cell::RefCell<Option<std::process::Child>>> = Default::default();
+        let (h, dir) = (holder.clone(), kept.clone());
+        set_hook(move |at, _| {
+            if at == platform_keystore::Step::Read && h.borrow().is_none() {
+                let child = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", "api::identity::keychain_move_tests::holds_a_kept_folder_lock_for_another_test"])
+                    .args(["--nocapture", "--test-threads=1"])
+                    .env(HOLD_KEPT, &dir)
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn()
+                    .unwrap();
+                *h.borrow_mut() = Some(child);
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                while !dir.join("held").exists() && std::time::Instant::now() < deadline {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+            }
+            true
+        });
+        settle_keychain_move_at(fx.root(), None);
+        clear_hook();
+        let first = std::fs::read(kept.join("identity.key")).unwrap();
+        std::fs::write(kept.join("release"), b"1").unwrap();
+        if let Some(mut child) = holder.borrow_mut().take() {
+            let _ = child.wait();
+        }
+        let took = kept.join("held").exists();
+        settle_keychain_move_at(fx.root(), None);
+        let later = std::fs::read(kept.join("identity.key")).unwrap();
+        let _ = std::fs::remove_dir_all(&kept);
+        assert!(took, "precondition: the other Hollow took the lock");
+        assert!(encryption::decrypt_identity(&first, &[0xa2; 32]).is_ok(), "the start re-keyed a folder another Hollow had open");
+        assert!(encryption::decrypt_identity(&later, &[0xa2; 32]).is_err(), "a later start left the kept data on its login key");
+    }
+
+    /// R1 (HOL-SEC-187): a `0x03` key 0.13 cached in a login item, which 0.14 may not
+    /// delete, opens nothing after one typed unlock. The password, the silent start
+    /// and the duress code still work, and the next start writes nothing.
+    #[test]
+    fn a_password_cached_key_in_a_login_item_opens_nothing_after_a_typed_unlock() {
+        let fx = fx();
+        let old = cached_in_login_keychain(&fx);
+        inject(Fault::LegacyNotOwner);
+        settle_keychain_move_at(fx.root(), None);
+        assert!(keychain_rekey_wants_password_at(fx.root(), None), "the start did not see the cached key");
+        unlock_identity(None).expect("the silent start");
+        crate::identity::duress::set_code(CODE, crate::identity::duress::SCOPE_DEVICE, false, None).expect("code");
+        let duress_slot = std::fs::read(fx.root().join("identity.duress")).unwrap();
+        encryption::clear_session_key();
+
+        assert_eq!(unlock_identity(Some(PIN.into())).expect("typed").peer_id, peer_of_lay_down());
+        assert_eq!(held(Store::Legacy, &fx.slot()), Some(old.to_vec()), "the fake let the delete through");
+        assert!(!opens_with(&fx, &old), "the login key still opens the identity");
+        assert_eq!(fx.flags(), 0x03, "the protection changed");
+        assert_eq!(std::fs::read(fx.root().join("identity.duress")).unwrap(), duress_slot, "the duress slot changed");
+        assert!(crate::identity::duress::probe(CODE).unwrap().is_some(), "the duress code stopped opening its slot");
+        assert!(!keychain_rekey_wants_password_at(fx.root(), None));
+        assert_eq!(load_or_create_identity().expect("the session reads its files").peer_id, peer_of_lay_down());
+
+        encryption::clear_session_key();
+        assert_eq!(unlock_identity(None).expect("silent after").peer_id, peer_of_lay_down());
+        encryption::clear_session_key();
+        assert_eq!(unlock_identity(Some(PIN.into())).expect("typed after").peer_id, peer_of_lay_down());
+        let _ = take_writes();
+        settle_keychain_move_at(fx.root(), None);
+        assert_eq!(take_writes(), 0, "the next start wrote the keychain");
+    }
+
+    /// The one ask after a silent start: the password typed there finishes the move,
+    /// a wrong one changes nothing, and the running session keeps reading its files.
+    #[test]
+    fn the_password_asked_for_once_finishes_the_move_off_the_login_item() {
+        let fx = fx();
+        let old = cached_in_login_keychain(&fx);
+        inject(Fault::LegacyNotOwner);
+        settle_keychain_move_at(fx.root(), None);
+        unlock_identity(None).expect("the silent start");
+        assert!(keychain_rekey_wants_password_at(fx.root(), None));
+        assert_eq!(finish_keychain_rekey("not the password".into()), Err(WRONG_SECRET.into()));
+        assert!(keychain_rekey_wants_password_at(fx.root(), None), "a wrong password changed something");
+        assert!(opens_with(&fx, &old));
+        assert_eq!(finish_keychain_rekey(PIN.into()), Ok(true));
+        assert!(!keychain_rekey_wants_password_at(fx.root(), None));
+        assert!(!opens_with(&fx, &old), "the login key still opens the identity");
+        assert_eq!(load_or_create_identity().expect("the session reads its files").peer_id, peer_of_lay_down());
+        assert_eq!(finish_keychain_rekey(PIN.into()), Ok(false), "a second ask found work");
+    }
+
+    /// An unlock whose own key search read the login keychain (which can ask) never
+    /// lets the device heal ask again.
+    #[test]
+    fn an_unlock_that_read_the_login_keychain_never_asks_again_for_the_device() {
+        let fx = fx();
+        lay_down(&fx, &[0xb1; 32], [0; 16], 0x02);
+        let device = NativeKeypair::from_secret_bytes(&[0x62; 32]);
+        crate::identity::device_key::rewrite_device_key_protection(&device, Some(&[0xb2; 32]), false, true).unwrap();
+        old_build_writes(&fx.slot(), &[0xb1; 32]);
+        old_build_writes(&machine_slot_name(), &[0xb2; 32]);
+        inject(Fault::LegacyAsksPerson);
+        let _ = take_loud_legacy_reads();
+        let _ = unlock_identity(None);
+        assert_eq!(take_loud_legacy_reads(), 1, "the device heal asked after the unlock had");
+    }
+
+    /// A pair a cut re-key split, whose old key only a login item that asks still
+    /// holds: the unlock found the master's key without asking, so the heal asks once.
+    #[test]
+    fn a_cut_pair_whose_old_key_only_a_login_item_holds_heals_with_one_ask() {
+        let fx = fx();
+        lay_down(&fx, &[0xb3; 32], [0; 16], 0x02);
+        let device = NativeKeypair::from_secret_bytes(&[0x62; 32]);
+        crate::identity::device_key::rewrite_device_key_protection(&device, Some(&[0xb4; 32]), false, true).unwrap();
+        plant(Store::Keys, &rekey_slot_name(fx.root()), &[0xb3; 32]);
+        old_build_writes(&fx.slot(), &[0xb4; 32]);
+        inject(Fault::LegacyAsksPerson);
+        let _ = take_loud_legacy_reads();
+        assert_eq!(unlock_identity(None).expect("the split pair opens").peer_id, peer_of_lay_down());
+        assert_eq!(take_loud_legacy_reads(), 1);
+        assert!(!opens_with(&fx, &[0xb4; 32]), "the device file stayed on the login key");
+    }
+
+    /// A re-salt cut between the two files: the silent start opens with the staged
+    /// key and re-wraps the password identity's device file onto it.
+    #[test]
+    fn a_resalt_cut_between_the_files_still_opens_at_the_silent_start() {
+        let fx = fx();
+        let _ = cached_in_login_keychain(&fx);
+        inject(Fault::LegacyNotOwner);
+        settle_keychain_move_at(fx.root(), None);
+        unlock_identity(None).expect("the silent start");
+        set_hook(|at, _| at != platform_keystore::Step::RekeyKeyFile);
+        assert_eq!(finish_keychain_rekey(PIN.into()), Ok(false), "the cut was not reached");
+        clear_hook();
+        encryption::clear_session_key();
+        assert_eq!(unlock_identity(None).expect("the split pair opens").peer_id, peer_of_lay_down());
+        encryption::clear_session_key();
+        settle_keychain_move_at(fx.root(), None);
+        assert!(!keychain_rekey_wants_password_at(fx.root(), None), "the next start did not finish it");
+        assert_eq!(unlock_identity(Some(PIN.into())).expect("typed after").peer_id, peer_of_lay_down());
     }
 }

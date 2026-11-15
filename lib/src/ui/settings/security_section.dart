@@ -78,6 +78,7 @@ Future<String?> askSecretDialog(
   required Future<void> Function(String current, String next) onSubmit,
   String? message,
   bool isPin = false,
+  String cancelLabel = 'Cancel',
 }) {
   return showHollowDialog<String>(
     context: context,
@@ -88,6 +89,7 @@ Future<String?> askSecretDialog(
       onSubmit: onSubmit,
       message: message,
       isPin: isPin,
+      cancelLabel: cancelLabel,
     ),
   );
 }
@@ -99,6 +101,7 @@ class _SecretDialog extends StatefulWidget {
   final Future<void> Function(String current, String next) onSubmit;
   final String? message;
   final bool isPin;
+  final String cancelLabel;
 
   const _SecretDialog({
     required this.title,
@@ -107,6 +110,7 @@ class _SecretDialog extends StatefulWidget {
     required this.onSubmit,
     required this.message,
     required this.isPin,
+    required this.cancelLabel,
   });
 
   @override
@@ -261,7 +265,7 @@ class _SecretDialogState extends State<_SecretDialog> with HollowDialogAction {
       actions: [
         HollowButton.ghost(
           onPressed: actionRunning ? null : () => Navigator.of(context).pop(),
-          child: const Text('Cancel'),
+          child: Text(widget.cancelLabel),
         ),
         HollowButton.filled(
           onPressed: _filled ? _submit : null,

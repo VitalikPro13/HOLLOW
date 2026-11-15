@@ -4,6 +4,7 @@ pub(crate) mod device_key;
 pub(crate) mod duress;
 pub(crate) mod encryption;
 pub(crate) mod hw_key;
+pub(crate) mod keychain_rekey;
 pub(crate) mod native_identity;
 pub(crate) mod platform_keystore;
 pub(crate) mod recovery;

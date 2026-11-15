@@ -499,7 +499,7 @@ fn keychain_key(root: &Path) -> Result<Option<[u8; 32]>, String> {
         return Ok(None);
     }
     crate::identity::platform_keystore::key_that_opens(root, &bytes)
-        .map(|(_, key)| Some(key))
+        .map(|(_, key)| Some(*key))
         .ok_or_else(|| KEY_NOT_KEPT.to_string())
 }
 
@@ -748,6 +748,40 @@ fn instance_lock_held(_dir: &Path) -> bool {
     false
 }
 
+/// `dir`'s instance lock, held while the value lives: a Hollow started in `dir`
+/// meanwhile finds it taken and never works on the same files. `None` when another
+/// process holds it. Never asked of this process's own root (see above).
+pub(crate) struct InstanceLock {
+    _file: std::fs::File,
+}
+
+#[cfg(unix)]
+pub(crate) fn take_instance_lock(dir: &Path) -> Option<InstanceLock> {
+    use std::os::fd::AsRawFd;
+    let file = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(dir.join("hollow.lock")).ok()?;
+    // SAFETY: a plain C struct, for which all zeros is a valid value.
+    let mut lock: libc::flock = unsafe { std::mem::zeroed() };
+    lock.l_type = libc::F_WRLCK as _;
+    lock.l_whence = libc::SEEK_SET as _;
+    lock.l_start = INSTANCE_LOCK_BYTE as _;
+    lock.l_len = 1;
+    // SAFETY: a valid descriptor and a struct the call only reads.
+    let taken = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_SETLK, &lock) } == 0;
+    taken.then_some(InstanceLock { _file: file })
+}
+
+#[cfg(windows)]
+pub(crate) fn take_instance_lock(dir: &Path) -> Option<InstanceLock> {
+    let file = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(dir.join("hollow.lock")).ok()?;
+    file.try_lock().ok()?;
+    Some(InstanceLock { _file: file })
+}
+
+#[cfg(not(any(windows, unix)))]
+pub(crate) fn take_instance_lock(dir: &Path) -> Option<InstanceLock> {
+    std::fs::File::open(dir).ok().map(|f| InstanceLock { _file: f })
+}
+
 /// A profile runs in `dir`: this process's or another's.
 fn in_use(dir: &Path) -> bool {
     crate::identity::data_dir().is_ok_and(|root| same_folder(&root, dir)) || instance_lock_held(dir)
@@ -781,6 +815,13 @@ fn kept_aside_of(root: &Path, out: &mut Vec<PathBuf>) {
         kept_aside_of(&path, out);
         out.push(path);
     }
+}
+
+/// Every folder a relink kept aside from `root` that no profile runs in now.
+pub(crate) fn kept_aside(root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    kept_aside_of(root, &mut out);
+    out
 }
 
 /// Every `<root>-old-<day>` folder beside `root`, at any depth, marked or not and

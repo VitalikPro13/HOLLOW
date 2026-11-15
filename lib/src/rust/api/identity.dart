@@ -6,7 +6,7 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `bound_key`, `code_is_the_password`, `database_opens_with`, `db_key_of`, `debug_defaults_hook`, `default_eligible_for`, `default_eligible`, `drop_cached_key_off_os_root`, `duress_available`, `duress_slot_left_on_first_key`, `duress_slot_left_unbound`, `forget_duress_code`, `forget_missed_tries`, `is_os_default_root`, `is_running_root`, `keychain_key_that_decrypts_at`, `keychain_key_that_decrypts`, `keychain_move_allowed`, `keychain_takes_new_keys`, `lands_as`, `launch_secret_allowed_for`, `lock_to_keychain`, `move_to_group_key`, `open_secret`, `open_typed_secret`, `owner_gate`, `password_keychain_allowed`, `phrase_is_this_identitys`, `protection_status_of`, `read_plain_key_file`, `refuse_short_pin`, `refused`, `repair_device_file`, `save_duress_settings`, `seal_for_keychain`, `settle_keychain_move_at`, `switch_to_keychain`, `switch_to_plaintext`, `this_os`, `tie_to_hardware`, `unlock_identity_with`, `unlock_logged`
+// These functions are ignored because they are not marked as `pub`: `bound_key`, `code_is_the_password`, `database_opens_with`, `db_key_of`, `debug_defaults_hook`, `default_eligible_for`, `default_eligible`, `drop_cached_key_off_os_root`, `duress_available`, `duress_slot_left_on_first_key`, `duress_slot_left_unbound`, `forget_duress_code`, `forget_missed_tries`, `is_os_default_root`, `is_running_root`, `keychain_key_found_at`, `keychain_key_that_decrypts_at`, `keychain_key_that_decrypts`, `keychain_move_allowed_at`, `keychain_move_allowed`, `keychain_rekey_wants_password_at`, `keychain_takes_new_keys`, `lands_as`, `launch_secret_allowed_for`, `lock_to_keychain`, `move_to_group_key`, `open_secret`, `open_typed_secret`, `owner_gate`, `password_keychain_allowed`, `phrase_is_this_identitys`, `protection_status_of`, `read_plain_key_file`, `refuse_short_pin`, `refused`, `repair_device_file`, `resalt_off_the_login_keychain`, `save_duress_settings`, `seal_for_keychain`, `settle_keychain_move_at`, `switch_to_keychain`, `switch_to_plaintext`, `this_os`, `tie_to_hardware`, `unlock_identity_with`, `unlock_logged`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `DesktopOs`, `Duress`, `Secret`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `eq`, `eq`, `fmt`
 
@@ -187,6 +187,21 @@ Future<bool> protectNewIdentityByDefault({required String phrase}) => RustLib
 /// forgets, unlocks and typed secrets never do. Elsewhere it does nothing.
 Future<void> settleKeychainMove() =>
     RustLib.instance.api.crateApiIdentitySettleKeychainMove();
+
+/// macOS (HOL-SEC-187): whether only the password can finish moving this identity off
+/// a key an older build left in a login keychain item: a password key the keychain
+/// caches, still held by such an item. Reads nothing that can ask. The app asks for
+/// the password once per start while this holds.
+Future<bool> keychainRekeyWantsPassword() =>
+    RustLib.instance.api.crateApiIdentityKeychainRekeyWantsPassword();
+
+/// macOS (HOL-SEC-187): finishes that move with the password typed now. The typed
+/// secret passes the one gate every prompt uses first (paced; a duress code wipes and
+/// answers "duress"). True once the old login item opens nothing.
+Future<bool> finishKeychainRekey({required String password}) => RustLib
+    .instance
+    .api
+    .crateApiIdentityFinishKeychainRekey(password: password);
 
 /// Turn keychain protection off: the identity goes back to plaintext files.
 Future<void> disableOsKeychainProtection() =>

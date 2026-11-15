@@ -651,6 +651,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
       await _offerPhraseUpgrade();
       await _offerProtection();
       if (!setUpThisLaunch) await _offerKeychainLock();
+      await _finishKeychainRekey();
       await _restoreOffers.atStart(countedAtStart: counted);
     } finally {
       done.complete();
@@ -698,6 +699,19 @@ class _HollowShellState extends ConsumerState<HollowShell>
     if (!await showKeychainOfferDialog(context) || !mounted) return;
     ref.invalidate(identityProtectionProvider);
     HollowToast.show(context, 'Your identity is now locked to this computer.',
+        type: HollowToastType.success);
+  }
+
+  /// macOS: the one ask that moves a cached password key off the login keychain
+  /// item an older build left (HOL-SEC-187), never above the app lock's cover
+  /// or a roster lock.
+  Future<void> _finishKeychainRekey() async {
+    await _untilUnlocked();
+    if (!mounted || ref.read(rosterGateProvider).kind != RosterGateKind.none) {
+      return;
+    }
+    if (!await askToFinishKeychainRekey(context) || !mounted) return;
+    HollowToast.show(context, 'Your key is secured on this Mac.',
         type: HollowToastType.success);
   }
 

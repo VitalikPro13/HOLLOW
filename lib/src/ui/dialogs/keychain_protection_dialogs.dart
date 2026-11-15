@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/providers/duress_provider.dart';
+import 'package:hollow/src/core/services/destroy_flow.dart';
 import 'package:hollow/src/rust/api/identity.dart' as identity_api;
 import 'package:hollow/src/rust/api/roster.dart' as roster_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
@@ -15,6 +16,7 @@ import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/dialogs/recovery_phrase_dialogs.dart';
+import 'package:hollow/src/ui/settings/security_section.dart';
 import 'package:hollow/src/ui/settings/settings_shared.dart';
 
 /// Locking an identity to this computer's keychain: the key that encrypts the
@@ -94,6 +96,43 @@ Future<bool> showKeychainOfferDialog(BuildContext context) async {
     ),
   );
   return done ?? false;
+}
+
+const kFinishKeychainTitle = 'Finish securing your key';
+const kFinishKeychainMessage =
+    'Type your password once to finish securing your key on this Mac. An '
+    'older version of Hollow left a copy of the key in your login keychain, '
+    'and this makes that copy useless.';
+
+/// macOS (HOL-SEC-187): a password whose key the keychain caches, where an
+/// older build left that key in a login keychain item only it may delete. Only
+/// the password moves the identity off it, so the start asks for it while Rust
+/// says so; "Not now" asks again at a later start. A duress code typed here
+/// does what it does at every prompt. True once the old copy opens nothing.
+Future<bool> askToFinishKeychainRekey(BuildContext context,
+    {bool? macOS}) async {
+  if (!(macOS ?? Platform.isMacOS)) return false;
+  try {
+    if (!await identity_api.keychainRekeyWantsPassword()) return false;
+  } catch (e) {
+    debugPrint('[HOLLOW] Keychain re-key check skipped: $e');
+    return false;
+  }
+  if (!context.mounted) return false;
+  var done = false;
+  final typed = await askSecretDialog(
+    context,
+    title: kFinishKeychainTitle,
+    message: kFinishKeychainMessage,
+    ask: SecretAsk.current,
+    confirmLabel: 'Finish',
+    cancelLabel: 'Not now',
+    onSubmit: (current, _) async {
+      done = await withTypedSecret(
+          () => identity_api.finishKeychainRekey(password: current));
+    },
+  );
+  return typed != null && done;
 }
 
 /// Settings' way to turn it on.

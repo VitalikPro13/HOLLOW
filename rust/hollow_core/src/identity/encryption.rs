@@ -7,7 +7,7 @@ use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
 const MAGIC: &[u8; 6] = b"HKEYV1";
 const PROTOBUF_HEADER: [u8; 4] = [0x08, 0x01, 0x12, 0x40];
 
-const FLAG_PASSWORD: u8 = 0x01;
+pub(crate) const FLAG_PASSWORD: u8 = 0x01;
 pub(crate) const FLAG_OS_KEYCHAIN: u8 = 0x02;
 /// The password's wrap also needs this device's hardware key (`hw_key`). A build
 /// older than the flag reads it as a plain password file and cannot open it.

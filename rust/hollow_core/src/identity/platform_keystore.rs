@@ -13,9 +13,11 @@
 //! before 0.14 wrote the file-based login keychain under a requirement every build
 //! the team ever signed meets, so an old build with a planted library could read
 //! them. `settle_move` copies those items across, reads each copy back, deletes
-//! exactly the item it read, then reads the name again to see it gone. Nothing writes
-//! the file-based keychain any more, and no macOS keychain call runs before the app's
-//! bundle self-check passed.
+//! exactly the item it read, then reads the name again to see it gone. macOS lets only
+//! the app that made a login item delete it, so the item may stay: the identity then
+//! moves onto a new key (`keychain_rekey`) and the old one opens nothing. Nothing
+//! writes the file-based keychain any more, and no macOS keychain call runs before
+//! the app's bundle self-check passed.
 
 use std::path::{Path, PathBuf};
 
@@ -25,6 +27,8 @@ pub(crate) enum Source {
     Profile,
     /// A conflict copy of this profile's slot (`<slot>.m.<hash>`), left by the move.
     Copy,
+    /// The new key of a re-key not finished yet (`<slot>.rekey`).
+    Rekey,
     Legacy,
     /// A file-based keychain item the move has not taken yet (macOS).
     Unmoved,
@@ -32,6 +36,14 @@ pub(crate) enum Source {
     /// Another slot of this keystore's naming: the same folder under a path
     /// written differently, or a profile folder that moved on this account.
     Scan,
+}
+
+impl Source {
+    /// Whether finding a key here took a read of the file-based keychain that may
+    /// ask the person (`key_that_opens` reads it after every protected source).
+    pub(crate) fn came_after_the_login_keychain(self) -> bool {
+        matches!(self, Source::Unmoved | Source::Blob | Source::Scan)
+    }
 }
 
 /// The keystore an item sits in.
@@ -56,6 +68,8 @@ pub(crate) enum Failure {
     WouldAsk,
     /// The bundle self-check has not passed in this process.
     Unchecked,
+    /// `errSecInvalidOwnerEdit`: only the app that made the item may delete it.
+    NotOwner,
     Other(i32),
 }
 
@@ -126,6 +140,9 @@ const BLOB: &str = "identity.dpapi";
 const PROBE: &str = "probe";
 /// Conflict copies: `<slot>.m.<16 hex of SHA-256(value)>`, owned by `<slot>`'s root.
 const COPY_MARK: &str = ".m.";
+/// A re-key's new key until it replaces the profile slot: `<slot>.rekey`. No slot or
+/// copy name ends so, so neither mover nor a heal's copy drop ever takes it.
+const REKEY_MARK: &str = ".rekey";
 
 /// 16 hex chars of SHA-256 over the data root as a string. Changing this orphans
 /// every existing per-profile slot.
@@ -145,12 +162,25 @@ fn mac_layout() -> bool {
     cfg!(target_os = "macos")
 }
 
+/// Whether keys here can sit in a login keychain item an older build wrote (macOS).
+pub(crate) fn has_login_keychain() -> bool {
+    mac_layout()
+}
+
 fn base() -> &'static str {
+    #[cfg(test)]
+    if let Some(base) = test_support::base_override() {
+        return base;
+    }
     if mac_layout() { MAC_BASE } else { WIN_BASE }
 }
 
 fn profile_slot(root: &Path) -> String {
     format!("{}.{}", base(), slot_suffix(root))
+}
+
+fn rekey_slot(root: &Path) -> String {
+    format!("{}{REKEY_MARK}", profile_slot(root))
 }
 
 fn legacy_slot() -> String {
@@ -201,13 +231,46 @@ fn every_store() -> &'static [Store] {
 /// did something), the scan of other slots, the move and every write (a session with
 /// no keychain, such as one started over ssh, must fail quietly, never ask). On macOS
 /// an item another build wrote asks the person before it opens; here the call fails
-/// instead. The switch is process-wide, so it is held only around these calls.
-fn without_prompts<T>(f: impl FnOnce() -> T) -> T {
+/// instead. The switch is process-wide, so it is held only around these calls, and
+/// counted: a nested call must not turn prompts back on when it returns.
+pub(crate) fn without_prompts<T>(f: impl FnOnce() -> T) -> T {
     #[cfg(target_os = "macos")]
-    let _quiet = security_framework::os::macos::keychain::SecKeychain::disable_user_interaction().ok();
+    let _quiet = mac_quiet::Hold::enter();
     #[cfg(test)]
     let _quiet_test = test_support::Quiet::enter();
     f()
+}
+
+#[cfg(target_os = "macos")]
+mod mac_quiet {
+    use security_framework::os::macos::keychain::{KeychainUserInteractionLock, SecKeychain};
+    use std::sync::Mutex;
+
+    /// How many callers want prompts off, and the switch the first of them took.
+    static HELD: Mutex<(usize, Option<KeychainUserInteractionLock>)> = Mutex::new((0, None));
+
+    pub(super) struct Hold;
+
+    impl Hold {
+        pub(super) fn enter() -> Self {
+            let mut held = HELD.lock().unwrap_or_else(|e| e.into_inner());
+            if held.0 == 0 {
+                held.1 = SecKeychain::disable_user_interaction().ok();
+            }
+            held.0 += 1;
+            Hold
+        }
+    }
+
+    impl Drop for Hold {
+        fn drop(&mut self) {
+            let mut held = HELD.lock().unwrap_or_else(|e| e.into_inner());
+            held.0 = held.0.saturating_sub(1);
+            if held.0 == 0 {
+                held.1 = None;
+            }
+        }
+    }
 }
 
 pub(crate) mod bundle {
@@ -601,6 +664,7 @@ mod mac {
     const NOT_FOUND: OSStatus = -25300;
     const DUPLICATE: OSStatus = -25299;
     const INTERACTION_NOT_ALLOWED: OSStatus = -25308;
+    const INVALID_OWNER_EDIT: OSStatus = -25244;
     const MISSING_ENTITLEMENT: OSStatus = -34018;
 
     #[link(name = "Security", kind = "framework")]
@@ -642,6 +706,7 @@ mod mac {
         match status {
             MISSING_ENTITLEMENT => Failure::Refused,
             INTERACTION_NOT_ALLOWED => Failure::WouldAsk,
+            INVALID_OWNER_EDIT => Failure::NotOwner,
             other => Failure::Other(other),
         }
     }
@@ -990,20 +1055,20 @@ use real as backend;
 /// a CI runner with no keychain at all.
 #[cfg(test)]
 mod backend {
-    use super::test_support::{self as t, fault, mode, Fault, Mode};
+    use super::test_support::{self as t, fault, Backend, Fault};
     use super::{Added, Deleted, Failure, Item, Store};
 
     pub(super) fn flat_available() -> bool {
-        match mode() {
-            Mode::Fake => true,
-            Mode::Real => super::real::flat_available(),
+        match t::mode_for(None) {
+            Backend::Fake => true,
+            Backend::Real => super::real::flat_available(),
         }
     }
 
     pub(super) fn has_blob() -> bool {
-        match mode() {
-            Mode::Fake => true,
-            Mode::Real => super::real::has_blob(),
+        match t::mode_for(None) {
+            Backend::Fake => true,
+            Backend::Real => super::real::has_blob(),
         }
     }
 
@@ -1017,16 +1082,16 @@ mod backend {
 
     fn found(store: Store, name: &str, with_item: bool) -> Result<super::Found, Failure> {
         t::note_read(store, name);
-        let found = match mode() {
-            Mode::Fake => {
+        let found = match t::mode_for(Some(store)) {
+            Backend::Fake => {
                 t::refusal(store, true)?;
                 if store == Store::Legacy && t::stale_after_a_miss() {
                     return Ok(None);
                 }
                 t::fake_item(store, name).map(|(value, id)| (value, t::fake_handle(store, id)))
             }
-            Mode::Real if with_item => super::real::read_ref(store, name)?,
-            Mode::Real => super::real::read(store, name)?.map(|v| (v, Item::Persistent(Vec::new()))),
+            Backend::Real if with_item => super::real::read_ref(store, name)?,
+            Backend::Real => super::real::read(store, name)?.map(|v| (v, Item::Persistent(Vec::new()))),
         };
         let after_a_write = t::wrote_since_injected();
         Ok(found.map(|(value, item)| {
@@ -1057,8 +1122,8 @@ mod backend {
 
     pub(super) fn add(store: Store, name: &str, key: &[u8]) -> Result<Added, Failure> {
         write_fault(store, name)?;
-        match mode() {
-            Mode::Fake => {
+        match t::mode_for(Some(store)) {
+            Backend::Fake => {
                 if t::fake_item(store, name).is_some() {
                     return Ok(Added::Present);
                 }
@@ -1066,7 +1131,7 @@ mod backend {
                 note_write(store, name);
                 Ok(Added::New)
             }
-            Mode::Real => {
+            Backend::Real => {
                 t::note_real_write(store, name);
                 super::real::add(store, name, key)
             }
@@ -1075,13 +1140,13 @@ mod backend {
 
     pub(super) fn put(store: Store, name: &str, key: &[u8]) -> Result<(), Failure> {
         write_fault(store, name)?;
-        match mode() {
-            Mode::Fake => {
+        match t::mode_for(Some(store)) {
+            Backend::Fake => {
                 t::fake_update_or_insert(store, name, key.to_vec());
                 note_write(store, name);
                 Ok(())
             }
-            Mode::Real => {
+            Backend::Real => {
                 t::note_real_write(store, name);
                 super::real::put(store, name, key)
             }
@@ -1089,30 +1154,31 @@ mod backend {
     }
 
     pub(super) fn list(store: Store, prefix: &str) -> Vec<String> {
-        match mode() {
-            Mode::Fake if t::refusal(store, false).is_err() => Vec::new(),
-            Mode::Fake => t::fake_names(store, prefix),
-            Mode::Real => super::real::list(store, prefix),
+        match t::mode_for(Some(store)) {
+            Backend::Fake if t::refusal(store, false).is_err() => Vec::new(),
+            Backend::Fake => t::fake_names(store, prefix),
+            Backend::Real => super::real::list(store, prefix),
         }
     }
 
     pub(super) fn delete(store: Store, name: &str) -> Result<(), Failure> {
-        match mode() {
-            Mode::Fake => {
+        match t::mode_for(Some(store)) {
+            Backend::Fake => {
                 t::refusal(store, false)?;
                 t::fake_remove(store, name);
                 Ok(())
             }
-            Mode::Real => super::real::delete(store, name),
+            Backend::Real => super::real::delete(store, name),
         }
     }
 
     pub(super) fn delete_item(store: Store, name: &str, item: &Item) -> Result<Deleted, Failure> {
+        t::count_item_delete();
         if fault(Fault::DeleteRefFails) {
             return Err(Failure::Other(-1));
         }
-        match mode() {
-            Mode::Fake => {
+        match t::mode_for(Some(store)) {
+            Backend::Fake => {
                 t::refusal(store, false)?;
                 let id = match item {
                     Item::Persistent(_) if store == Store::Legacy && fault(Fault::LegacyRefsMiss) => return Ok(Deleted::NotFound),
@@ -1120,6 +1186,9 @@ mod backend {
                     #[cfg(target_os = "macos")]
                     Item::Object(_) => return Err(Failure::Other(-4)),
                 };
+                if store == Store::Legacy && fault(Fault::LegacyNotOwner) {
+                    return Err(Failure::NotOwner);
+                }
                 if store == Store::Legacy && fault(Fault::LegacyStaleAfterMiss) {
                     t::miss_and_go_stale();
                     return Ok(Deleted::NotFound);
@@ -1129,27 +1198,27 @@ mod backend {
                 }
                 Ok(if t::fake_remove_ref(store, id) { Deleted::Took } else { Deleted::NotFound })
             }
-            Mode::Real => super::real::delete_item(store, name, item),
+            Backend::Real => super::real::delete_item(store, name, item),
         }
     }
 
     const FAKE_TAG: &[u8] = b"FAKEBLOB";
 
     pub(super) fn protect(data: &[u8]) -> Result<Vec<u8>, String> {
-        match mode() {
-            Mode::Fake => Ok([FAKE_TAG, data].concat()),
-            Mode::Real => super::real::protect(data),
+        match t::mode_for(None) {
+            Backend::Fake => Ok([FAKE_TAG, data].concat()),
+            Backend::Real => super::real::protect(data),
         }
     }
 
     pub(super) fn unprotect(data: &[u8]) -> Result<Vec<u8>, String> {
-        match mode() {
-            Mode::Fake if fault(Fault::BlobWrong) => Ok(vec![0x6b; 32]),
-            Mode::Fake => data
+        match t::mode_for(None) {
+            Backend::Fake if fault(Fault::BlobWrong) => Ok(vec![0x6b; 32]),
+            Backend::Fake => data
                 .strip_prefix(FAKE_TAG)
                 .map(<[u8]>::to_vec)
                 .ok_or_else(|| "fake blob does not open".to_string()),
-            Mode::Real => super::real::unprotect(data),
+            Backend::Real => super::real::unprotect(data),
         }
     }
 }
@@ -1213,7 +1282,7 @@ pub(crate) fn candidates_at(root: &Path) -> Vec<(Source, Vec<u8>)> {
             out.push((source, key));
         }
     };
-    for source in [Source::Profile, Source::Legacy, Source::Unmoved, Source::Blob] {
+    for source in [Source::Profile, Source::Rekey, Source::Legacy, Source::Unmoved, Source::Blob] {
         for key in read_source(root, source) {
             push(source, Some(key));
         }
@@ -1230,6 +1299,7 @@ fn read_source(root: &Path, source: Source) -> Vec<Vec<u8>> {
         // Every group, not the first answer: a stale key in the keys group must not
         // hide the one in the app-ID group that opens the file.
         Source::Profile => every_of(protected_stores(), &profile_slot(root)),
+        Source::Rekey => every_of(protected_stores(), &rekey_slot(root)),
         Source::Legacy => every_of(protected_stores(), &legacy_slot()),
         Source::Unmoved if mac_layout() => [profile_slot(root), legacy_slot()]
             .iter()
@@ -1244,20 +1314,31 @@ fn read_source(root: &Path, source: Source) -> Vec<Vec<u8>> {
 /// the first that does, so the shared legacy slot is read only when this profile's
 /// own slot and copies fail (on macOS a read of an item another build wrote can
 /// prompt).
-pub(crate) fn key_that_opens(root: &Path, identity: &[u8]) -> Option<(Source, [u8; 32])> {
+pub(crate) fn key_that_opens(root: &Path, identity: &[u8]) -> Option<(Source, zeroize::Zeroizing<[u8; 32]>)> {
     let opens = |bytes: Vec<u8>| {
-        let key = <[u8; 32]>::try_from(bytes.as_slice()).ok()?;
+        let bytes = zeroize::Zeroizing::new(bytes);
+        let key = zeroize::Zeroizing::new(<[u8; 32]>::try_from(bytes.as_slice()).ok()?);
         super::encryption::decrypt_identity(identity, &key).is_ok().then_some(key)
     };
     let own = |source| read_source(root, source).into_iter().find_map(&opens).map(|key| (source, key));
-    if let Some(found) = own(Source::Profile) {
+    // A re-key cut short leaves the files on the key it staged.
+    if let Some(found) = own(Source::Profile).or_else(|| own(Source::Rekey)) {
         return Some(found);
     }
     let copies = copies_of(root);
     if let Some(found) = copies.iter().find_map(|(s, n)| opens(read(*s, n).ok()??).map(|key| (Source::Copy, key))) {
         return Some(found);
     }
-    let known = [Source::Legacy, Source::Unmoved, Source::Blob].into_iter().find_map(own);
+    // One login item at a time: each read there may ask the person.
+    let unmoved = || {
+        mac_layout()
+            .then(|| [profile_slot(root), legacy_slot()])
+            .into_iter()
+            .flatten()
+            .find_map(|name| opens(read(Store::Legacy, &name).ok()??))
+            .map(|key| (Source::Unmoved, key))
+    };
+    let known = own(Source::Legacy).or_else(unmoved).or_else(|| own(Source::Blob));
     if known.is_some() {
         return known;
     }
@@ -1401,9 +1482,11 @@ fn forget_items(root: &Path, machine: &[(Store, String)]) {
     let _ = std::fs::remove_file(blob_path(root));
     let own = profile_slot(root);
     let copies = format!("{own}{COPY_MARK}");
+    let staged = rekey_slot(root);
     without_prompts(|| {
         for store in every_store() {
             let _ = delete(*store, &own);
+            let _ = delete(*store, &staged);
             for name in list(*store, &copies) {
                 let _ = delete(*store, &name);
             }
@@ -1414,17 +1497,29 @@ fn forget_items(root: &Path, machine: &[(Store, String)]) {
     });
 }
 
-/// One point of a move, for the tests' hook; a hook answering false is a process
-/// that died there.
+/// One point of a move or a re-key, for the tests' hook; a hook answering false is a
+/// process that died there.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Step {
     Read,
     Copied,
     ReadBack,
     Deleted,
+    /// The re-key's new key is stored and read back.
+    RekeyStaged,
+    /// `identity.key` is on the new key.
+    RekeyKeyFile,
+    /// `identity.device` is on the new key.
+    RekeyDeviceFile,
+    /// The pair a phrase restore set aside is on the new key.
+    RekeyLockedFiles,
+    /// The profile slot holds the new key.
+    RekeyPromoted,
+    /// The staged name is gone.
+    RekeyUnstaged,
 }
 
-fn step(at: Step, name: &str) -> bool {
+pub(crate) fn step(at: Step, name: &str) -> bool {
     #[cfg(test)]
     return test_support::run_hook(at, name);
     #[cfg(not(test))]
@@ -1438,10 +1533,26 @@ fn step(at: Step, name: &str) -> bool {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Moved {
     pub(crate) moved: usize,
-    /// Copied but the source stays (a copy that did not read back, a refused delete).
+    /// Copied but the source stays (a copy that did not read back, a failed delete).
     pub(crate) kept: usize,
     /// Never touched: a read that would prompt or failed, a value not a key.
     pub(crate) skipped: usize,
+    /// Copied, and the login keychain refused the delete: only the app that made
+    /// the item may delete it. The re-key makes such an item's key open nothing.
+    pub(crate) held: usize,
+    /// Left as it is: the protected name holds another key, or the copy was already
+    /// there and the key opens nothing of ours.
+    pub(crate) left: usize,
+    /// Protected copies written this start.
+    pub(crate) wrote: usize,
+}
+
+impl Moved {
+    /// Whether this start changed or learned anything worth one log line. A start
+    /// that only met items it already copied says nothing.
+    pub(crate) fn news(&self) -> bool {
+        self.moved + self.kept + self.skipped + self.wrote > 0
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1449,7 +1560,15 @@ enum Outcome {
     Moved,
     Kept,
     Skipped,
+    Held,
+    Left,
     Died,
+}
+
+/// [`settle_move_judged`] that treats every key as ours, for the tests.
+#[cfg(test)]
+pub(crate) fn settle_move(root: &Path) -> Moved {
+    settle_move_judged(root, &|_| true)
 }
 
 /// macOS, once per start before any unlock: every Hollow key in the file-based
@@ -1458,8 +1577,11 @@ enum Outcome {
 /// read back byte for byte, and only then is exactly the item that was read
 /// deleted, so no store is ever without the key and a key another process wrote
 /// meanwhile stays. An item counts as moved only once a new read of its name finds
-/// nothing. Runs only where the keystore answered a definite yes.
-pub(crate) fn settle_move(root: &Path) -> Moved {
+/// nothing. A login item whose protected copy a past start made is deleted again
+/// only while `ours` says its key still opens one of this profile's files: macOS
+/// refuses every later try at an item only its maker may delete. Runs only where
+/// the keystore answered a definite yes.
+pub(crate) fn settle_move_judged(root: &Path, ours: &dyn Fn(&[u8]) -> bool) -> Moved {
     let mut done = Moved::default();
     if !mac_layout() {
         return done;
@@ -1467,31 +1589,40 @@ pub(crate) fn settle_move(root: &Path) -> Moved {
     let Writable::Yes(target) = protected_writable() else { return done };
     let first = [profile_slot(root), legacy_slot()];
     without_prompts(|| {
-        if move_store(Store::Legacy, target, &first, slot_name, &mut done) && target == Store::Keys {
-            move_store(Store::AppId, Store::Keys, &first, our_name, &mut done);
+        if move_store(Store::Legacy, target, &first, slot_name, ours, &mut done) && target == Store::Keys {
+            move_store(Store::AppId, Store::Keys, &first, our_name, ours, &mut done);
         }
     });
     done
 }
 
 /// False when the process "died" in a test hook.
-fn move_store(from: Store, to: Store, first: &[String], ours: fn(&str) -> bool, done: &mut Moved) -> bool {
-    let mut names: Vec<String> = list(from, base()).into_iter().filter(|n| ours(n)).collect();
+fn move_store(
+    from: Store,
+    to: Store,
+    first: &[String],
+    name_ok: fn(&str) -> bool,
+    ours: &dyn Fn(&[u8]) -> bool,
+    done: &mut Moved,
+) -> bool {
+    let mut names: Vec<String> = list(from, base()).into_iter().filter(|n| name_ok(n)).collect();
     names.sort();
     names.dedup();
     names.sort_by_key(|n| !first.iter().any(|f| f == n));
     for name in names.into_iter().take(MOVE_LIMIT) {
-        match move_one(from, to, &name) {
+        match move_one(from, to, &name, ours, done) {
             Outcome::Moved => done.moved += 1,
             Outcome::Kept => done.kept += 1,
             Outcome::Skipped => done.skipped += 1,
+            Outcome::Held => done.held += 1,
+            Outcome::Left => done.left += 1,
             Outcome::Died => return false,
         }
     }
     true
 }
 
-fn move_one(from: Store, to: Store, name: &str) -> Outcome {
+fn move_one(from: Store, to: Store, name: &str, ours: &dyn Fn(&[u8]) -> bool, done: &mut Moved) -> Outcome {
     let (value, item) = match read_ref(from, name) {
         Ok(Some(found)) => found,
         Ok(None) => {
@@ -1511,12 +1642,23 @@ fn move_one(from: Store, to: Store, name: &str) -> Outcome {
     if !step(Step::Read, name) {
         return Outcome::Died;
     }
-    let target = match place_copy(to, name, &value) {
-        Ok(target) => target,
+    let from_login = from == Store::Legacy;
+    let placed = match place_copy(to, name, &value, !from_login) {
+        Ok(placed) => placed,
         Err(why) => {
             crate::hollow_log!("[HOLLOW-ID] Keychain move: no protected copy could be made ({why}); the old item stays");
             return Outcome::Kept;
         }
+    };
+    let (target, fresh) = match placed {
+        Placed::New(target) => {
+            done.wrote += 1;
+            (target, true)
+        }
+        Placed::Had(target) => (target, false),
+        // Never deleted, so no copy is needed: the profile it belongs to re-keys
+        // off it at its own next start.
+        Placed::Differs => return Outcome::Left,
     };
     if !step(Step::Copied, name) {
         return Outcome::Died;
@@ -1528,16 +1670,26 @@ fn move_one(from: Store, to: Store, name: &str) -> Outcome {
     if !step(Step::ReadBack, name) {
         return Outcome::Died;
     }
-    take_source(from, name, &value, &item)
+    if from_login && !fresh && !ours(&value) {
+        return Outcome::Left;
+    }
+    take_source(from, name, &value, &item, fresh)
 }
 
 /// Deletes exactly the item the move read. Moved only when the delete removed an
 /// item AND a new read of the name finds nothing: a delete and a check that share one
 /// lookup agree on "gone" when that lookup misses the item, and after another
-/// process's rewrite this process's read can miss the new key while it stands.
-fn take_source(from: Store, name: &str, value: &[u8], item: &Item) -> Outcome {
+/// process's rewrite this process's read can miss the new key while it stands. An
+/// item only its maker may delete is held; `say` logs it the first time.
+fn take_source(from: Store, name: &str, value: &[u8], item: &Item, say: bool) -> Outcome {
     let took = match delete_item(from, name, item) {
         Ok(took) => took,
+        Err(Failure::NotOwner) => {
+            if say {
+                crate::hollow_log!("[HOLLOW-ID] Keychain move: the old login item stays (only the app that made it may delete it)");
+            }
+            return Outcome::Held;
+        }
         Err(f) => {
             crate::hollow_log!("[HOLLOW-ID] Keychain move: the old item was not deleted ({f:?}); it stays for the next start");
             return Outcome::Kept;
@@ -1565,14 +1717,26 @@ fn take_source(from: Store, name: &str, value: &[u8], item: &Item) -> Outcome {
     }
 }
 
-/// Puts `value` under `name` in `to`, or under its conflict copy when `name` holds
-/// another key there; never overwrites a key. The error says which call failed and
-/// how, without the value.
-fn place_copy(to: Store, name: &str, value: &[u8]) -> Result<String, String> {
-    for target in [name.to_string(), copy_name(name, value)] {
+/// Where a copy went.
+#[derive(Debug, PartialEq, Eq)]
+enum Placed {
+    /// Written now, under this name.
+    New(String),
+    /// A past start (or another mover) put the same key there.
+    Had(String),
+    /// The name holds another key and no conflict copy was asked for.
+    Differs,
+}
+
+/// Puts `value` under `name` in `to`, or, with `conflict_copy`, under its conflict
+/// copy when `name` holds another key there; never overwrites a key. The error says
+/// which call failed and how, without the value.
+fn place_copy(to: Store, name: &str, value: &[u8], conflict_copy: bool) -> Result<Placed, String> {
+    let targets = if conflict_copy { vec![name.to_string(), copy_name(name, value)] } else { vec![name.to_string()] };
+    for target in targets {
         let held = match read(to, &target).map(|v| v.map(zeroize::Zeroizing::new)) {
             Ok(None) => match add(to, &target, value) {
-                Ok(Added::New) => return Ok(target),
+                Ok(Added::New) => return Ok(Placed::New(target)),
                 Ok(Added::Present) => match read(to, &target) {
                     Ok(Some(held)) => zeroize::Zeroizing::new(held),
                     Ok(None) => return Err("add found the name taken, a read found nothing".into()),
@@ -1584,10 +1748,134 @@ fn place_copy(to: Store, name: &str, value: &[u8]) -> Result<String, String> {
             Err(f) => return Err(format!("read {f:?}")),
         };
         if same(&held, value) {
-            return Ok(target);
+            return Ok(Placed::Had(target));
         }
     }
-    Err("the slot and its copy hold other keys".into())
+    if conflict_copy { Err("the slot and its copy hold other keys".into()) } else { Ok(Placed::Differs) }
+}
+
+// -- The re-key's keystore side (macOS, `keychain_rekey`) --
+
+/// The login keychain names a re-key of `root` reads: this root's own slot and the
+/// machine slot first (as the move takes them), so items planted under our naming
+/// that sort earlier never push ours past the limit.
+fn login_names(root: &Path) -> Vec<String> {
+    let first = [profile_slot(root), legacy_slot()];
+    let mut rest: Vec<String> =
+        list(Store::Legacy, base()).into_iter().filter(|n| slot_name(n) && !first.contains(n)).collect();
+    rest.sort();
+    rest.dedup();
+    first.into_iter().chain(rest).take(MOVE_LIMIT).collect()
+}
+
+/// A stored value as a key, wiped when dropped either way.
+fn as_key(value: Vec<u8>) -> Option<zeroize::Zeroizing<[u8; 32]>> {
+    let value = zeroize::Zeroizing::new(value);
+    <[u8; 32]>::try_from(value.as_slice()).ok().map(zeroize::Zeroizing::new)
+}
+
+/// Every 32-byte key a quiet read finds under our slot names in the file-based
+/// keychain, at most [`MOVE_LIMIT`], `root`'s own slot and the machine slot first.
+/// An item that would ask is left out: it asks an old build too.
+pub(crate) fn login_keys(root: &Path) -> Vec<zeroize::Zeroizing<[u8; 32]>> {
+    if !mac_layout() {
+        return Vec::new();
+    }
+    without_prompts(|| login_names(root).iter().filter_map(|n| read(Store::Legacy, n).ok().flatten()).filter_map(as_key).collect())
+}
+
+/// The new key a re-key staged for `root`. Of one per protected group, the one
+/// `opens` accepts (it opens a file of `root`'s), else the first.
+pub(crate) fn staged_key(root: &Path, opens: &dyn Fn(&[u8]) -> bool) -> Option<zeroize::Zeroizing<[u8; 32]>> {
+    let name = rekey_slot(root);
+    let staged: Vec<_> =
+        without_prompts(|| protected_stores().iter().filter_map(|s| read(*s, &name).ok().flatten()).filter_map(as_key).collect());
+    let pick = staged.iter().position(|k| opens(&k[..])).unwrap_or(0);
+    staged.into_iter().nth(pick)
+}
+
+/// Stores `key` as `root`'s staged key and answers what a NEW read finds there: the
+/// key itself, or the one another mover staged first (never overwritten).
+pub(crate) fn stage_key(root: &Path, key: &[u8; 32]) -> Result<zeroize::Zeroizing<[u8; 32]>, String> {
+    let Writable::Yes(store) = protected_writable() else {
+        return Err("the protected keychain takes no key now".into());
+    };
+    let name = rekey_slot(root);
+    without_prompts(|| add(store, &name, key)).map_err(|f| format!("stage {f:?}"))?;
+    match without_prompts(|| read(store, &name)) {
+        Ok(Some(back)) => as_key(back).ok_or_else(|| "the staged key is not 32 bytes".to_string()),
+        Ok(None) => Err("the staged key did not read back".into()),
+        Err(f) => Err(format!("staged read {f:?}")),
+    }
+}
+
+/// Deletes `root`'s staged key from each protected store whose value `keep` refuses:
+/// a value a file still needs is never deleted, and a store that did not answer
+/// keeps what it holds.
+pub(crate) fn unstage(root: &Path, keep: &dyn Fn(&[u8]) -> bool) {
+    let name = rekey_slot(root);
+    without_prompts(|| {
+        for store in protected_stores() {
+            if let Ok(Some(value)) = read(*store, &name)
+                && !keep(&zeroize::Zeroizing::new(value))
+            {
+                let _ = delete(*store, &name);
+            }
+        }
+    });
+}
+
+/// After a re-key promoted the key every file opens with (`needed` says which keys a
+/// file of `root`'s still needs): `root`'s profile slot in a group holding a key no
+/// file needs, its conflict copies, a protected machine-slot copy of an `old` key
+/// (one proven to have opened these files) that no file needs and no login item
+/// mirrors (a mirrored one would only be copied back by the next start), and one
+/// quiet try at every login item holding an `old` key. Answers how many such login
+/// items stay.
+pub(crate) fn retire(root: &Path, old: &[zeroize::Zeroizing<[u8; 32]>], needed: &dyn Fn(&[u8]) -> bool) -> usize {
+    let slot = profile_slot(root);
+    let machine = legacy_slot();
+    let held = |store: Store, name: &str| read(store, name).ok().flatten().map(zeroize::Zeroizing::new);
+    without_prompts(|| {
+        for store in protected_stores() {
+            if held(*store, &slot).is_some_and(|v| !needed(&v)) {
+                let _ = delete(*store, &slot);
+            }
+        }
+        let mirrored = held(Store::Legacy, &machine);
+        for store in protected_stores() {
+            let Some(value) = held(*store, &machine) else { continue };
+            let proven = old.iter().any(|k| same(&value, &k[..]));
+            if proven && !needed(&value) && !mirrored.as_ref().is_some_and(|m| same(m, &value)) {
+                let _ = delete(*store, &machine);
+            }
+        }
+    });
+    drop_copies(root);
+    delete_login_holding(root, old).1
+}
+
+/// One quiet try at deleting every login item holding one of `old`; answers how many
+/// went and how many stay (only their maker may delete them, or the delete failed).
+pub(crate) fn delete_login_holding(root: &Path, old: &[zeroize::Zeroizing<[u8; 32]>]) -> (usize, usize) {
+    if !mac_layout() || old.is_empty() {
+        return (0, 0);
+    }
+    without_prompts(|| {
+        let (mut gone, mut stay) = (0, 0);
+        for name in login_names(root) {
+            let Ok(Some((value, item))) = read_ref(Store::Legacy, &name) else { continue };
+            let value = zeroize::Zeroizing::new(value);
+            if !old.iter().any(|k| same(&value, &k[..])) {
+                continue;
+            }
+            match take_source(Store::Legacy, &name, &value, &item, false) {
+                Outcome::Moved => gone += 1,
+                _ => stay += 1,
+            }
+        }
+        (gone, stay)
+    })
 }
 
 #[cfg(test)]
@@ -1604,6 +1892,10 @@ pub(crate) mod test_support {
     pub(crate) enum Mode {
         Fake,
         Real,
+        /// The real file-based keychain beside fake protected stores: what an
+        /// unsigned test binary can prove of the move and the re-key on this Mac.
+        #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+        LoginReal,
     }
 
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1620,6 +1912,9 @@ pub(crate) mod test_support {
         ProbeUnknown,
         /// Reads of the file-based keychain would ask the person.
         LegacyAsks,
+        /// Reads of the file-based keychain ask the person, who allows each one: a
+        /// read with prompts off fails, one with prompts on answers.
+        LegacyAsksPerson,
         DeleteRefFails,
         /// A delete by reference answers success but the item stays.
         DeleteRefLeaves,
@@ -1629,6 +1924,9 @@ pub(crate) mod test_support {
         /// Another process rewrote the file-based item: the delete answers "not
         /// found", the item stays, and this process's reads miss it from then on.
         LegacyStaleAfterMiss,
+        /// The login keychain lets only the item's maker delete it
+        /// (`errSecInvalidOwnerEdit`, field report 2026-11-14).
+        LegacyNotOwner,
     }
 
     type Hook = Box<dyn FnMut(Step, &str) -> bool>;
@@ -1653,6 +1951,33 @@ pub(crate) mod test_support {
         static PROBES: Cell<u32> = const { Cell::new(0) };
         static HOOK: RefCell<Option<Hook>> = const { RefCell::new(None) };
         static STALE: Cell<bool> = const { Cell::new(false) };
+        static BASE: Cell<Option<&'static str>> = const { Cell::new(None) };
+        static ITEM_DELETES: Cell<u32> = const { Cell::new(0) };
+        static LOUD_LEGACY_READS: Cell<u32> = const { Cell::new(0) };
+    }
+
+    pub(crate) fn count_item_delete() {
+        ITEM_DELETES.with(|d| d.set(d.get() + 1));
+    }
+
+    /// Deletes of one item (by its object or reference) on this thread since the last call.
+    pub(crate) fn take_item_deletes() -> u32 {
+        ITEM_DELETES.with(|d| d.replace(0))
+    }
+
+    /// Slot names on this thread start with `base` instead (the real login-keychain
+    /// tests, so a move there never meets another test's items).
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub(crate) fn set_base(base: Option<&'static str>) {
+        BASE.with(|b| b.set(base));
+    }
+
+    pub(crate) fn base_override() -> Option<&'static str> {
+        BASE.with(Cell::get)
+    }
+
+    pub(crate) fn rekey_slot_name(root: &std::path::Path) -> String {
+        super::rekey_slot(root)
     }
 
     /// Runs the code under the macOS layout (`true`) or the flat one, whatever the
@@ -1741,7 +2066,16 @@ pub(crate) mod test_support {
         LOUD_WRITES.with(|w| w.replace(0))
     }
 
+    /// Reads of the file-based keychain on this thread, since the last call, that
+    /// were allowed to ask the person.
+    pub(crate) fn take_loud_legacy_reads() -> u32 {
+        LOUD_LEGACY_READS.with(|w| w.replace(0))
+    }
+
     pub(crate) fn note_read(store: Store, name: &str) {
+        if store == Store::Legacy && QUIET.with(Cell::get) == 0 {
+            LOUD_LEGACY_READS.with(|w| w.set(w.get() + 1));
+        }
         READS.with(|r| r.borrow_mut().push((store, name.to_string())));
     }
 
@@ -1794,6 +2128,21 @@ pub(crate) mod test_support {
         MODE.with(Cell::get)
     }
 
+    /// The backend `store` takes: the login-only mode is real only for the
+    /// file-based keychain; `None` (the blob) is fake there.
+    pub(crate) fn mode_for(store: Option<Store>) -> Backend {
+        match (mode(), store) {
+            (Mode::Real, _) | (Mode::LoginReal, Some(Store::Legacy)) => Backend::Real,
+            _ => Backend::Fake,
+        }
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum Backend {
+        Fake,
+        Real,
+    }
+
     pub(crate) fn fault(f: Fault) -> bool {
         FAULTS.with(|v| v.borrow().contains(&f))
     }
@@ -1823,8 +2172,16 @@ pub(crate) mod test_support {
             Store::Keys if fault(Fault::KeysRefused) => Err(Failure::Refused),
             Store::AppId if fault(Fault::AppIdRefused) => Err(Failure::Refused),
             Store::Legacy if reading && fault(Fault::LegacyAsks) => Err(Failure::WouldAsk),
+            Store::Legacy if reading && fault(Fault::LegacyAsksPerson) && QUIET.with(Cell::get) > 0 => {
+                Err(Failure::WouldAsk)
+            }
             _ => Ok(()),
         }
+    }
+
+    /// Empties every fake store on this thread.
+    pub(crate) fn reset_fakes() {
+        FAKE.with(|m| m.borrow_mut().clear());
     }
 
     pub(crate) fn fake_item(store: Store, name: &str) -> Option<(Vec<u8>, Vec<u8>)> {
@@ -1958,6 +2315,14 @@ pub(crate) mod test_support {
         #[cfg(target_os = "macos")]
         pub(crate) fn enter_file_keychain() -> Self {
             MODE.with(|m| m.set(Mode::Real));
+            Self { _private: () }
+        }
+
+        /// The real file-based keychain in the test namespace, the protected stores
+        /// fake: the move and the re-key whole, on this Mac.
+        #[cfg(target_os = "macos")]
+        pub(crate) fn enter_login_only() -> Self {
+            MODE.with(|m| m.set(Mode::LoginReal));
             Self { _private: () }
         }
 
