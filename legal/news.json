@@ -1,5 +1,11 @@
 [
   {
+    "id": "2026-11-15-v0140",
+    "date": "November 15, 2026",
+    "title": "v0.14 - Lost Device Protection, Invite Link Reset, Call Route Badge & Get Help Page",
+    "body": "Well, look who's back... A new update with tons of security fixes, which are supposed to be the actual final ones, closing the entire internal security audit. New features will be added, but I still need to handle the rest (the App Store is still on my watchlist and not finished yet, same for disabling TestFlight). The changelog is available, as usual. Everyone in a server should update, since older versions stop working in servers once their members update. There is a lot to do and improve, obviously. It's not the end and I'll do my best to get it done. Thank goodness for the entire testing environment I thought of. It makes testing so much easier. Alright, that's it. Enjoy!"
+  },
+  {
     "id": "2026-10-30-v0130",
     "date": "October 30, 2026",
     "title": "v0.13 - Security Review, Relay Setup Wizard, Bigger Servers & Windows Volume Fix",

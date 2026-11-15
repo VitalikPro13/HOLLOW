@@ -1,21 +1,21 @@
 {
-  "latest": "0.13.0",
+  "latest": "0.14.0",
   "versions": [
     {
-      "version": "0.13.0",
-      "date": "October 30, 2026",
-      "url_windows": "https://anonlisten.com/hollow/releases/hollow-0.13.0-win64.zip",
-      "url_windows_setup": "https://anonlisten.com/hollow/releases/hollow-0.13.0-win64-setup.exe",
-      "url_macos": "https://anonlisten.com/hollow/releases/hollow-0.13.0-macos.zip",
-      "url_macos_dmg": "https://anonlisten.com/hollow/releases/hollow-0.13.0.dmg",
-      "url_linux": "https://anonlisten.com/hollow/releases/hollow-0.13.0-linux-x86_64.flatpak",
-      "url_linux_targz": "https://anonlisten.com/hollow/releases/hollow-0.13.0-linux.tar.gz",
-      "url_android": "https://anonlisten.com/hollow/releases/hollow-0.13.0-android.apk",
-      "notes": "Security Review, Relay Setup Wizard, Bigger Servers & Windows Volume Fix",
-      "sha256_windows": "3c36ad280b27c816a10db96aa5a32273617e1e5c05247c059b51f893dea4b778",
-      "sha256_macos": "946e696a22142804c22fff24edb94903f8d4a7b677bd51b4e0b6a8b52f331cad",
-      "sha256_linux": "02af16af3f0a6305c78face0c0e5df9d48d27c6f42c9b8b23f18d36f8193ac49",
-      "sha256_linux_targz": "ea1eaec0f897170536445c779347437e9c345ad271edee7edc571c419783fa0b"
+      "version": "0.14.0",
+      "date": "November 15, 2026",
+      "url_windows": "https://anonlisten.com/hollow/releases/hollow-0.14.0-win64.zip",
+      "url_windows_setup": "https://anonlisten.com/hollow/releases/hollow-0.14.0-win64-setup.exe",
+      "url_macos": "https://anonlisten.com/hollow/releases/hollow-0.14.0-macos.zip",
+      "url_macos_dmg": "https://anonlisten.com/hollow/releases/hollow-0.14.0.dmg",
+      "url_linux": "https://anonlisten.com/hollow/releases/hollow-0.14.0-linux-x86_64.flatpak",
+      "url_linux_targz": "https://anonlisten.com/hollow/releases/hollow-0.14.0-linux.tar.gz",
+      "url_android": "https://anonlisten.com/hollow/releases/hollow-0.14.0-android.apk",
+      "notes": "Lost Device Protection, Invite Link Reset, Call Route Badge & Get Help Page",
+      "sha256_windows": "50ccbcedbf8fca4e2a1bce5af5a4e1db47f16382e98c3fee7272efb7d613a60f",
+      "sha256_macos": "501d62c2a33334264e9216c1b3e2031c3af93407e73ebe7245fbae13ad348c78",
+      "sha256_linux": "3c3b7ac4e6711f41b4673fa896755e9f2835f95862e743c829348519e4e7b008",
+      "sha256_linux_targz": "5dc4ebdae98dcf38a216ec70567d9f75922d6d129051f1e70d4924796d267cb0"
     }
   ]
 }

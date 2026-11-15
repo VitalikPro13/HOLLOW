@@ -2144,7 +2144,7 @@ Release time: 100ms
     - [x] Before release: full PC suite (nextest + flutter) and fleets on every platform on the final tree (45b462aa: nextest 3777 of 3784, the 7 need a desktop session; flutter 3652 pass; fleets iOS, Android, macOS, Linux and Windows green after the fix in 45b462aa; audit report section 3.8).
     - [x] Before release: the fleet tool's production-relay guard (fd12d442) (wiki `fleet_probe`, "Keeping 0.14 fleets off the production relay").
     - [x] Release commit 0.14.0 on main (91c2e636).
-    - [ ] Signed `v0.14.0-beta` tag and the `release` skill pipeline (builds, upload, GitHub release).
+    - [x] Signed `v0.14.0-beta` tag and the `release` skill pipeline (builds, upload, GitHub release), live 2026-11-15.
     - [ ] After 0.14: move members and AFK (#109).
     - [ ] After 0.14: camera resolution and FPS picker in Settings, 1080p by default (capture is a fixed 640x480 at 30 today).
     - [ ] After 0.14: the rest of #124 (static join page on self-hosted relays, per-key device counts, per-key server creation, limited-use keys).

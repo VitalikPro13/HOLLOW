@@ -341,7 +341,8 @@ if runs sign && [ "$SIGNED" = 1 ]; then
   # own signature below binds (macos/Runner/BundleSeal.swift checks it at start).
   echo "==> seal the nested code, embed the profile"
   bash "$SCRIPT_DIR/macos_load_gate.sh" seal "$APP"
-  cp "$MAC_PROVISION_PROFILE" "$APP/Contents/embedded.provisionprofile"
+  # -X: a downloaded profile carries quarantine marks the DMG would not keep.
+  cp -X "$MAC_PROVISION_PROFILE" "$APP/Contents/embedded.provisionprofile"
 
   echo "==> sign the app bundle (with entitlements)"
   sign --options runtime --entitlements "$ENT_SHIP" "$APP"
