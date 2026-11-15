@@ -1,8 +1,8 @@
 # HOL-SEC-205: A received sticker pack was unpacked with no size limit as soon as its card showed
 
 ```
-ID:          HOL-SEC-205                 Status: Fixed on local branch security/0.14
-                                          (89d3a85d, 2026-11-14), retest at release
+ID:          HOL-SEC-205                 Status: Fixed in 0.14
+                                          (89d3a85d, 2026-11-14)
 Severity:    High                        (Impact M-H: every member who views the conversation
                                           runs out of memory and the app aborts, again on every
                                           open while the attachment stays; nothing is read or
@@ -18,9 +18,8 @@ Attacker:    any friend or server member who can send a file
 Found:       2026-11-14 (hostile review of track t14-deps, finding 1)
 Affected:    every release with sticker packs, from 0.10.0-beta (603853b5, 2026-08-01)
              through 0.13.0 (the pack card); the shards import in every release through 0.13.0
-Fix commit:  89d3a85d (security/0.14, 2026-11-14)
-Embargo:     EMBARGOED until the 0.14 release (local branch security/0.14, never pushed);
-             advisory with the 0.14 GHSAs
+Fix commit:  89d3a85d (0.14, 2026-11-14)
+Disclosure:  advisory with the 0.14 GHSAs
 ```
 
 ## Description

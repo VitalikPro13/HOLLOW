@@ -22,7 +22,7 @@ ships with 0.14), **Planned** (nothing built), **Living** (kept current, no sing
 | `planned/relay-and-sync/SCALE_PROBE_2026_10.md` | Measurement, baseline 18484f7e (2026-10-17); its fixes shipped in 0.12.2 and 0.13 (HOL-SEC-184, -185) | the G1 reruns ran 2026-11-08 (no drops, no breaker trip; memory `reference_g1_scale_run_procedure`), but their column is not written into the file yet | Rerun written as section 9 (2026-11-15, from the 2026-11-08 logs). Move to `shipped/relay-and-sync/`. |
 | `planned/ui-and-accessibility/DIALOG_REDESIGNS_BEFORE.md` | Shipped | the five redesigns replaced these screens in the design language plan (b9b92478, 2026-09-26), released in 0.12.0 | Move to `shipped/ui-and-accessibility/`. Not embargoed, no references; it has no README row today. |
 | `planned/security/SECURITY_AUDIT_PLAN.md` | Living | the method and the program; phases A to G done, the external audit next | Decision Q1 below. |
-| `planned/security/SECURITY_AUDIT_2026_10.md` and `.pdf` | Shipped (describes 0.13.0) | committed for 0.13 (358f2b58 "Publish 0.13.0 and correct the audit records"); the 0.14 addendum folds in first | Vitalii read the 0.13 report (2026-11-07). DONE 2026-11-15: the addendum is folded in (each part where its heading says, the cover names the 0.14 findings) and the PDF rebuilt (114 pages). Vitalii reads the 0.14 part, from the addendum or its own PDF `SECURITY_AUDIT_2026_10_ADDENDUM_0.14.pdf`. Then move both to `shipped/security/`. |
+| `planned/security/SECURITY_AUDIT_2026_10.md` and `.pdf` | Committed: ONE edition as of 0.14 (revised 2026-11-15); the 0.13 edition is public with the 0.13.0 release (358f2b58) | the addendum is folded in and deleted (2026-11-15): one report, updated totals, findings 187 to 206 in sections 4 and 5, accepted risks and open items as of 0.14, the PDF rebuilt | Vitalii reads the revised edition. Then move both to `shipped/security/`. |
 | `planned/security/CHECKPOINT_COVERAGE_DESIGN.md` | Committed | 56587ca2 (t14-cover, 2026-11-05) | Status line fixed (2026-11-15). Move to `shipped/security/` with 0.14. |
 | `planned/security/HOL_SEC_187_KEYCHAIN_DESIGN.md` | Committed | design 2fc4dc44 (2026-10-31), build b8b64d15 (2026-11-01), 6fec99e7 (2026-11-14), re-key b887e706 (2026-11-15) | The signed proof by hand PASSED on 2026-11-15 (notarized build of b887e706, signed on the old iMac, run on the mini; design section 6). The automated signed job has never run. Status line fixed (2026-11-15). Move to `shipped/security/` with 0.14. |
 | `planned/security/HOL_SEC_187_KEYCHAIN_DESIGN_REVIEW.md` | Committed | 2fc4dc44 | Moves with the design. |
@@ -43,7 +43,7 @@ ships with 0.14), **Planned** (nothing built), **Living** (kept current, no sing
 | `design_G_standing.md` | Shipped; extended to every anchored server | 0.13.0; c0410f9d in 0.14 |
 | `design_G2_breaker.md` | Shipped in SHADOW; enforces in 0.14 | relay 2026-10-23; enforce by default in 4ccb0a10 (track t14-relay) |
 | `findings/HOL-SEC-001` to `-186` | Fixed | 0.12.0 to 0.13 (report section 4) |
-| `findings/HOL-SEC-187` to `-206` | Committed | security/0.14 (the addendum names each commit); HOL-SEC-187 brought up to the re-key and its signed proof on 2026-11-15 |
+| `findings/HOL-SEC-187` to `-206` | Committed | 0.14 (report section 4 names each commit); headers carry shipped wording (2026-11-15); HOL-SEC-187 brought up to the re-key and its signed proof on 2026-11-15 |
 | `claims.md`, `threat_model.md`, `authz_matrix.md`, `accepted_risks.md`, `coverage.md`, `candidate_findings.md`, `whitepaper_claims_check.md`, `rs_*_review.md` | Living record | kept current per release |
 | `phase_b_evidence/`, `phase_b_recheck/`, `phase_ef/`, `mutation_passes/` | Evidence, complete for 0.13; `phase_ef/crdt.md`, `public_channels.md`, `backfill.md` added for 0.14 | |
 | `requirements.md` (new, 0.14) | Living | written for external reviewers, current to ad38a14e |
@@ -70,14 +70,15 @@ Found with `grep -r` on 2026-11-05; run the grep again on release day, since lat
 ## 4. Release-day order
 
 1. Done: track C committed `DEVICE_PROOF_DESIGN.md` (11d2619f).
-2. Done 2026-11-15: the addendum is folded into `SECURITY_AUDIT_2026_10.md` and the PDF
-   rebuilt; the addendum also has its own PDF for reading. Open: Vitalii reads it.
+2. Done 2026-11-15: the addendum is folded into `SECURITY_AUDIT_2026_10.md`, which is now
+   one edition as of 0.14, the PDF rebuilt, and the addendum (`.md` and `.pdf`) deleted.
+   Open: Vitalii reads the revised edition.
 3. Done: Q1 and Q2 are answered (section 5). The status lines of the three security
    designs and the scale probe's rerun section are written (2026-11-15).
 4. One `git mv` pass for every row marked "Move", then the reference fixes of section 3 and
    the README rows, in the release commit (memory `feedback_small_fixes_ride_release_commit`).
-5. Delete this checklist and the addendum file once folded (the report and the README rows
-   are the record).
+5. Delete this checklist (the report and the README rows are the record; the addendum is
+   already gone).
 
 ## 5. Decisions (Vitalii, 2026-11-05)
 
@@ -91,22 +92,21 @@ Found with `grep -r` on 2026-11-05; run the grep again on release day, since lat
 
 For Vitalii:
 
-- Read the 0.14 part of the report (the addendum PDF holds exactly that part).
-- The automated signed keychain check (`scripts/macos_keychain_check.sh`, release-apple
-  `macos-keychain-check`) has never run: it needs the repository variables
-  `MAC_PREVIOUS_RELEASE_ZIP_URL` and `MAC_PREVIOUS_RELEASE_ZIP_SHA256`, and 0.14's Apple
-  builds are signed on the old iMac. Decide whether it runs after the release or stays
-  replaced by the hand proof.
+- Read the revised report (one edition as of 0.14; the 0.14 findings are HOL-SEC-187 to
+  206 in sections 4 and 5, the changes since 0.13 in section 1).
+- DECIDED 2026-11-15: the automated signed keychain job is dropped as a requirement. The
+  proof is the hand procedure on notarized builds (`scripts/macos_keychain_check.sh`,
+  check A, the password case), re-run for any release that changes keychain code; the
+  2026-11-15 hand run on b887e706 is the 0.14 proof. Recorded in R-ID-07, the finding, the
+  design and wiki `security_write_gates` §43b.
 
 For the lead, in the release commit:
 
 - The `git mv` pass of section 4 step 4 and the reference fixes of section 3, the default
   source path in `scripts/build_audit_report.sh` and the root `README.md` PDF link among
   them (Q2). Rebuild the PDF after the move if any path inside the report changes.
-- Move `SECURITY_AUDIT_2026_10_ADDENDUM_0.14.pdf` too, or delete it with the addendum at
-  step 5.
 - Text that becomes public with the move and still names OSTIF or the freeze (left as
-  written, since it is a record of its time): `SECURITY_AUDIT_2026_10.md` section 3.11 and
-  Appendix A (already public since 0.13), `SECURITY_AUDIT_PLAN.md` (the OSTIF application
+  written, since it is a record of its time; the report itself no longer names OSTIF since
+  2026-11-15): `SECURITY_AUDIT_PLAN.md` (the OSTIF application
   plan), `HOL_SEC_187_KEYCHAIN_DESIGN_REVIEW.md` (the "frozen tag" in F7 and section 4), and
   `HOLLOW_PLAN.md`'s 0.14 entry. This checklist itself names OSTIF and is deleted at step 5.

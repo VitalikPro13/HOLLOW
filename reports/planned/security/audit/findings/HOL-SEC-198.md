@@ -1,8 +1,8 @@
 # HOL-SEC-198: Removing the relay left the take-over backup with the old relay's secrets
 
 ```
-ID:          HOL-SEC-198                 Status: Fixed on local branch security/0.14
-                                          (3d62ce35, 2026-11-07), retest at release
+ID:          HOL-SEC-198                 Status: Fixed in 0.14
+                                          (3d62ce35, 2026-11-07)
 Severity:    Low                         (Impact M: copies of the TLS private key, TURN secret, push
                                           token, DuckDNS token, members-only keys and forwarder identity
                                           stay on a box the person believes is clean; Exploitability L:
@@ -17,9 +17,8 @@ Attacker:    a later holder of root or of the disk (a sold or reused VPS, a back
 Found:       2026-11-07 (hostile review of the relay setup wizard, finding L2)
 Affected:    the setup wizard's take over and uninstall since they shipped (relay 0.13.0 build 1
              for self-hosters, 8350841b)
-Fix commit:  3d62ce35 (security/0.14, 2026-11-07)
-Embargo:     EMBARGOED until the 0.14 release (local branch security/0.14, never pushed);
-             advisory with the 0.14 GHSAs
+Fix commit:  3d62ce35 (0.14, 2026-11-07)
+Disclosure:  advisory with the 0.14 GHSAs
 ```
 
 ## Description

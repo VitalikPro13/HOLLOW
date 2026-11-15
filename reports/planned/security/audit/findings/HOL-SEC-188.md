@@ -1,12 +1,11 @@
 # HOL-SEC-188: A device its roster removed could still write server history with the master key
 
 ```
-ID:          HOL-SEC-188                 Status: Fixed on local branch security/0.14 in three
-                                          tracks: the relay join lock (5af8f7b7, 2026-11-04),
+ID:          HOL-SEC-188                 Status: Fixed in 0.14 in three tracks: the
+                                          relay join lock (5af8f7b7, 2026-11-04),
                                           the roster authority walk (060ca581, 2026-11-05) and
                                           the device proof on server ops and channel posts
-                                          (track C: 11d2619f and dcce6b29, 2026-11-07), retest
-                                          at release
+                                          (track C: 11d2619f and dcce6b29, 2026-11-07)
 Severity:    High                        (Impact H: on an owner's identity, any server state
                                           signed as the owner's checkpoint, a server delete, and
                                           every moderation act the identity's role allows, for
@@ -28,9 +27,8 @@ Found:       2026-11-01 (hostile review rev 2 of the checkpoint coverage design,
              "can a roster-removed device still author master-signed server ops")
 Affected:    every release from 0.12.0 (design ID-1 made the roster the device authority)
              through 0.13.0
-Fix commit:  5af8f7b7, 060ca581, 11d2619f, dcce6b29 (security/0.14)
-Embargo:     EMBARGOED until the 0.14 release (local branch security/0.14, never pushed);
-             advisory with the 0.14 GHSAs
+Fix commit:  5af8f7b7, 060ca581, 11d2619f, dcce6b29 (0.14)
+Disclosure:  advisory with the 0.14 GHSAs
 ```
 
 ## Description

@@ -1,8 +1,8 @@
 # HOL-SEC-197: A take over copied the old relay's state by name while the old services ran
 
 ```
-ID:          HOL-SEC-197                 Status: Fixed on local branch security/0.14
-                                          (3d62ce35, 2026-11-07), retest at release
+ID:          HOL-SEC-197                 Status: Fixed in 0.14
+                                          (3d62ce35, 2026-11-07)
 Severity:    Low                         (Impact M: a root-only file lands as the new relay's report
                                           counts or the forwarder's identity, readable by that
                                           service; Exploitability L: needs code running as the old
@@ -18,9 +18,8 @@ Attacker:    code execution as the old relay's or the old forwarder's service ac
 Found:       2026-11-07 (hostile review of the relay setup wizard, finding L1)
 Affected:    the setup wizard's take over since it shipped (relay 0.13.0 build 1 for
              self-hosters, 8350841b)
-Fix commit:  3d62ce35 (security/0.14, 2026-11-07)
-Embargo:     EMBARGOED until the 0.14 release (local branch security/0.14, never pushed);
-             advisory with the 0.14 GHSAs
+Fix commit:  3d62ce35 (0.14, 2026-11-07)
+Disclosure:  advisory with the 0.14 GHSAs
 ```
 
 ## Description

@@ -1,8 +1,8 @@
 # HOL-SEC-200: Olm pickles left session and account secrets in freed memory on every save
 
 ```
-ID:          HOL-SEC-200                 Status: Fixed on local branch security/0.14
-                                          (a6cdf8c4, 2026-11-07), retest at release
+ID:          HOL-SEC-200                 Status: Fixed in 0.14
+                                          (a6cdf8c4, 2026-11-07)
 Severity:    Low                         (Impact M: root and chain keys, skipped
                                           message keys and the account's identity and
                                           one-time secret keys outlive their use in
@@ -21,8 +21,8 @@ Attacker:    P-09 physical holder of a device (its memory, a crash dump or swap)
              any process that reads this one's memory
 Found:       2026-11-07 (hostile review of the vodozemac 0.9 -> 0.11.2 upgrade)
 Affected:    every release through 0.13.0
-Fix commit:  a6cdf8c4 (security/0.14, 2026-11-07)
-Embargo:     EMBARGOED until the 0.14 release; advisory with the 0.14 GHSAs
+Fix commit:  a6cdf8c4 (0.14, 2026-11-07)
+Disclosure:  advisory with the 0.14 GHSAs
 ```
 
 ## Description

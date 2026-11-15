@@ -1,11 +1,12 @@
-# Coverage of the Hollow security audit, 2026-09-26 to 2026-10-24
+# Coverage of the Hollow security audit, 2026-09-26 to 2026-11-15
 
 This document lists what each work package of the audit examined, what it found, what it
 examined and found sound, and what it did not examine. It is the `coverage.md` the audit plan
 requires before the audit can close (`reports/planned/security/SECURITY_AUDIT_PLAN.md` section 3
 artifact table and section 6 exit criteria), in the style of a Cure53 work-package note,
 including "areas examined that yielded no findings". It is an appendix of the final report
-`SECURITY_AUDIT_2026_10.md`.
+`SECURITY_AUDIT_2026_10.md`. It records the review up to the 0.13 close; what the 0.14 work
+added is in "The 0.14 work" below, and the rows that 0.14 changed say so.
 
 ## Scope and how to read this
 
@@ -148,7 +149,9 @@ replaced, and persisted the live-frame replay guard (AR-35 item 1).
  `AutoDownloadPref` (A-DM-26), `frame_auth::open`, the plaintext lane drop and
  `MessageEnvelope::Carried` (new:1-3). MATRIX.
 - L-02 (vodozemac non-contributory DH) holds: every non-ephemeral key input is signed and
- verified before session creation on every path (EF/olm "L-02").
+ verified before session creation on every path (EF/olm "L-02"). Since 0.14 vodozemac
+ (0.11.2) refuses non-contributory key agreements itself, and Hollow also refuses a
+ PreKey's small-order inner ratchet key, which vodozemac reaches only at the first send.
 - L-04 holds: every Ed25519 check is strict, and no signature bytes serve as an id, dedup key or
  replay key (EF/olm "L-04").
 - The Olm half of AR-19 matches the code as described (EF/olm "AR-19").
@@ -419,7 +422,8 @@ used a media forwarder), 138 (a kicked member stayed in the voice call), 139 (un
 frames pinned a receiver's CPU), 140 (a share passed the forwarder before encryption), 141 (the
 Share lane leaked IP addresses with Always relay on), 142. Accepted: AR-03 (members can forge
 each other's frames, RFC 9605 7.2), AR-14, AR-35 (1:1 camera video and gossip-forwarded audio
-carry no SFrame layer, only DTLS-SRTP; SFrame there is on the 0.14 list).
+carried no SFrame layer, only DTLS-SRTP, at the 0.13 close; 0.14 added SFrame to both, and
+gossip forwarding ships off).
 
 **Examined, no finding.**
 - L-01 (SFrame nonce uniqueness): SAFE, no fix required (EF/media "L-01").
@@ -494,23 +498,38 @@ Fixed in the same commit, not a separate finding: `announce_door_change` sent pr
 own fetch sockets; since `986a4d75` it skips fetch and guest sockets
 (`relay-uws/src/ws_handler.cpp`, the `!d->is_fetch` check in that function).
 
+## The 0.14 work (2026-10-31 to 2026-11-15)
+
+Each 0.14 track went through a design review where needed, a hostile code review, one fix
+round, a mutation pass, the full Rust suite on the PC and, where it changed behaviour, a
+fleet run. What it examined and found:
+
+| Work | Examined | Found | Source |
+|---|---|---|---|
+| macOS app review | The installed app's library search paths, its signature and the keychain item that holds the identity key | HOL-SEC-187; the fix proven by hand on a notarized build | `HOL_SEC_187_KEYCHAIN_DESIGN.md`, finding HOL-SEC-187 |
+| Track reviews | Device proof, checkpoint coverage, the join lock bound to devices, hidden senders, stranger bounds, received-voice volume, the relay denylist and limits | HOL-SEC-188 to 193, 195, 203, 204; AR-37, AR-38, AR-40 to AR-43 | `DEVICE_PROOF_DESIGN.md`, `CHECKPOINT_COVERAGE_DESIGN.md`, the finding files |
+| Setup wizard review | Take over, rollback, removal, certbot | HOL-SEC-196 to 199 | commit `3d62ce35`, R-RS-09 to R-RS-11 |
+| STRIDE slices | Server state, public channels, history sync (flows F-30, F-34, F-35) | HOL-SEC-194; AR-17 extended, AR-45, AR-46 | `audit/phase_ef/crdt.md`, `public_channels.md`, `backfill.md` |
+| Rust fuzzing | 23 cargo-fuzz targets: wire parsers, ingest folds, zips, pushes, peer images | HOL-SEC-202 | commit `82df7694` |
+| Dependency upgrades | vodozemac 0.11.2 and the Olm and MLS saves around it, the zip and SQLCipher updates and the archives they open | HOL-SEC-200, 201, 205, 206; AR-44 | commits `a6cdf8c4`, `bc2c4bdc`, `89d3a85d` |
+| Requirements | Every security rule: where it is enforced, which test proves it | R-RB-02 without a dedicated test, one planned guard (section 6.2) | `audit/requirements.md` |
+
 ## Exit criteria against the record
 
 | Criterion (PLAN section 6) | State in the record |
 |---|---|
-| Every DFD element walked through its STRIDE cells; LINDDUN GO on relay and push | 443 cells in eight phase E+F slices; LINDDUN GO done in EF/relay_push. Flows F-30, F-34, F-35 (CRDT ops, public channels, backfill responders) had no E+F slice; TM section 7 still says "to do" |
+| Every DFD element walked through its STRIDE cells; LINDDUN GO on relay and push | 443 cells in eight phase E+F slices; LINDDUN GO done in EF/relay_push. Flows F-30, F-34, F-35 (CRDT ops, public channels, backfill responders) had no E+F slice at the 0.13 close; 0.14 wrote them (`audit/phase_ef/crdt.md`, `public_channels.md`, `backfill.md`) |
 | Every matrix row has verified code evidence and an `authz_*` test per wrong principal | 346 rows, 0 OPEN, 3 DEFERRED (K3), every row with a guard test column. Most rows are agent-verified with mechanically checked citations; the lead re-read OPEN rows and ten sampled FIXED rows (MATRIX). Per-principal completeness is not recorded per row |
-| Every requirement traces to a test | Requirements exist per slice (R-IDENTITY, R-OLM, R-MLS, R-RP, R-DIST, R-FILES, R-LOCAL, R-MEDIA), written at `aa104d48` with some NOT MET at the time. There is no consolidated `requirements.md` (PLAN artifact table) and no record re-checking each R-* at the scope commit |
+| Every requirement traces to a test | Requirements exist per slice (R-IDENTITY, R-OLM, R-MLS, R-RP, R-DIST, R-FILES, R-LOCAL, R-MEDIA), written at `aa104d48` with some NOT MET at the time. At the 0.13 close there was no consolidated `requirements.md` (PLAN artifact table); 0.14 wrote it (`audit/requirements.md`: each rule, where it is enforced, which test proves it) |
 | Every finding fixed and retested, or accepted | Finding headers read "Fixed" or "Fixed... retest at release"; HOL-SEC-015 and 017 read "Fixed" since the close-out (their rest closed by HOL-SEC-062 and 041, as CAND and PLAN record). Retest dates per finding are not filled in |
 | Every finding has a variant-analysis section | 51 of 168 finding files mention variants (grep). PLAN phase D (variant analysis as its own session) has no separate record |
 | `coverage.md` lists each work package | This file |
-| Tooling items 1-5 of PLAN 2.8 run in CI | 1 and 2: CI job "Supply Chain" runs cargo-deny 0.20.2, osv-scanner 2.5.1, gitleaks 8.30.1 over the whole history and zizmor 1.30.1 (`ci.yml:285-347`). 3: the harness runs in nextest. 4 (proptest state machines): no record, `proptest` is not a dependency. 5: relay fuzzing runs nightly on the Mac mini by decision, not in public CI (crash inputs stay private); the Rust envelope parsers are not fuzzed |
+| Tooling items 1-5 of PLAN 2.8 run in CI | 1 and 2: CI job "Supply Chain" runs cargo-deny 0.20.2, osv-scanner 2.5.1, gitleaks 8.30.1 over the whole history and zizmor 1.30.1 (`ci.yml:285-347`). 3: the harness runs in nextest. 4 (proptest state machines): no record, `proptest` is not a dependency. 5: relay fuzzing runs nightly on the Mac mini by decision, not in public CI (crash inputs stay private); the Rust envelope parsers are fuzzed since 0.14 (23 cargo-fuzz targets) |
 
 ## Not covered and known gaps
 
 - **No independent team and no outside audit yet.** The work was done by the owner with AI agents
- as enumerators, builders and hostile reviewers. An external audit with the support of OSTIF
- is planned.
+ as enumerators, builders and hostile reviewers. An external audit is planned.
 - **No formal protocol model.** Verifpal or Tamarin on the roster, destroy orders and a
  relay-controlling attacker was deferred until the device design froze (PLAN 2.8 item 9,
  decision 3); no record that it was done.
@@ -522,25 +541,27 @@ own fetch sockets; since `986a4d75` it skips fetch and guest sockets
 - **Media and native code only in part.** The forked `flutter_webrtc` and our libwebrtc build
  were read for the frame cryptor only; mobile WebRTC binaries were not verified file by file;
  `screen_audio_capturer`, ffmpeg and Skia were not fuzzed (EF/media, EF/files).
-- **Rust parsers not fuzzed**, except the image check: the serde envelopes, `parse_ops_tolerant`,
- `fetch.rs` frame parsing, `hollowpack`, vault shards and the link-preview parser (PLAN 2.8
- item 5, EF/files, EF/relay_push).
+- **Rust parsers fuzzed only since 0.14.** At the 0.13 close only the image check had a target;
+ 0.14 added 23 cargo-fuzz targets for the wire parsers, ingest folds, zips, pushes and peer
+ images, with about 30 million executions in their first run (PLAN 2.8 item 5, EF/files,
+ EF/relay_push).
 - **No property-based tests** of the authorisation cores (PLAN 2.8 item 4); no record.
 - **Static rules and lint ratchets** (PLAN 2.8 items 7, 8): no record in the audit; an earlier
  Semgrep pass (issue 46) and SonarQube Cloud predate it.
 - **Phase E+F slices ran nothing.** Every slice was read-only; their "met with a test" verdicts
  mean the test exists, not that it passed at that tree (EF/local, EF/identity headers).
-- **CRDT and channel STRIDE.** Covered by the phase B matrix and design E only (see WP3).
+- **CRDT and channel STRIDE.** Covered by the phase B matrix and design E only at the 0.13
+ close (see WP3); 0.14 wrote the three slices (`audit/phase_ef/crdt.md`, `public_channels.md`,
+ `backfill.md`).
 - **Open accepted risks.** `AR` holds the current state of every row. Among them: no
- per-message relay limits (AR-01, AR-06; the G2 breaker runs in shadow until the 0.14 enforce
- switch), member frame forgery in calls (AR-03), the first-contact and legacy residuals of the
+ per-message relay limits (AR-01, AR-06; the G2 breaker enforces by default since 0.14), member frame forgery in calls (AR-03), the first-contact and legacy residuals of the
  identity designs (AR-10 to AR-19), and the residuals of AR-25, AR-27 (mixed-version groups and
  meetings), AR-33, AR-35 and AR-36.
 - **iOS stranger wakes** wait on Apple's filtering entitlement (K3).
-- **0.14 list** of known compatibility paths still in 0.13: vector sync, the old discovery
- answer, the ring-1 switch, the MLS legacy rebind, SFrame on 1:1 camera and gossip audio, archive
- format 2 writes, the `revoked_devices` dual write, the hidden-sender broadcast limits and the
- breaker enforce switch.
+- **The 0.13 list for 0.14** (vector sync, the old discovery answer, the ring-1 switch, the MLS
+ legacy rebind, SFrame on 1:1 camera and gossip audio, archive format 2 writes, the
+ `revoked_devices` dual write, the hidden-sender broadcast limits and the breaker enforce
+ switch) is done in 0.14, except that gossip forwarding of voice ships off (section 6.2).
 
 ## Timeline
 
@@ -556,3 +577,5 @@ own fetch sockets; since `986a4d75` it skips fetch and guest sockets
 | 2026-10-06 to 10-07 | Scanner triage; resumable-sessions reviews | HOL-SEC-163, 164, 165, 170 to 172; AR-36 |
 | 2026-10-08 to 10-20 | 0.12.1 and 0.12.2 | AR-24 narrowed, AR-26 and AR-29 closed, AR-30 and AR-34 fixed, AR-33 in part |
 | 2026-10-22 to 10-24 | Phase G, the 0.13 wave | 26 commits `22116aa5` to `41080e0d`; relay deployed 10-23; merged-tree suites and fleets 10-24 |
+| 2026-10-30 | 0.13.0 released | the 0.13 edition of this report |
+| 2026-10-31 to 11-15 | The 0.14 work | HOL-SEC-187 to 206; AR-12 and AR-39 closed, AR-37, AR-38 and AR-40 to AR-46 new; the HOL-SEC-187 proof by hand 11-15 |

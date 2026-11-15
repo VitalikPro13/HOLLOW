@@ -1,8 +1,8 @@
 # HOL-SEC-193: A carried profile card or update keeps a roster for any identity its sender's device signed
 
 ```
-ID:          HOL-SEC-193                 Status: Fixed on local branch security/0.14
-                                          (track t14-prof, 2026-11-05), retest at release
+ID:          HOL-SEC-193                 Status: Fixed in 0.14
+                                          (track t14-prof, 2026-11-05)
 Severity:    Medium                      (Impact M: unbounded growth of the roster book
                                           and the card store, and the resolver re-points
                                           the sending device to each minted identity;
@@ -21,9 +21,8 @@ Found:       2026-11-05 (t14-flood, harness probe on 33024bdb; the code is the s
              main 8350841b)
 Affected:    every release from 0.12.0 (profiles phase D: cards and rosters ride profile
              messages) through 0.13.0
-Fix commit:  a58d7f38 (security/0.14, 2026-11-05)
-Embargo:     EMBARGOED until the 0.14 release (local branch security/0.14, never pushed);
-             advisory with the 0.14 GHSAs
+Fix commit:  a58d7f38 (0.14, 2026-11-05)
+Disclosure:  advisory with the 0.14 GHSAs
 ```
 
 ## Description

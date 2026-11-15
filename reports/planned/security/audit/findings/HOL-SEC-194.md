@@ -1,8 +1,8 @@
 # HOL-SEC-194: A member served a public channel's deleted posts, and their files, to a non-member
 
 ```
-ID:          HOL-SEC-194                 Status: Fixed on local branch security/0.14
-                                          (c7caff62, 2026-11-05), retest at release
+ID:          HOL-SEC-194                 Status: Fixed in 0.14
+                                          (c7caff62, 2026-11-05)
 Severity:    Low                         (Impact L: text and files their author deleted from a
                                           public channel stay readable to a stranger who never
                                           saw them; Exploitability M: needs a modified client
@@ -20,9 +20,8 @@ Affected:    every release with public channels through 0.13.0 (before 0.11.1 th
              responder had no requester gate at all, closed then for non-public channels)
 Found:       2026-11-05 (docs-only STRIDE pass, confirmed by a harness probe on 56587ca2;
              the code is the same on main 8350841b)
-Fix commit:  c7caff62 (security/0.14, 2026-11-05)
-Embargo:     EMBARGOED until the 0.14 release (local branch security/0.14, never pushed);
-             advisory with the 0.14 GHSAs
+Fix commit:  c7caff62 (0.14, 2026-11-05)
+Disclosure:  advisory with the 0.14 GHSAs
 ```
 
 ## Description

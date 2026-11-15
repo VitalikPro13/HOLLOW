@@ -1570,7 +1570,7 @@ A portable, cryptographically verified export format for conversation history:
 - **Deletion records** with per-delete signatures (the deleted text is preserved, the delete operation itself is signed).
 - **Reaction removal evidence** (who removed which reaction, when, signed).
 - **File embedding** with SHA-256 integrity hashes (three modes: full, images-only, placeholder).
-- **Archive-level signature:** The exporter's Ed25519 key signs a deterministic hash of the entire archive contents. This catches selective omission: it attests that the archive is the exporter's complete record. From format 2 the signature covers the hash under a `hollow-archive1` domain tag, like every other signed payload; format 1 archives, which signed the bare hash, still verify, and the format number is itself inside the hash. Version 0.13 opens both formats and still writes format 1.
+- **Archive-level signature:** The exporter's Ed25519 key signs a deterministic hash of the entire archive contents. This catches selective omission: it attests that the archive is the exporter's complete record. From format 2 the signature covers the hash under a `hollow-archive1` domain tag, like every other signed payload; format 1 archives, which signed the bare hash, still verify, and the format number is itself inside the hash. Hollow opens both formats and, since 0.14, writes format 2.
 
 ### 16.4 Evidence Recovery (Cooperative Shard Gathering)
 

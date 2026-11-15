@@ -3,8 +3,9 @@
 Design, revision 2 (after the hostile review `HOL_SEC_187_KEYCHAIN_DESIGN_REVIEW.md` and
 Vitalik's answers of 2026-10-31), approved 2026-10-31 and built in 0.14: b8b64d15
 (2026-11-01), 6fec99e7 (2026-11-14) and the re-key b887e706 (2026-11-15, section 3.2 c).
-Signed proof by hand on 2026-11-15 (section 6). EMBARGOED with HOL-SEC-187 until 0.14
-ships.
+Signed proof by hand on 2026-11-15 (section 6), shipped with HOL-SEC-187's fix in 0.14.
+The proof is that hand procedure on a notarized build, run again for any release that
+changes keychain code; an automated signed CI job is not required (decided 2026-11-15).
 
 Scope: the macOS identity key that every old signed build still opens without a prompt,
 and the Apple team transfer (old team `NWPBHZX7DT` to new team `XMTJT2AV6F`), which
@@ -265,8 +266,8 @@ process's queries reach. Its stage 1 seeds the login item from a helper of the s
 item's maker, `SecItemAdd` with an access list trusting both apps), so 0.14 may read it and
 may not delete it, and REQUIRES the item to stay, the re-key line, and the item's key to
 open nothing: an item 0.14 could delete is "field case not reproduced", a FAIL (review R6).
-The signed job has never run (its repo variables were never set, and 0.14's Apple builds
-are signed outside CI); the signed proof that did run is by hand (section 6).
+The script runs by hand on a notarized build, with the move from 0.13 and the password
+case, for any release that changes keychain code (section 6); no CI job runs it.
 
 Deleting the old item is NOT enough, because it does not happen: on the signed 0.14 build
 (2026-11-14, macOS 26) every delete of 0.13's login item answered `errSecInvalidOwnerEdit`
@@ -365,7 +366,7 @@ the attacker cannot swap without losing the entitlements:
 - Second layer on macOS 14 and later: a library load constraint pinned to the team and the
   release's cdhashes (`codesign` library constraints; tooling UNVERIFIED, U14).
 - Cost and the callback's timing before an image's initialisers run are UNVERIFIED (U14);
-  measured on the signed runner.
+  measured on a signed build.
 
 ## 3. The move on the first 0.14 launch (Q2)
 
@@ -702,7 +703,7 @@ that enforces them (Rust store, Swift self-check, load gate).
 | the transfer note shows even after the 0.12.2 note | Dart `the_transfer_note_shows_even_after_the_0122_note` | `flutter test` |
 | every Apple keychain call names a group; the extensions never claim the keys group; Debug never takes the release identity | Dart source guards over `AppDelegate.swift`, `app_lock_service.dart`, the iOS entitlements, `macos/Flutter/*.xcconfig` (`flutter_debug_config_never_takes_the_release_identity`) | `flutter test` |
 | the shipped Mac app embeds a valid profile, a complete sealed-image list and no debug engine | `macos_load_gate_test.sh` new cases (missing, wrong team, expired, unauthorised claim, a Mach-O missing from or mismatching `HollowSealedImages`, a JIT engine) + `macos_load_gate_guard_test.dart` | CI, scratch bundles |
-| signed 0.14 moves the key; signed 0.13 cannot read it, even with a dylib; a swapped framework reads nothing | install 0.13, make a throwaway keychain identity, install 0.14, launch (legacy gone, identity opens), relaunch 0.13 (key-missing in the log), an injected dylib's protected query returns `errSecMissingEntitlement`; copy signed 0.14, swap one framework for 0.13's, launch: no protected read, the log names the refusal, nothing deleted; the macOS launch secret reads back after a restart (U9); `launchctl procinfo` shows "entitlements validated" | GitHub macOS runner, throwaway user keychain (U11): NEVER RUN (the repo variables `MAC_PREVIOUS_RELEASE_ZIP_URL` / `_SHA256` were never set; 0.14 is signed outside CI) |
+| signed 0.14 moves the key; signed 0.13 cannot read it, even with a dylib; a swapped framework reads nothing | install 0.13, make a throwaway keychain identity, install 0.14, launch (legacy gone, identity opens), relaunch 0.13 (key-missing in the log), an injected dylib's protected query returns `errSecMissingEntitlement`; copy signed 0.14, swap one framework for 0.13's, launch: no protected read, the log names the refusal, nothing deleted; the macOS launch secret reads back after a restart (U9); `launchctl procinfo` shows "entitlements validated" | By hand on a notarized build with a throwaway identity (the next row), with `scripts/macos_keychain_check.sh`, for any release that changes keychain code. No CI job (decided 2026-11-15: the Rust tests cover the logic, mutation-tested, and only the real keychain's ownership rules need a signed build). The 2026-11-15 run proved the move and that 0.13 opens nothing; the script's planted-library and swapped-framework stages were not part of it |
 | signed 0.14 re-keys off a login item it may not delete, and re-salts a cached password key; signed 0.13 opens neither afterwards | by hand on the Mac mini (macOS 26), 2026-11-15, notarized Developer ID build of b887e706 (`spctl` "Notarized Developer ID", staple valid), throwaway identity on the test relay. Keychain only (`0x02`): 0.13 new identity, then 0.14 logged "Keychain re-key: this identity now opens only with a new key in the protected keychain; 1 old login item(s) stay but no longer open it"; 0.14 again silent; 0.13 `keychain_key_missing`, files untouched. Password with the cache (`0x03`, ask-before-start off): 0.14 at the typed App Lock password logged "Keychain re-key: the password key moved under a new salt; 1 old login item(s) stay but no longer open it" (salt changed, both files rewritten, still `0x03`, no extra dialog: the typed unlock did it, so the one ask did not show); 0.14 again silent; 0.13 could not open from the login item, asked for the password and opened with it, files untouched; 0.14 after that had nothing to re-salt. Screen share (permission, own share never full screen) passed on the same build; launch, video, camera and the App Lock password on the signed build of 2026-11-14. PASS | Vitalik's hands on the mini; the build signed on the old iMac |
 | transfer mechanics, history across the real transfer | D1 to D3; step 4 | Vitalik's iPhone, runners, the old Mac |
 
@@ -734,7 +735,7 @@ key; whoever holds the keys group registration can read the items (the signing t
 power); a Mac moved by Migration Assistant after 0.14 asks for the phrase, one moved from
 a 0.13 Mac stays a clone of it.
 
-**Test**, add the section 6 Rust names, the gate cases and the signed-runner checks.
+**Test**, add the section 6 Rust names, the gate cases and the signed checks by hand.
 
 **HOL-SEC-158**, residual "The macOS Rust keychain item keeps its class (the
 data-protection keychain needs a signing change)": resolved (this-device class in 0.14).
@@ -760,17 +761,17 @@ enclave key re-group or re-bind. Nothing here is remote-reachable.
 | # | Claim | How |
 |---|---|---|
 | U1 | macOS accepts an iOS-style app group as a data-protection keychain group with a Developer ID profile, on 12 to 26 | D3: PASS on macOS 15.7.4 only (2026-11-01 drill, old iMac, write and read, procinfo "entitlements validated"); 12, 13, 14 and 26 not run, the runtime fallback covers them |
-| U2 | an old build (no entitlements) gets `errSecMissingEntitlement` for our group, a dylib inside it too | D3: PASS (an ad-hoc copy claiming the group got -34018; an ad-hoc copy claiming the full set was killed at launch). The signed runner repeats it for the real 0.13 with a planted library |
+| U2 | an old build (no entitlements) gets `errSecMissingEntitlement` for our group, a dylib inside it too | D3: PASS (an ad-hoc copy claiming the group got -34018; an ad-hoc copy claiming the full set was killed at launch). The script's planted-library stage repeats it for the real 0.13, by hand on a signed build |
 | U3 | `SecItemUpdate` can re-group an enclave key, and it then works from another team's app | D2: PASS on iOS 18.7.8 (2026-11-01, Vitalik's iPhone 13 mini): status 0, same ECDH before and after, and a new-team app got identical ECDH outputs after the group moved teams; a key made directly in the group survived the move too. Other iOS versions stay on the runtime fallback (re-bind) |
 | U4 | group container files survive the group transfer | D2/D3 (file): PASS on iOS 18.7.8 and macOS 15.7.4 (2026-11-01), the new-team app read the file and the old-team app kept reading everything; step 4 still checks the real app |
 | U5 | the portal offers App Groups for a Developer ID profile of `com.anonlisten.hollow` | PASS (2026-11-01 drill) |
 | U6 | an old-team Developer ID app keeps launching after its App ID and group leave the team | D3 F1 case: PASS at 0 h on macOS 15.7.4 (launch, read, file; Gatekeeper "accepted, source=Developer ID") and on iOS (ad-hoc A); PASS after a restart and 82 h on macOS 15.7.4 (2026-11-04: launch, group keychain read, container file; the group was deleted on both teams, stricter than a real transfer). DTS question still open |
 | (drill) | the new team can register a group name the old team deleted | accepted at once, no waiting window (2026-11-01); the back-to-back rule of 4.2 still holds |
 | U7 | a new-team re-grant replaces TCC's stored requirement | after step 4 |
-| U8 | `AfterFirstUnlockThisDeviceOnly` items on macOS survive a locked-screen restart and do not restore elsewhere | signed runner; Migration Assistant if a spare Mac exists |
-| U9 | macOS App Lock writes fail today, and work with the profile | signed 0.13, then 0.14 on the runner |
+| U8 | `AfterFirstUnlockThisDeviceOnly` items on macOS survive a locked-screen restart and do not restore elsewhere | a signed build by hand; Migration Assistant if a spare Mac exists |
+| U9 | macOS App Lock writes fail today, and work with the profile | signed 0.13, then 0.14, by hand |
 | U10 | revocation stops installed apps offline too; whether a revoked-certificate library still loads into a valid app; who revokes | Apple Developer Support |
-| U11 | GitHub macOS runners have a working data-protection keychain | the first runner job |
+| U11 | GitHub macOS runners have a working data-protection keychain | not needed: no runner job proves the keychain (decided 2026-11-15) |
 | U12 | the app's private container and UserDefaults survive the real transfer | step 4 |
 | U13 | push re-registers after the transfer | step 4 |
 | U14 | the in-memory cdhash check and the add-image callback run before an image's code, at an acceptable cost; macOS 14 library constraints pin cdhashes | Partly answered (fix round, 2026-11-01): initialisers of libraries linked at launch run BEFORE the check (dyld runs them before the executable's code), so the check stops a swapped library from reaching the keychain, the engine or the person, not from running its constructors; library constraints stay the only layer that stops those. Cost on an M4 mini: the whole start check on the real release bundle (38 sealed slices, ad-hoc dry run with the hardened runtime) took 11.9 and 17.5 ms; a full static validation of every image would add about 300 ms per start (hollow_core alone 239 MB, 240 ms), so the check samples 32 `__TEXT` pages per image in memory instead. Signed runner still measures the signed bundle |
@@ -781,7 +782,7 @@ enclave key re-group or re-bind. Nothing here is remote-reachable.
   uses the data-protection keychain on macOS and the Mac app has no keychain entitlement,
   so the launch secret is probably never kept. Fix: rides this design; the plugin ignores
   `groupId` on macOS, so the entries land in the app-ID group and are lost once at the
-  team change (the person types the PIN once). Test: the signed-runner check reads the
+  team change (the person types the PIN once). Test: a signed check by hand reads the
   launch secret back after a restart.
 - **The macOS store deletes before it adds** (`platform_keystore.rs:270-275`). Low: in
   today's callers a crash in that gap costs the silent unlock, not the identity (something

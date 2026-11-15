@@ -1,8 +1,8 @@
 # HOL-SEC-201: MLS saves left group and signing secrets in freed memory on every message
 
 ```
-ID:          HOL-SEC-201                 Status: Fixed on local branch security/0.14
-                                          (bc2c4bdc, 2026-11-07), retest at release
+ID:          HOL-SEC-201                 Status: Fixed in 0.14
+                                          (bc2c4bdc, 2026-11-07)
 Severity:    Low                         (Impact M: the device's MLS signing key, each
                                           group's epoch and message secrets, HPKE private
                                           keys, resumption secrets and a staged commit's
@@ -22,8 +22,8 @@ Attacker:    P-09 physical holder of a device (its memory, a crash dump or swap)
              any process that reads this one's memory
 Found:       2026-11-07 (while fixing HOL-SEC-200)
 Affected:    every release through 0.13.0
-Fix commit:  bc2c4bdc (security/0.14, 2026-11-07)
-Embargo:     EMBARGOED until the 0.14 release; advisory with the 0.14 GHSAs
+Fix commit:  bc2c4bdc (0.14, 2026-11-07)
+Disclosure:  advisory with the 0.14 GHSAs
 ```
 
 ## Description

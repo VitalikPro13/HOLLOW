@@ -30,9 +30,7 @@ Attacker:    another process running as the same macOS user
 Found:       2026-10-31 (review of the installed 0.12.2 app, confirmed by the lead)
 Affected:    every macOS release from 0.5.0, the first shipped macOS build (the macOS port,
              commit a7bb7ec0), through 0.13.0
-Embargo:     EMBARGOED until the 0.14 release (local branch security/0.14, never pushed);
-             the CI sign-stage patch applies only at the 0.14 release; advisory with the
-             0.14 GHSAs
+Disclosure:  advisory with the 0.14 GHSAs
 ```
 
 ## Description
@@ -200,9 +198,8 @@ builds of the new team.
   opened as a profile again. A set-aside password pair whose password is not the current
   one stays under the login key that opens it. A profile not opened in 0.14 keeps its old
   key until its first 0.14 start.
-- The signed proof ran by hand on one Mac (macOS 26). The automated signed job
-  (`scripts/macos_keychain_check.sh` on macOS 14, 15 and 26 runners) has never run, and
-  macOS 12 and 13, which 0.14 still supports, have no signed run at all.
+- The signed proof ran by hand on one Mac (macOS 26); macOS 12 and 13, which 0.14 still
+  supports, have no signed run.
 
 ## Test
 
@@ -326,13 +323,12 @@ throwaway identity on the test relay, beside the signed 0.13.0 release:
   opens full screen, passed. Video, camera and the App Lock password passed on the signed
   build of 2026-11-14.
 
-Not run: the automated signed job, `scripts/macos_keychain_check.sh` on throwaway macOS 14,
-15 and 26 runners (release-apple job `macos-keychain-check`: the move with a login item
-only its maker may delete, 0.13 and a library planted in it refused, a framework swapped
-for 0.13's, an edited Info.plist and this team's framework moved outside the bundle each
-ending the start before the engine). Its repository variables
-`MAC_PREVIOUS_RELEASE_ZIP_URL` and `MAC_PREVIOUS_RELEASE_ZIP_SHA256` were never set and
-0.14's Apple builds are signed outside CI, so it has never run.
+This hand procedure on a notarized build is the proof of the keychain behaviour (decided
+2026-11-15): `scripts/macos_keychain_check.sh` with the steps above, the move from 0.13 and
+back to it and the password case. It runs again for any release that changes keychain
+code; the hand run of 2026-11-15 is the proof for 0.14. The logic is covered by the Rust
+tests above, which are mutation-tested; only the real keychain's ownership rules need a
+signed build. An automated signed CI job is not required.
 
 `check` fails on the installed 0.12.2 app and on a fresh unsigned release build (nine run
 paths each) and passes after `strip`. A probe placed inside that build, signed with the

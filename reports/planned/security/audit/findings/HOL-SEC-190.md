@@ -1,8 +1,8 @@
 # HOL-SEC-190: A received voice's volume was looked up by the track id its sender chose
 
 ```
-ID:          HOL-SEC-190                 Status: Fixed on local branch security/0.14
-                                          (track t14-vol, 2026-11-04), retest at release
+ID:          HOL-SEC-190                 Status: Fixed in 0.14
+                                          (track t14-vol, 2026-11-04)
 Severity:    Medium                      (Impact M: a participant could keep playing for a
                                           listener who deafened or muted them, or turn another
                                           member up or down at that listener; Exploitability M:
@@ -18,9 +18,8 @@ Traces to:   C-21 (participants only); feedback_remote_track_volume_not_found (#
 Attacker:    a participant of the call or voice channel
 Found:       2026-11-01 (wave 2 track w2-e, confirmed on main 8350841b on 2026-11-04)
 Affected:    every release with calls or voice channels through 0.13.0
-Fix commit:  33024bdb (security/0.14, 2026-11-04)
-Embargo:     EMBARGOED until the 0.14 release (local branch security/0.14, never pushed);
-             advisory with the 0.14 GHSAs
+Fix commit:  33024bdb (0.14, 2026-11-04)
+Disclosure:  advisory with the 0.14 GHSAs
 ```
 
 ## Description

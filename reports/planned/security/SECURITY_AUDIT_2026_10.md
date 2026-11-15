@@ -1,12 +1,14 @@
 # Hollow Internal Security Review 2026-10
 
 **Internal security review**\
-**Hollow version: 0.13.0, with the 0.14 findings added (HOL-SEC-187 to HOL-SEC-206)**\
-**Date: October 30, 2026; 0.14 findings added November 15, 2026**\
-**Scope: the 0.13.0 release, tag `v0.13.0-beta`, and for the 0.14 findings the 0.14 release**\
-**Review period: 2026-09-26 to 2026-10-24; 0.14 findings 2026-10-31 to 2026-11-15**\
+**Hollow version: 0.14.0**\
+**Date: October 30, 2026; revised for 0.14 on November 15, 2026**\
+**Scope: the 0.14.0 release, tag `v0.14.0`**\
+**Review period: 2026-09-26 to 2026-11-15**\
 **Author: Vitalii Rovinskyi**\
 *This report was generated with the assistance of Claude (AI), and the review it describes was carried out with Claude agents directed by the author. Every decision on what Hollow must allow, every severity and every conclusion is the author's. This is not an audit by an independent firm.*
+
+*Revision note: this edition was revised for 0.14 on November 15, 2026. It describes Hollow at the 0.14 release. The twenty findings filed since 0.13.0 sit in their sections, and every total counts them. The 0.13 edition of October 30, 2026 stays available with the 0.13.0 release.*
 
 ---
 
@@ -18,13 +20,15 @@ Hollow is a distributed, end-to-end encrypted chat and voice application: Rust c
 (`rust/hollow_core`), Flutter app on five platforms (Windows, macOS, Linux, Android, iOS), and a C++ WebSocket relay
 (`relay-uws`) that members or Hollow run. This review covered the Rust core, the relay and
 its host, the parts of the Flutter app that make security decisions or handle untrusted
-input, the push path, and the release and update signing. It ran from 2026-09-26 to
-2026-10-24, across the releases 0.12.0 (2026-10-05), 0.12.1 (2026-10-16), 0.12.2
-(2026-10-20) and the 0.13 wave (2026-10-22 to 2026-10-24).
+input, the push path, the release and update signing, the macOS app bundle and the
+self-hosted relay's setup wizard. It ran from 2026-09-26 to 2026-11-15, across the
+releases 0.12.0 (2026-10-05), 0.12.1 (2026-10-16), 0.12.2 (2026-10-20), the 0.13 wave
+(2026-10-22 to 2026-10-24, released as 0.13.0 on 2026-10-30) and the 0.14 work
+(2026-10-31 to 2026-11-15).
 
 ### Headline numbers
 
-The review filed 182 findings, numbered HOL-SEC-001 to HOL-SEC-186. The numbers 166 to 169
+The review filed 202 findings, numbered HOL-SEC-001 to HOL-SEC-206. The numbers 166 to 169
 were never used (see section 3.10). Every finding is fixed. What a fix did not remove is
 recorded as a residual in the finding and, where it is a decision, in the accepted-risk
 register (section 6).
@@ -42,11 +46,11 @@ break of confidentiality:
 | Severity | C | A | P | S | Total |
 |---|---|---|---|---|---|
 | Critical | 7 | 1 | 0 | 0 | 8 |
-| High | 26 | 6 | 0 | 0 | 32 |
-| Medium | 45 | 19 | 11 | 1 | 76 |
-| Low | 37 | 19 | 7 | 1 | 64 |
+| High | 28 | 7 | 0 | 0 | 35 |
+| Medium | 50 | 21 | 12 | 1 | 84 |
+| Low | 43 | 21 | 8 | 1 | 73 |
 | Info | 2 | 0 | 0 | 0 | 2 |
-| Total | 117 | 45 | 18 | 2 | 182 |
+| Total | 130 | 50 | 20 | 2 | 202 |
 
 Where the fixes shipped:
 
@@ -55,6 +59,8 @@ Where the fixes shipped:
 | 0.12.0 (relay fixes deployed ahead of it) | 162 | 8 | 29 | 68 | 55 | 2 |
 | 0.12.1 | 6 | 0 | 1 | 3 | 2 | 0 |
 | 0.13 (relay deployed 2026-10-23) | 14 | 0 | 2 | 5 | 7 | 0 |
+| 0.14 (relay fixes deployed ahead of it) | 20 | 0 | 3 | 8 | 9 | 0 |
+| Total | 202 | 8 | 35 | 84 | 73 | 2 |
 
 ### Verdict
 
@@ -78,7 +84,14 @@ crash of the node through a panic in a third-party image decoder (HOL-SEC-173), 
 exhaustion of the relay box with large broadcasts (HOL-SEC-183). Both are fixed, and the
 relay fix is deployed.
 
-We believe Hollow 0.13 keeps the promises in `audit/claims.md` as far as
+The 0.14 work found no Critical either. Of its 20 findings, 13 are class C, 5 are class A
+and 2 are class P. Three are High. The macOS app could load libraries from outside its
+bundle, and every signed build could open the identity key without a prompt
+(HOL-SEC-187). A device its owner had removed from the roster could still write server
+history with the master key (HOL-SEC-188). A received sticker pack was unpacked with no
+size limit as soon as its card showed (HOL-SEC-205). All three are fixed in 0.14.
+
+We believe Hollow 0.14 keeps the promises in `audit/claims.md` as far as
 tests can show, with the residuals listed per finding and in section 6. This belief rests
 on an internal review, and the limits below are real.
 
@@ -89,10 +102,12 @@ on an internal review, and the limits below are real.
   correlated. This is the main reason an external audit is planned (section 3.11).
 - **No formal model.** None of the protocols (frame sealing, the roster and recovery
   phrase, the join lock, the MLS authority rules) has a Tamarin or ProVerif model.
-- **Fuzzing is partial.** The relay's nine network-facing parsers run under libFuzzer with
-  ASan and UBSan nightly (about 1.36 billion executions in the first run, no memory-safety
-  report). In the Rust core only the image check has a fuzz target; the wire parsers
-  (sealed frames, envelopes, CRDT batches, rosters, archives) are not fuzzed yet.
+- **Fuzzing is partial.** The relay's network-facing parsers run under libFuzzer with
+  ASan and UBSan nightly in ten targets (about 1.36 billion executions in the first run of
+  the first nine, no memory-safety report). The Rust wire parsers (sealed frames,
+  envelopes, CRDT batches, rosters, archives and file names among them) have run under 23
+  cargo-fuzz targets since 0.14, with about 30 million executions in their first run. The
+  native media and decoding code is not fuzzed.
 - **No penetration test of the deployed relay box** beyond the host checks in
   `relay-uws/deploy/check-host.sh`, and no bug bounty.
 - **Native code is covered only at its edges** (section 2).
@@ -100,28 +115,32 @@ on an internal review, and the limits below are real.
   (1,737 citations, none wrong) and the open rows and a sample of fixed rows were re-read
   by hand; the other rows are agent-verified, and the matrix says so.
 
-### After 0.13: the 0.14 findings
+### What changed since the 0.13 edition
 
-Twenty findings were filed after 0.13.0 shipped, numbered HOL-SEC-187 to HOL-SEC-206. They
-came from a review of the installed macOS app, the hostile reviews of the 0.14 designs and
-code, probes written while building 0.14, the STRIDE slices of section 6.2, a fuzz target,
-and a review of the 0.14 dependency upgrades. Every one is fixed in 0.14, and all
-twenty publish with the 0.14 advisories.
-
-| Severity | C | A | P | S | Total |
-|---|---|---|---|---|---|
-| High | 2 | 1 | 0 | 0 | 3 |
-| Medium | 5 | 2 | 1 | 0 | 8 |
-| Low | 6 | 2 | 1 | 0 | 9 |
-| Total | 13 | 5 | 2 | 0 | 20 |
-
-With them, the review's record holds 202 findings, numbered HOL-SEC-001 to HOL-SEC-206
-(166 to 169 unused, section 3.10).
-
-0.14 also narrows the fuzzing limit above. The Rust wire parsers now
-run under 23 cargo-fuzz targets (sealed frames, envelopes, CRDT batches, rosters, archives
-and file names among them; about 30 million executions in the first run, one finding,
-HOL-SEC-202), and the relay's libFuzzer set has a tenth target for its denylist.
+- **Twenty new findings**, HOL-SEC-187 to HOL-SEC-206, all fixed in 0.14. They came from a
+  review of the installed macOS app, the hostile reviews of the 0.14 designs and code,
+  probes written while building 0.14, three new STRIDE slices, a fuzz target and a review
+  of the 0.14 dependency upgrades. They sit in sections 4 and 5 with the others, and the
+  totals above count them.
+- **Assurance.** The Rust wire parsers are fuzzed, and the relay's fuzz set has a tenth
+  target, for its denylist. The STRIDE slices the 0.13 pass left out (server state, public
+  channels, history sync) are written. A requirements list (`audit/requirements.md`) names,
+  for each security rule, where the code enforces it and which test proves it.
+- **The relay and older clients.** The circuit breaker enforces by default (4ccb0a10),
+  after the official relay's shadow counters over 11 days, the G1 scale run and a probe of
+  300 fresh sessions behind one address showed no trip. The paths kept for 0.12.2 and 0.13
+  clients are gone: the legacy MLS leaf rebind, the old stand-in rule for anchored servers,
+  the dual `revoked_devices` write, the state vector for self-certifying servers, the old
+  discovery answer and the ring-control switch (550d6b01).
+- **Media and archives.** A 1:1 call's camera carries SFrame like every other media path,
+  and archives are written in format 2.
+- **Accepted risks.** AR-12 and AR-39 are closed. AR-37, AR-38 and AR-40 to AR-46 are new.
+  AR-01, AR-08, AR-11, AR-15, AR-17, AR-27, AR-35 and AR-36 changed (section 6.1).
+- **HOL-SEC-161** has no residual left: 0.14 refuses a PreKey's small-order inner ratchet
+  key too, and vodozemac 0.11.2 refuses small-order keys itself.
+- **0.13 clients** stop seeing servers whose join lock a 0.14 device moved (AR-38), and
+  their posts past a server's cut no longer reach 0.14 members. A signed status notice
+  tells them to update.
 
 ## 2. Scope
 
@@ -132,13 +151,14 @@ HOL-SEC-202), and the relay's libFuzzer set has a tenth target for its denylist.
   encryption, the FFI surface, the push fetch node and the iOS extension's Rust half, the
   embedded and standalone media forwarder.
 - `relay-uws`: the C++ relay, its snapshot codec, its tables and fair-share eviction, its
-  deploy units, the Docker path, and the production host's accounts, sandboxes, secrets
-  and logs.
+  deploy units, the Docker path, the self-hosted setup wizard, and the production host's
+  accounts, sandboxes, secrets and logs.
 - The Flutter app where it decides something or handles untrusted input: links and deep
   links, notifications and App Lock, file saves, data-channel file intake, call signals and
   share audio, SFrame key handling, the wipe.
 - Distribution: the signed update manifest and feeds, the updater's archive handling, the
-  flatpak repository (phase E+F distribution pass).
+  flatpak repository (phase E+F distribution pass), and the macOS bundle's library load
+  paths, signature and keychain use (0.14).
 - The push sidecar's handling of tokens and logs.
 
 ### Out of scope or covered only in part
@@ -176,8 +196,8 @@ physical holder of a device, P-10 hostile infrastructure other than the relay (u
 host, CDN, TURN, a forwarder), P-11 push providers, P-12 third-party websites. Every peer
 and the relay sit across a trust boundary, so every byte they send is attacker-controlled.
 
-The promises being tested are the claims in `audit/claims.md` (C-01 to C-37, 36 since C-23
-was withdrawn), approved by the author on 2026-09-26. Every finding traces to a claim, an
+The promises being tested are the claims in `audit/claims.md` (C-01 to C-39, 38 since C-23
+was withdrawn), approved by the author on 2026-09-26; C-38 and C-39 were added in 0.14. Every finding traces to a claim, an
 asset or an attack tree.
 
 ### 3.2 Research first, then a written method
@@ -214,7 +234,12 @@ group authentication is mistaken for authority over the object a message names.
   non-finding (`audit/phase_ef/dispositions.md`).
 - **G. Relay traffic, limits and fuzzing, and close-out** (0.13 wave, 2026-10-22 to
   2026-10-24): measured traffic, a circuit breaker in shadow mode, a send budget, relay
-  fuzzing, the scale fixes, this report.
+  fuzzing, the scale fixes, the 0.13 edition of this report.
+- **The 0.14 work** (2026-10-31 to 2026-11-15): a review of the installed macOS app, a
+  design and code review for every 0.14 track, the three STRIDE slices the 0.13 pass left
+  out (`audit/phase_ef/crdt.md`, `public_channels.md`, `backfill.md`), cargo-fuzz targets
+  for the Rust wire parsers, a review of the dependency upgrades, and the requirements
+  list (`audit/requirements.md`).
 
 ### 3.4 Severity
 
@@ -229,7 +254,7 @@ needs no attacker is scored on its impact and on how often it happens by itself.
 A finding counts only once a test reproduces it. Each finding file names that test instead
 of walking through the steps; the test fails on the old code and passes with the fix.
 Distributed behaviour is proven in the multi-node harness (`node/test_harness.rs`, 704
-harness tests at the close), which runs many nodes against a mock relay that can drop,
+harness tests at the 0.13 close), which runs many nodes against a mock relay that can drop,
 delay, reorder, replay and inject frames. Relay rules are proven in the relay's C++ suites
 (unit tests and live tests against a running relay), plain and under AddressSanitizer and
 UndefinedBehaviorSanitizer, run on the VPS before every deploy. Rules mirrored in Rust and
@@ -248,7 +273,7 @@ of their day and do not run against today's tree.
 
 ### 3.7 Hostile review with one fix round
 
-Every track of the 0.12.x and 0.13 work went through a hostile reviewer with a fresh
+Every track of the 0.12.x, 0.13 and 0.14 work went through a hostile reviewer with a fresh
 context after the design and again after the code, then one fix round, then a narrow
 re-review of the fixes. Low leftovers became follow-ups instead of more rounds. Review
 also caught serious defects in new code before it merged or shipped, which are not counted
@@ -270,8 +295,11 @@ push and lock-screen behaviour. At the 0.13 merge (commit c4e2f7f5) the full Rus
 passed 2,749 of 2,758 on the Windows PC (the other nine are seven keystore tests that
 cannot run over SSH and two load-sensitive tests that pass alone), the Flutter suite
 passed 2,767 with none failing, every iOS phone scenario passed, and a mixed Android and
-iPhone run passed 10 of 10 in both roles. The commit in scope adds the self-hosted relay
-installer on top of c4e2f7f5; it changes no relay C++ or relay test file.
+iPhone run passed 10 of 10 in both roles. The 0.13 scope commit, `41080e0d`, added the
+self-hosted relay installer on top of c4e2f7f5 and changed no relay C++ or relay test file.
+For 0.14 each track ran its targeted tests, the full Rust suite on the PC and, where it
+changed behaviour, a fleet run before it merged. The macOS fix of HOL-SEC-187 was proven by
+hand on a notarized build (section 5).
 
 ### 3.9 Fuzzing
 
@@ -280,7 +308,11 @@ control, join-lock links, rosters, kill orders, the restart snapshot, crypto inp
 under libFuzzer with ASan and UBSan in nine targets, nightly and privately on the Mac mini
 so a crash input is never published before its fix is deployed. Every seed and saved
 crash input is replayed by the relay test script, plain and sanitized. The Rust image
-check has a cargo-fuzz target, which found HOL-SEC-173.
+check has a cargo-fuzz target, which found HOL-SEC-173. 0.14 added a tenth relay target,
+for the operator denylist, and brought the Rust side to 23 cargo-fuzz targets for the wire
+parsers, ingest folds, zip archives, push payloads and peer images. Their first run took
+about 30 million executions and found HOL-SEC-202, and a harness test replays their
+corpora into live nodes.
 
 ### 3.10 Finding numbers
 
@@ -306,18 +338,19 @@ security advisories; four are published (GHSA-39pq-74wg-66gv, GHSA-pw74-83g2-x56
 GHSA-rp8v-8rcw-gj6x, GHSA-3jhj-9w4q-rqjw) and two await CVE numbers. The eight Critical
 findings of this review are covered by seven draft advisories (HOL-SEC-001 and 006 share
 one). 0.13.0 shipped the fixes on 2026-10-30; the advisories publish once their CVE numbers
-are assigned. The `image-webp` panic behind HOL-SEC-173 was
+are assigned. 0.14 ships the fixes for HOL-SEC-187 to 206, and their advisories publish
+with it. The `image-webp` panic behind HOL-SEC-173 was
 reported upstream independently (image-rs/image-webp#182) and a fix waits in an open pull
-request; Hollow keeps decoding inside its panic guard until a fixed release ships. An external audit with the support of OSTIF is planned, with
-this folder as the readiness pack.
+request; Hollow keeps decoding inside its panic guard until a fixed release ships. An external audit is planned, and
+this folder is written so that outside reviewers can start from it.
 
 ## 4. Findings table
 
 Status is Fixed for every finding. "Fixed in" names the first release that carries the
 fix, or the date a relay-only fix was deployed to the official relay; where the finding
-file names commits, they are given. For 0.13 the commits are on `main` since the 0.13.0
-release. Where a 0.12.0 fix also changed the relay, the relay was deployed before
-the client release.
+file names commits, they are given. The commits of 0.13 are on `main` since the 0.13.0
+release, and those of 0.14 since the 0.14 release. Where a 0.12.0 or 0.14 fix also changed
+the relay, the relay was deployed before the client release.
 
 | ID | Title | Severity | Class | Status | Fixed in |
 |---------|------------------------------|--------|----|------|--------|
@@ -503,13 +536,6 @@ the client release.
 | HOL-SEC-184 | Peer discovery answered every device with full member lists every 30 seconds | Medium | S | Fixed | 0.13; relay 2026-10-23 (70f7f10e) |
 | HOL-SEC-185 | Opening a channel asked every member device for its history, and each page cost grew with the history | Low | S | Fixed | 0.13 (e87391e0) |
 | HOL-SEC-186 | The relay read client JSON only up to a raw NUL byte | Low | C | Fixed | Relay, 2026-10-23 (22116aa5) |
-
-From HOL-SEC-187 on, the fixes ship in 0.14; the commits name the branch `security/0.14`
-they were made on. A relay-only fix is deployed to the official relay
-before the 0.14 clients.
-
-| ID | Title | Severity | Class | Status | Fixed in |
-|---------|------------------------------|--------|----|------|--------|
 | HOL-SEC-187 | The macOS app could load code from directories outside its bundle | High | C | Fixed | 0.14 (d957c635, b8b64d15, 5da98071, 6fec99e7, b887e706) |
 | HOL-SEC-188 | A device its roster removed could still write server history with the master key | High | C | Fixed | 0.14 (5af8f7b7, 060ca581, 11d2619f, dcce6b29) |
 | HOL-SEC-189 | A removed device's vouch flood could uncount a device another voucher holds | Medium | C | Fixed | 0.14 (23891904) |
@@ -2673,7 +2699,7 @@ One section per finding, condensed from its file in `reports/planned/security/au
 
 **Fix.** Range fingerprints over fold time replace the vector, so a missing op is found wherever it sits; 0.12.2 peers are still served by the vector.
 
-**Residual.** The vector path for 0.12.2 peers goes in 0.14.
+**Residual.** The vector path for 0.12.2 peers was left for 0.14, which removed it except for a legacy-id server whose replicas still lack an owner checkpoint.
 
 **Test.** `sibling_op_older_than_the_vector_tip_still_syncs`, `held_op_expired_after_a_later_op_still_syncs` (both failed on the vector), `digest_random_sets_converge`. Mutation pass 20/20.
 
@@ -2687,7 +2713,7 @@ One section per finding, condensed from its file in `reports/planned/security/au
 
 **Fix.** Leaders are ranked by standing (role tier, then admission position in the signed fold, then id); door answerers are one slot per identity in a nonce-salted order; the rule is gated per group for 0.12.2 compatibility.
 
-**Residual.** Groups with a pre-0.13 leaf keep the old rule until 0.14, and AR-11 is widened to backdated admission by any former member.
+**Residual.** Groups with a pre-0.13 leaf kept the old rule until 0.14, which leads every anchored server by standing, and AR-11 is widened to backdated admission by any former member.
 
 **Test.** `g13w2f_a_ground_low_id_never_becomes_the_stand_in_committer` (red before), `g13w2f_a_ground_id_is_neither_catch_up_responder_nor_repairer`, `rank_masters_orders_by_tier_then_position_then_id`, `g13w2f_door_answerers_are_three_identities_whatever_their_device_ids`. Mutation passes 48/52, 17/19, 12/12.
 
@@ -2699,7 +2725,7 @@ One section per finding, condensed from its file in `reports/planned/security/au
 
 **Description.** The resolver kept one revoked flag per device id and lifted it for any roster that counted the device.
 
-**Fix.** Revocations are kept per (master, device), each master lifts only its own, and the old table is dual-written until 0.14.
+**Fix.** Revocations are kept per (master, device), each master lifts only its own, and the old table was dual-written until 0.14, which ended the dual write.
 
 **Test.** `g13c_a_lifting_by_one_master_leaves_anothers_removal`, `g13w3_a_removed_device_joining_another_identity_stays_refused_for_its_old_one`, `g13w3_revoked_devices_survive_the_move_to_per_master_marks`. Mutation passes 9/10 and 8/8.
 
@@ -2779,7 +2805,7 @@ One section per finding, condensed from its file in `reports/planned/security/au
 
 **Fix.** A send budget (a quarter of RAM by default) bounds held bytes per socket and address share; the heaviest share's sockets close first, and a sender that cannot fit is closed with 1013 and resumes. The circuit breaker in the same commit runs in shadow mode only.
 
-**Residual.** An attacker holding many address blocks still spreads its charge across them, and the breaker's enforce switch waits for 0.14.
+**Residual.** An attacker holding many address blocks still spreads its charge across them. The breaker shipped in shadow mode and enforces by default since 0.14.
 
 **Test.** Relay `test_send_budget`, live `oom_honest_fanout_evicts_nonreaders` ("the relay's RSS stays bounded by the budget"), `oom_cotenant_gives_way_before_sender_trips`. Mutation passes 34/35, 18/18 and 2/2 live; 29/32 C++ mutants on the merged relay.
 
@@ -2831,9 +2857,9 @@ One section per finding, condensed from its file in `reports/planned/security/au
 
 **Fix.** A release gate strips every search path that leaves the bundle, refuses any that remains, and checks after signing that no executable waives library validation; the shipped signature no longer waives it. The identity key moves into a keychain group that only builds with a validated Developer ID profile can read, after a self-check of the bundle's own signature and loaded images. macOS lets only the app that made a login keychain item delete it, so 0.14 cannot delete the item 0.13 made. Instead the first 0.14 start moves the identity onto a fresh key kept only in the protected keychain and re-encrypts its files, the pair a phrase restore set aside included, so the old item stays but opens nothing. A password identity whose key the keychain caches changes key under a fresh salt at the first typed unlock, and a Mac where the password is never typed asks once ("Finish securing your key"). The steps are staged so a stored key opens every file at every point, and the start reads the login keychain without prompts. An App Lock entry moved to its new keychain class is copied under a staging name and read back before the old one goes, so a stop in between loses no secret.
 
-**Residual.** Legacy virtual cameras on macOS 12 and 13 stop working (accepted). Until the old team's certificate is revoked, old builds keep the privacy grants. A cached password key stays readable to old builds until its password is typed once in 0.14, as do a folder kept aside whose identity has a password and a set-aside pair under a password that is not the current one. A backup or Time Machine copy from before the re-key still opens with the old key. The automated signed job has never run, and macOS 12 and 13 have no signed run.
+**Residual.** Legacy virtual cameras on macOS 12 and 13 stop working (accepted). Until the old team's certificate is revoked, old builds keep the privacy grants. A cached password key stays readable to old builds until its password is typed once in 0.14, as do a folder kept aside whose identity has a password and a set-aside pair under a password that is not the current one. A backup or Time Machine copy from before the re-key still opens with the old key. macOS 12 and 13 have no signed run.
 
-**Test.** `scripts/macos_load_gate_test.sh` (43 cases) with its source guard `test/macos_load_gate_guard_test.dart`; `a_legacy_key_moves_into_the_protected_keychain_then_leaves`, `a_move_cut_short_keeps_both_and_finishes_at_the_next_start`; the re-key `a_login_item_only_its_maker_may_delete_opens_nothing_after_the_first_start`, `a_rekey_killed_at_any_step_still_opens_and_finishes_at_the_next_start`, `the_pair_a_phrase_restore_set_aside_moves_off_the_login_key_too`, `a_start_reads_the_login_keychain_only_without_prompts`; the re-salt `a_password_cached_key_in_a_login_item_opens_nothing_after_a_typed_unlock`, `a_resalt_killed_at_any_step_still_opens_and_finishes`, `the_password_asked_for_once_finishes_the_move_off_the_login_item`, `test/widget/keychain_rekey_ask_test.dart`; on the real login keychain `a_login_item_another_process_made_opens_nothing_after_the_rekey`; `test/app_lock_keychain_groups_test.dart` for the App Lock move. Signed proof by hand on 2026-11-15 with a notarized build of b887e706 on macOS 26: a keychain-only identity from 0.13 re-keyed at the first 0.14 start and 0.13 then found its key missing; a cached password key moved under a new salt at the typed App Lock password and 0.13 then had to ask for the password; each second 0.14 start was silent; screen share passed on the same build. The automated check `scripts/macos_keychain_check.sh` (release-apple job `macos-keychain-check`, macOS 14, 15 and 26 runners) has never run.
+**Test.** `scripts/macos_load_gate_test.sh` (43 cases) with its source guard `test/macos_load_gate_guard_test.dart`; `a_legacy_key_moves_into_the_protected_keychain_then_leaves`, `a_move_cut_short_keeps_both_and_finishes_at_the_next_start`; the re-key `a_login_item_only_its_maker_may_delete_opens_nothing_after_the_first_start`, `a_rekey_killed_at_any_step_still_opens_and_finishes_at_the_next_start`, `the_pair_a_phrase_restore_set_aside_moves_off_the_login_key_too`, `a_start_reads_the_login_keychain_only_without_prompts`; the re-salt `a_password_cached_key_in_a_login_item_opens_nothing_after_a_typed_unlock`, `a_resalt_killed_at_any_step_still_opens_and_finishes`, `the_password_asked_for_once_finishes_the_move_off_the_login_item`, `test/widget/keychain_rekey_ask_test.dart`; on the real login keychain `a_login_item_another_process_made_opens_nothing_after_the_rekey`; `test/app_lock_keychain_groups_test.dart` for the App Lock move. Signed proof by hand on 2026-11-15 with a notarized build of b887e706 on macOS 26: a keychain-only identity from 0.13 re-keyed at the first 0.14 start and 0.13 then found its key missing; a cached password key moved under a new salt at the typed App Lock password and 0.13 then had to ask for the password; each second 0.14 start was silent; screen share passed on the same build. That hand procedure on a notarized build (`scripts/macos_keychain_check.sh`, the move from 0.13 and back, the password case) is the proof of the keychain behaviour and runs again for any release that changes keychain code. The logic is covered by the Rust tests above, which are mutation-tested; only the real keychain's ownership rules need a signed build.
 
 ### HOL-SEC-188: A device its roster removed could still write server history with the master key
 
@@ -3106,18 +3132,18 @@ One section per finding, condensed from its file in `reports/planned/security/au
 ### 6.1 Accepted risks
 
 What Hollow knowingly does not defend against, with the reason and a review date, is kept
-in `audit/accepted_risks.md`. Its open rows as of the 0.13 release follow, then the entries
-closed since.
+in `audit/accepted_risks.md`. Its open rows at the 0.14 release follow, then the entries
+closed since they were first accepted.
 
 #### AR-01
 
 **Risk.** The relay has no per-message rate limits, although ASVS 17.3.1 wants signalling to survive floods and RFC 9420 16.8 says KeyPackage requests SHOULD be rate-limited.
 
-**Decision.** Revisited in 0.13 (2026-10-23, phase G2): still no per-message limit; a circuit breaker counts work in shadow mode and a send budget bounds the relay's held bytes. Was accepted (2026-09-26)
+**Decision.** Revisited in 0.14 (2026-11-12, track t14-relay): still no per-message limit; the circuit breaker enforces by default and the connection limits are operator settings. Revisited in 0.13 (2026-10-23, phase G2): a circuit breaker counting work in shadow mode and a send budget bounding the relay's held bytes. Was accepted (2026-09-26)
 
-**Reason.** Message and binary rate limits were tried and broke the core: a reconnect burst (sync requests, channel probes, profiles, signalling) exceeds any limit, and dropped frames wedge CRDT sync. The protections that stay: per-IP connection caps (34 per address, 10 new per minute while the address holds a socket and 30 while it holds none, IPv6 /64), guest mode with its own limits and room cap, CAKE per-host fair share on the official relay's NIC (a setting on that box, not part of the repo's units or the setup wizard, so a self-hosted relay has it only if its operator adds it), coturn locked to the relay's own peers, the 64 MB payload ceiling and hard backpressure. G2 (0.13): every frame is charged in work units (frames, the writes they cause, signature checks, door proofs, audience size) against session buckets sized above a member of ten 1,536-device servers, and a frame the bucket cannot pay for closes the socket with code 1013 and a reconnect hint (`breaker.h`). A session's frame is never dropped: it stays uncounted and is resent on resume. A fetch or guest socket, which has no session, loses that frame and pauses 30 s. It ships in shadow mode: the relay counts what it would trip and closes nothing, `auth_ok` names the credit, and `enforced` is set only on an enforcing relay, so 0.13 clients pace themselves the same way (`relay_pace.rs`) without waiting on a shadow relay. The device ladder steps only when a session overspends the whole honest budget within 10 minutes (cap plus 10 minutes of refill, 1.4M units); any other trip is a pause. Separately, the relay's held bytes are bounded (`send_budget.h`): at most 64 MB per socket and a global budget of a quarter of RAM by default, never below 512 MiB or a third of a smaller box's RAM, which an operator may change but not push below that floor, charged per address share; under pressure the least progressed reader of the heaviest share is closed first. That is memory safety, not a volume quota. The breaker's numbers are compiled in; an operator cannot lower them.
+**Reason.** Message and binary rate limits were tried and broke the core: a reconnect burst (sync requests, channel probes, profiles, signalling) exceeds any limit, and dropped frames wedge CRDT sync. The protections that stay: per-address connection limits the operator sets (`SELF_HOSTING.md` "Connection limits"; by default 512 open and 120 new a minute after a first burst of 512 per IPv4 address, 128 open and 30 a minute after a burst of 128 per IPv6 /64, at most 256 logins in progress per IPv4 /24 or IPv6 /48 and 10,000 on the whole relay, and a budget of connected sockets set from memory; every limit refusal closes 1008, and a value out of range counts as the nearer end), guest mode with its own limits and room cap, CAKE per-host fair share on the relay's uplink: since 0.14 the setup wizard puts it on every relay it sets up (`hollow-cake.service`, on by default, sized under the line's measured or reported speed; an operator may turn it off, which check-host reports as their choice), the official relay runs the same repo unit at 950 Mbit/s on ens16, and check-host fails a relay host without it, coturn locked to the relay's own peers, the 64 MB payload ceiling and hard backpressure. G2 (0.13): every frame is charged in work units (frames, the writes they cause, signature checks, door proofs, audience size) against session buckets sized above a member of ten 1,536-device servers, and a frame the bucket cannot pay for closes the socket with code 1013 and a reconnect hint (`breaker.h`). A session's frame is never dropped: it stays uncounted and is resent on resume. A fetch or guest socket, which has no session, loses that frame and pauses 30 s. It shipped in shadow mode in 0.13: the relay counted what it would trip and closed nothing, `auth_ok` names the credit, and `enforced` is set only on an enforcing relay, so clients pace themselves the same way (`relay_pace.rs`) without waiting on a shadow relay. Since 0.14 it enforces by default: the official relay's shadow counters over 11 days, the G1 scale run and a probe of 300 fresh sessions behind one address showed no trip; `BREAKER_MODE=shadow` is the operator's way back, and the setup menu names the mode. The fresh-start floor follows the operator's connection rate and burst. The device ladder steps only when a session overspends the whole honest budget within 10 minutes (cap plus 10 minutes of refill, 1.4M units); any other trip is a pause. Separately, the relay's held bytes are bounded (`send_budget.h`): at most 64 MB per socket and a global budget of a quarter of RAM by default, never below 512 MiB or a third of a smaller box's RAM, which an operator may change but not push below that floor, charged per address share; under pressure the least progressed reader of the heaviest share is closed first. That is memory safety, not a volume quota. The breaker's numbers are compiled in; an operator cannot lower them.
 
-**Next review.** 0.14: switch the breaker to enforce once its shadow counters show no honest trips, after plan-level tests for junk lock proofs and non-member leaves (relay mutations C6 and C9 survived).
+**Next review.** When an honest client is reported tripping the breaker, or when the per-share scheduler (A10) is built. Done in 0.14: the breaker enforces (track t14-relay). The plan-level tests for junk lock proofs and non-member leaves (relay mutations C6 and C9) and the guest refusals ahead of the send budget landed in 0.14 (track w2-d, `security_write_gates` §52), and a guest's JSON `msg` broadcasts now share its binary broadcasts' ten a minute.
 
 #### AR-03
 
@@ -3181,23 +3207,13 @@ closed since.
 
 #### AR-11
 
-**Risk.** A demoted or removed admin, or any ex-member, can still backdate ops to before its demotion or removal, and every member admits them at that time (design E residual R2). Since 0.13 such a backdated role grant also buys MLS precedence while the owner is away (`node/standing.rs` ranks by role tier first). A backdated admission buys no position: an admittee never ranks before its admitter's current span, and one whose admitters all left ranks last within its role tier.
+**Risk.** A demoted admin can still backdate ops to before its demotion, and every member admits them at that time (design E residual R2). Since 0.13 such a backdated role grant also buys MLS precedence while the owner is away (`node/standing.rs` ranks by role tier first). A backdated admission buys no position: an admittee never ranks before its admitter's current span, and one whose admitters all left ranks last within its role tier. Until 0.14 the same held for a kicked or banned member; since 0.14 a kick or ban voids only the target's backdated power-granting ops, so its other backdated acts still fold.
 
-**Decision.** Accepted (2026-09-27)
+**Decision.** Reopened 2026-11-04 and narrowed in 0.14 for kicks and bans (decision "void granted powers only", track t14-cover): a kick or ban names, by 16-byte content hash, every power-granting op of its target it had seen in the span it closes (admissions, role changes, permission and channel grants, labels given to others, join lock moves, lifted bans; at most 1,024, the rest marked by clock) and the base that decides the rest; every member voids a target op of those kinds dated inside that span and named nowhere. Still accepted: (1) demotions (2026-09-27); (2) a kicked or banned member's backdated acts that grant nothing (kicks, bans, mutes and demotions of others, channel and label removals, renames) still fold inside the span the removal closes; (3) a leave carries no list, so a member that left, was admitted again and is then kicked can backdate grants into its older span, which its own leave closed (review 2026-11-04, MED-3); (4) once a checkpoint decided the removal (its op gone, only the span end recorded), every grant of the target dated in that span that arrives later is void, honest or not and from whatever version the removal came, so a 0.13 kick voids nothing only while its op is retained (the silent re-ask seats a voided admittee again); (5) a rebuild drops a voiding removal that is refused at its own point and folds again, at most four passes: a removal dropped in one pass that folds in a later one voids nothing, and a longer chain keeps the fourth pass.
 
-**Reason.** Without a total order handed out by an authority, no decentralized design tells a backdated op from one authored offline before the demotion (Matrix state resolution has the same gap). Such ops lose every register a later honest write touched, and the admin could do the same things while it held the role.
+**Reason.** A demotion closes no span, so nothing marks where the demoted admin's authority ended; without a total order handed out by an authority, no decentralized design tells a backdated op from one authored offline before the demotion (Matrix state resolution has the same gap). Such ops lose every register a later honest write touched, and the admin could do the same things while it held the role. The same holds for (2): every such act is one the member could make while it was a member, and later honest writes win. (3) needs a leave and a re-admission before the kick; giving a leave a list would make every leave a signed audit of grants for one narrow case (no new design rounds for narrow cases, 2026-11-04). (4) and (5) only ever void more or less of the target's own grants, never anyone else's acts. A kick or ban from before 0.14 carries no list and voids nothing while its op is retained.
 
-**Next review.** Reviewed 2026-10-01 with ID-1: device co-signatures order device statements, never server ops, so this stays. Re-checked with the 0.13 standing rule (g13 wave 3, 2026-10-23): impact widened to stand-in MLS leadership, confidentiality unchanged (commits and Welcomes stay judged). Next: if ops ever gain a verifiable author time.
-
-#### AR-12
-
-**Risk.** An op older than a checkpoint's `covers` (the newest clock the owner's state reflects) that the owner had not seen is dropped by every member (design E residual R3).
-
-**Decision.** Accepted (2026-09-27)
-
-**Reason.** Deterministic and rare: it takes an op dated before the owner's own newest one that never reached the owner, and the owner checkpoints once per existing server and then only when a log passes 2000 ops, at most hourly. Everything after `covers` survives, so an owner back from days away overwrites nothing that happened meanwhile. The author sees the change undone and can make it again.
-
-**Next review.** If a lost change is ever reported.
+**Next review.** Reviewed 2026-10-01 with ID-1 and 2026-10-23 with the 0.13 standing rule. 2026-11-04: kicks and bans closed (tests `rev3_cover_a_kicked_member_backdates_an_admission`, `a_ban_after_a_leave_voids_an_admission_backdated_into_that_span`, `a_member_kicked_and_admitted_again_cannot_backdate_into_its_old_span`); 2026-11-05: a refused removal voids nothing (`review4_a_kicked_admins_refused_removal_voids_honest_grants`, `review4_a_demoted_admins_refused_removal_voids_honest_grants`, `a_refused_removal_leaves_the_tail_and_a_rebuild_equal`, `a_removal_parked_by_a_late_kick_of_its_author_voids_nothing`). Next for demotions: if ops ever gain a verifiable author time.
 
 #### AR-13
 
@@ -3221,9 +3237,9 @@ closed since.
 
 #### AR-15
 
-**Risk.** Design ID-1's residuals: a legacy identity (from before 0.12, none of whose devices kept the phrase 0.11 stored, phrase not yet signing a recovery there) still lets the master key admit a device; someone meeting the identity for the first time after a master-key holder published a forged recovery key pins the forged one; whoever learns the phrase is the identity (the newest recovery wins). ID-1R (2026-10-02, HOL-SEC-078) closed the inbox half and left: after the relay box reboots, or after the relay drops an identity's roster record under its fair-share byte budget, the first roster shown for that identity sets its recovery key at that relay, so a master-key holder who shows a forged one first holds that inbox there until that record is lost again; a member that floods its own base pushes out devices deeper than itself until the phrase is typed (HOL-SEC-079); a thief's own vouchees made before its removal stay until removed too (HOL-SEC-080). Meetings (session 33 follow-up, checked in code 2026-10-04): a meeting host who holds no roster for a participant judges that participant's devices by the master-signed certificate alone (`mls_authority::refused` refuses only where a held roster leaves the device out), so a device the participant removed stays seated in a running meeting, can knock on a new one and be admitted, and a master-key holder can mint a device and appear as the identity in any such meeting whose link and `key=` it has.
+**Risk.** Design ID-1's residuals: a legacy identity (from before 0.12, none of whose devices kept the phrase 0.11 stored, phrase not yet signing a recovery there) still lets the master key admit a device; someone meeting the identity for the first time after a master-key holder published a forged recovery key pins the forged one; whoever learns the phrase is the identity (the newest recovery wins). ID-1R (2026-10-02, HOL-SEC-078) closed the inbox half and left: after the relay box reboots, or after the relay drops an identity's roster record under its fair-share byte budget, the first roster shown for that identity sets its recovery key at that relay, so a master-key holder who shows a forged one first holds that inbox there until that record is lost again; a member that floods its own base pushes out devices deeper than itself until the phrase is typed (HOL-SEC-079); a thief's own vouchees made before its removal stay until removed too (HOL-SEC-080). Meetings (session 33 follow-up, checked in code 2026-10-04): a meeting host who holds no roster for a participant judges that participant's devices by the master-signed certificate alone (`mls_authority::refused` refuses only where a held roster leaves the device out), so a device the participant removed stays seated in a running meeting, can knock on a new one and be admitted, and a master-key holder can mint a device and appear as the identity in any such meeting whose link and `key=` it has. Server joins (0.14, track t14-rostercheck, `security_write_gates` section 70): closed on a relay that answers `roster_check`: a joiner's KeyPackage reaches, and its Welcome comes from, only a device the relay's fold of that identity's rosters counts, merged under our own key. Still open there: a hostile relay that withholds a removal or every answer (the joiner waits and never admits wrongly); a relay that lost the record (a restart without the snapshot, an eviction) and was shown the stale roster first; a removal made by a device that has not been online since; a deliverer the room hides from us, whose staged roster lands alone after 5 s; a placement stands 60 s, so a removal shown inside that window counts at the next ask; a relay without the check (the 0.13 rule); the join-answer path; first contact outside server rooms (friend requests, meetings); and a device holding a pending friend request from someone can read that person's roster through the relay in their DM room.
 
-**Decision.** Accepted (2026-10-01, ID-1R part 2026-10-02, meetings 2026-10-04)
+**Decision.** Accepted (2026-10-01, ID-1R part 2026-10-02, meetings 2026-10-04); narrowed in 0.14 for server joins (2026-11-12, track t14-rostercheck, 5103eeed)
 
 **Reason.** The legacy window closes at the first 0.12 start of any device that kept the phrase 0.11 stored: before it connects, that device signs the identity's first recovery with it (one fixed statement every device of the identity signs alike, so devices that upgrade at different times meet in one base), and its contacts, its other devices and the relay pin the real key when they next hear from it (session 35, decision C). The window stays open only for an identity none of whose devices kept that copy, or whose only such device is missing from its own 0.11 device list, until the phrase signs a recovery there (the phrase check alone signs nothing). A restored backup that nobody refused becomes a member at every contact after seven quiet days on that contact's own clock, even while every owner device is away (phase E+F C-IDENTITY-14); `no_wait` turns that path off. A forged key only fools contacts who never met the identity before; everyone who did keeps the real one and the owner's devices see the conflict. Meetings are the same first-contact case: a host who never met the identity has nothing to tell its devices apart by, every knock is admitted by hand unless the host turned the waiting room off (it is on by default), the link and its key are needed, and participants who hold the roster (friends, co-members) refuse that device's chat and voice inside the meeting (HOL-SEC-123). The fix, if meeting impersonation ever matters: the host asks the relay for the participant's current roster fold (ID-1R) before admitting, at the cost of a new relay query and showing a stranger the participant's device list. A phrase is a bearer secret by design, the same as every recovery phrase. Nothing in an identity's id commits to its recovery key, so a relay that lost its memory cannot tell a forged key from the real one; reboots are rare and planned, a service restart keeps the registry, and pushing a record out under the budget takes many address blocks (the phase G class, as AR-16). A member's flood can only do what it could do by removing devices, and a new base gives it no standing.
 
@@ -3245,9 +3261,9 @@ closed since.
 
 **Decision.** Accepted (2026-10-02)
 
-**Reason.** The preview is a first look before a join, and the join itself is anchored (the server id or the owner pin). A member can already show a stranger anything it likes outside the app. A closed channel never reaches the list from an honest member (HOL-SEC-094), and every post and author name a guest sees is signed (HOL-SEC-095).
+**Reason.** The preview is a first look before a join, and the join itself is anchored (the server id or the owner pin). A member can already show a stranger anything it likes outside the app. A closed channel never reaches the list from an honest member (HOL-SEC-094), and every post and author name a guest sees is signed (HOL-SEC-095). Two more on the guest side (STRIDE slice `phase_ef/public_channels.md`, G-P2 and G-P3, 2026-11-05): a guest holds no member list, so it cannot tell a member's post from a non-member's in a public channel (an unknown author shows with no name); and a guest's memory store has no cap of its own while it browses, so a sender in the room, bounded by the relay's breaker, can grow it until the guest leaves the preview.
 
-**Next review.** If server previews ever carry the owner's signature.
+**Next review.** If server previews ever carry the owner's signature, or if guests are seen browsing long enough for their memory to matter.
 
 #### AR-18
 
@@ -3335,9 +3351,9 @@ closed since.
 
 **Decision.** Fixed in 0.13 (2026-10-22, wave g13 s3) for all-0.13 groups; mixed groups and meetings accepted. Was accepted until 0.12.x (2026-10-04)
 
-**Reason.** Every receiver now judges each commit against an epoch-rate rule before any rule that depends on its own view (`mls_rate::rate_refusal`, wiki `security_write_gates` §48): each leaf carries a tally of its master's recent counted commits, a commit that counts against a master must carry exactly the tally the receiver derives, and a master gets at most 3 counted commits in 12 epochs. A KeyPackage cannot plant history for another master, repairs a committer makes for others are charged to their target (an honest committer also paces them to 3 per master per 10 minutes, then a doubling backoff), and a master its own history shows at the cap is never chosen to answer, repair or commit. Still open: the rule applies only where every other master's leaves carry a tally, so a master's commits are not judged while another master keeps a 0.12.x leaf in the group; the server's anchored owner and meetings are exempt (a meeting without a waiting room seats knocks in one commit per batch, at most 6 such commits a minute, and a seated guest that knocks again is re-seated at once the first time, then after a backoff doubling from 30 seconds to 10 minutes); a legacy rebind stays unjudged until 0.14; a carried list written while the rule was off can cap repairs of a master it names once the group reaches those epochs (never that master's fitness). It costs only work and a brief media hiccup; no one reads or forges anything, and the member is visible and can be kicked.
+**Reason.** Every receiver now judges each commit against an epoch-rate rule before any rule that depends on its own view (`mls_rate::rate_refusal`, wiki `security_write_gates` §48): each leaf carries a tally of its master's recent counted commits, a commit that counts against a master must carry exactly the tally the receiver derives, and a master gets at most 3 counted commits in 12 epochs. A KeyPackage cannot plant history for another master, repairs a committer makes for others are charged to their target (an honest committer also paces them to 3 per master per 10 minutes, then a doubling backoff), and a master its own history shows at the cap is never chosen to answer, repair or commit. Still open: the rule applies only where every other master's leaves carry a tally, so a master's commits are not judged while another master keeps a 0.12.x leaf in the group; the server's anchored owner and meetings are exempt (a meeting without a waiting room seats knocks in one commit per batch, at most 6 such commits a minute, and a seated guest that knocks again is re-seated at once the first time, then after a backoff doubling from 30 seconds to 10 minutes); a carried list written while the rule was off can cap repairs of a master it names once the group reaches those epochs (never that master's fitness). It costs only work and a brief media hiccup; no one reads or forges anything, and the member is visible and can be kicked.
 
-**Next review.** 0.14: the "0.13-only" MLS default (option B) makes every group judged; the legacy rebind goes.
+**Next review.** The legacy rebind went in 0.14. Next: the "0.13-only" MLS default (option B), which makes every group judged.
 
 #### AR-31
 
@@ -3361,13 +3377,13 @@ closed since.
 
 #### AR-35
 
-**Risk.** Protocol hygiene the pass recorded. Fixed in 0.13 (g13w3-ar35): the live-frame replay guard outlives a restart (`live_frame_nonces`, each row kept until its frame turns stale; 32,768 rows for our own, friends' and co-members' devices plus 32,768 shared by everyone else, at most 1,024 per known identity or per stranger device, a full pool evicting from its heaviest sender and never refusing; until the stored rows load, live frames stamped before the start are refused); a share manifest must add up (`ShareManifest::well_formed`: chunk count tied to size, at most 2^20 chunks); archives open in format 2 (the signature over a `hollow-archive1` domain tag) as well as format 1; releases carry SLSA L1 provenance (`scripts/release_provenance.py`, unsigned). Still open: a first sight the store's queue was too far behind to take (1,024 waiting notes for a stranger, 4,096 for a known sender) is guarded only in RAM, so that frame can be replayed once after a restart inside its 5-minute window; a live frame acted on just before the app is killed, before its note committed, can be replayed once after the restart (the note is fire-and-forget on this hot path); a stranger flood can cost other strangers their stored rows, and a flood of co-member identities (strangers who joined a server we are in) can cost friends and our own devices theirs; when the stored rows cannot be read, honest frames stamped before the start are refused for up to 5 minutes (a one-shot call invite shows as missed); the RAM guard bounds nonces per sender, not the number of senders (pruned every 30 s); the media forwarder's replay guard stays in RAM; exports stay format 1 until 0.14; the camera video of a 1:1 call and voice audio forwarded along a large voice channel's gossip tree have no SFrame layer, only DTLS-SRTP (WHITEPAPER 6.3); the MLS legacy rebind (an unbound committer may rebind as the device or master its old credential names) lives until 0.14 (phase E+F olm C-OLM-05, -07; media C-MEDIA-08; files C-FILES-06; mls I-5; distribution C-DIST-07).
+**Risk.** Protocol hygiene the pass recorded. Fixed in 0.13 (g13w3-ar35): the live-frame replay guard outlives a restart (`live_frame_nonces`, each row kept until its frame turns stale; 32,768 rows for our own, friends' and co-members' devices plus 32,768 shared by everyone else, at most 1,024 per known identity or per stranger device, a full pool evicting from its heaviest sender and never refusing; until the stored rows load, live frames stamped before the start are refused); a share manifest must add up (`ShareManifest::well_formed`: chunk count tied to size, at most 2^20 chunks); archives open in format 2 (the signature over a `hollow-archive1` domain tag) as well as format 1; releases carry SLSA L1 provenance (`scripts/release_provenance.py`, unsigned). Fixed in 0.14: archives are written in format 2, a 1:1 call's camera carries SFrame, a forwarded voice counts only once its SFrame cryptor is bound (gossip forwarding ships off), and the legacy MLS rebind is gone (an unbound leaf never commits). Still open: a first sight the store's queue was too far behind to take (1,024 waiting notes for a stranger, 4,096 for a known sender) is guarded only in RAM, so that frame can be replayed once after a restart inside its 5-minute window; a live frame acted on just before the app is killed, before its note committed, can be replayed once after the restart (the note is fire-and-forget on this hot path); a stranger flood can cost other strangers their stored rows, and a flood of co-member identities (strangers who joined a server we are in) can cost friends and our own devices theirs; when the stored rows cannot be read, honest frames stamped before the start are refused for up to 5 minutes (a one-shot call invite shows as missed); the RAM guard bounds nonces per sender, not the number of senders (pruned every 30 s); the media forwarder's replay guard stays in RAM (phase E+F olm C-OLM-05, -07; media C-MEDIA-08; files C-FILES-06; mls I-5; distribution C-DIST-07).
 
-**Decision.** Partly fixed in 0.13 (2026-10-23, wave g13w3); the rest accepted (2026-10-04)
+**Decision.** Partly fixed in 0.13 (2026-10-23, wave g13w3) and in 0.14; the rest accepted (2026-10-04)
 
-**Reason.** None of these opens a read or a forgery: the replayed frames are ones the sender sent and heal, the archive hash is computed by the verifier itself, the unlayered media is still encrypted end to end between the participants and neither TURN nor the relay sees it in the clear, the manifest bound holds (a bitmap of at most 128 KiB), and the release keys never reach the update host or the repo. The forwarder may write nothing to disk on the relay box; every fwd signal is sealed, a stream's owner ops count only from its owner, and a viewer leg needs the owner's allowlist, and a restart drops every stream it held. The rebind exists only for leaves from before 0.12, and removing it in a mixed 0.12.2/0.13 group would fork it (a refused commit spends the commit key); a legacy leaf converges without it through `stale_leaves` removal and a bound re-add. Refusing pre-start frames while the rows are unreadable is the price of failing closed.
+**Reason.** None of these opens a read or a forgery: the replayed frames are ones the sender sent and heal, the archive hash is computed by the verifier itself, the manifest bound holds (a bitmap of at most 128 KiB), and the release keys never reach the update host or the repo. The forwarder may write nothing to disk on the relay box; every fwd signal is sealed, a stream's owner ops count only from its owner, and a viewer leg needs the owner's allowlist, and a restart drops every stream it held. Refusing pre-start frames while the rows are unreadable is the price of failing closed.
 
-**Next review.** 0.14: flip `ARCHIVE_WRITE_FORMAT` to 2; SFrame on DM camera video and gossip audio, unconditional; remove the legacy rebind (the Unbound to Bound arm of `mls_authority::commit_verdict`, the legacy signer and credential in `MlsManager`, its callers, the AR-27 note). Follow-ups: a tier for own and friends' rows co-members cannot reach; the RAM guard's sender count bounded by the same eviction; a signature on the provenance file.
+**Next review.** Done in 0.14: archives written in format 2, SFrame on 1:1 camera video and forwarded voice, the legacy rebind removed. Follow-ups: a tier for own and friends' rows co-members cannot reach; the RAM guard's sender count bounded by the same eviction; a signature on the provenance file.
 
 #### AR-36
 
@@ -3375,9 +3391,99 @@ closed since.
 
 **Decision.** Partly fixed in 0.13 (2026-10-22, wave g13w2-b; G2 circuit breaker 2026-10-23, shadow mode); the resume `members` cost, the halved grace-slot takeover, the mailbox re-read per new socket and the G2 residuals stay accepted
 
-**Reason.** Grace-slot takeovers: a grace session gives its slot to a newcomer only after half its grace, at most 3 a minute per address, decided before any state changes; otherwise the newcomer is refused with ip_limit and retries with backoff (a newcomer behind a full CGNAT address waits). A device's own fetch socket never ends its own session. Mailbox: each socket reads it once (a sequence mark raised only by the replay, never snapshotted); a new socket or a gapped resume reads it all, so that egress per reconnect stays, bounded by the per-address connection rate and the 512 MiB buffer budget. Many address blocks: stays accepted, since weighting by block evicts the honest users who share big carrier blocks first. Resume `members`: a resume still answers one fresh `members` per room it holds (about 80 ms of relay CPU at 10,000 rooms), bounded by the per-address connection rate. Kept after a design and its review: presence frames are uncounted, so the relay cannot know which of them reached a socket that died, and it cannot tell a client whose sockets keep dying from one that pretends to. A rule that answers only rooms that changed must still re-send every room it wrote presence to within the liveness window, its own resume answers included, or an honest client keeps a stale room view (a silent one-way loss in DM, inbox, roster and forwarder rooms that no presence audit heals); with that rule an attacker pays nothing more, so the worst case stays where it is. G2 (2026-10-23) charges presence work in the breaker's work units, but 0.13 runs the breaker in shadow mode: it counts the trips it would make and pauses, delays or closes nothing, so until the 0.14 enforce switch the bounds below are not in force and the connection caps and the send budget are what limit a socket. Its residuals, accepted 2026-10-23: one abusive IPv4 address that stays under every human reference can still spend about 34k units a second plus fresh-session churn (about 0.45 of a relay core). For IPv6 the unit is a /64, so a /48 holder has 65,536 of them; the fresh-start tier drops to 24k for a flooding /48, but the connection flood itself (TLS, auth) is outside G2. A resume costs a flat 4 units per room (it undercounts a resume of many big rooms, bounded by the connection rate), and, once enforced, a resume of a session in debt waits until it is back at zero. Stranger counts: all payers' trackers share 32 MiB (about 63,000 payers with a few targets, or about 3,000 sketching ones); a full book forgets the heaviest share's least recently used tracker, which then counts afresh (each deposit still pays 3 units). Junk door proofs: a lock move still runs a DH for every stored proof that opened nothing, paid by the relay, not the mover; at most 64 per room plus 8 per address group beyond that, each held by a live socket or session (one IPv4 address adds at most 8, a /56 holder about 2,100 per room, about 50 ms of relay CPU per lock move), and lock moves come only from moderators. Under a crowd of more than 64 such proofs, a ninth member behind one address who proves a door the relay does not hold yet loses its automatic prove on the relock and recovers by DoorAsk or a rejoin. The client's priority lane orders by listed devices, so a hidden or held device can see a direct frame overtake an earlier room broadcast (separate MLS and Olm sessions, no ordering dependency). A churning visible peer costs each co-member's node at most 7 frames per churn (about 21 units of the co-member's own budget, paced, never tripped); churn is bounded per /64 by the connection rate (10 a minute while the address holds another socket, 30 while it holds none), so a /56 holder visible in an unlocked room can cost each co-member up to about 7,680 churns a minute, near 2,700 units a second. Door rooms show strangers no presence, so only unlocked rooms and members' own churn reach that.
+**Reason.** Grace-slot takeovers: a grace session gives its slot to a newcomer only after half its grace, at most 3 a minute per address, decided before any state changes; otherwise the newcomer is refused with ip_limit and retries with backoff (a newcomer behind a full CGNAT address waits). A device's own fetch socket never ends its own session. Mailbox: each socket reads it once (a sequence mark raised only by the replay, never snapshotted); a new socket or a gapped resume reads it all, so that egress per reconnect stays, bounded by the per-address connection rate and the 512 MiB buffer budget. Many address blocks: stays accepted, since weighting by block evicts the honest users who share big carrier blocks first. Resume `members`: a resume still answers one fresh `members` per room it holds (about 80 ms of relay CPU at 10,000 rooms), bounded by the per-address connection rate. Kept after a design and its review: presence frames are uncounted, so the relay cannot know which of them reached a socket that died, and it cannot tell a client whose sockets keep dying from one that pretends to. A rule that answers only rooms that changed must still re-send every room it wrote presence to within the liveness window, its own resume answers included, or an honest client keeps a stale room view (a silent one-way loss in DM, inbox, roster and forwarder rooms that no presence audit heals); with that rule an attacker pays nothing more, so the worst case stays where it is. G2 (2026-10-23) charges presence work in the breaker's work units; 0.13 ran the breaker in shadow mode, and 0.14 enforces it by default, so the bounds below are in force. Its residuals, accepted 2026-10-23 and re-measured 2026-11-12: one abusive IPv4 address that stays under every human reference can spend about 34k units a second per session plus fresh-session churn; with the 0.14 default of 512 open connections per address, that address can drive about 512k units a second of relay work, about 13 times the G2 figure (the per-share scheduler, A10, is the later lever). For IPv6 the unit is a /64, so a /48 holder has 65,536 of them; the fresh-start tier drops to 24k for a flooding /48, but the connection flood itself (TLS, auth) is outside G2. A resume costs a flat 4 units per room (it undercounts a resume of many big rooms, bounded by the connection rate), and, once enforced, a resume of a session in debt waits until it is back at zero. Stranger counts: all payers' trackers share 32 MiB (about 63,000 payers with a few targets, or about 3,000 sketching ones); a full book forgets the heaviest share's least recently used tracker, which then counts afresh (each deposit still pays 3 units). Junk door proofs: a lock move still runs a DH for every stored proof that opened nothing, paid by the relay, not the mover; at most 64 per room plus 8 per address group beyond that, each held by a live socket or session (one IPv4 address adds at most 8, a /56 holder about 2,100 per room, about 50 ms of relay CPU per lock move), and lock moves come only from moderators. Under a crowd of more than 64 such proofs, a ninth member behind one address who proves a door the relay does not hold yet loses its automatic prove on the relock and recovers by DoorAsk or a rejoin. The client's priority lane orders by listed devices, so a hidden or held device can see a direct frame overtake an earlier room broadcast (separate MLS and Olm sessions, no ordering dependency). A churning visible peer costs each co-member's node at most 7 frames per churn (about 21 units of the co-member's own budget, paced, never tripped); churn is bounded per /64 by the connection rate (by default 30 a minute after a first burst of 128), so a /56 holder visible in an unlocked room can cost each co-member up to about 7,680 churns a minute, near 2,700 units a second. Door rooms show strangers no presence, so only unlocked rooms and members' own churn reach that. Connection limits (0.14, track t14-relay, `security_write_gates` section 69): per IPv4 /24 up to 256 addresses of 512 admitted sockets each, and per IPv6 /48 65,536 /64s of 128 each, every one costing one Ed25519 check at login (about 50 us). The pre-login window (256 per block, soft, and 10,000 on the relay) sheds stalled logins first, then the heaviest share; a login stalls when it reaches no new stage (first the hello, then the signed auth) for 5 s, so a repeated `auth_hello` is no progress. With nothing stalled, an attacker needs at least the window's total of fresh pending sockets, over shares each lighter than the honest pool. A paced attacker whose socket says hello just before 5 s stays fresh until the 10 s login timeout; at the default rate of 2 new sockets a second per address after its burst, holding the window takes about 500 IPv4 addresses, and in the first 10 s a burst from at least 20 addresses pushes out the least advanced logins of an honest pool past 512 pending, which retry on the client's backoff. Judging a stall from the socket's open instead of per stage was weighed and the per-stage rule kept.
 
-**Next review.** 0.14: the breaker's enforce switch once shadow counters show no honest trips, and limits on a hidden sender's broadcasts (at most 3 provers by rank, `0x07` only to `~join`).
+**Next review.** When the per-share scheduler (A10) is built, or if an honest pool is reported pushed out of the login window. Done in 0.14: the breaker enforces, and the limits on a hidden sender's broadcasts are built (track w2-d, `security_write_gates` §55c): at most three provers per frame, `0x07` only to `~join`.
+
+#### AR-37
+
+**Risk.** What a sender the relay hides in a door-locked server room may reach (0.14, track w2-d, `security_write_gates` §55c). The relay hands such a sender's broadcast to at most three provers its frame picks. Two residuals. (1) Answer slots are per device, not per identity as design G §4.7 planned: one identity with many online proving devices takes slots in proportion to its devices, redrawn on every frame and every retry. (2) 0.13 clients on a 0.14 relay: a 0.13 member answers a door ask only when it ranks among the first three identities by its own order, and serves a hidden joiner only when its whole room view elects it, so the members the relay picked often leave the frame unanswered. A 0.13 door ask is then answered with a chance of about 71% at 10 online provers and 17% at 50, and asked again only on the next door status (20 s); a 0.13 joiner the room hides waits for a retry that reaches a member who got both frames, or for its parked copy. Three more since the w2-d LOW fixes (track t14-w2d, 2026-11-07): a rejoin ask names only a leave our own devices heard, so after a kick racing our leave, or a sibling's leave or rejoin we did not hear, the ask counts by its seal time and waits out the sender's clock lead; an admitting member moves its server clock to a rejoiner's verified ask stamp (at most `MAX_DRIFT` ahead, put back when the fold refuses the admission, and never for a first-time joiner); an away device answers no door ask and no hidden first join ask, so when every prover is away the joiner's 4 s repeat is served by any device that saw its first copy, and a door ask waits for the next door status (20 s).
+
+**Decision.** Accepted 2026-11-01
+
+**Reason.** Per-device slots: the relay cannot tell devices of one master apart outside inboxes, so it cannot pick by identity; every pick is fresh per frame, so no device id can be ground to hold the slots, and three slots still bound what one hidden frame costs. 0.13 clients: 0.14 is a clean break and the relay deploys before the clients (join lock rule). A relay switch that keeps 0.13 picking rules until 0.14 is the floor was weighed and declined: the cost is slower door asks and hidden joins for people still on 0.13, never a wrong admission, and the signed 0.13 status notice already tells them to update. Self-hosters are told to update clients together with the relay (`SELF_HOSTING.md`).
+
+**Next review.** Per-device slots: when the relay learns identities outside inboxes. 0.13 clients: gone once 0.14 is the client floor.
+
+#### AR-38
+
+**Risk.** 0.13 clients on a 0.14 relay lose servers whose join lock a 0.14 device moved (t14-lock, design DEVICE_PROOF §12 "Deploy order"). The first lock link carrying a device proof (`dev`) makes the `JoinLock` op unreadable to a 0.13 build, so every 0.13 member of that server, not only its mods, holds no newer door: it loses the D1 room view (roster, presence, broadcasts, rings) and answers no joins there; a 0.13 mod also cannot open a device-keyed grant and loses the change key. Until that first `dev` link, 0.13 links still extend a 0.13 chain, so a removed device holding a 0.13 tip's change key can extend it without a proof until a 0.14 device's move lands (a 0.14 remover moves ahead of its removal, and its removal's due moves again once the leaf is out). (N12b, a remover's move ahead of a second removal within `REMOVAL_GAP` being skipped, closed in 0.14, track t14-r2: the move ahead of a removal never waits for the gap.)
+
+**Decision.** Accepted 2026-11-02
+
+**Reason.** 0.14 is a clean break and the relay deploys before the clients. The device proof is what keeps the master key from moving the lock (C4); a dual write that 0.13 can read would keep a lock op the master key alone can author. A link without a proof is never treated as dead, so this window cannot be used to take a lock past an honest 0.13 move (review H1). The RED 0.13 status notice tells 0.13 users to update and that they stop seeing servers whose lock a 0.14 device has moved.
+
+**Next review.** Gone once 0.14 is the client floor.
+
+#### AR-40
+
+**Risk.** Two HOL-SEC-190 review residuals in received-voice volume (0.14). (1) With gossip forwarding on, a forward is recognised by the track id its forwarder wrote, so a forwarder that names its own microphone like an asked forward keeps its voice off its member slider (`test/gossip_forward_service_test.dart` "a forwarder naming its own voice like an asked forward keeps its slider": skipped while forwarding ships off, it runs once `gossipForwardingEnabled` ships on and fails until forwards are keyed by mid). (2) The Windows, Linux and Apple native `setVolume` walk the connection's receivers on the platform thread, one signalling-thread hop per call, so a volume change during mute churn could stall the window for as long as the signalling thread is busy.
+
+**Decision.** Accepted for 0.14 (confirmed by Vitalii 2026-11-05)
+
+**Reason.** (1) Gossip forwarding ships OFF (`gossipForwardingEnabled = false`), and with it off no voice is taken as a forward, so nothing is reachable; the fix (key forwards by transceiver mid on both ends) changes every forward table and is a precondition for turning forwarding on. (2) No freeze has been seen; moving the walk off the platform thread means calling into a connection a close may be tearing down, which crashed before (`MediaTrackForId`), so it waits for evidence.
+
+**Next review.** (1) Before `gossipForwardingEnabled` turns on. (2) If a volume stall is reported, else 2027-02-01.
+
+#### AR-41
+
+**Risk.** A retire's post window from a remover that lacks the history (0.14, merged review 2026-11-07). A retire writes as its post window the newest date of what the retired device proved that the remover holds or its own clears took. A remover whose history of the server begins later (a fresh or recovery install, a late-linked device, a copy of a cleared device, a channel it never synced) sets the window below posts the retired device really made before its removal; past the cut those posts are refused on every later backfill and catch-up by devices that do not already hold them (new joiners, devices with a hole), while every device that holds them keeps them (a retire never deletes a held post).
+
+**Decision.** Accepted for 0.14 (confirmed by Vitalii 2026-11-07)
+
+**Reason.** Only an honest retire (the device in hand) by a device lacking history; a lost-or-stolen removal writes T and is unaffected. The retire round's answers are CRDT digests and cannot carry a proven post date; a bare date from an answerer is unproven and, taken as a max, lets one answering member widen a retired key's window to the removal time. Candidate fixes: retire from a device that holds the history (the UI could prefer it), or, where the remover has a hole or a floor without counts in that server, write the removal time as a lost removal does (a wider window for a key that later leaks, a design decision).
+
+**Next review.** Before 0.15, or on the first report of missing posts after a retire.
+
+#### AR-42
+
+**Risk.** Profile updates are signed by the master key alone (0.14 track C review, 2026-11-06). A profile's name, avatar, about, status and showcase, sent through `ProfileRelay` and served as cards to guests, carry only the master signature (`hollow-profile2`), so a stolen device that holds the master key can rename or re-avatar the identity everywhere until the person signs again; the roster and the device proof do not judge them.
+
+**Decision.** Accepted for 0.14 (Vitalii 2026-11-06)
+
+**Reason.** Identity-level and present in 0.13 too; server history, channel posts and every change to them do carry the device proof since 0.14 (HOL-SEC-188). Removing the device stops nothing here: a profile check against the roster needs its own design (which device may sign a profile, how a card shows it, what an old card means), too large for 0.14.
+
+**Next review.** Design a roster check for profiles after 0.14.
+
+#### AR-43
+
+**Risk.** Two residuals of the rule that an admission opens a span only on an ask newer than the member's own last leave (0.14, w2-d re-check finding 1, `crdt/members.rs` `opens`). (1) A sibling device whose clock lags the device that minted a spare ask (a re-ask made during a lock move, stamped inside a clock lead) can stamp the identity's next leave below that ask; the spare ask then counts as newer than the leave, and a member who still holds it can author `MemberAdded` with it and re-admit the identity. (2) A removal or ban by someone else (`MemberEvent::Remove`) does not move the last leave, so a member holding a spare ask that a kicked member minted before the kick can re-admit that member with it, as long as the ask is newer than every ask that opened a span before.
+
+**Decision.** Accepted for 0.14 (2026-11-07)
+
+**Reason.** Both need a spare ask the identity signed itself: only its own devices mint asks, and a leave is stamped past the ask that admitted it (`witness_own_ask`). So (1) needs a re-ask minted during a clock lead and kept unused, plus a second leave from a device whose clock is behind that lead, and the outcome is the identity a member again on an ask it signed, never someone else admitted. (2) re-admits only someone who asked to join, until a moderator removes them again; a ban is not undone (`admission_allowed` refuses a banned target). The full fix signs the named leave into `JoinAsk` and has `admission_allowed` refuse an ask whose named leave is not the member's own at the op's point, a wire and fold change.
+
+**Next review.** When `JoinAsk` next changes on the wire, or 2027-02-01.
+
+#### AR-44
+
+**Risk.** SQLite's own memory (0.14, HOL-SEC-200 and HOL-SEC-201 residuals). A bound value's copy, record buffers and the decrypted page cache are freed unwiped, since SQLCipher's `cipher_memory_security` stays off; Olm pickles, MLS rows and the signer are wiped in Hollow's own buffers up to the bind.
+
+**Decision.** Accepted for 0.14 (Vitalii 2026-11-07)
+
+**Reason.** Turning it on wipes every SQLite free and locks every allocation in memory, process-wide and one-way. Measured 2026-11-07 (debug test binary, SQLCipher at opt-level 2): on the Mac a 50-message page read went from 6 ms to 49 to 132 ms, a 500-message insert batch from 13 to 18 ms to 62 to 84 ms, an Olm save from 0.02 to 0.08 to 0.15 ms and a CRDT batch from 1.9 to 3.1 ms; on Windows the run with it on overflowed its stack every time, a 256 MB stack included, so it cannot be turned on there as is. Reading it back needs a memory disclosure, a core dump or swap of the device, and core dumps are off at every process entry since 0.14.
+
+**Next review.** With a SQLCipher that does not recurse on Windows, or a narrower wipe (`secure_delete` already covers scrubs).
+
+#### AR-45
+
+**Risk.** An asked sync responder can withhold ops (design E, wiki `security_write_gates` section 40, residual L2; recorded from the 0.14 STRIDE slice `phase_ef/crdt.md`, G-C1). A responder hands a log without an op it holds, and its signature-checked pages still count; a non-partial responder alone clears the whole-log mark, so one malicious member that is asked can keep an op from us. Channel history has the same limit per channel: a holder that leaves rows out keeps them from us until the next holder serves the channel.
+
+**Decision.** Accepted (design E, 2026-09-27; recorded here 2026-11-14)
+
+**Reason.** Ops cannot be forged or altered: every op is author-signed and judged by the fold, the next delta from any member still carries every author's newer ops, the two-identity rule narrows it while the responder is marked, and a channel ask moves to another holder in a random order within 10 minutes. Proving completeness needs a log digest the owner signs.
+
+**Next review.** When the owner signs a log digest, or on the first report of an op lost this way.
+
+#### AR-46
+
+**Risk.** A backdated flood costs every member a rebuild per op (design E residual R4; recorded from the 0.14 STRIDE slice `phase_ef/crdt.md`, G-C1). Every op older than the log's tail rebuilds the server state, so a member flooding backdated ops costs every member CPU per op.
+
+**Decision.** Accepted (design E, 2026-09-27; recorded here 2026-11-14)
+
+**Reason.** Cost, not safety: the fold's result does not change. The owner's compaction checkpoints bound the log, each op is charged against its author's share of the server's quota (0.14, `ServerState::allocate`), and retire-triggered rebuilds are capped per author (4 a minute).
+
+**Next review.** At the next G1 scale run.
 
 #### Closed entries
 
@@ -3386,104 +3492,52 @@ These risks were accepted at first and fixed since. They stay in the register fo
 - **AR-02.** Every device holds the master key, so a stolen usable device can revoke its owner's real devices (they wipe themselves), issue destroy orders, and keep the identity. Closed (2026-10-01, HOL-SEC-077).
 - **AR-07.** Once the relay's offline buffer holds its global ceiling of 65,536 recipient keys, a sender holding a single key evicts the oldest deposit of anyone, so many throwaway accounts can push real parked messages out (candidate I9). Closed (2026-09-29, HOL-SEC-070).
 - **AR-09.** A signed `KeyRequest` stays valid for the 300 s skew window, so the relay can replay a captured one (resetting a session after the 5 s cooldown), and any new identity can make us mint one-time keys, which can push a friend request's carried key bundle back to the live key exchange (candidate L6). Closed (replay half 2026-09-27, HOL-SEC-054; minting half 2026-10-03, HOL-SEC-111).
+- **AR-12.** An op older than a checkpoint's `covers` (the newest clock the owner's state reflects) that the owner had not seen is dropped by every member (design E residual R3). Closed in 0.14 (2026-11-05, 56587ca2).
 - **AR-26.** Push wakes sent through Google (FCM) and Apple (APNs) carry the sender's device id, and for channel wakes the server id, channel id and mention flag, in the clear, so Google and Apple can see who messages a phone and which servers it belongs to; UnifiedPush already encrypts the same block (phase E+F relay_push C-RP-05). Closed (2026-10-18, 0.12.2).
 - **AR-28.** Images from peers still reach Flutter's image decoder (Skia and its libwebp) without a pure-Rust check first in two places: asset-rail blobs (emotes, stickers, avatar frames, banners), which are content-addressed and so cannot be re-encoded without changing their id, and image attachments that auto-download; an attacker who holds a decoder bug and can send us an image could reach it without a tap (phase E+F files C-FILES-04; thumbnails ARE re-encoded in Rust since 0.12). Closed in 0.13 (2026-10-22).
 - **AR-29.** A device removal reaches a contact only when that contact hears it: contacts who were offline at the time learn it on a later roster exchange, nothing makes a held roster expire, and nothing notices two contacts holding different rosters for one identity, so a relay that withholds the removal from a contact keeps the removed device receiving that contact's DMs (phase E+F identity C-IDENTITY-05, lead L-05; WhatsApp answers this with a 35-day device list expiry). Closed (2026-10-17, 0.12.2).
 - **AR-30.** An Olm session is saved after the message it encrypted has left, without waiting for the save, so a kill in that window restarts on an older copy of the sending chain and the next message reuses a message key; whoever holds both ciphertexts learns where their plaintexts agree (phase E+F olm C-OLM-09). Fixed in 0.12.1 (2026-10-08).
 - **AR-32.** The relay host's own surface. Closed in 0.13 (2026-10-22).
 - **AR-34.** Identity residuals of the phase E+F pass. Fixed in 0.12.1 (2026-10-08).
-
-**Changes in 0.14.**
-
-- **AR-01 (no per-message limits).** Revisited in 0.14: the circuit breaker now enforces by
-  default, and the connection limits are operator settings (`SELF_HOSTING.md`, "Connection
-  limits"). Still no per-message limit.
-- **AR-08 (report counts).** The full-table half is fixed in 0.14 (track b14-bounds); the
-  report half stays accepted.
-- **AR-11 (backdated ops).** Narrowed in 0.14 for kicks and bans. A kick or ban now names
-  the target's power-granting operations it had seen, and every member voids those it did
-  not name inside the span the removal closed. Demotions and the cases the row lists stay
-  accepted.
-- **AR-12 (an op older than a checkpoint's clock is lost).** Closed in 0.14 by checkpoint
-  coverage (56587ca2).
-- **AR-15 (identity residuals).** Narrowed in 0.14 for server joins: on a relay that answers
-  `roster_check`, a joiner's KeyPackage reaches, and its Welcome comes from, only a device
-  the relay's roster fold counts. The row lists what stays open.
-- **AR-17 (guest preview).** Extended by the STRIDE slice on public channels: a guest cannot
-  tell a member's post from a non-member's, and its memory store has no cap of its own.
-- **AR-36 (resumable sessions).** Corrected for 0.14's limits: the breaker enforces, one
-  IPv4 address can drive more relay work under the new default of 512 connections, and
-  holding the login window takes about 500 IPv4 addresses.
-- **New in 0.14.** AR-37 (what a sender a locked room hides may reach), AR-38 (0.13 clients
-  lose servers whose join lock a 0.14 device moved), AR-40 (two volume residuals of
-  HOL-SEC-190), AR-41 (a retire's post window from a remover that lacks the history),
-  AR-42 (profile updates signed by the master key alone), AR-43 (two residuals of the
-  rejoin rule), AR-44 (SQLite's own memory), AR-45 (a sync responder can withhold ops) and
-  AR-46 (the rebuild cost of a backdated flood). AR-39 was opened and closed within 0.14.
+- **AR-39.** A device that cleared a channel's history answers sync asks below its floor with nothing, so while every online holder of a channel has cleared it, catch-up brings nothing, and once every holder has, the gap is permanent. Opened and closed in 0.14 (track t14-ar39).
 
 ### 6.2 Open items
 
-These are known and not fixed in 0.13. None is a finding. Each is a hardening step, a
-residual already stated in a finding, or a compatibility path that 0.14 removes.
+These are known and not fixed at the 0.14 release. None is a finding. Each is a hardening
+step, or a residual already stated in a finding or an accepted risk.
 
-- **Circuit breaker enforcement.** The relay's circuit breaker runs in shadow mode. Its
-  enforce switch waits for 0.14, after the shadow counters show no honest trips, and
-  after two plan-level tests (junk door proofs on a lock upload, a non-member's leave) that
-  the C++ mutation pass found missing. Guest opcode and rate refusals should run
-  before the send budget is charged.
-- **0.13 compatibility paths that 0.14 deletes.** The CRDT state vector for 0.12.2 peers
-  (HOL-SEC-175), the old discovery answer (HOL-SEC-184), the ring-control switch for 0.12.1
-  clients, the old stand-in rule in mixed groups (HOL-SEC-176), the legacy MLS leaf
-  rebind, and the dual-written `revoked_devices` table (HOL-SEC-177).
-- **Planned for 0.14.** SFrame on 1:1 camera and gossip audio (AR-35), archives written in
-  format v2, limits on broadcasts from senders a locked room hides, and a signed status
-  notice for versions that stop working.
+- **Media.** Forwarding voice along a large channel's gossip tree ships off, so a voice
+  channel stays a full mesh up to 16 people, and SFrame on a forwarded voice is proven by
+  unit and widget tests only, not on real devices (AR-40).
+- **Profiles.** Profile updates are signed by the master key alone, so nothing holds a
+  removed device off a profile yet (AR-42).
+- **Requirements without their test.** R-RB-02 (every write to the relay socket is bounded
+  in time) has no dedicated test. R-AR-07's guard that a future OpenMLS key-material label
+  cannot bypass Hollow's wiped writes is planned, a follow-up from HOL-SEC-201.
 - **Friend removals.** A stranger's `FriendRemove` with no friend row still makes a
   tombstone, so junk can crowd the 256 shared removals; tombstone only identities we hold
   a row or request for. The residuals of HOL-SEC-181 stand.
 - **Smaller protocol follow-ups.** A join request is judged against `left_at` with no
   clock slack; `send_tombstone_if_revoked` still uses a first-match room (HOL-SEC-179); the
   live-frame replay guard's pools should keep friends' and own devices' rows out of reach
-  of a co-member flood, and its RAM guard should bound the number of senders; channel
-  history pages should be verified before they count as progress (HOL-SEC-185); the MLS
-  ring pull should wait until a joiner is seated (HOL-SEC-178); big servers need a
+  of a co-member flood, and its RAM guard should bound the number of senders (AR-35);
+  channel history pages should be verified before they count as progress (HOL-SEC-185);
+  the MLS ring pull should wait until a joiner is seated (HOL-SEC-178); big servers need a
   priority lane for posts under the breaker.
 - **Platform.** The iOS notification filtering entitlement, requested from Apple on
   2026-09-27, is still pending, so a wake can show a neutral banner the extension cannot
   withhold (HOL-SEC-035, HOL-SEC-156). Under Docker, a TURN port lock that fails at boot
-  leaves coturn unlocked until `check-host.sh` flags it.
-- **Assurance.** An external audit, a formal model of at least one protocol, cargo-fuzz
-  targets for the Rust wire parsers, and property tests for the Dart link parsers.
-
-**State at the 0.14 release.**
-
-- **Circuit breaker.** Enforces by default since 0.14 (4ccb0a10): the official relay's
-  shadow counters over 11 days, the G1 scale run and a probe of 300 fresh sessions behind
-  one address showed no trip.
-- **0.13 compatibility paths.** Gone in 0.14: the legacy MLS leaf rebind, the old stand-in
-  rule for anchored servers, the dual `revoked_devices` write, the state vector for
-  self-certifying servers, the old discovery answer and the ring-control switch (550d6b01).
-- **Media.** SFrame on 1:1 cameras is built. Gossip audio stays off, so voice channels stay
-  a full mesh up to 16 people, and SFrame on a forwarded voice is proven in tests only.
-- **The signed status notice for 0.13** is a release step: it tells 0.13 users to update,
-  that they stop seeing servers whose lock a 0.14 device moved, and that their posts past a
-  server's cut no longer reach 0.14 members.
-- **HOL-SEC-187's signed proof.** Run by hand on 2026-11-15 on a notarized build of
-  b887e706 (macOS 26): the re-key of a keychain-only identity and the re-salt of a cached
-  password key both passed, and 0.13 could no longer open either from its login item. The
-  automated signed check (`scripts/macos_keychain_check.sh`, macOS 14, 15 and 26 runners)
-  has never run, and macOS 12 and 13 have no signed run.
-- **Assurance.** The STRIDE slices for server state, public channels and history sync,
-  which the 0.13 pass left out, are written (`audit/phase_ef/crdt.md`,
-  `public_channels.md`, `backfill.md`); one of their gaps became HOL-SEC-194. The
-  requirements list (`audit/requirements.md`) names, for each rule, where it is enforced and
-  which test proves it. The Rust wire parsers are fuzzed.
+  leaves coturn unlocked until `check-host.sh` flags it. HOL-SEC-187's signed proof ran on
+  macOS 26; macOS 12 and 13, which 0.14 still supports, have no signed run.
+- **Assurance.** An external audit, a formal model of at least one protocol, and property
+  tests for the Dart link parsers.
 
 ## 7. Code-maturity scorecard
 
 In the style of Trail of Bits' code-maturity evaluation. Ratings: Strong, Satisfactory,
-Moderate, Weak, Missing. They describe the codebase at the 0.13 tag, after the fixes,
-and they are the author's own judgement.
+Moderate, Weak, Missing. They were set at the 0.13 tag, after the fixes, and they are the
+author's own judgement. This edition keeps them for 0.14 and brings the facts behind them
+up to date.
 
 | Category | Rating |
 |----------------|--------|
@@ -3520,7 +3574,7 @@ bound to their subject and checked at one gate per class: the frame seal
 (`node/frame_auth.rs`), the lane rule, `change_may_touch_row` for every remote change to
 a message row, `op_allowed` in the CRDT fold, the roster for devices, `mls_authority` for
 leaves and commits, the join lock and door proofs at the relay. The wiki
-`security_write_gates.md` records 52 sections of gates, and source-scan tests fail when a
+`security_write_gates.md` records 73 sections of gates, and source-scan tests fail when a
 receive path stops calling its gate. The rating is not Strong because most findings of
 this review were in this category, the gates were added after the code they protect, and
 the matrix rows are agent-verified.
@@ -3554,8 +3608,9 @@ entries through `enclosed_name` with an allowlist and size budget, client JSON a
 through one depth-limited parser, message bodies are refused whole past 64 KiB, peer
 images are checked in pure Rust before a native decoder, and ids are shape-checked at
 every entry. The review still found two remote panics in Rust (HOL-SEC-007, HOL-SEC-173),
-a canonicalisation bug in the signing payload (HOL-SEC-143) and a parser differential at
-the relay (HOL-SEC-186).
+a canonicalisation bug in the signing payload (HOL-SEC-143), a parser differential at
+the relay (HOL-SEC-186) and, in 0.14, a sticker pack unpacked with no size limit
+(HOL-SEC-205).
 
 **Decentralization: Moderate.** Members hold their servers' state and history, a
 server's authority is provable from signed ops, and the relay can neither read nor forge
@@ -3578,11 +3633,11 @@ code (section 3.7). Native media and decoding code (patched libwebrtc, ffmpeg, S
 large and reached by peer bytes; it is gated, and reviewed only where Hollow configures it
 (section 2).
 
-**Testing and verification: Satisfactory.** 2,758 Rust tests in the full run, 704 of
-them multi-node harness tests with a hostile mock relay, 2,767 Flutter tests, relay suites
+**Testing and verification: Satisfactory.** At the 0.13 close, 2,758 Rust tests in the
+full run, 704 of them multi-node harness tests with a hostile mock relay, 2,767 Flutter tests, relay suites
 plain and sanitized, a test that failed before every fix, mutation passes on every
 security rule, and fleet runs of the real apps on desktop and phones. Not Strong because
-there is no formal model, the Rust wire parsers are not fuzzed, the mutation scripts
+there is no formal model, the Rust wire parsers are fuzzed only since 0.14, the mutation scripts
 cannot be re-run against today's tree, a few tests are load-sensitive, and the harness
 does not reach the relay C++ or the media plane.
 
@@ -3603,7 +3658,8 @@ examined and found sound, and what it did not examine. It is the `coverage.md` t
 requires before the audit can close (`reports/planned/security/SECURITY_AUDIT_PLAN.md` section 3
 artifact table and section 6 exit criteria), in the style of a Cure53 work-package note,
 including "areas examined that yielded no findings". It is an appendix of the final report
-`SECURITY_AUDIT_2026_10.md`.
+`SECURITY_AUDIT_2026_10.md`. It records the review up to the 0.13 close; what the 0.14 work
+added is in "The 0.14 work" below, and the rows that 0.14 changed say so.
 
 #### Scope and how to read this
 
@@ -3656,7 +3712,7 @@ Source keys used below. Paths are relative to the repository root unless noted.
 | Mutation passes | One mutation at a time, named tests expected to fail, file restored by hash | MUT, finding files, per track |
 | Fleet and phones | Throwaway-identity journeys on Windows, macOS, Linux, iOS Simulators, Android emulators | `reports/shipped/security/REGRESSION_PASS_0.12.md` |
 | Relay suites | `relay-uws/test/run_tests.sh` plain and with `SANITIZE=1` (ASan, UBSan) on the VPS before every deploy, and in CI job "Relay C++" | CLAUDE.md, `.github/workflows/ci.yml:350-372` |
-| Fuzzing | Nine relay libFuzzer targets; one Rust cargo-fuzz target for the image check | commit `22116aa5`, `relay-uws/fuzz/`, `rust/hollow_core/fuzz/` |
+| Fuzzing | Nine relay libFuzzer targets; 23 Rust cargo-fuzz targets for the wire parsers, ingest folds, zips, pushes and peer images (0.14), plus a harness replay of their corpora into live nodes | commit `22116aa5`, `relay-uws/fuzz/`, `rust/hollow_core/fuzz/` (wiki rust_crypto "Fuzzing the Rust wire parsers") |
 | Scale probes | G1 rerun on the merged 0.13 tree | SCALE |
 
 Attacker profiles (TM section 1) are applied with one standing rule: every peer attacker runs a
@@ -3897,6 +3953,9 @@ the Android certificate were confirmed from code and memory, not re-run (EF/dist
 for the lead"). The self-hosted relay setup wizard and its signed `relay.json` feed (commit
 `41080e0d`, inside the scope commit) have no audit or hostile-review record in the sources read;
 the commit message notes the first real `relay.json` publish still waits for approval.
+Since then (2026-11-07, 0.14) the wizard had its own hostile review, which filed HOL-SEC-196
+to 199, and one fix round (3d62ce35); those finding files and requirements R-RS-09 to
+R-RS-11 are its record.
 
 #### WP6. Push, FCM, UnifiedPush, iOS NSE, channel push
 
@@ -4016,7 +4075,8 @@ used a media forwarder), 138 (a kicked member stayed in the voice call), 139 (un
 frames pinned a receiver's CPU), 140 (a share passed the forwarder before encryption), 141 (the
 Share lane leaked IP addresses with Always relay on), 142. Accepted: AR-03 (members can forge
 each other's frames, RFC 9605 7.2), AR-14, AR-35 (1:1 camera video and gossip-forwarded audio
-carry no SFrame layer, only DTLS-SRTP; SFrame there is on the 0.14 list).
+carried no SFrame layer, only DTLS-SRTP, at the 0.13 close; 0.14 added SFrame to both, and
+gossip forwarding ships off).
 
 **Examined, no finding.**
 - L-01 (SFrame nonce uniqueness): SAFE, no fix required (EF/media "L-01").
@@ -4091,23 +4151,38 @@ Fixed in the same commit, not a separate finding: `announce_door_change` sent pr
 own fetch sockets; since `986a4d75` it skips fetch and guest sockets
 (`relay-uws/src/ws_handler.cpp`, the `!d->is_fetch` check in that function).
 
+#### The 0.14 work (2026-10-31 to 2026-11-15)
+
+Each 0.14 track went through a design review where needed, a hostile code review, one fix
+round, a mutation pass, the full Rust suite on the PC and, where it changed behaviour, a
+fleet run. What it examined and found:
+
+| Work | Examined | Found | Source |
+|---|---|---|---|
+| macOS app review | The installed app's library search paths, its signature and the keychain item that holds the identity key | HOL-SEC-187; the fix proven by hand on a notarized build | `HOL_SEC_187_KEYCHAIN_DESIGN.md`, finding HOL-SEC-187 |
+| Track reviews | Device proof, checkpoint coverage, the join lock bound to devices, hidden senders, stranger bounds, received-voice volume, the relay denylist and limits | HOL-SEC-188 to 193, 195, 203, 204; AR-37, AR-38, AR-40 to AR-43 | `DEVICE_PROOF_DESIGN.md`, `CHECKPOINT_COVERAGE_DESIGN.md`, the finding files |
+| Setup wizard review | Take over, rollback, removal, certbot | HOL-SEC-196 to 199 | commit `3d62ce35`, R-RS-09 to R-RS-11 |
+| STRIDE slices | Server state, public channels, history sync (flows F-30, F-34, F-35) | HOL-SEC-194; AR-17 extended, AR-45, AR-46 | `audit/phase_ef/crdt.md`, `public_channels.md`, `backfill.md` |
+| Rust fuzzing | 23 cargo-fuzz targets: wire parsers, ingest folds, zips, pushes, peer images | HOL-SEC-202 | commit `82df7694` |
+| Dependency upgrades | vodozemac 0.11.2 and the Olm and MLS saves around it, the zip and SQLCipher updates and the archives they open | HOL-SEC-200, 201, 205, 206; AR-44 | commits `a6cdf8c4`, `bc2c4bdc`, `89d3a85d` |
+| Requirements | Every security rule: where it is enforced, which test proves it | R-RB-02 without a dedicated test, one planned guard (section 6.2) | `audit/requirements.md` |
+
 #### Exit criteria against the record
 
 | Criterion (PLAN section 6) | State in the record |
 |---|---|
-| Every DFD element walked through its STRIDE cells; LINDDUN GO on relay and push | 443 cells in eight phase E+F slices; LINDDUN GO done in EF/relay_push. Flows F-30, F-34, F-35 (CRDT ops, public channels, backfill responders) had no E+F slice; TM section 7 still says "to do" |
+| Every DFD element walked through its STRIDE cells; LINDDUN GO on relay and push | 443 cells in eight phase E+F slices; LINDDUN GO done in EF/relay_push. Flows F-30, F-34, F-35 (CRDT ops, public channels, backfill responders) had no E+F slice at the 0.13 close; 0.14 wrote them (`audit/phase_ef/crdt.md`, `public_channels.md`, `backfill.md`) |
 | Every matrix row has verified code evidence and an `authz_*` test per wrong principal | 346 rows, 0 OPEN, 3 DEFERRED (K3), every row with a guard test column. Most rows are agent-verified with mechanically checked citations; the lead re-read OPEN rows and ten sampled FIXED rows (MATRIX). Per-principal completeness is not recorded per row |
-| Every requirement traces to a test | Requirements exist per slice (R-IDENTITY, R-OLM, R-MLS, R-RP, R-DIST, R-FILES, R-LOCAL, R-MEDIA), written at `aa104d48` with some NOT MET at the time. There is no consolidated `requirements.md` (PLAN artifact table) and no record re-checking each R-* at the scope commit |
+| Every requirement traces to a test | Requirements exist per slice (R-IDENTITY, R-OLM, R-MLS, R-RP, R-DIST, R-FILES, R-LOCAL, R-MEDIA), written at `aa104d48` with some NOT MET at the time. At the 0.13 close there was no consolidated `requirements.md` (PLAN artifact table); 0.14 wrote it (`audit/requirements.md`: each rule, where it is enforced, which test proves it) |
 | Every finding fixed and retested, or accepted | Finding headers read "Fixed" or "Fixed... retest at release"; HOL-SEC-015 and 017 read "Fixed" since the close-out (their rest closed by HOL-SEC-062 and 041, as CAND and PLAN record). Retest dates per finding are not filled in |
 | Every finding has a variant-analysis section | 51 of 168 finding files mention variants (grep). PLAN phase D (variant analysis as its own session) has no separate record |
 | `coverage.md` lists each work package | This file |
-| Tooling items 1-5 of PLAN 2.8 run in CI | 1 and 2: CI job "Supply Chain" runs cargo-deny 0.20.2, osv-scanner 2.5.1, gitleaks 8.30.1 over the whole history and zizmor 1.30.1 (`ci.yml:285-347`). 3: the harness runs in nextest. 4 (proptest state machines): no record, `proptest` is not a dependency. 5: relay fuzzing runs nightly on the Mac mini by decision, not in public CI (crash inputs stay private); the Rust envelope parsers are not fuzzed |
+| Tooling items 1-5 of PLAN 2.8 run in CI | 1 and 2: CI job "Supply Chain" runs cargo-deny 0.20.2, osv-scanner 2.5.1, gitleaks 8.30.1 over the whole history and zizmor 1.30.1 (`ci.yml:285-347`). 3: the harness runs in nextest. 4 (proptest state machines): no record, `proptest` is not a dependency. 5: relay fuzzing runs nightly on the Mac mini by decision, not in public CI (crash inputs stay private); the Rust envelope parsers are fuzzed since 0.14 (23 cargo-fuzz targets) |
 
 #### Not covered and known gaps
 
 - **No independent team and no outside audit yet.** The work was done by the owner with AI agents
- as enumerators, builders and hostile reviewers. An external audit with the support of OSTIF
- is planned.
+ as enumerators, builders and hostile reviewers. An external audit is planned.
 - **No formal protocol model.** Verifpal or Tamarin on the roster, destroy orders and a
  relay-controlling attacker was deferred until the device design froze (PLAN 2.8 item 9,
  decision 3); no record that it was done.
@@ -4119,25 +4194,27 @@ own fetch sockets; since `986a4d75` it skips fetch and guest sockets
 - **Media and native code only in part.** The forked `flutter_webrtc` and our libwebrtc build
  were read for the frame cryptor only; mobile WebRTC binaries were not verified file by file;
  `screen_audio_capturer`, ffmpeg and Skia were not fuzzed (EF/media, EF/files).
-- **Rust parsers not fuzzed**, except the image check: the serde envelopes, `parse_ops_tolerant`,
- `fetch.rs` frame parsing, `hollowpack`, vault shards and the link-preview parser (PLAN 2.8
- item 5, EF/files, EF/relay_push).
+- **Rust parsers fuzzed only since 0.14.** At the 0.13 close only the image check had a target;
+ 0.14 added 23 cargo-fuzz targets for the wire parsers, ingest folds, zips, pushes and peer
+ images, with about 30 million executions in their first run (PLAN 2.8 item 5, EF/files,
+ EF/relay_push).
 - **No property-based tests** of the authorisation cores (PLAN 2.8 item 4); no record.
 - **Static rules and lint ratchets** (PLAN 2.8 items 7, 8): no record in the audit; an earlier
  Semgrep pass (issue 46) and SonarQube Cloud predate it.
 - **Phase E+F slices ran nothing.** Every slice was read-only; their "met with a test" verdicts
  mean the test exists, not that it passed at that tree (EF/local, EF/identity headers).
-- **CRDT and channel STRIDE.** Covered by the phase B matrix and design E only (see WP3).
+- **CRDT and channel STRIDE.** Covered by the phase B matrix and design E only at the 0.13
+ close (see WP3); 0.14 wrote the three slices (`audit/phase_ef/crdt.md`, `public_channels.md`,
+ `backfill.md`).
 - **Open accepted risks.** `AR` holds the current state of every row. Among them: no
- per-message relay limits (AR-01, AR-06; the G2 breaker runs in shadow until the 0.14 enforce
- switch), member frame forgery in calls (AR-03), the first-contact and legacy residuals of the
+ per-message relay limits (AR-01, AR-06; the G2 breaker enforces by default since 0.14), member frame forgery in calls (AR-03), the first-contact and legacy residuals of the
  identity designs (AR-10 to AR-19), and the residuals of AR-25, AR-27 (mixed-version groups and
  meetings), AR-33, AR-35 and AR-36.
 - **iOS stranger wakes** wait on Apple's filtering entitlement (K3).
-- **0.14 list** of known compatibility paths still in 0.13: vector sync, the old discovery
- answer, the ring-1 switch, the MLS legacy rebind, SFrame on 1:1 camera and gossip audio, archive
- format 2 writes, the `revoked_devices` dual write, the hidden-sender broadcast limits and the
- breaker enforce switch.
+- **The 0.13 list for 0.14** (vector sync, the old discovery answer, the ring-1 switch, the MLS
+ legacy rebind, SFrame on 1:1 camera and gossip audio, archive format 2 writes, the
+ `revoked_devices` dual write, the hidden-sender broadcast limits and the breaker enforce
+ switch) is done in 0.14, except that gossip forwarding of voice ships off (section 6.2).
 
 #### Timeline
 
@@ -4153,12 +4230,16 @@ own fetch sockets; since `986a4d75` it skips fetch and guest sockets
 | 2026-10-06 to 10-07 | Scanner triage; resumable-sessions reviews | HOL-SEC-163, 164, 165, 170 to 172; AR-36 |
 | 2026-10-08 to 10-20 | 0.12.1 and 0.12.2 | AR-24 narrowed, AR-26 and AR-29 closed, AR-30 and AR-34 fixed, AR-33 in part |
 | 2026-10-22 to 10-24 | Phase G, the 0.13 wave | 26 commits `22116aa5` to `41080e0d`; relay deployed 10-23; merged-tree suites and fleets 10-24 |
+| 2026-10-30 | 0.13.0 released | the 0.13 edition of this report |
+| 2026-10-31 to 11-15 | The 0.14 work | HOL-SEC-187 to 206; AR-12 and AR-39 closed, AR-37, AR-38 and AR-40 to AR-46 new; the HOL-SEC-187 proof by hand 11-15 |
 
 ### Appendix B: Whitepaper claims check
 
-Appendix to the 0.13 security report. Close-out item of the audit plan
-(`SECURITY_AUDIT_PLAN.md`, phase G close-out): `WHITEPAPER.md` security claims
-re-checked against `claims.md` and against the code.
+Made for the 0.13 edition of this report and kept as its record. Close-out item of the
+audit plan (`SECURITY_AUDIT_PLAN.md`, phase G close-out): `WHITEPAPER.md` security claims
+re-checked against `claims.md` and against the code. Since then each 0.14 track edited the
+whitepaper sections it changed, and its version header reads 0.14.0; items 1 and 7 of
+section 5 below are done.
 
 - **Scope:** commit `41080e0d` on `main` (tree
   relay `relay-uws/src` and client `rust/hollow_core/src`

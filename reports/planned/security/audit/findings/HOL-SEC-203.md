@@ -1,8 +1,8 @@
 # HOL-SEC-203: A wrong-typed keys.json ended the relay without its restart snapshot
 
 ```
-ID:          HOL-SEC-203                 Status: Fixed on local branch security/0.14
-                                          (883aa238, 2026-11-08), retest at release
+ID:          HOL-SEC-203                 Status: Fixed in 0.14
+                                          (883aa238, 2026-11-08)
 Severity:    Low                         (Impact M: the relay ends without its SIGTERM path,
                                           so every offline buffer, topic ring, parked kill
                                           signal, session and push token on the box is lost,
@@ -20,9 +20,8 @@ Attacker:    none needed; the relay operator's own file
 Found:       2026-11-07 (t14-deny design, out-of-scope note; confirmed by the hostile
              design review, D14)
 Affected:    every relay release through 0.13.0 build 1 (8350841b) that reads keys.json
-Fix commit:  883aa238 (security/0.14, 2026-11-08)
-Embargo:     EMBARGOED until the 0.14 release (local branch security/0.14, never pushed);
-             advisory with the 0.14 GHSAs
+Fix commit:  883aa238 (0.14, 2026-11-08)
+Disclosure:  advisory with the 0.14 GHSAs
 ```
 
 ## Description

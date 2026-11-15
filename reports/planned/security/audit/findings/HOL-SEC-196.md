@@ -1,8 +1,8 @@
 # HOL-SEC-196: A take over's backup could hold a link, and its rollback read through it as root
 
 ```
-ID:          HOL-SEC-196                 Status: Fixed on local branch security/0.14
-                                          (3d62ce35, 2026-11-07), retest at release
+ID:          HOL-SEC-196                 Status: Fixed in 0.14
+                                          (3d62ce35, 2026-11-07)
 Severity:    Medium                      (Impact M: root-only files on the relay box, such as a TLS
                                           private key or /etc/shadow, land readable by the old relay's
                                           service account; Exploitability M: needs code running as
@@ -19,9 +19,8 @@ Attacker:    code execution as the old relay's service account (a compromised re
 Found:       2026-11-07 (hostile review of the relay setup wizard, finding M1)
 Affected:    the setup wizard's take over since it shipped (relay 0.13.0 build 1 for
              self-hosters, 8350841b)
-Fix commit:  3d62ce35 (security/0.14, 2026-11-07)
-Embargo:     EMBARGOED until the 0.14 release (local branch security/0.14, never pushed);
-             advisory with the 0.14 GHSAs
+Fix commit:  3d62ce35 (0.14, 2026-11-07)
+Disclosure:  advisory with the 0.14 GHSAs
 ```
 
 ## Description

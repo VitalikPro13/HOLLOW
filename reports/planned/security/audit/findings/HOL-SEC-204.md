@@ -1,8 +1,8 @@
 # HOL-SEC-204: A self-hosted install's background push fetch dialled the official relay
 
 ```
-ID:          HOL-SEC-204                 Status: Fixed on local branch security/0.14
-                                          (5965e6b9, 2026-11-13), retest at release
+ID:          HOL-SEC-204                 Status: Fixed in 0.14
+                                          (5965e6b9, 2026-11-13)
 Severity:    Medium                      (Impact M: the official relay learns that a device
                                           uses Hollow, its device id and public key, its IP
                                           address, the room it asks for and when it gets a
@@ -26,9 +26,8 @@ Found:       2026-11-12 (track t14-iospush, while finding why channel pushes aga
 Affected:    Android installs on a self-hosted relay with UnifiedPush, from 0.12.0
              (04cd3a25) through 0.13.0; the iOS extension only where a self-hosted relay
              has push credentials of its own (test setups)
-Fix commit:  5965e6b9 (security/0.14, 2026-11-13)
-Embargo:     EMBARGOED until the 0.14 release (local branch security/0.14, never pushed);
-             advisory with the 0.14 GHSAs
+Fix commit:  5965e6b9 (0.14, 2026-11-13)
+Disclosure:  advisory with the 0.14 GHSAs
 ```
 
 ## Description

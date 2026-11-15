@@ -1,8 +1,8 @@
 # HOL-SEC-202: A file name cut to length could come out as a Windows device name
 
 ```
-ID:          HOL-SEC-202                 Status: Fixed on local branch security/0.14
-                                          (82df7694, 2026-11-07), retest at release
+ID:          HOL-SEC-202                 Status: Fixed in 0.14
+                                          (82df7694, 2026-11-07)
 Severity:    Low                         (Impact L: a Share download saved on Windows
                                           under a device name such as CON opens the device
                                           instead of a file, so that download fails or its
@@ -21,9 +21,8 @@ Found:       2026-11-07, writing the file_names fuzz target's property (t14-fuzz
              target's assertion fails on the old code with the input kept in
              fuzz/regressions/file_names/
 Affected:    every release since 0.10.0-beta (2026-07-23) through main 8350841b (0.13.0)
-Fix commit:  82df7694 (security/0.14, 2026-11-07)
-Embargo:     EMBARGOED until the 0.14 release (local branch security/0.14, never pushed);
-             advisory with the 0.14 GHSAs
+Fix commit:  82df7694 (0.14, 2026-11-07)
+Disclosure:  advisory with the 0.14 GHSAs
 ```
 
 ## Description

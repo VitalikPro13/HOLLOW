@@ -1,8 +1,8 @@
 # HOL-SEC-206: Importing a shards bundle could replace a vault file's key or store shards no manifest names
 
 ```
-ID:          HOL-SEC-206                 Status: Fixed on local branch security/0.14
-                                          (89d3a85d, 2026-11-14), retest at release
+ID:          HOL-SEC-206                 Status: Fixed in 0.14
+                                          (89d3a85d, 2026-11-14)
 Severity:    Medium                      (Impact H: a held vault file's manifest (its key,
                                           name and content id) is replaced, so the file a
                                           member recovers is someone else's bytes, and junk
@@ -18,9 +18,8 @@ Attacker:    anyone who can hand the person a file
 Found:       2026-11-14 (track t14-zipbomb, HOL-SEC-205 sweep)
 Affected:    every release with the evidence recovery pool (shard export and import,
              e63446bf, 2026-04-13) through 0.13.0
-Fix commit:  89d3a85d (security/0.14, 2026-11-14)
-Embargo:     EMBARGOED until the 0.14 release (local branch security/0.14, never pushed);
-             advisory with the 0.14 GHSAs
+Fix commit:  89d3a85d (0.14, 2026-11-14)
+Disclosure:  advisory with the 0.14 GHSAs
 ```
 
 ## Description

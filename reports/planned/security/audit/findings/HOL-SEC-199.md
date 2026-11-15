@@ -1,8 +1,8 @@
 # HOL-SEC-199: The setup's certbot ran as root from packages nobody pinned
 
 ```
-ID:          HOL-SEC-199                 Status: Fixed on local branch security/0.14
-                                          (3d62ce35, 2026-11-07), retest at release
+ID:          HOL-SEC-199                 Status: Fixed in 0.14
+                                          (3d62ce35, 2026-11-07)
 Severity:    Low                         (Impact H: code that runs as root twice a day on the relay
                                           box; Exploitability L: needs a malicious release of one of
                                           certbot's dependencies on PyPI, or a hostile index or
@@ -18,9 +18,8 @@ Attacker:    P-10 hostile infrastructure (a package index or a compromised depen
 Found:       2026-11-07 (hostile review of the relay setup wizard, finding L3)
 Affected:    the setup wizard since it shipped (relay 0.13.0 build 1 for self-hosters, 8350841b),
              IP address mode on Debian or any box without snap
-Fix commit:  3d62ce35 (security/0.14, 2026-11-07)
-Embargo:     EMBARGOED until the 0.14 release (local branch security/0.14, never pushed);
-             advisory with the 0.14 GHSAs
+Fix commit:  3d62ce35 (0.14, 2026-11-07)
+Disclosure:  advisory with the 0.14 GHSAs
 ```
 
 ## Description
