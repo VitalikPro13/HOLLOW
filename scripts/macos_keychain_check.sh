@@ -1,8 +1,9 @@
 #!/bin/bash
-# HOL-SEC-187 signed checks of the macOS keychain move, for a throwaway GitHub macOS
-# runner at the release build (release-apple.yml, job macos-keychain-check).
+# HOL-SEC-187 signed checks of the macOS keychain move and re-key on notarized builds. No CI
+# job runs it: it is the hand procedure for any release that changes keychain code, and it
+# writes the login keychain, so only on a throwaway macOS account or VM.
 #
-#   bash scripts/macos_keychain_check.sh NEW_APP OLD_APP   on a GitHub-hosted runner only
+#   bash scripts/macos_keychain_check.sh NEW_APP OLD_APP   throwaway macOS account or VM only
 #   bash scripts/macos_keychain_check.sh --dry-run          anywhere: builds the fixtures and
 #                                                            the probe, touches no keychain
 #

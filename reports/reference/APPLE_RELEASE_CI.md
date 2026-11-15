@@ -217,8 +217,6 @@ is one.
 | `NOTARY_KEY_P8_BASE64` | secret | that key's `AuthKey_<id>.p8` (downloadable once): `base64 -i AuthKey_<id>.p8 \| pbcopy` |
 | `MAC_TEAM_ID` | variable | the 10-character Team ID (developer.apple.com > Membership) |
 | `MAC_SIGN_NAME` | variable | the NAME part of the Developer ID certificate's common name (`security find-identity -v -p codesigning` on that Mac) |
-| `MAC_PREVIOUS_RELEASE_ZIP_URL` | variable (repository) | the signed updater zip of the last release before 0.14 (`hollow-0.13.0-macos.zip`), which `macos-keychain-check` runs against |
-| `MAC_PREVIOUS_RELEASE_ZIP_SHA256` | variable (repository) | its sha256, as published in that release's SHA256SUMS |
 
 ### `apple-asc-upload`
 

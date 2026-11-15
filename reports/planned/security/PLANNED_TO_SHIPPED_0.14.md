@@ -24,7 +24,7 @@ ships with 0.14), **Planned** (nothing built), **Living** (kept current, no sing
 | `planned/security/SECURITY_AUDIT_PLAN.md` | Living | the method and the program; phases A to G done, the external audit next | Decision Q1 below. |
 | `planned/security/SECURITY_AUDIT_2026_10.md` and `.pdf` | Committed: ONE edition as of 0.14 (revised 2026-11-15); the 0.13 edition is public with the 0.13.0 release (358f2b58) | the addendum is folded in and deleted (2026-11-15): one report, updated totals, findings 187 to 206 in sections 4 and 5, accepted risks and open items as of 0.14, the PDF rebuilt | Vitalii reads the revised edition. Then move both to `shipped/security/`. |
 | `planned/security/CHECKPOINT_COVERAGE_DESIGN.md` | Committed | 56587ca2 (t14-cover, 2026-11-05) | Status line fixed (2026-11-15). Move to `shipped/security/` with 0.14. |
-| `planned/security/HOL_SEC_187_KEYCHAIN_DESIGN.md` | Committed | design 2fc4dc44 (2026-10-31), build b8b64d15 (2026-11-01), 6fec99e7 (2026-11-14), re-key b887e706 (2026-11-15) | The signed proof by hand PASSED on 2026-11-15 (notarized build of b887e706, signed on the old iMac, run on the mini; design section 6). The automated signed job has never run. Status line fixed (2026-11-15). Move to `shipped/security/` with 0.14. |
+| `planned/security/HOL_SEC_187_KEYCHAIN_DESIGN.md` | Committed | design 2fc4dc44 (2026-10-31), build b8b64d15 (2026-11-01), 6fec99e7 (2026-11-14), re-key b887e706 (2026-11-15) | The signed proof by hand PASSED on 2026-11-15 (notarized build of b887e706, signed on the old iMac, run on the mini; design section 6). The automated signed job never ran and is removed from the workflow. Status line fixed (2026-11-15). Move to `shipped/security/` with 0.14. |
 | `planned/security/HOL_SEC_187_KEYCHAIN_DESIGN_REVIEW.md` | Committed | 2fc4dc44 | Moves with the design. |
 | `planned/security/DEVICE_PROOF_DESIGN.md` | Committed: track R 5af8f7b7, track I 060ca581, track C 11d2619f and dcce6b29 (the design itself came in with track C) | rev 3.5 of 2026-11-04, with build notes | Status line names the three tracks (2026-11-15). Move to `shipped/security/` with 0.14. |
 | `planned/security/audit/` (the whole folder) | Mixed: designs shipped, findings fixed, evidence complete | see section 2 | Decision Q1 below. |
@@ -94,11 +94,11 @@ For Vitalii:
 
 - Read the revised report (one edition as of 0.14; the 0.14 findings are HOL-SEC-187 to
   206 in sections 4 and 5, the changes since 0.13 in section 1).
-- DECIDED 2026-11-15: the automated signed keychain job is dropped as a requirement. The
-  proof is the hand procedure on notarized builds (`scripts/macos_keychain_check.sh`,
-  check A, the password case), re-run for any release that changes keychain code; the
-  2026-11-15 hand run on b887e706 is the 0.14 proof. Recorded in R-ID-07, the finding, the
-  design and wiki `security_write_gates` §43b.
+- DECIDED 2026-11-15: the automated signed keychain job is dropped and removed from
+  `release-apple.yml`. The proof is the hand procedure on notarized builds
+  (`scripts/macos_keychain_check.sh`, check A, the password case), re-run for any release
+  that changes keychain code; the 2026-11-15 hand run on b887e706 is the 0.14 proof.
+  Recorded in R-ID-07, the finding, the design and wiki `security_write_gates` §43b.
 
 For the lead, in the release commit:
 

@@ -2143,7 +2143,7 @@ Release time: 100ms
     - [x] Pre-freeze: HOL-SEC-187 signed-build proof (notarize on the old iMac, run the app on the mini: launch, video, camera, share). Done by hand 2026-11-15 on a notarized build of b887e706: keychain-only re-key and `0x03` re-salt PASS, 0.13 locked out of both, screen share PASS (video, camera, App Lock 11-14). That hand procedure is the proof (Vitalik 2026-11-15): no automated signed CI job is required; it runs again by hand for any release that changes keychain code.
     - [ ] Pre-freeze: full PC suite (nextest + flutter) and fleets on every platform on the final tree.
     - [ ] Pre-freeze: the fleet tool's production-relay guard (wiki `fleet_probe`, "Keeping 0.14 fleets off the production relay").
-    - [ ] Release: local commits onto main, signed `v0.14.0` tag, the `release` skill pipeline, then the OSTIF application.
+    - [ ] Release: local commits onto main, signed `v0.14.0-beta` tag, the `release` skill pipeline, then the OSTIF application.
 
 **Deliverable:** A polished, feature-complete communication platform ready for public release — with private, encrypted P2P file sharing that rivals torrent performance without any of the privacy/legal exposure.
 

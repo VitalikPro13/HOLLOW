@@ -11,8 +11,6 @@
 #   macos-release  sign, notarize + staple the app; the DMG from a staged
 #                  folder (hdiutil, committed layout), checked, signed,
 #                  notarized + stapled; the updater zip     apple-developer-id
-#   macos-keychain-check  the signed app on throwaway runners (macOS 14, 15, 26):
-#                  the HOL-SEC-187 keychain move against 0.13       no secrets
 #   macos-attest   SLSA build provenance for the dmg and the zip
 #   ios-build      xcodebuild archive with code signing OFF, crash symbols
 #                  from its dSYMs                                         no secrets
@@ -349,57 +347,11 @@ jobs:
           retention-days: 14
           if-no-files-found: error
 
-  # HOL-SEC-187 on the signed build, per macOS version: the first start moves the key out
-  # of the login keychain, 0.13 (and a library planted into it) cannot read it, a
-  # framework swapped for 0.13's keeps the keychain shut. A throwaway runner only: the
-  # script writes the login keychain. No secrets.
-  macos-keychain-check:
-    name: macOS keychain move (signed, ${{ matrix.os }})
-    needs: [prepare, macos-release]
-    if: needs.prepare.outputs.sign == 'true'
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-14, macos-15, macos-26]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          artifact-ids: ${{ needs.macos-release.outputs.artifact_id }}
-          path: ${{ runner.temp }}/release
-
-      - name: The signed app and the previous release
-        env:
-          VERSION: ${{ needs.prepare.outputs.version }}
-          ZIP_SHA256: ${{ needs.macos-release.outputs.zip_sha256 }}
-          OLD_URL: ${{ vars.MAC_PREVIOUS_RELEASE_ZIP_URL }}
-          OLD_SHA256: ${{ vars.MAC_PREVIOUS_RELEASE_ZIP_SHA256 }}
-        run: |
-          set -euo pipefail
-          cd "$RUNNER_TEMP"
-          printf '%s  %s\n' "$ZIP_SHA256" "release/hollow-$VERSION-macos.zip" | shasum -a 256 --check --strict
-          [[ "$OLD_URL" == https://* && "$OLD_SHA256" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::set MAC_PREVIOUS_RELEASE_ZIP_URL and _SHA256"; exit 1; }
-          curl -fsSL --proto '=https' -o old.zip "$OLD_URL"
-          printf '%s  old.zip\n' "$OLD_SHA256" | shasum -a 256 --check --strict
-          mkdir new old
-          ditto -x -k "release/hollow-$VERSION-macos.zip" new
-          ditto -x -k old.zip old
-
-      - name: Keychain move checks
-        run: bash scripts/macos_keychain_check.sh "$RUNNER_TEMP/new/Hollow.app" "$RUNNER_TEMP/old/Hollow.app"
-
   # A public repository only: attestations of a private repository need GitHub
   # Enterprise Cloud (APPLE_RELEASE_CI.md, "The embargo").
   macos-attest:
     name: macOS provenance
-    needs: [prepare, macos-release, macos-keychain-check]
+    needs: [prepare, macos-release]
     if: needs.prepare.outputs.sign == 'true' && !github.event.repository.private
     runs-on: ubuntu-latest
     timeout-minutes: 15

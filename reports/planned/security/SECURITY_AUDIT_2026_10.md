@@ -3,7 +3,7 @@
 **Internal security review**\
 **Hollow version: 0.14.0**\
 **Date: October 30, 2026; revised for 0.14 on November 15, 2026**\
-**Scope: the 0.14.0 release, tag `v0.14.0`**\
+**Scope: the 0.14.0 release, tag `v0.14.0-beta`**\
 **Review period: 2026-09-26 to 2026-11-15**\
 **Author: Vitalii Rovinskyi**\
 *This report was generated with the assistance of Claude (AI), and the review it describes was carried out with Claude agents directed by the author. Every decision on what Hollow must allow, every severity and every conclusion is the author's. This is not an audit by an independent firm.*
@@ -141,6 +141,9 @@ on an internal review, and the limits below are real.
 - **0.13 clients** stop seeing servers whose join lock a 0.14 device moved (AR-38), and
   their posts past a server's cut no longer reach 0.14 members. A signed status notice
   tells them to update.
+- **Scorecard.** The code-maturity ratings were judged again for 0.14 (section 7).
+  Authentication and access controls moved down from Satisfactory to Moderate after
+  HOL-SEC-188; the other eleven ratings stay.
 
 ## 2. Scope
 
@@ -3535,15 +3538,17 @@ step, or a residual already stated in a finding or an accepted risk.
 ## 7. Code-maturity scorecard
 
 In the style of Trail of Bits' code-maturity evaluation. Ratings: Strong, Satisfactory,
-Moderate, Weak, Missing. They were set at the 0.13 tag, after the fixes, and they are the
-author's own judgement. This edition keeps them for 0.14 and brings the facts behind them
-up to date.
+Moderate, Weak, Missing. They were set at the 0.14 tag, after the fixes, and they are the
+author's own judgement. Each category was judged again for this edition against what
+changed since the 0.13 tag: the 0.14 commits, findings HOL-SEC-187 to 206 and the records
+in `audit/`. A rating moved only where there was evidence, and new findings in a category
+counted against raising it. One rating moved, and it moved down.
 
 | Category | Rating |
 |----------------|--------|
 | Arithmetic | Moderate |
 | Auditing and logging | Satisfactory |
-| Authentication and access controls | Satisfactory |
+| Authentication and access controls | Moderate (Satisfactory at 0.13) |
 | Complexity management | Weak |
 | Configuration | Satisfactory |
 | Cryptography and key management | Satisfactory |
@@ -3554,100 +3559,164 @@ up to date.
 | Testing and verification | Satisfactory |
 | Maintenance and supply chain | Satisfactory |
 
-**Arithmetic: Moderate.** Arithmetic on values a peer chooses has failed three times in
-this review: an HLC counter that wrapped (HOL-SEC-020), unchecked subtraction on
+**Arithmetic: Moderate, kept.** Arithmetic on values a peer chooses failed three times
+before 0.14: an HLC counter that wrapped (HOL-SEC-020), unchecked subtraction on
 sender-chosen stamps that panicked debug builds (HOL-SEC-145), and a negative size from a
 2^63 declaration in the Dart stream intake (HOL-SEC-116). Each site now saturates or
 checks, and time comparisons go through a stamp ceiling (`frame_auth::stamp_ceiling`).
-Nothing enforces this across the code, since the clippy lints for arithmetic side effects
-and indexing are not on.
+0.14 found no arithmetic bug. Its 23 Rust fuzz targets are built with overflow checks on,
+and about 30 million executions through the parsers and the op fold hit no overflow. That
+covers the fuzzed paths only, run nightly on one machine and not in CI. The clippy lints
+for arithmetic side effects and indexing are still off, so nothing enforces checked
+arithmetic across the code.
 
-**Auditing and logging: Satisfactory.** One logging macro (`hollow_log!`) and a rule
-that log lines carry no names, codes, keys or message content (claim C-37,
-HOL-SEC-160), with key lines dropped from libwebrtc's logs (HOL-SEC-142). The relay
-writes nothing about clients to disk (HOL-SEC-075) and a wipe leaves no log trace
-(HOL-SEC-156). Refusals are logged where a test can see them. There is no tamper-evident
-audit trail, and diagnosing an incident depends on a user exporting a redacted log.
+**Auditing and logging: Satisfactory, kept.** One logging macro (`hollow_log!`) and a rule
+that log lines carry no names, codes, keys or message content (claim C-37, HOL-SEC-160),
+with key lines dropped from libwebrtc's logs (HOL-SEC-142). The relay writes nothing about
+clients to disk (HOL-SEC-075) and a wipe leaves no log trace (HOL-SEC-156). Refusals are
+logged where a test can see them. The 0.14 code follows the same rule: the macOS keychain
+move logs one status line per item and never key bytes, and the relay's denylist counts
+reach `/server-stats` only when the operator turns them on. 0.14 found nothing in this
+category. There is still no tamper-evident audit trail, and diagnosing an incident depends
+on a user exporting a redacted log.
 
-**Authentication and access controls: Satisfactory.** Authority now rests on signatures
-bound to their subject and checked at one gate per class: the frame seal
-(`node/frame_auth.rs`), the lane rule, `change_may_touch_row` for every remote change to
-a message row, `op_allowed` in the CRDT fold, the roster for devices, `mls_authority` for
-leaves and commits, the join lock and door proofs at the relay. The wiki
-`security_write_gates.md` records 73 sections of gates, and source-scan tests fail when a
-receive path stops calling its gate. The rating is not Strong because most findings of
-this review were in this category, the gates were added after the code they protect, and
-the matrix rows are agent-verified.
+**Authentication and access controls: Moderate, down from Satisfactory.** Authority rests
+on signatures bound to their subject and checked at one gate per class: the frame seal
+(`node/frame_auth.rs`), the lane rule, `change_may_touch_row` for every remote change to a
+message row, `op_allowed` in the CRDT fold, the roster for devices, `mls_authority` for
+leaves and commits, the join lock and door proofs at the relay, and since 0.14 a device
+proof on server history. The wiki `security_write_gates.md` records 73 sections of gates,
+and source-scan tests fail when a receive path stops calling its gate. The rating went
+down because 0.14 showed a whole class the gates missed. In every release from 0.12.0 to
+0.13.0, a device its owner had removed could still sign server operations, keep the door
+to a server's room and have its posts carried into everyone's history, because all of it
+was checked against the master signature, which every device holds (HOL-SEC-188, High).
+0.14 fixes that with a device proof on every server operation, post and post change past a
+server's cut, and a join lock that moves when a device is removed. The same gap stays open
+for profiles, which carry only the master signature (AR-42). Five more 0.14 findings sit
+here: a removed device's vouches could uncount an honest one (HOL-SEC-189), a received
+voice's volume and the share's voice redirect went by a track id its sender chose
+(HOL-SEC-190, 191), a member served a public channel's deleted posts to a non-member
+(HOL-SEC-194), and a shards import could replace a vault file's key (HOL-SEC-206). 0.14
+also recorded new residuals in the same rules (AR-41, AR-43). Most findings of the whole
+review are in this category, the gates were added after the code they protect, and the
+matrix rows are agent-verified.
 
-**Complexity management: Weak.** The node's event-loop dispatcher (`node/swarm.rs`) is
-about 15,000 lines, the relay's handler (`ws_handler.cpp`) about 4,600, and the rules
-interact across designs (roster, fold, join lock, door rooms, standing). Several 0.13
-findings came from such interactions. A seal clock change exposed a friend re-add race
-(HOL-SEC-181), a faster store exposed a routing bug (HOL-SEC-179), and a ring replay
-starved direct frames (HOL-SEC-178). Rules are kept in one function where possible and
-documented, but the whole is hard for one person to hold.
+**Complexity management: Weak, kept.** The node's event-loop dispatcher (`node/swarm.rs`)
+grew from about 15,400 lines at the 0.13 tag to about 17,100, and the relay's handler
+(`ws_handler.cpp`) from about 4,600 to about 5,500. 0.14 added rules that touch every
+earlier design: device proofs and server cuts on top of the fold, a join lock that follows
+device removals, saved marks for servers a relay refuses, the operator denylist and
+batched presence. Its findings again sat where two designs meet. A removal the roster knew
+never reached the fold's authority (HOL-SEC-188), a removed device's vouches met the
+roster's cap (HOL-SEC-189), and a leave during the screen share picker left a share
+running for the next room (HOL-SEC-195). Rules are kept in one function where possible and
+documented, but the whole is harder for one person to hold than at 0.13.
 
-**Configuration: Satisfactory.** The relay box runs each service under its own account
-in a systemd sandbox, keeps secrets in root-only files and nothing about clients on disk,
-and `check-host.sh` fails on the old shape (HOL-SEC-073 to 075). The four 0.11
-compatibility switches are deleted. Self-hosters get one `.env`, a TURN port lock and an
-opt-out for public statistics. Gaps: the Docker path's port lock can fail open at boot,
-and the official relay remains a single box.
+**Configuration: Satisfactory, kept.** The relay box runs each service under its own
+account in a systemd sandbox, keeps secrets in root-only files and nothing about clients
+on disk, and `check-host.sh` fails on the old shape (HOL-SEC-073 to 075). Self-hosters get
+one `.env`, a TURN port lock and an opt-out for public statistics. Since 0.14 the circuit
+breaker enforces by default, connection limits and a denylist are operator settings, and
+the setup installs certbot only from hash-pinned packages in a sandbox that
+`check-host.sh` checks. The macOS app, though, shipped from 0.5.0 to 0.13.0 with library
+search paths outside its bundle and library validation off (HOL-SEC-187, High). 0.14 turns
+validation on, runs a load gate test in every Apple release build and has the app check
+its own bundle at start. Six more 0.14 findings were configuration: the setup wizard's
+take over, rollback, removal and certbot (HOL-SEC-196 to 199), a wrong-typed `keys.json`
+that ended the relay without its restart snapshot (HOL-SEC-203), and a self-hosted
+install's push fetch that dialled the official relay (HOL-SEC-204). Each is fixed with a
+test that failed first, so the rating stays. Gaps: the Docker path's port lock can fail
+open at boot, the official relay remains a single box, and HOL-SEC-187's signed proof
+covers macOS 26 only.
 
-**Cryptography and key management: Satisfactory.** Primitives come from audited
+**Cryptography and key management: Satisfactory, kept.** Primitives come from audited
 libraries (vodozemac, OpenMLS, RustCrypto). Every signature carries its own domain tag
 (dozens of distinct `hollow-*` tags) and its subject, signed fields are shape-checked by
 signer and verifier (HOL-SEC-143), and Rust and C++ share known-answer vectors. The
-recovery phrase is never stored. Gaps: no formal model of the protocols; an App Lock PIN
-has no hardware-enforced attempt limit (AR-24); the Android release key sits on one
-machine (AR-22); server MLS groups rely on self-update turns for post-compromise recovery
-(AR-25).
+recovery phrase is never stored. 0.14 moved to vodozemac 0.11.2, which refuses small-order
+keys itself (HOL-SEC-161 has no residual left), put SFrame on a 1:1 call's camera, and
+wipes Olm pickles and MLS saves after use (HOL-SEC-200, 201). Against that, every signed
+macOS build could open the identity key without a prompt (HOL-SEC-187). 0.14 keeps the key
+where only fixed builds read it and re-keys each identity off the login keychain item 0.13
+wrote, proven by hand on one macOS version. Gaps: no formal model of the protocols;
+SQLite's own buffers are freed unwiped (AR-44); an App Lock PIN has no hardware-enforced
+attempt limit (AR-24); the Android release key sits on one machine (AR-22); server MLS
+groups rely on self-update turns for post-compromise recovery (AR-25).
 
-**Data handling: Satisfactory.** Remote file names go through `safe_file_name`, zip
-entries through `enclosed_name` with an allowlist and size budget, client JSON at the relay
-through one depth-limited parser, message bodies are refused whole past 64 KiB, peer
-images are checked in pure Rust before a native decoder, and ids are shape-checked at
-every entry. The review still found two remote panics in Rust (HOL-SEC-007, HOL-SEC-173),
-a canonicalisation bug in the signing payload (HOL-SEC-143), a parser differential at
-the relay (HOL-SEC-186) and, in 0.14, a sticker pack unpacked with no size limit
-(HOL-SEC-205).
+**Data handling: Satisfactory, kept.** Remote file names go through `safe_file_name`,
+client JSON at the relay through one depth-limited parser, message bodies are refused
+whole past 64 KiB, peer images are checked in pure Rust before a native decoder, and ids
+are shape-checked at every entry. Since 0.14 every zip reader counts what an entry really
+inflates to, with a cap per entry and a budget for the whole zip. The 23 Rust fuzz targets
+put the peer-facing parsers under about 30 million executions, and they found one Low bug,
+a cut file name that could come out as a Windows device name (HOL-SEC-202). Against
+raising it: a received sticker pack was unpacked with no size limit as soon as its card
+showed (HOL-SEC-205, High), although the rule for zips had stood since HOL-SEC-129, and a
+shards import could store shards no manifest names (HOL-SEC-206). Earlier the review found
+two remote panics in Rust (HOL-SEC-007, HOL-SEC-173), a canonicalisation bug in the
+signing payload (HOL-SEC-143) and a parser differential at the relay (HOL-SEC-186).
 
-**Decentralization: Moderate.** Members hold their servers' state and history, a
+**Decentralization: Moderate, kept.** Members hold their servers' state and history, a
 server's authority is provable from signed ops, and the relay can neither read nor forge
 what it carries (design A). Availability still rests on one relay per user, the official
 relay is one machine, phone wakes go through Google and Apple, and update signing rests on
-one offline key held by one person.
+one offline key held by one person. 0.14 lets a relay operator refuse listed servers,
+identities and networks; nothing is deleted on any device, but a refused server stays
+read-only until the relay lifts it, since a client has no second relay to turn to. A
+self-hosted install's push fetch now dials its own relay (HOL-SEC-204). The Apple releases
+are built on GitHub's runners, with signing gated by environments that need the author's
+approval.
 
-**Documentation: Satisfactory.** A protocol whitepaper, the claims, threat model,
+**Documentation: Satisfactory, kept.** A protocol whitepaper, the claims, threat model,
 authorisation matrix, accepted-risk register, design documents for every redesign, one
-file per finding, and the write-gate wiki. Gaps: some of the working memory behind
-decisions lives outside the repository, and the whitepaper trails the code in places (its
-check is appendix B).
+file per finding, and the write-gate wiki. 0.14 added a requirements list
+(`audit/requirements.md`) that names, for each security rule, where the code enforces it
+and which test proves it (one rule, R-RB-02, has no dedicated test), and the three STRIDE
+slices the 0.13 pass left out. Each 0.14 track edited the whitepaper sections it changed.
+Gaps: the whitepaper check (appendix B) was made for 0.13 and not repeated against the
+0.14 code, and some of the working memory behind decisions lives outside the repository.
 
-**Memory safety and low-level code: Moderate.** The core is Rust; outside test code it has
-under a hundred `unsafe` blocks, mostly in FFI, OS keystore and file-locking code. The
-relay is C++, sanitized in CI, and fuzzed nightly; sanitizer runs caught two
-use-after-free bugs before deploy. Twice a single client could end the process of a
-released relay (HOL-SEC-028, HOL-SEC-128), and review caught a third way in unreleased
-code (section 3.7). Native media and decoding code (patched libwebrtc, ffmpeg, Skia) is
-large and reached by peer bytes; it is gated, and reviewed only where Hollow configures it
-(section 2).
+**Memory safety and low-level code: Moderate, kept.** The core is Rust; outside test code
+it has about 85 `unsafe` blocks (53 at the 0.13 tag), most of the new ones for the macOS
+keychain calls of HOL-SEC-187, the rest in FFI, OS keystore and file-locking code. The
+relay is C++, sanitized in CI and fuzzed nightly in ten targets (the denylist parser is
+new); sanitizer runs caught two use-after-free bugs before deploy. The Rust parsers are
+fuzzed since 0.14 and showed no memory error. Twice a single client could end the process
+of a released relay (HOL-SEC-028, HOL-SEC-128), and review caught a third way in
+unreleased code (section 3.7). In 0.14 the macOS app could load libraries from folders
+other programs can write (HOL-SEC-187), and a wrong-typed operator file ended the relay
+without its restart snapshot (HOL-SEC-203). Native media and decoding code (patched
+libwebrtc, ffmpeg, Skia) is large and reached by peer bytes; it is gated, and reviewed
+only where Hollow configures it (section 2).
 
-**Testing and verification: Satisfactory.** At the 0.13 close, 2,758 Rust tests in the
-full run, 704 of them multi-node harness tests with a hostile mock relay, 2,767 Flutter tests, relay suites
-plain and sanitized, a test that failed before every fix, mutation passes on every
-security rule, and fleet runs of the real apps on desktop and phones. Not Strong because
-there is no formal model, the Rust wire parsers are fuzzed only since 0.14, the mutation scripts
-cannot be re-run against today's tree, a few tests are load-sensitive, and the harness
-does not reach the relay C++ or the media plane.
+**Testing and verification: Satisfactory, kept.** The last full runs of 0.14 had 3,733
+Rust tests (887 multi-node harness tests with a hostile mock relay at the tag, 704 at the
+0.13 close) and 3,610 Flutter tests. Around them are relay suites plain and sanitized, a
+test that failed before every fix, mutation passes on every security rule, and fleet runs
+of the real apps on desktop and phones. Since 0.14 the Rust wire parsers are fuzzed, the
+requirements list ties each rule to its test, and the fleet and probe tooling refuses to
+reach the official relay unless a run names it. Not Strong because there is no formal
+model, the mutation scripts in `audit/mutation_passes/` stop at the 0.13 wave and do not
+run against today's tree (the 0.14 passes are recorded in their findings and commits), a
+few tests depend on their environment (seven keystore tests fail over SSH), the harness
+does not reach the relay C++ or the media plane, and HOL-SEC-187's signed half is proven
+only by a hand run on macOS 26, with no CI job.
 
-**Maintenance and supply chain: Satisfactory.** CI runs cargo-deny (advisories, bans,
-licences, sources), osv-scanner, gitleaks over the whole history and zizmor on the workflows;
-actions are pinned to commit hashes; Dependabot proposes updates after a seven-day
-cooldown. Update manifests and status feeds are signed with a key kept outside the
-repository. Gaps: nine advisories are ignored in `deny.toml` (each with a written
+**Maintenance and supply chain: Satisfactory, kept.** CI runs cargo-deny (advisories,
+bans, licences, sources), osv-scanner (since 0.14 over the fuzz lockfile too), gitleaks
+over the whole history and zizmor on the workflows; actions are pinned to commit hashes;
+Dependabot proposes updates after a seven-day cooldown, and the advisories open at the
+0.14 freeze were cleared. Update manifests and status feeds are signed with a key kept
+outside the repository. 0.14 pins the mdk media engine by SHA-256 on all five platforms,
+signs release tags with the keys listed in `.github/allowed_signers`, and builds the Apple
+releases on GitHub in signing jobs that run no third-party code. Two gaps the 0.13 rating
+had not seen count against raising it: until 0.14 mdk was fetched from a nightly with no
+checksum on Windows, Linux and Android, and the setup's certbot came from packages nobody
+pinned (HOL-SEC-199). Gaps: ten advisories are ignored in `deny.toml` (each with a written
 reason), the forked `flutter_webrtc` and patched libwebrtc are maintained by one person,
-and build provenance is new in 0.13.
+Windows releases are signed on one machine, and the build provenance of the other
+platforms is unsigned.
 
 ## 8. Appendices
 
