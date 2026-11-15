@@ -470,7 +470,7 @@ link-mode key prompt), so nobody uses the throwaway as an account. Tests:
 
 ## 16. MLS group state: leaves, commits, Welcomes, failures (design D, security audit session 8, 2026-09-27)
 
-Design: `reports/planned/security/audit/design_D_mls_authority.md`. The rules live in
+Design: `reports/shipped/security/audit/design_D_mls_authority.md`. The rules live in
 `node/mls_authority.rs`; the staging lives in `crypto/mls_manager.rs`.
 
 | Write | Where | Gate |
@@ -488,7 +488,7 @@ Design: `reports/planned/security/audit/design_D_mls_authority.md`. The rules li
 
 ## 17. CRDT state authority: anchors, the fold, admission, history (design E, security audit session 9, 2026-09-27)
 
-Design: `reports/planned/security/audit/design_E_crdt_authority.md`. The fold lives in
+Design: `reports/shipped/security/audit/design_E_crdt_authority.md`. The fold lives in
 `crdt/fold.rs`, self-certifying ids in `crdt/anchor.rs`, the rules in
 `ServerState::op_allowed`.
 
@@ -506,7 +506,7 @@ Design: `reports/planned/security/audit/design_E_crdt_authority.md`. The fold li
 
 ## 18. Every relay frame names its sender (design A, security audit session 10, 2026-09-27)
 
-Design: `reports/planned/security/audit/design_A_frame_authority.md`. The seal lives in
+Design: `reports/shipped/security/audit/design_A_frame_authority.md`. The seal lives in
 `node/frame_auth.rs`; the replay classes are `HavenMessage::live_only` and
 `MessageEnvelope::live_only` in `node/types.rs` (exhaustive, a new variant must pick).
 
@@ -579,7 +579,7 @@ bug class, so the rows live here. HOL-SEC-063..068.
 ## 21. Identity authority: the roster and the recovery phrase (design ID-1, security audit sessions 20-22, 2026-09-30/10-01)
 
 BUILT, tested and driven on throwaway fleet peers (session 22); findings HOL-SEC-002,
-076, 077. Design: `reports/planned/security/audit/design_ID1_identity_authority.md`
+076, 077. Design: `reports/shipped/security/audit/design_ID1_identity_authority.md`
 (section 7a: the rules the build forced). The master-signed device list of sections 5 and
 13 is REPLACED by the roster; those rows describe the pre-0.12 model. Every rule below
 survived a mutation pass (22/22 roster rules and 9/9 link rules fail a named test when put
@@ -604,7 +604,7 @@ back; each session-22 rule fails its own test alone).
 
 ## 22. ID-1R: the relay learns rosters, and what mirroring the fold fixed (session 25, 2026-10-02)
 
-Design: `reports/planned/security/audit/design_ID1R_relay_rosters.md`; findings
+Design: `reports/shipped/security/audit/design_ID1R_relay_rosters.md`; findings
 HOL-SEC-078..081. Relay DEPLOYED 2026-10-02.
 
 | Write | Where | Gate |
@@ -619,7 +619,7 @@ HOL-SEC-078..081. Relay DEPLOYED 2026-10-02.
 
 ## 23. Phase B re-check leftovers (session 27, 2026-10-02)
 
-Source: `reports/planned/security/audit/phase_b_recheck/`; findings HOL-SEC-083..090.
+Source: `reports/shipped/security/audit/phase_b_recheck/`; findings HOL-SEC-083..090.
 
 | Write | Where | Gate |
 |---|---|---|
@@ -668,7 +668,7 @@ Source: `reports/planned/security/audit/phase_b_recheck/`; findings HOL-SEC-083.
 
 ## 26. Phase B closed: the matrix rebuild and its findings (session 32, 2026-10-03)
 
-The whole matrix is `reports/planned/security/audit/authz_matrix.md` (346 rows, every binding cited with a quote).
+The whole matrix is `reports/shipped/security/audit/authz_matrix.md` (346 rows, every binding cited with a quote).
 
 | Path | Site | Gate |
 |---|---|---|
@@ -702,7 +702,7 @@ Residuals: a member alone judges a parked ask with what the ring gave it; after 
 
 ## 28. Merged phase E+F pass (session 34, 2026-10-04)
 
-Slice reports: `reports/planned/security/audit/phase_ef/`. Findings HOL-SEC-128..160, ARs 21-29.
+Slice reports: `reports/shipped/security/audit/phase_ef/`. Findings HOL-SEC-128..160, ARs 21-29.
 
 | Path | Site | Gate |
 |---|---|---|
@@ -920,7 +920,7 @@ Residuals: no hardware attempt counter exists for an app's own PIN on Android or
 ## 43b. Where Apple keychain secrets live (HOL-SEC-187, track sec-keychain, 0.14)
 
 Local only: no frame reaches any of these; a same-user process (an old signed Hollow with
-a planted library) is the attacker. Design `reports/planned/security/HOL_SEC_187_KEYCHAIN_DESIGN.md`.
+a planted library) is the attacker. Design `reports/shipped/security/HOL_SEC_187_KEYCHAIN_DESIGN.md`.
 
 | Write / read | Site | Gate |
 |---|---|---|
@@ -1003,7 +1003,7 @@ the person, not from running its constructors (macOS 14 library constraints, U14
 
 ## 48. MLS self-update turns and the epoch-rate rule (AR-25, AR-27, wave g13 s3, 2026-10-22)
 
-Design: `reports/planned/security/audit/design_G_mls_turns.md`. Code: `node/mls_turns.rs`, `crypto/mls_tally.rs`, `crypto/mls_rate.rs`.
+Design: `reports/shipped/security/audit/design_G_mls_turns.md`. Code: `node/mls_turns.rs`, `crypto/mls_tally.rs`, `crypto/mls_rate.rs`.
 
 | Write | Where | Gate |
 |---|---|---|
@@ -1033,7 +1033,7 @@ Design: `reports/planned/security/audit/design_G_mls_turns.md`. Code: `node/mls_
 
 ## 51. Who leads an MLS group while the owner is away (standing, g13 wave 3, 0.13, 2026-10-23)
 
-Design: `reports/planned/security/audit/design_G_standing.md` (v2.1, three review rounds). Code: `node/standing.rs`. Before 0.13 every stand-in was the lowest master id by string sort, which anyone can grind.
+Design: `reports/shipped/security/audit/design_G_standing.md` (v2.1, three review rounds). Code: `node/standing.rs`. Before 0.13 every stand-in was the lowest master id by string sort, which anyone can grind.
 
 | Write | Where | Gate |
 |---|---|---|
@@ -1051,7 +1051,7 @@ Residuals: a backdated role grant from an ex-admin buys stand-in precedence (AR-
 
 ## 52. The relay's held bytes and the circuit breaker (OOM + G2, 0.13, 2026-10-23)
 
-Design: `reports/planned/security/audit/design_G2_breaker.md`. Code: `relay-uws/src/send_budget.h`, `breaker.h`, `msg_plan.h`, `door_room.h`, `fair_share.h`; one close helper `close_once` in `ws_handler.cpp`. Every table is RAM only, never logged, never in the restart snapshot.
+Design: `reports/shipped/security/audit/design_G2_breaker.md`. Code: `relay-uws/src/send_budget.h`, `breaker.h`, `msg_plan.h`, `door_room.h`, `fair_share.h`; one close helper `close_once` in `ws_handler.cpp`. Every table is RAM only, never logged, never in the restart snapshot.
 
 | Write | Where | Gate |
 |---|---|---|
@@ -1159,7 +1159,7 @@ Residuals: the roster book and the card store are never pruned. A master a held 
 
 ## 59. Checkpoint coverage: a checkpoint replaces only what its owner folded (track t14-cover, 0.14)
 
-Design: `reports/planned/security/CHECKPOINT_COVERAGE_DESIGN.md` rev 2 plus the rev 2 review changes (H2, H3, M1-M5, L1, L2) and the code review rev 3 fix round (floor, charge trees, exact tail, AR-11 voids) and the focused review 4 round (refused removals void nothing, checkpoint size measured before signing). Device proof (design section 10) NOT built: AR-02 for server ops still open.
+Design: `reports/shipped/security/CHECKPOINT_COVERAGE_DESIGN.md` rev 2 plus the rev 2 review changes (H2, H3, M1-M5, L1, L2) and the code review rev 3 fix round (floor, charge trees, exact tail, AR-11 voids) and the focused review 4 round (refused removals void nothing, checkpoint size measured before signing). Device proof (design section 10) NOT built: AR-02 for server ops still open.
 
 | Write | Where | Gate |
 |---|---|---|
@@ -1217,7 +1217,7 @@ Residual: the DM call's per-watch redirect arm (`_sendDmScreenOffer`) is not ser
 
 ## 63. Device proof, CRDT side: the proof, the verdict, the cut (track C1, 0.14, embargoed)
 
-Design: `reports/planned/security/DEVICE_PROOF_DESIGN.md` rev 3.5 + build notes, sections 4 to 7, 10, 11, 12 (R1 to R3). Shared seams with track C2: `crdt/authority.rs`, `node/authority_view.rs` (`.team/INTERFACE.md`). Built so far: the proof, the view, the verdict, the cut, parking with the H3 carve-out, eligibility rules 1 to 3 with the freeze, the lineage checks, `DeviceRetired` with its carry, the remover's flow and its sync round (M4), the per-author bound on retire rebuilds, and t14-lock's R1 to R3. Since builder 4 also: restore points, settle marks (`SettleSign`, `SettlePin`), the owner's settling after a lost-or-stolen removal, the member's lost retire, co-signing marks. Since builder 5: content-dated `seen_ms`, mark-first settlings sent before the removal, two settlings at once, `cp_seen` rotation, held retires surviving a restart. Own-op retention (step 4). NOT yet: the settling's own sync round on R (needs C2's `sync_ask_on_base`), the post gate and post proofs of section 13 (the `cp_posts_until` carry is built), witnesses, floor marks and the hold, the owner re-fold, channel post proofs (section 13).
+Design: `reports/shipped/security/DEVICE_PROOF_DESIGN.md` rev 3.5 + build notes, sections 4 to 7, 10, 11, 12 (R1 to R3). Shared seams with track C2: `crdt/authority.rs`, `node/authority_view.rs` (`.team/INTERFACE.md`). Built so far: the proof, the view, the verdict, the cut, parking with the H3 carve-out, eligibility rules 1 to 3 with the freeze, the lineage checks, `DeviceRetired` with its carry, the remover's flow and its sync round (M4), the per-author bound on retire rebuilds, and t14-lock's R1 to R3. Since builder 4 also: restore points, settle marks (`SettleSign`, `SettlePin`), the owner's settling after a lost-or-stolen removal, the member's lost retire, co-signing marks. Since builder 5: content-dated `seen_ms`, mark-first settlings sent before the removal, two settlings at once, `cp_seen` rotation, held retires surviving a restart. Own-op retention (step 4). NOT yet: the settling's own sync round on R (needs C2's `sync_ask_on_base`), the post gate and post proofs of section 13 (the `cp_posts_until` carry is built), witnesses, floor marks and the hold, the owner re-fold, channel post proofs (section 13).
 
 | Write | Where | Gate |
 |---|---|---|

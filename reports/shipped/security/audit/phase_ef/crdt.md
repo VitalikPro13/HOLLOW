@@ -1,6 +1,6 @@
 # Phase E slice "crdt": server state, the design E fold, checkpoint coverage, the device proof
 
-Pre-freeze STRIDE pass for 0.14 (2026-11-05), the slice the 0.13 review left open (flow F-30;
+STRIDE pass before the 0.14 release (2026-11-05), the slice the 0.13 review left open (flow F-30;
 `coverage.md` WP3 "Not examined"). Code read on `security/0.14` at `56587ca2` (worktree
 `~/dev/wt/t14-docs`). Nothing was built or run: verdicts come from reading the code, the
 designs and the wiki gate rows, and every test named exists in that tree unless it is marked
@@ -92,7 +92,7 @@ is walked as designed, since track C has not built its CRDT half.
 | Class | Threat | Mitigation | Residual | Test |
 |---|---|---|---|---|
 | T | A field this build drops re-serializes to bytes the signature does not cover. | `read_op` verifies over the exact payload bytes (`raw_value`) and calls such an op unread, never a forgery. | none | `a_newer_build_folds_in_what_an_older_one_kept` |
-| D | A deeply nested or oversized op exhausts the parser. | serde_json's recursion limit; the door's byte bounds before the fold. | Fuzzing of CRDT batches is a pre-freeze item (cargo-fuzz wire parsers) | none yet |
+| D | A deeply nested or oversized op exhausts the parser. | serde_json's recursion limit; the door's byte bounds before the fold. | Fuzzing of CRDT batches is due before the 0.14 release (cargo-fuzz wire parsers) | none yet |
 
 ### P4: the transports
 

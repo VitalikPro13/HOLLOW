@@ -9,7 +9,7 @@ WORKING-TREE WARNING: while I was reading, another session edited
 `node/fetch.rs`, `node/forwarder_client.rs`, `node/message_ops.rs`, `node/swarm.rs`,
 `node/test_harness.rs` and `node/types.rs` (uncommitted). The edits are an
 in-progress fix for HOL-SEC-003 (the PreKey identity-key hole, A-DM-03 below), and
-there is an untracked `reports/planned/security/audit/findings/HOL-SEC-003.md`.
+there is an untracked `reports/shipped/security/audit/findings/HOL-SEC-003.md`.
 Because of this, working-tree line numbers are shifted: `swarm.rs` by +1 after 570
 and +9 after about 6712, `message_ops.rs` by -9 after 715, `types.rs` by +9 after
 1416, `test_harness.rs` by +182 after 3225. Anything marked "WT" is uncommitted

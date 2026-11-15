@@ -7,7 +7,7 @@ LINE NUMBERS ARE PINNED TO HEAD `b009e9a0`. When reading started only `node/test
 modified; during the run the parallel session began editing `crypto/olm_manager.rs`,
 `forwarder/signaling.rs`, `node/crypto_handler.rs`, `node/fetch.rs`, `node/forwarder_client.rs`,
 `node/message_ops.rs`, `node/swarm.rs`, `node/types.rs` and added
-`reports/planned/security/audit/findings/HOL-SEC-003.md` (apparently fixing X-1 below). Every
+`reports/shipped/security/audit/findings/HOL-SEC-003.md` (apparently fixing X-1 below). Every
 `node/swarm.rs`, `node/types.rs`, `forwarder/signaling.rs`, `crypto/olm_manager.rs` and
 `node/fetch.rs` citation was re-verified with `git show HEAD:<path>`; working-tree swarm.rs lines
 are now shifted by up to +9. `node/voice_handler.rs`, `forwarder/engine.rs`, `forwarder/dispatch.rs`,

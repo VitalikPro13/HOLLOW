@@ -648,7 +648,7 @@ Retest:          date, commit, result
 ### 2.9 External audit route
 
 - **Changed 2026-10-24:** the NLnet application was rejected. The route is now an
-  application to OSTIF (Open Source Technology Improvement Fund) after 0.13, with
+  application for an external audit after 0.13, with
   the audit folder and SECURITY_AUDIT_2026_10.md as the readiness pack.
 - **Decided 2026-09-26:** OTF Security Lab is too strict for us and NLnet
   Restack excludes AI projects, so the route is the pending NLnet application
@@ -664,7 +664,7 @@ Retest:          date, commit, result
   projects qualify; Briar and Delta Chat got theirs this way. Its US funding
   is uncertain.
 - **Not for us:** Sovereign Tech Agency excludes messaging apps; Alpha-Omega
-  and OSTIF target critical infrastructure; huntr is AI/ML only; Mozilla MOSS
+  targets critical infrastructure; huntr is AI/ML only; Mozilla MOSS
   is dormant. The GitHub Secure Open Source Fund (10k USD, a security course,
   no audit) is an option once adoption is visible.
 - **What auditors expect first** (Trail of Bits' preparation guide): a threat
@@ -690,7 +690,7 @@ hunt variants from a seed diff, and write harness tests. Deciding who SHOULD
 be allowed to do what is a design decision, made by Vitalii and me, and never
 delegated.
 
-Artifacts, all under `reports/planned/security/audit/` on the security branch:
+Artifacts, all under `reports/shipped/security/audit/` on the security branch:
 
 | Artifact | IDs | Content |
 |---|---|---|

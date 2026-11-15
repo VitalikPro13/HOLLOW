@@ -1,5 +1,5 @@
 //! Who may change an MLS group, judged by every receiver: design D in
-//! `reports/planned/security/audit/design_D_mls_authority.md`. The committer plans its
+//! `reports/shipped/security/audit/design_D_mls_authority.md`. The committer plans its
 //! own commits with the same rules, so an honest coordinator never builds a commit
 //! that honest members refuse.
 

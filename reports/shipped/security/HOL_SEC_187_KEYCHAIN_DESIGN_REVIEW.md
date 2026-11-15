@@ -163,8 +163,8 @@ lose a key or delete one).
   two data-protection groups is new code, with its own crash-safety questions.
 - **Fix.** Reads try the keys group, then the app-ID group, by name. Every start promotes an
   app-ID item into the keys group through a byte-verified copy, read back, then delete by
-  ref (as in F4). Define the refusal status. Put this mover into 0.14 so the frozen tag
-  carries it.
+  ref (as in F4). Define the refusal status. Put this mover into 0.14 so the 0.14
+  release carries it.
 - **Test.** `an_item_in_the_app_id_group_opens_and_moves_once_the_keys_group_works`.
 
 ### F8 (Medium, wipe leftover). Conflict copies `wrapping_key.m.<hash>` are never deleted, and no forget can find them
@@ -310,11 +310,11 @@ crate.
   rewrite the installed 0.14 (F2). Add "does revocation stop library loads" to U10. Add the
   Debug bundles from F3 to the revocation case.
 - **Q5:** the drill gains the F1 case (an old-team Mac app after its group and App ID
-  leave) and a macOS 12 or 13 machine. Without them, U1 and U6 stay open at the freeze.
+  leave) and a macOS 12 or 13 machine. Without them, U1 and U6 stay open at the 0.14 release.
 - **Q6:** (a) also needs F6 and F12. (b) needs F7's two-group reads and promotion.
 - **Q7:** the "later old-team release" carries a new mover between data-protection groups,
-  and the Q4 clone touches every wipe path. Both are security code outside the frozen
-  OSTIF tag. Either finish the drill before the freeze, or put the second mover and the
+  and the Q4 clone touches every wipe path. Both are security code outside the 0.14
+  release. Either finish the drill before the release, or put the second mover and the
   clone into 0.14, dormant and behind the drill's result.
 - **Q8:** the text is wrong twice. A build whose probe fails reads the legacy item before
   the move, and with F5 unfixed it deletes keys. On a Mac where the release script ran, a

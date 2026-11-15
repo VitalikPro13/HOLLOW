@@ -205,7 +205,7 @@ asset or an attack tree.
 
 ### 3.2 Research first, then a written method
 
-The method (`reports/planned/security/SECURITY_AUDIT_PLAN.md`) came from reading published
+The method (`reports/shipped/security/SECURITY_AUDIT_PLAN.md`) came from reading published
 messenger audits (Trail of Bits on SimpleX, Cure53 on Briar and Threema, NCC Group on Olm
 and Keybase, Least Authority on vodozemac, SRLabs on OpenMLS, Quarkslab on Session,
 Radically Open Security on Galene) and the academic attacks on Matrix, Threema, Signal
@@ -301,8 +301,20 @@ passed 2,767 with none failing, every iOS phone scenario passed, and a mixed And
 iPhone run passed 10 of 10 in both roles. The 0.13 scope commit, `41080e0d`, added the
 self-hosted relay installer on top of c4e2f7f5 and changed no relay C++ or relay test file.
 For 0.14 each track ran its targeted tests, the full Rust suite on the PC and, where it
-changed behaviour, a fleet run before it merged. The macOS fix of HOL-SEC-187 was proven by
-hand on a notarized build (section 5).
+changed behaviour, a fleet run before it merged. On the final 0.14 tree (commit 45b462aa,
+tree 3081671b) the full Rust suite passed 3,777 of 3,784 on the Windows PC (the other
+seven are keystore tests that need a desktop session, which SSH does not reach), and the
+Flutter suite passed 3,652 with none failing. The fleets then ran against a test relay:
+iOS 3 of 3, Android 3 of 3, a mixed iOS and Android run 1 of 1, macOS 5 of 5, macOS with
+Windows 2 of 2, Linux 4 of 4 and Windows 25 of 28. Two of the Windows failures,
+`fleet_channel_file_catchup` and `fleet_file_card_states`, came from one 0.14 regression.
+The answer to a channel file request did not carry the author device's proof (`meta_dev`),
+so a member back online refused it and never got the file. The third,
+`fleet_asset_offline`, failed in the scenario itself, because a tall first GIF pushed the
+cell it taps below the fold. Commit 45b462aa fixed the answer and added the scroll step to
+the scenario, and all three passed on the final tree. The macOS fix of HOL-SEC-187 was
+proven by hand on a notarized build, where the keychain move (check A), the password case
+and screen share all passed (section 5).
 
 ### 3.9 Fuzzing
 
@@ -562,7 +574,7 @@ the relay, the relay was deployed before the client release.
 
 ## 5. Findings
 
-One section per finding, condensed from its file in `reports/planned/security/audit/findings/`. Each gives the flaw, its impact, the fix, any residual and the tests that prove it; the files hold the components, trust boundaries, attacker profiles and the claims each finding traces to. No section walks through an exploit.
+One section per finding, condensed from its file in `reports/shipped/security/audit/findings/`. Each gives the flaw, its impact, the fix, any residual and the tests that prove it; the files hold the components, trust boundaries, attacker profiles and the claims each finding traces to. No section walks through an exploit.
 
 ### HOL-SEC-001: Any identity could remotely wipe a device with its own signed device list
 
@@ -3706,8 +3718,8 @@ only by a hand run on macOS 26, with no CI job.
 **Maintenance and supply chain: Satisfactory, kept.** CI runs cargo-deny (advisories,
 bans, licences, sources), osv-scanner (since 0.14 over the fuzz lockfile too), gitleaks
 over the whole history and zizmor on the workflows; actions are pinned to commit hashes;
-Dependabot proposes updates after a seven-day cooldown, and the advisories open at the
-0.14 freeze were cleared. Update manifests and status feeds are signed with a key kept
+Dependabot proposes updates after a seven-day cooldown, and the advisories open before
+the 0.14 release were cleared. Update manifests and status feeds are signed with a key kept
 outside the repository. 0.14 pins the mdk media engine by SHA-256 on all five platforms,
 signs release tags with the keys listed in `.github/allowed_signers`, and builds the Apple
 releases on GitHub in signing jobs that run no third-party code. Two gaps the 0.13 rating
@@ -3724,7 +3736,7 @@ platforms is unsigned.
 
 This document lists what each work package of the audit examined, what it found, what it
 examined and found sound, and what it did not examine. It is the `coverage.md` the audit plan
-requires before the audit can close (`reports/planned/security/SECURITY_AUDIT_PLAN.md` section 3
+requires before the audit can close (`reports/shipped/security/SECURITY_AUDIT_PLAN.md` section 3
 artifact table and section 6 exit criteria), in the style of a Cure53 work-package note,
 including "areas examined that yielded no findings". It is an appendix of the final report
 `SECURITY_AUDIT_2026_10.md`. It records the review up to the 0.13 close; what the 0.14 work
@@ -3755,14 +3767,14 @@ Source keys used below. Paths are relative to the repository root unless noted.
 
 | Key | Source |
 |---|---|
-| PLAN | `reports/planned/security/SECURITY_AUDIT_PLAN.md` |
-| CLAIMS, TM, AR | `audit/claims.md`, `audit/threat_model.md`, `audit/accepted_risks.md` (all under `reports/planned/security/`) |
+| PLAN | `reports/shipped/security/SECURITY_AUDIT_PLAN.md` |
+| CLAIMS, TM, AR | `audit/claims.md`, `audit/threat_model.md`, `audit/accepted_risks.md` (all under `reports/shipped/security/`) |
 | MATRIX, CAND | `audit/authz_matrix.md`, `audit/candidate_findings.md` |
 | EV, RC | `audit/phase_b_evidence/authz_<area>.md`, `audit/phase_b_recheck/recheck_<area>.md` |
 | EF/x, DISP | `audit/phase_ef/<slice>.md`, `audit/phase_ef/dispositions.md` |
 | MUT | `audit/mutation_passes/README.md` and the scripts beside it |
 | RS-H, RS-B | `audit/rs_handshake_review.md`, `audit/rs_bounds_review.md` |
-| SCALE | `reports/planned/relay-and-sync/SCALE_PROBE_2026_10.md` section 8 |
+| SCALE | `reports/shipped/relay-and-sync/SCALE_PROBE_2026_10.md` section 8 |
 
 #### Method in one table
 

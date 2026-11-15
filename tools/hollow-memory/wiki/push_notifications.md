@@ -132,7 +132,7 @@ ONLY — E2EE preserved).
 
 ## UnifiedPush — Android alternative to FCM (#75, 2026-09-17)
 
-Plan `reports/planned/relay-and-sync/UNIFIEDPUSH_PLAN.md`. Android users pick a
+Plan `reports/shipped/relay-and-sync/UNIFIEDPUSH_PLAN.md`. Android users pick a
 UnifiedPush distributor (ntfy etc.) in Settings > Notifications > Push Delivery.
 
 - **Relay unchanged.** `register_push_token` with `platform:"unifiedpush"`,

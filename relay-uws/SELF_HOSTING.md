@@ -140,8 +140,17 @@ work. Then:
 sudo apt install git
 git clone --recurse-submodules https://github.com/VitalikPro13/HOLLOW.git
 cd HOLLOW
+git checkout v0.14.0-beta
+git -c gpg.ssh.allowedSignersFile=.github/allowed_signers verify-tag v0.14.0-beta
+git submodule update --init --recursive
 sudo bash relay-uws/install.sh
 ```
+
+Use the newest release tag in place of `v0.14.0-beta`. The newest is at the top
+of the project's Releases page, and tags before 0.14.0 are not signed.
+`verify-tag` should print a line that starts with `Good "git" signature` and
+names the release key, `SHA256:S474PF7v/QSTHwpXexCX4EzKFsNfDajUtcfP71jO+R4`. If
+it prints anything else, stop and tell us (see `SECURITY.md`).
 
 There is no `curl ... | bash` one-liner, on purpose. The clone gives you a copy
 you can read before you run it. The setup is `relay-uws/install.sh` plus the

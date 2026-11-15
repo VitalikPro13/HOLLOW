@@ -9,7 +9,7 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
-src="${1:-$root/reports/planned/security/SECURITY_AUDIT_2026_10.md}"
+src="${1:-$root/reports/shipped/security/SECURITY_AUDIT_2026_10.md}"
 out="${2:-$root/build/security_audit/$(basename "${src%.md}").pdf}"
 style="$root/scripts/audit_report/style.typ"
 

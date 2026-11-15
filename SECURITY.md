@@ -43,6 +43,29 @@ Out of scope:
 | Latest beta | Yes |
 | Older builds | Best effort |
 
+## Verifying a release
+
+Every release since 0.14.0 has a signed Git tag, named `vX.Y.Z-beta`. Older tags are not signed. To check a tag before you build from it:
+
+```bash
+git clone --recurse-submodules https://github.com/VitalikPro13/HOLLOW.git
+cd HOLLOW
+git checkout v0.14.0-beta
+git -c gpg.ssh.allowedSignersFile=.github/allowed_signers verify-tag v0.14.0-beta
+```
+
+A good tag prints a line starting with `Good "git" signature` and the release tag key's fingerprint. The command trusts the keys in `.github/allowed_signers` from the same checkout, so compare the fingerprint it prints with the list below.
+
+| Key | Fingerprint |
+|-----|-------------|
+| Release tags | `SHA256:S474PF7v/QSTHwpXexCX4EzKFsNfDajUtcfP71jO+R4` |
+| Release tags, recovery (kept offline, used only if the main key has to be replaced) | `SHA256:t2SgLyt37RDVcPNofDMdPPJYrbfH6GmLso+bAGLHDF0` |
+| Commits on `main` | `SHA256:g92cPD7LGn7PROHB2c0rwWUuOaICuYcNjzqufzBm+7Q` |
+
+Commits are signed with their own key. `.github/allowed_signers` lists only the tag keys, so it doesn't include this one; GitHub shows commits signed with it as Verified.
+
+If a check fails or prints a different key, don't build from that copy. Report it as described above.
+
 ## Disclosure
 
 We follow coordinated disclosure. Once a fix is ready, we:

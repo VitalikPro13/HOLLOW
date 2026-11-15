@@ -21,6 +21,12 @@ builder; the task prompt wins where it is more specific.
 3. Widget work: load the `hollow-ui` skill first. User-facing copy: the `sepia` skill.
 4. Before your first shell command: memory `feedback_windows_tool_friction.md` (Windows traps).
    Scripts with backslashes or quotes go to a FILE via the Write tool, never inline. Absolute paths.
+5. **Locating is a scout's job, judging is yours.** For a "where is everything" question (every
+   call site or arm, which files hold X, what memory and the wiki say about Y) spawn an `Explore`
+   scout (Haiku, about $0.13) with the question and your worktree path, then read the lines it
+   points at. Start from the `file:line` pointers in your task prompt before searching at all. A
+   lookup whose target you already know you run yourself. A sweep a security rule depends on is
+   still yours to prove: check the scout's list against one Grep of your own.
 
 ## 1b. Security is every builder's job
 
@@ -34,7 +40,8 @@ proves WHO sent it, never that they MAY.
 
 **Tripwires.** If your change does any of these, it is security work whatever the task calls it:
 read wiki `security_write_gates.md` and the CLAUDE.md sections it touches before designing, add
-the gate row, and say "TRIPWIRE: <which>" at the top of your report so the lead sends it to the
+the gate row, add or update the rule's row in `reports/*/security/audit/requirements.md` (where
+it is enforced, which test proves it; a dropped rule loses its row), and say "TRIPWIRE: <which>" at the top of your report so the lead sends it to the
 reviewer.
 - A new or changed wire message, envelope, `HavenMessage`/`CrdtPayload` variant, voice signal or
   relay frame (it picks its `lane()`, its `live_only()` class, `#[serde(default)]` fields).
@@ -83,6 +90,10 @@ in YOUR context costs far more than in a runner's.
   means, and where logs and screenshots go (`<worktree>\.team\`).
 - **Run yourself** only quick checks inside the edit loop whose output is short: one targeted test,
   `cargo check`, clippy on what you touched.
+- **Web research (helplines, docs, vendor pages, checking URLs) = HAIKU only:** Agent tool with
+  `model: "haiku"`, one output file per agent under `.team/`, "work alone, never spawn agents".
+  Never a Sonnet or Opus agent for research (Vitalik 11-11; memory
+  `feedback_web_research_haiku_only`). Security and code judgment stay with you.
 - **One fresh runner per job**, so each starts clean and its digest covers only that job.
   Independent jobs (Windows fleet and an iOS run) may run as parallel runners when the machine
   budget allows.
@@ -104,12 +115,24 @@ in YOUR context costs far more than in a runner's.
   verify the hash). Report N/N killed; a survivor gets a test or an explanation. A rule enforced in
   two layers needs a test per layer. While a mutation run is live, NOTHING copies the worktree
   (no `pc_sync.sh`, no fleet build, no VPS stage): b14-bounds shipped a mutant to the PC that way and
-  its suite "failed on Windows".
+  its suite "failed on Windows". Every test command in your mutation script gets a timeout (about
+  10 min); a timeout counts as caught and ends only that run's process tree by PID (some mutants hang
+  a test forever: a pass sat hung 6 h on 11-06). Long waits judge progress (log growth or CPU rise),
+  never exit alone; see hollow-runner "Long jobs".
 - **Then prove it in the real app** on every platform the change touches (Windows fleet, the
   mini's simulators, emulators and macOS, the VM for Linux), with before and after evidence where
   a person sees a difference.
 - Comments say WHAT and WHY, never HOW. User-visible text: no em dashes, never a colon in their
   place, settings labels in sentence case, plain words.
+- **Docs as you go, in the same diff** (Vitalik 11-12: 0.14 piled up a wiki and WHITEPAPER backlog).
+  - **Wiki:** besides the `security_write_gates.md` gate row, update the area wiki page that
+    explains the behaviour you changed: how it works now and its traps. Examples: `push_notifications`,
+    the `rules_*` book, the relay and join pages. Edit the existing text where it no longer matches
+    the code; do not just append.
+  - **WHITEPAPER:** if your change alters what `WHITEPAPER.md` describes (protocol, crypto, what the
+    relay may see, push, identity, storage, limits), edit that section in your worktree. Public copy
+    goes through the `sepia` skill.
+  - **No doc impact:** say so with one reason in your report.
 
 ## 5. Machines
 
@@ -138,8 +161,22 @@ in YOUR context costs far more than in a runner's.
 - A new field on a persisted struct gets `#[serde(default)]`; a schema change is an additive
   migration an existing database survives (test it on a copy).
 
-## 7. Context and handoff
+## 7. Context, cost and handoff
 
+Every request re-reads your WHOLE context, whatever it does: at 300k tokens one `sed -n` costs as
+much as a large edit. Measured 11-12 (memory `project_usage_audit_2026_11`): 91% of builder
+requests carried ONE tool call, and single lookups were a third of the whole team's spend.
+
+- **Batch lookups.** When you already know two or more things you need to see (three slices, a
+  grep and a file, a diff and its test), send them as parallel tool calls in ONE message. Chain a
+  call only when it depends on the answer before it.
+- **Read once, wide enough.** Take the whole function or block in one range instead of three
+  neighbouring slices in three turns; one `grep -n -C3` over several paths instead of one per file.
+- **Wait with ONE blocking command per job, never a check per minute.** A foreground
+  `until [ -f <done marker> ] || ! kill -0 <pid> 2>/dev/null; do sleep 30; done` with the 10-minute
+  tool timeout, or one Monitor that fires on completion. When it times out, look once at progress
+  (log growth or CPU, the stall rule in hollow-runner "Long jobs") and issue it again. A
+  `sleep 45; tail log` turn costs a full context read each time.
 - Keep your context lean: read line ranges instead of whole large files, never paste logs, let
   runners digest output.
 - **Handoff, never a stop.** When the lead sends "handoff" (it watches your context and sends it
@@ -147,25 +184,35 @@ in YOUR context costs far more than in a runner's.
   restore anything a script left mutated, stop your jobs by PID, and end with a HANDOFF report:
   the goal, what is done with evidence, the state of every test, the exact next steps, open
   questions, files touched, anything still running. A fresh builder continues from it to the same
-  goal.
+  goal. WRITE it to `<worktree>/.team/HANDOFF.md` first (overwrite; the previous one moves below a
+  `---- EARLIER ----` line), then hand back; a handback alone is lost when the lead's session ends.
+- **"CHECKPOINT"** from the lead (the /checkpoint skill) = the same handoff, now: clean point,
+  mutants restored, jobs stopped by PID, locks released, HANDOFF.md written, one-line handback.
 
 ## 8. Reporting
 
 - **ONE final report, no interim handbacks.** Wait for your own background jobs and runners; do not
-  end your turn while one runs. Your final message IS the report (subagents cannot write report
-  files).
+  end your turn while one runs. Your final message IS the report; also save it as
+  `<worktree>/.team/HANDOFF.md` so it survives the lead's session.
 - Before reporting, clean up: your build trees on the VM and the mini, your simulators and
   emulators, your fleet peers, and `build/` after the fleet proof, and shut the Linux VM down if
   you or your runners started it and nobody else needs it. Nothing of yours keeps running.
-- Sections: 0) security: the tripwires your change hit (or "none") and the gate and test for
-  each, 1) done vs. scope, 2) files changed, 3) tests added with RED then GREEN, 4) mutation
+- Sections: 0) security: the tripwires your change hit (or "none") and the gate, test and
+  requirements.md row for each, 1) done vs. scope, 2) files changed, incl. the wiki pages and
+  WHITEPAPER sections updated (or "no doc impact" with a reason; WHITEPAPER edits are public copy
+  for Vitalik to read), 3) tests added with RED then GREEN, 4) mutation
   results, 5) suite results with counts, 6) platform proof (what ran where, evidence paths),
   7) requests for files you do not own (exact file and change), 8) what is left, risks, questions
   for Vitalik, 9) anything left running (should be nothing).
 
-## 9. For the lead: the review gate before every merge
+## 9. For the lead: the brief, and the review gate before every merge
 
-Decided by path, never by how the task was named:
+**Briefs carry pointers.** Before writing a task prompt, send an `Explore` scout for the track's
+entry points and put its `file:line` list in the brief (handlers, types, the existing tests, the
+wiki pages to read), so the builder starts by reading the right lines instead of searching for
+them. Orientation was about 20% of builder cost in the 11-12 audit.
+
+The review gate is decided by path, never by how the task was named:
 - **Hostile review** (`reviewer`) when the diff touches `rust/hollow_core/src/` (node, crypto,
   identity, storage, crdt, api), `relay-uws/src/`, `relay-uws/deploy/`, `push-sidecar/`, or the
   builder reported a TRIPWIRE. Give it the diff and the task, never your conclusion.

@@ -1,6 +1,6 @@
 # Phase E slice "backfill": catch-up sync of DMs, channels and the op log
 
-Pre-freeze STRIDE pass for 0.14 (2026-11-05), the third slice the 0.13 review left open
+STRIDE pass before the 0.14 release (2026-11-05), the third slice the 0.13 review left open
 (flow F-35, plus F-23 and the CRDT catch-up half of F-30; `coverage.md` WP3 "Not
 examined"). Code read on `security/0.14` at `56587ca2`. Nothing was built or run; every
 test named exists in that tree unless marked *planned*.
@@ -98,7 +98,7 @@ test named exists in that tree unless marked *planned*.
 | T | Backfill from a guest or a non-member. | `channel_backfill_allowed_from`: a current member who can read the channel; source scan pins both arms. | none | `channel_ingest_gates_stay_wired` |
 | T | Cleared history comes back by sync. | Every insert path obeys the channel floor (`ChannelInsert::Cleared`). | none | (w2-c units) |
 | R | A deletion is denied after the fact. | The deletion proof is kept with the deleted text (evidence) and re-served to members. | none | as T |
-| D | A malformed or oversized item panics the node or is stored clipped. | A body over 64 KiB (`MAX_MESSAGE_BYTES`) drops whole, never clipped; remote strings are parsed fallibly. | Fuzzing of sync batches is a pre-freeze item | `authz_a_remote_string_never_panics_the_node` |
+| D | A malformed or oversized item panics the node or is stored clipped. | A body over 64 KiB (`MAX_MESSAGE_BYTES`) drops whole, never clipped; remote strings are parsed fallibly. | Fuzzing of sync batches is due before the 0.14 release | `authz_a_remote_string_never_panics_the_node` |
 | E | Backfill bypasses a mute or a posting rule. | By design: live enforces, backfill tolerates (a mute may postdate the history). | Stated rule, not a gap | none |
 
 ## Gaps for the lead

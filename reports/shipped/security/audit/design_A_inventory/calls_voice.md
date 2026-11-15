@@ -124,7 +124,7 @@ P-01 = a malicious relay: stamps any `from`, replays, re-routes, drops, delays, 
     `screen_audio_receiver.dart`, `mobile_screen_audio_capturer.dart`, `api/screen_audio.rs`: none).
     The whitepaper claims DTLS suffices (`WHITEPAPER.md:542` "Screen share audio over data channels
     is encrypted at the transport layer (DTLS) but does not use SFrame."); the threat model left it
-    open (`reports/planned/security/audit/threat_model.md:169` "F-43 ... (verify B: encrypted?)").
+    open (`reports/shipped/security/audit/threat_model.md:169` "F-43 ... (verify B: encrypted?)").
     Against P-01 the DTLS claim does not hold: the DM call itself is Olm+SFrame, its share audio is not.
   - **Audio injection.** The receive callbacks ignore the sender:
     `call_provider.dart:420-430` `webrtc.onScreenAudioReceived = (fromPeer, data) async { ... _screenAudioRenderer?.pushPacket(data);`

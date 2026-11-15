@@ -203,3 +203,6 @@ gifs/m/
 
 # Firebase config of the iOS dev variant (com.anonlisten.hollow.dev)
 ios/GoogleService-Info-dev.plist
+
+# Internal business planning
+reports/planned/business/

@@ -1,6 +1,6 @@
 # Phase E slice "public channels": plaintext signed posts, guests, public files
 
-Pre-freeze STRIDE pass for 0.14 (2026-11-05), the second slice the 0.13 review left open
+STRIDE pass before the 0.14 release (2026-11-05), the second slice the 0.13 review left open
 (flow F-34; `coverage.md` WP3 "Not examined"). Code read on `security/0.14` at `56587ca2`.
 Nothing was built or run; every test named exists in that tree.
 

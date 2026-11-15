@@ -14,7 +14,7 @@ Component:   relay-uws/src/ws_handler.cpp (handle_join, every room fan-out),
              ws_client.rs (door proof), swarm.rs
 Boundary:    TB-1 (the relay's rooms) / TB-0 (the internet)
 Traces to:   no claim yet (decision D1); design
-             reports/planned/security/audit/design_D1_door_rooms.md
+             reports/shipped/security/audit/design_D1_door_rooms.md
 Attacker:    anyone who learned a server id, with a throwaway identity
 Found:       2026-10-02 (phase B re-check, decision D1)
 ```

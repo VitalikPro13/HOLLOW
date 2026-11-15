@@ -2122,7 +2122,7 @@ Release time: 100ms
 
 - [ ] **Volunteer full-file storage pool — opt-in 24/7 super-seeders for a server (NOT federation).** Distinct from both the built erasure-coding (shards spread across peers, no one holds the whole file) and the existing 512 MB shard-hosting default. This is FULL-replication hosting: a member with a NAS / always-on box opts in via an admin/settings panel to dedicate a chosen folder as a high-capacity holder of a server's complete (still-encrypted) file set, so content stays available + fast even when no ordinary peer is online. Builds on the existing `~/.hollow/files/` full-replication layout + the configurable storage cap (raise 512 MB → e.g. 100 GB). **Design it as a POOL from day one (N volunteers combine storage + bandwidth), never a single host** — one seeder = an accidental central server (single point of failure); a pool = resilient mesh that preserves the no-central-server principle. **The host holds ENCRYPTED data only** — they're a holder, not a trustee; only server members with MLS keys can read it. That `hosting ≠ trusting` line is what keeps this Hollow-shaped and NOT a betrayal of the mission (and why it is NOT federation: no independent server identity/state syncing between servers — just members who hold more of the same server's encrypted files, same MLS group, same relay, same E2EE). Admin panel: per-volunteer pledged capacity, current usage, online status, combined pool headroom. Caveat to watch: availability ≠ centralization, but a thin pool creates a soft dependency — encourage ≥2-3 volunteers per server. See session discussion 2026-06-12. **Designed 2026-09-17 as storage nodes** (volunteer Cloudflare Worker + R2 with enforced quota and zero-bill guards, or self-hosted `hollow-blobd`; server pools and personal nodes): `reports/planned/relay-and-sync/STORAGE_NODES_PLAN.md`.
 
-- [~] **0.14 = the frozen security release (decided 2026-10-31; built 2026-10-31 to 11-14 on the local, embargoed `security/0.14` branch, 56 commits after 8350841b). Its signed tag is the commit sent to OSTIF.** Clean break from 0.13: every open security item closed or recorded as an accepted risk. Audit record: `reports/planned/security/SECURITY_AUDIT_2026_10.md` (one edition as of 0.14, revised 2026-11-15), `PLANNED_TO_SHIPPED_0.14.md`, `audit/requirements.md`.
+- [x] **0.14 = the security release, released as 0.14.0 on 2026-11-15 (release commit 91c2e636; decided 2026-10-31; built 2026-10-31 to 11-14 on the local, embargoed `security/0.14` branch, 56 commits after 8350841b).** Clean break from 0.13: every open security item closed or recorded as an accepted risk. Audit record: `reports/shipped/security/SECURITY_AUDIT_2026_10.md` (one edition as of 0.14, revised 2026-11-15), `audit/requirements.md`.
     - [x] macOS loads no library from outside its bundle and keeps keychain secrets where only fixed builds read them (HOL-SEC-187: load gate, bundle self-check, keys app group, App Lock class migration).
     - [x] Device proof (track C, `DEVICE_PROOF_DESIGN.md`): every server op, post and change names the device that wrote it; removal as retired or lost, settlings, recovery floor, owner and member recovery screens.
     - [x] Checkpoint coverage (`CHECKPOINT_COVERAGE_DESIGN.md`): a checkpoint is a base, uncovered ops fold on top.
@@ -2140,10 +2140,14 @@ Release time: 100ms
     - [x] Get help page in Settings; shop item dialog matches the website and asks before Buy (`HollowCheckbox`).
     - [x] Dependencies: Flutter 3.47.9 with the held Dart packages, mdk 0.39.0 pinned by SHA-256, SQLCipher 4.20 (rusqlite 0.42), zip 9.5.1, every open advisory cleared.
     - [x] Docs pass: wiki, WHITEPAPER, audit record (2026-11-14).
-    - [x] Pre-freeze: HOL-SEC-187 signed-build proof (notarize on the old iMac, run the app on the mini: launch, video, camera, share). Done by hand 2026-11-15 on a notarized build of b887e706: keychain-only re-key and `0x03` re-salt PASS, 0.13 locked out of both, screen share PASS (video, camera, App Lock 11-14). That hand procedure is the proof (Vitalik 2026-11-15): no automated signed CI job is required; it runs again by hand for any release that changes keychain code.
-    - [ ] Pre-freeze: full PC suite (nextest + flutter) and fleets on every platform on the final tree.
-    - [ ] Pre-freeze: the fleet tool's production-relay guard (wiki `fleet_probe`, "Keeping 0.14 fleets off the production relay").
-    - [ ] Release: local commits onto main, signed `v0.14.0-beta` tag, the `release` skill pipeline, then the OSTIF application.
+    - [x] Before release: HOL-SEC-187 signed-build proof (notarize on the old iMac, run the app on the mini: launch, video, camera, share). Done by hand 2026-11-15 on a notarized build of b887e706: keychain-only re-key and `0x03` re-salt PASS, 0.13 locked out of both, screen share PASS (video, camera, App Lock 11-14). That hand procedure is the proof (Vitalik 2026-11-15): no automated signed CI job is required; it runs again by hand for any release that changes keychain code.
+    - [x] Before release: full PC suite (nextest + flutter) and fleets on every platform on the final tree (45b462aa: nextest 3777 of 3784, the 7 need a desktop session; flutter 3652 pass; fleets iOS, Android, macOS, Linux and Windows green after the fix in 45b462aa; audit report section 3.8).
+    - [x] Before release: the fleet tool's production-relay guard (fd12d442) (wiki `fleet_probe`, "Keeping 0.14 fleets off the production relay").
+    - [x] Release commit 0.14.0 on main (91c2e636).
+    - [ ] Signed `v0.14.0-beta` tag and the `release` skill pipeline (builds, upload, GitHub release).
+    - [ ] After 0.14: move members and AFK (#109).
+    - [ ] After 0.14: camera resolution and FPS picker in Settings, 1080p by default (capture is a fixed 640x480 at 30 today).
+    - [ ] After 0.14: the rest of #124 (static join page on self-hosted relays, per-key device counts, per-key server creation, limited-use keys).
 
 **Deliverable:** A polished, feature-complete communication platform ready for public release — with private, encrypted P2P file sharing that rivals torrent performance without any of the privacy/legal exposure.
 
@@ -2160,7 +2164,7 @@ Release time: 100ms
 - [ ] Documentation (user guide, FAQ)
 - [ ] Security audit (third-party review of E2EE implementation - OTF Security Lab etc.)
 - [ ] **Theme system** — structured theme manifest (colors, fonts, spacing, radii, optional cosmetics like profile decorations/nickname accents), `.hollow-theme` bundle format (manifest + asset files, signed for integrity), in-app import/export UI with live preview, curated community gallery repo on GitHub. Per-user local only — themes never travel with messages. Data-only schema (no HTML/CSS/JS, no arbitrary code execution) so community-shared themes are provably safe to apply. Absorbs the old "hearts/sparkles on profiles + custom fonts" idea as one set of knobs among many. Build on existing `HollowTheme` ThemeExtension by making it loadable from a manifest instead of hardcoded.
-- [ ] **Media viewer, albums and subtitles.** One viewer for images, GIFs and video, Telegram-style albums, and subtitle tracks. Full design in `reports/planned/voice-and-media/MEDIA_VIEWER_ALBUMS_SUBTITLES_PLAN.md`.
+- [ ] **Media viewer, albums and subtitles.** One viewer for images, GIFs and video, Telegram-style albums, and subtitle tracks. Full design in `reports/shipped/voice-and-media/MEDIA_VIEWER_ALBUMS_SUBTITLES_PLAN.md`.
     - [X] Part A, shipped 2026-09-14: true fullscreen through a `hollow/window` method channel in the Windows runner, `window_manager` on macOS and Linux, a rebindable F11, and rotation unlocked only on the mobile media route.
     - [X] Part B phase 1, shipped 2026-09-14: one viewer route for images, GIFs and video (zoom, actual size, crisp pixels, rotate, walking the conversation's media through `list_media_for_context`, info panel, reply, react, save, copy, delete), plus the preview-line fix (`messagePreviewText`, no more raw tokens in conversation lists and notifications). Images open in the window, video keeps the OS fullscreen flow.
     - [ ] Part B phase 3, planned: eyedropper, annotate and send back, media tab, frame step, copy frame.
@@ -2195,7 +2199,7 @@ Release time: 100ms
 
 **Credibility & launch:**
 - [X] Proper README with feature grid, architecture diagram, screenshots (visual repo presentation)
-- [ ] Apply for cryptographic audit (OSTIF: contact only after the signed 0.14 tag; the application draft is prepared beforehand)
+- [ ] Apply for an external cryptographic audit of the signed 0.14 tag
 - [X] Clean repo pre-launch (remove secrets, debug hacks, dead code paths)
 
 📋 INFRASTRUCTURE MASTER PLAN: "The Swarm"

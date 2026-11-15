@@ -75,6 +75,34 @@ section after the Windows fleet); these rules hold for every command that runs O
 - Never put `tail -F` or `Get-Content -Wait` on a measurement or results file: the writer's
   append fails and the job dies. Read it with a plain read in a bounded poll.
 
+## Long jobs: progress, not just exit (11-06: a mutation pass sat hung 6 h unnoticed)
+
+- A wait on a long job checks PROGRESS, never only whether the process exited: a hung process looks
+  exactly like a busy one to an exit check. Every check (about every 5 to 10 min) records the log's
+  line count and size, and the job's process tree CPU time (`Get-Process -Id <pid>` .CPU, plus its
+  children: `dart*`, `flutter_tester`, `cargo*`, `rustc`, `link`, `pwsh`).
+- Progress = the log grew OR CPU time rose since the last check. A quiet log with CPU still rising is
+  legit work (a cold build, codegen, linking, a long harness test): keep waiting. Say nothing yet.
+  EXCEPTION: one test or mutant still on the same line past its own timeout is hung even while its
+  CPU climbs (a mutant can spin a test in a busy loop: 2,400 s CPU on one mutant, 11-06).
+- STALLED = NO log growth AND NO CPU rise across two checks at least 10 min apart (20 min for a
+  cold build). Then look before you judge: the last log lines, which test or mutant it is on, which
+  children are alive and whether their CPU moves. Report it to your parent as STALLED with that
+  evidence. Never stop it yourself on a stall: your parent decides (a hard kill can leave a mutant
+  in the source).
+- Wait with ONE background loop that checks every 5-10 min (an `until` loop or a Monitor), never a
+  string of short checks: a runner that polled every few seconds used its 100 turns in 5 minutes
+  and left 40 wait loops behind (11-06). Each check you make costs a turn.
+- A long job you start in a background command dies with you: if your parent stops you, the job
+  stops mid-mutant and leaves the mutant in the source. So say in NOTES which background command
+  holds it, and a parent never stops a runner whose background job is a mutation script; it waits,
+  or restores the file before relaunching.
+- Find processes by the real name family: `Get-Process python*` (it runs as `python3.12`),
+  `dart*`, `flutter*`, `cargo*`. A check for `python` misses it and reads a live run as dead.
+- Before starting a run on a tree, make sure no earlier run is alive on it (`python*` and
+  `flutter_tester` processes, the log still growing). Two runs on one tree overwrite each other's
+  mutants. If one is alive, report it; never start a second.
+
 ## Rust tests and the harness (from `rust/hollow_core`)
 
 - Full suite: `cargo nextest run --lib` (about 80 s; plain `cargo test` takes about 950 s). Use
@@ -107,6 +135,18 @@ section after the Windows fleet); these rules hold for every command that runs O
 - ONE background script applies one mutation at a time, runs the named tests, expects FAIL, and
   restores the file in a `finally`/`trap`, then verifies the file's hash. Never hard-kill a running
   mutation script (it leaves the mutant in the source); if you must stop, let it restore first.
+- Every test command the script runs has a timeout (10 min per mutant is plenty), and a timeout
+  counts as a caught mutant: some mutants make a test hang forever. On a timeout the script ends only
+  that run's own process tree by PID (`taskkill /F /T /PID <pid>`), then restores the file as usual.
+  `flutter_tester` leaves that tree, so also end the test PIDs that appeared during the run (list
+  before and after, kill the new ones by PID), and send output to a FILE, never a pipe: an orphan
+  holding the pipe makes the read after a timeout block forever. End them with Python's own
+  `os.kill(pid, SIGTERM)` (TerminateProcess), not `taskkill /T` (it failed inside an ssh session),
+  and never `wait()` without a limit after a kill.
+- A test hung past its timeout in a run that is otherwise fine: the parent stops ONLY that test's
+  processes by PID (`ssh pc 'Stop-Process -Id <pids> -Force'`, allowed); the script then sees its
+  test end, counts the mutant caught, restores the file and goes on. Never stop the script itself.
+  A script without a timeout: report it to your parent before starting.
 - Report N/N killed, and for each survivor the mutation and the test run that passed.
 
 ## Windows fleet (`scripts\fleet.ps1`; manual: wiki `fleet_probe.md`)

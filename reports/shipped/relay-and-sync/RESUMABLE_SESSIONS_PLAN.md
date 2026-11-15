@@ -383,7 +383,7 @@ Linux get small platform listeners, or a Rust crate if one fits.
 - Fetch sockets (push fetch, iOS NSE) never get sessions.
 - Bounded and fair by construction (3.5), RAM and memfd only, never logged.
 - A security review of the resume handshake goes through the audit method in
-  `reports/planned/security/SECURITY_AUDIT_PLAN.md` before the relay deploys, with hostile harness
+  `reports/shipped/security/SECURITY_AUDIT_PLAN.md` before the relay deploys, with hostile harness
   tests: a resume with another device's `sid`, a replayed resume frame, a resume after removal, a
   stranger filling rings, a session flood from one address.
 

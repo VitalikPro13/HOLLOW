@@ -5,7 +5,7 @@
 //! by `op_allowed` against the state just before it (today's authority). An op the base
 //! dominates drops at the door, or stays stored but unfolded when only the base and not
 //! its parent decides it, so a step to a rival base loses nothing. Design E plus
-//! checkpoint coverage, `reports/planned/security/CHECKPOINT_COVERAGE_DESIGN.md`.
+//! checkpoint coverage, `reports/shipped/security/CHECKPOINT_COVERAGE_DESIGN.md`.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;

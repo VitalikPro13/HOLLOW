@@ -1,7 +1,7 @@
 # Phase B re-check brief (Hollow security audit)
 
 Repo root: C:\Users\Jabun\Documents\Coding\HOLLOW
-Audit folder: reports/planned/security/audit/
+Audit folder: reports/shipped/security/audit/
 - `phase_b_evidence/authz_<area>.md`: evidence gathered 2026-09-26, one `### ` section per
   inbound message type / ingest path, each with dispatch sites, checks, the BINDING cell
   (the line tying the signer's authority to the object the message names) and suspicions.

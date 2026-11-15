@@ -2,7 +2,7 @@
 
 **Files:** `lib/src/ui/media/` (route, `media_item.dart`, `media_viewer_scope.dart`, `media_zoom_math.dart`, `media_zoom_view.dart`, `media_video_page.dart`, `media_viewer_controls.dart`, `media_strip.dart`, `media_info_panel.dart`, `media_playback_session.dart`, `fullscreen_media_chrome.dart`).
 **Rust:** `rust/hollow_core/src/storage/messages.rs` (`list_media_for_context`), `rust/hollow_core/src/api/storage.rs` (`MediaListItem`, FFI wrapper).
-**Status:** Part B phase 1 shipped 2026-09-14; Part C (albums, `ui_chat_dm.md` / `ui_message_bubbles.md`) shipped 2026-09-17: an album tile opens this viewer like any attachment, and per-item delete stays here. Phase 3 (eyedropper, annotate-and-send-back, media tab, frame step, copy frame) and Part D (subtitles) are planned: `reports/planned/voice-and-media/MEDIA_VIEWER_ALBUMS_SUBTITLES_PLAN.md`.
+**Status:** Part B phase 1 shipped 2026-09-14; Part C (albums, `ui_chat_dm.md` / `ui_message_bubbles.md`) shipped 2026-09-17: an album tile opens this viewer like any attachment, and per-item delete stays here. Phase 3 (eyedropper, annotate-and-send-back, media tab, frame step, copy frame) and Part D (subtitles) are planned: `reports/shipped/voice-and-media/MEDIA_VIEWER_ALBUMS_SUBTITLES_PLAN.md`.
 
 One route replaces the old `_FullscreenImageView` dialog (`file_attachment_widget.dart`) and `_FullscreenVideoView` dialog (`video_message_bubble.dart`) for images, GIFs and video. `test/media_viewer_guard_test.dart` keeps both gone.
 

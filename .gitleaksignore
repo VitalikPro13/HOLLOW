@@ -41,3 +41,74 @@ bb5f57b0d279319f362f53bec4c8d71f32e88e53:tools/hollow-memory/wiki/conferences.md
 # Reviewed 2026-10-21.
 5cb41db4386d91221eab55ff6698997b2019baab:push-sidecar/test/sealed_wake.test.js:generic-api-key:16
 5cb41db4386d91221eab55ff6698997b2019baab:push-sidecar/test/sealed_wake_vectors.json:generic-api-key:4
+
+# Roster test vectors: each auth_base is the first 16 bytes of a SHA-256 over a
+# recovery statement the generator signs with keys from fixed test seeds
+# (identity/roster_vectors.rs). A digest of public test data, no key.
+# Reviewed 2026-11-15.
+060ca5815d65f10486597f0e1d11823f6d4f2e6d:relay-uws/test/roster_vectors.json:generic-api-key:10
+060ca5815d65f10486597f0e1d11823f6d4f2e6d:relay-uws/test/roster_vectors.json:generic-api-key:12
+060ca5815d65f10486597f0e1d11823f6d4f2e6d:relay-uws/test/roster_vectors.json:generic-api-key:14
+060ca5815d65f10486597f0e1d11823f6d4f2e6d:relay-uws/test/roster_vectors.json:generic-api-key:15
+060ca5815d65f10486597f0e1d11823f6d4f2e6d:relay-uws/test/roster_vectors.json:generic-api-key:17
+060ca5815d65f10486597f0e1d11823f6d4f2e6d:relay-uws/test/roster_vectors.json:generic-api-key:19
+060ca5815d65f10486597f0e1d11823f6d4f2e6d:relay-uws/test/roster_vectors.json:generic-api-key:21
+060ca5815d65f10486597f0e1d11823f6d4f2e6d:relay-uws/test/roster_vectors.json:generic-api-key:28
+060ca5815d65f10486597f0e1d11823f6d4f2e6d:relay-uws/test/roster_vectors.json:generic-api-key:29
+060ca5815d65f10486597f0e1d11823f6d4f2e6d:relay-uws/test/roster_vectors.json:generic-api-key:32
+060ca5815d65f10486597f0e1d11823f6d4f2e6d:relay-uws/test/roster_vectors.json:generic-api-key:36
+060ca5815d65f10486597f0e1d11823f6d4f2e6d:relay-uws/test/roster_vectors.json:generic-api-key:38
+060ca5815d65f10486597f0e1d11823f6d4f2e6d:relay-uws/test/roster_vectors.json:generic-api-key:40
+060ca5815d65f10486597f0e1d11823f6d4f2e6d:relay-uws/test/roster_vectors.json:generic-api-key:46
+060ca5815d65f10486597f0e1d11823f6d4f2e6d:relay-uws/test/roster_vectors.json:generic-api-key:52
+060ca5815d65f10486597f0e1d11823f6d4f2e6d:relay-uws/test/roster_vectors.json:generic-api-key:54
+060ca5815d65f10486597f0e1d11823f6d4f2e6d:relay-uws/test/roster_vectors.json:generic-api-key:56
+060ca5815d65f10486597f0e1d11823f6d4f2e6d:relay-uws/test/roster_vectors.json:generic-api-key:59
+060ca5815d65f10486597f0e1d11823f6d4f2e6d:relay-uws/test/roster_vectors.json:generic-api-key:62
+060ca5815d65f10486597f0e1d11823f6d4f2e6d:relay-uws/test/roster_vectors.json:generic-api-key:63
+060ca5815d65f10486597f0e1d11823f6d4f2e6d:relay-uws/test/roster_vectors.json:generic-api-key:65
+060ca5815d65f10486597f0e1d11823f6d4f2e6d:relay-uws/test/roster_vectors.json:generic-api-key:71
+060ca5815d65f10486597f0e1d11823f6d4f2e6d:relay-uws/test/roster_vectors.json:generic-api-key:72
+060ca5815d65f10486597f0e1d11823f6d4f2e6d:relay-uws/test/roster_vectors.json:generic-api-key:73
+060ca5815d65f10486597f0e1d11823f6d4f2e6d:relay-uws/test/roster_vectors.json:generic-api-key:74
+060ca5815d65f10486597f0e1d11823f6d4f2e6d:relay-uws/test/roster_vectors.json:generic-api-key:75
+060ca5815d65f10486597f0e1d11823f6d4f2e6d:relay-uws/test/roster_vectors.json:generic-api-key:76
+060ca5815d65f10486597f0e1d11823f6d4f2e6d:relay-uws/test/roster_vectors.json:generic-api-key:78
+060ca5815d65f10486597f0e1d11823f6d4f2e6d:relay-uws/test/roster_vectors.json:generic-api-key:79
+060ca5815d65f10486597f0e1d11823f6d4f2e6d:relay-uws/test/roster_vectors.json:generic-api-key:80
+060ca5815d65f10486597f0e1d11823f6d4f2e6d:relay-uws/test/roster_vectors.json:generic-api-key:81
+060ca5815d65f10486597f0e1d11823f6d4f2e6d:relay-uws/test/roster_vectors.json:generic-api-key:82
+060ca5815d65f10486597f0e1d11823f6d4f2e6d:relay-uws/test/roster_vectors.json:generic-api-key:86
+060ca5815d65f10486597f0e1d11823f6d4f2e6d:relay-uws/test/roster_vectors.json:generic-api-key:87
+060ca5815d65f10486597f0e1d11823f6d4f2e6d:relay-uws/test/roster_vectors.json:generic-api-key:90
+060ca5815d65f10486597f0e1d11823f6d4f2e6d:relay-uws/test/roster_vectors.json:generic-api-key:92
+060ca5815d65f10486597f0e1d11823f6d4f2e6d:relay-uws/test/roster_vectors.json:generic-api-key:93
+060ca5815d65f10486597f0e1d11823f6d4f2e6d:relay-uws/test/roster_vectors.json:generic-api-key:94
+060ca5815d65f10486597f0e1d11823f6d4f2e6d:relay-uws/test/roster_vectors.json:generic-api-key:97
+060ca5815d65f10486597f0e1d11823f6d4f2e6d:relay-uws/test/roster_vectors.json:generic-api-key:99
+060ca5815d65f10486597f0e1d11823f6d4f2e6d:relay-uws/test/roster_vectors.json:generic-api-key:102
+060ca5815d65f10486597f0e1d11823f6d4f2e6d:relay-uws/test/roster_vectors.json:generic-api-key:103
+060ca5815d65f10486597f0e1d11823f6d4f2e6d:relay-uws/test/roster_vectors.json:generic-api-key:104
+060ca5815d65f10486597f0e1d11823f6d4f2e6d:relay-uws/test/roster_vectors.json:generic-api-key:106
+060ca5815d65f10486597f0e1d11823f6d4f2e6d:relay-uws/test/roster_vectors.json:generic-api-key:107
+060ca5815d65f10486597f0e1d11823f6d4f2e6d:relay-uws/test/roster_vectors.json:generic-api-key:108
+060ca5815d65f10486597f0e1d11823f6d4f2e6d:relay-uws/test/roster_vectors.json:generic-api-key:110
+060ca5815d65f10486597f0e1d11823f6d4f2e6d:relay-uws/test/roster_vectors.json:generic-api-key:111
+060ca5815d65f10486597f0e1d11823f6d4f2e6d:relay-uws/test/roster_vectors.json:generic-api-key:112
+060ca5815d65f10486597f0e1d11823f6d4f2e6d:relay-uws/test/roster_vectors.json:generic-api-key:113
+060ca5815d65f10486597f0e1d11823f6d4f2e6d:relay-uws/test/roster_vectors.json:generic-api-key:116
+060ca5815d65f10486597f0e1d11823f6d4f2e6d:relay-uws/test/roster_vectors.json:generic-api-key:117
+060ca5815d65f10486597f0e1d11823f6d4f2e6d:relay-uws/test/roster_vectors.json:generic-api-key:118
+060ca5815d65f10486597f0e1d11823f6d4f2e6d:relay-uws/test/roster_vectors.json:generic-api-key:119
+060ca5815d65f10486597f0e1d11823f6d4f2e6d:relay-uws/test/roster_vectors.json:generic-api-key:120
+060ca5815d65f10486597f0e1d11823f6d4f2e6d:relay-uws/test/roster_vectors.json:generic-api-key:121
+060ca5815d65f10486597f0e1d11823f6d4f2e6d:relay-uws/test/roster_vectors.json:generic-api-key:122
+060ca5815d65f10486597f0e1d11823f6d4f2e6d:relay-uws/test/roster_vectors.json:generic-api-key:123
+060ca5815d65f10486597f0e1d11823f6d4f2e6d:relay-uws/test/roster_vectors.json:generic-api-key:124
+060ca5815d65f10486597f0e1d11823f6d4f2e6d:relay-uws/test/roster_vectors.json:generic-api-key:125
+
+# Made-up relay access keys in the relay's tests: a keys.json of the wrong shape
+# and a patterned AAAA-BBBB key. Neither is in the production relay's keys.json.
+# Reviewed 2026-11-15.
+883aa238520ca73a9703b8133f36caad9742f7b5:relay-uws/test/test_license_pool.cpp:generic-api-key:75
+883aa238520ca73a9703b8133f36caad9742f7b5:relay-uws/test/test_relay_live.cpp:hollow-relay-license-key:6868

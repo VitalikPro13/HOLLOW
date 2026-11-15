@@ -2,7 +2,7 @@
 
 This document lists what each work package of the audit examined, what it found, what it
 examined and found sound, and what it did not examine. It is the `coverage.md` the audit plan
-requires before the audit can close (`reports/planned/security/SECURITY_AUDIT_PLAN.md` section 3
+requires before the audit can close (`reports/shipped/security/SECURITY_AUDIT_PLAN.md` section 3
 artifact table and section 6 exit criteria), in the style of a Cure53 work-package note,
 including "areas examined that yielded no findings". It is an appendix of the final report
 `SECURITY_AUDIT_2026_10.md`. It records the review up to the 0.13 close; what the 0.14 work
@@ -33,14 +33,14 @@ Source keys used below. Paths are relative to the repository root unless noted.
 
 | Key | Source |
 |---|---|
-| PLAN | `reports/planned/security/SECURITY_AUDIT_PLAN.md` |
-| CLAIMS, TM, AR | `audit/claims.md`, `audit/threat_model.md`, `audit/accepted_risks.md` (all under `reports/planned/security/`) |
+| PLAN | `reports/shipped/security/SECURITY_AUDIT_PLAN.md` |
+| CLAIMS, TM, AR | `audit/claims.md`, `audit/threat_model.md`, `audit/accepted_risks.md` (all under `reports/shipped/security/`) |
 | MATRIX, CAND | `audit/authz_matrix.md`, `audit/candidate_findings.md` |
 | EV, RC | `audit/phase_b_evidence/authz_<area>.md`, `audit/phase_b_recheck/recheck_<area>.md` |
 | EF/x, DISP | `audit/phase_ef/<slice>.md`, `audit/phase_ef/dispositions.md` |
 | MUT | `audit/mutation_passes/README.md` and the scripts beside it |
 | RS-H, RS-B | `audit/rs_handshake_review.md`, `audit/rs_bounds_review.md` |
-| SCALE | `reports/planned/relay-and-sync/SCALE_PROBE_2026_10.md` section 8 |
+| SCALE | `reports/shipped/relay-and-sync/SCALE_PROBE_2026_10.md` section 8 |
 
 ## Method in one table
 

@@ -6,7 +6,7 @@
 //! keyed by a salt the asker picks, so no author can mint ops whose ids cancel. A range that
 //! differs is sent whole when the answerer holds few ops in it, or split into sub-ranges the
 //! asker compares again; the last round always sends. Design: `.team/DESIGN.md` of g13-s1a,
-//! `reports/planned/relay-and-sync/SCALE_PROBE_2026_10.md` section 2.1.
+//! `reports/shipped/relay-and-sync/SCALE_PROBE_2026_10.md` section 2.1.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
