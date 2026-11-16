@@ -1261,7 +1261,7 @@ fn rebuild_seed_state(
         peer_have: HashMap::new(),
         inflight: HashMap::new(),
         dial_after: HashMap::new(),
-        last_have_broadcast: now_inst.checked_sub(HAVE_REBROADCAST_INTERVAL).unwrap_or(now_inst),
+        last_have_broadcast: super::types::earlier_by(now_inst, HAVE_REBROADCAST_INTERVAL),
         speed_samples: Vec::new(),
         speed_bps: 0,
         manifest_requested_at: None,
@@ -2088,7 +2088,7 @@ pub async fn handle_envelope_share_chunk_response(
 
     let now_inst = Instant::now();
     state.speed_samples.push((now_inst, pt.len()));
-    let cutoff = now_inst - Duration::from_secs_f64(SPEED_WINDOW_SECS);
+    let cutoff = super::types::earlier_by(now_inst, Duration::from_secs_f64(SPEED_WINDOW_SECS));
     state.speed_samples.retain(|(t, _)| *t >= cutoff);
     let window_bytes: usize = state.speed_samples.iter().map(|(_, b)| b).sum();
     let window_dt = state.speed_samples.first()
@@ -2200,7 +2200,7 @@ pub async fn handle_webrtc_share_chunk_complete(
 
     let now_inst = Instant::now();
     state.speed_samples.push((now_inst, pt.len()));
-    let cutoff = now_inst - Duration::from_secs_f64(SPEED_WINDOW_SECS);
+    let cutoff = super::types::earlier_by(now_inst, Duration::from_secs_f64(SPEED_WINDOW_SECS));
     state.speed_samples.retain(|(t, _)| *t >= cutoff);
     let window_bytes: usize = state.speed_samples.iter().map(|(_, b)| b).sum();
     let window_dt = state.speed_samples.first()

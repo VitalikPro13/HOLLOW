@@ -48489,10 +48489,11 @@ async fn md_mls_scene_and_commit(relay: &MockRelay, tags: [u8; 5]) -> (MdMlsScen
     );
     relay.set_recording(&c_dev, false);
 
-    // Any roster ingest on any node here re-links the device for all of them, so
-    // nothing moves between the three while o1 does not place it.
+    // Only o1's roster lags: the resolver is shared, so a global `forget` also made the
+    // friend disown the device (it committed the leaf out) and any roster ingest still
+    // landing re-linked it for o1 (the held add merged). Blind o1 alone instead.
     md_mls_freeze(relay, &[&o_dev1, &c_dev, &o_dev2], true);
-    super::resolver::forget(&o_dev2);
+    super::resolver::blind_for_test(&o_dev1, &o_dev2);
     let commit = commit.unwrap();
     relay.inject(&server_id, &c_dev, &o_dev1, frame(&commit));
     assert!(
@@ -48554,7 +48555,7 @@ async fn a_commit_adding_a_device_our_roster_has_not_placed_yet_is_held_not_refu
     let MdMlsScene { mut o1, c, o2, server_id, .. } = md_mls_commit_before_the_roster(&relay, [240, 241, 242, 243, 244]).await;
 
     // The roster arrives: its ingest links the device to its master.
-    super::resolver::update_many(&o1.master_id, [o2.device_id.as_str()]);
+    super::resolver::unblind_for_test(&o1.device_id, &o2.device_id);
     md_mls_freeze(&relay, &[&o1.device_id, &c.device_id, &o2.device_id], false);
     assert!(
         wait_until(15, async || {
@@ -48589,7 +48590,7 @@ async fn a_held_add_whose_roster_never_comes_lapses_unmerged_and_heals_only_once
     let relay = MockRelay::new();
     let MdMlsScene { mut o1, c, o2, server_id, epoch_before } =
         md_mls_commit_before_the_roster(&relay, [245, 246, 247, 248, 249]).await;
-    let (o_master, o_dev1, o_dev2) = (o1.master_id.clone(), o1.device_id.clone(), o2.device_id.clone());
+    let (o_dev1, o_dev2) = (o1.device_id.clone(), o2.device_id.clone());
     relay.set_recording(&o_dev1, true);
 
     o1.cmd_tx.send(NodeCommand::TestAgeHeldCommits { by: std::time::Duration::from_secs(3600) }).await.unwrap();
@@ -48614,7 +48615,7 @@ async fn a_held_add_whose_roster_never_comes_lapses_unmerged_and_heals_only_once
 
     // The genuine roster comes after the bound: o1 asks whether the group moved past
     // it, and the friend's catch-up, failing on the spent key, brings one repair.
-    super::resolver::update_many(&o_master, [o_dev2.as_str()]);
+    super::resolver::unblind_for_test(&o_dev1, &o_dev2);
     assert!(
         wait_until(10, async || relay.held_kinds(&o_dev1, &c.device_id).iter().any(|k| k == "mls_epoch_probe")).await,
         "a lapsed add that now passes never asked whether the group moved on",
@@ -48657,7 +48658,7 @@ async fn md_review_mls_a_restart_inside_a_held_add_still_heals_once_placed() {
     // The app is closed and reopened before the roster arrives.
     let mut o1 = restart_node(&relay, o1, 250, 251).await;
     assert_eq!(o1.mls_epoch(&server_id).await, Some(epoch_before), "the restart lost the group");
-    super::resolver::update_many(&o1.master_id, [o2.device_id.as_str()]);
+    super::resolver::unblind_for_test(&o1.device_id, &o2.device_id);
     md_mls_freeze(&relay, &[&o1.device_id, &c.device_id, &o2.device_id], false);
     assert!(
         wait_until(60, async || {
@@ -48723,8 +48724,7 @@ async fn a_spent_commit_brings_one_repair_from_our_responder_once_nothing_is_hel
     let relay = MockRelay::new();
     let (MdMlsScene { mut o1, c, o2, server_id, epoch_before }, commit) =
         md_mls_scene_and_commit(&relay, [215, 216, 217, 218, 219]).await;
-    let (o_master, o_dev1, o_dev2, c_dev) =
-        (o1.master_id.clone(), o1.device_id.clone(), o2.device_id.clone(), c.device_id.clone());
+    let (o_dev1, o_dev2, c_dev) = (o1.device_id.clone(), o2.device_id.clone(), c.device_id.clone());
     let HavenMessage::MlsCommit { commit: commit_b64, .. } = commit else { panic!("not a commit") };
     let catchup = frame(&HavenMessage::MlsCommitCatchup {
         server_id: server_id.clone(),
@@ -48752,7 +48752,7 @@ async fn a_spent_commit_brings_one_repair_from_our_responder_once_nothing_is_hel
         wait_until(10, async || md_mls_held(&o1).await == (Vec::new(), Vec::new())).await,
         "the lapsed add outlived its own bound",
     );
-    super::resolver::update_many(&o_master, [o_dev2.as_str()]);
+    super::resolver::unblind_for_test(&o_dev1, &o_dev2);
 
     relay.inject_direct(&server_id, &o_dev2, &o_dev1, catchup.clone());
     sleep_ms(1000).await; // ABSENCE: a catch-up from a member we would not ask asks nothing
@@ -48782,15 +48782,14 @@ async fn a_repair_welcome_naming_an_unplaced_device_is_held_not_refused() {
     let relay = MockRelay::new();
     let MdMlsScene { mut o1, c, o2, server_id, epoch_before } =
         md_mls_commit_before_the_roster(&relay, [210, 211, 212, 213, 214]).await;
-    let (o_master, o_dev1, o_dev2, c_dev) =
-        (o1.master_id.clone(), o1.device_id.clone(), o2.device_id.clone(), c.device_id.clone());
+    let (o_dev1, o_dev2, c_dev) = (o1.device_id.clone(), o2.device_id.clone(), c.device_id.clone());
     relay.set_recording(&o_dev1, true);
     o1.cmd_tx.send(NodeCommand::TestAgeHeldCommits { by: std::time::Duration::from_secs(3600) }).await.unwrap();
     assert!(wait_until(10, async || md_mls_held(&o1).await.1.contains(&server_id)).await, "the held add never lapsed");
 
     // Placed now: o1 probes, the friend re-serves the spent commit, o1 asks a repair.
     // The new device hears the repair's commit, as it would on a live relay.
-    super::resolver::update_many(&o_master, [o_dev2.as_str()]);
+    super::resolver::unblind_for_test(&o_dev1, &o_dev2);
     relay.set_broadcast_deaf(&o_dev2, false);
     for (from, to, kind, what) in [
         (&o_dev1, &c_dev, "mls_epoch_probe", "o1 never probed"),
@@ -48808,7 +48807,7 @@ async fn a_repair_welcome_naming_an_unplaced_device_is_held_not_refused() {
     relay.set_broadcast_deaf(&o_dev2, true);
 
     // The Welcome reaches o1 while its roster does not place the new device.
-    super::resolver::forget(&o_dev2);
+    super::resolver::blind_for_test(&o_dev1, &o_dev2);
     relay.release_held_kind(&c_dev, &o_dev1, "mls_welcome");
     assert!(
         wait_until(10, async || md_mls2_held_welcomes(&o1).await.contains(&server_id)).await,
@@ -48816,7 +48815,7 @@ async fn a_repair_welcome_naming_an_unplaced_device_is_held_not_refused() {
     );
     assert_eq!(o1.mls_epoch(&server_id).await, Some(epoch_before), "held, never installed unjudged");
 
-    super::resolver::update_many(&o_master, [o_dev2.as_str()]);
+    super::resolver::unblind_for_test(&o_dev1, &o_dev2);
     assert!(md_mls2_level(&o1, &c, &server_id, 15).await, "the held Welcome never installed once the device was placed");
     assert!(md_mls2_held_welcomes(&o1).await.is_empty(), "the installed Welcome is still held");
     assert_eq!(md_mls2_key_packages(&relay, &o_dev1, &server_id), 1, "the held Welcome cost another KeyPackage");
@@ -57387,6 +57386,9 @@ async fn g13w2f_a_rejoiner_goes_to_the_back_of_the_line() {
     relay.start_wiretap();
     join_and_wait(&mut nodes[3], &sid).await;
     expect_mls_leaf(&nodes[2], &sid, &ids[3], 30).await;
+    // The committer's tree shows the leaf before its commit frame leaves, so the wire
+    // is read once the group agrees.
+    assert!(quiet_agreed_group(&[&nodes[1], &nodes[2], &nodes[3]], &sid, 30).await.is_some(), "one group");
     let (by_lo, by_hi) = (mls_commits_from(&relay, &ids[1]), mls_commits_from(&relay, &ids[2]));
     assert!(by_hi >= 1 && by_lo == 0, "the member that stayed commits: stayed {by_hi}, rejoiner {by_lo}");
     drop(nodes);
@@ -57531,9 +57533,11 @@ async fn g13w2f_a_squatted_old_leaf_keeps_no_server_on_the_old_rule() {
     relay.start_wiretap();
     join_and_wait(&mut nodes[3], &sid).await;
     expect_mls_leaf(&nodes[2], &sid, &ids[3], 40).await;
+    // The committer's tree shows the leaf before its commit frame leaves, so the wire
+    // is read once the group agrees.
+    assert!(quiet_agreed_group(&[&nodes[1], &nodes[2], &nodes[3]], &sid, 30).await.is_some(), "one group");
     let (by_old, by_admin) = (mls_commits_from(&relay, &ids[1]), mls_commits_from(&relay, &ids[2]));
     assert!(by_admin >= 1 && by_old == 0, "standing's committer adds the joiner: admin {by_admin}, lowest id {by_old}");
-    assert!(quiet_agreed_group(&[&nodes[1], &nodes[2], &nodes[3]], &sid, 30).await.is_some(), "one group");
     drop(nodes);
 }
 
@@ -57608,9 +57612,11 @@ async fn g13w2f_the_last_upgrade_turns_standing_on_without_a_fork() {
     relay.start_wiretap();
     join_and_wait(&mut nodes[3], &sid).await;
     expect_mls_leaf(&nodes[2], &sid, &ids[3], 30).await;
+    // The committer's tree shows the leaf once its commit merges, before the frame
+    // leaves (it waits for the save), so the wire is read once the group agrees.
+    assert!(quiet_agreed_group(&[&nodes[1], &nodes[2], &nodes[3]], &sid, 30).await.is_some(), "one group");
     let (by_low, by_admin) = (mls_commits_from(&relay, &ids[1]), mls_commits_from(&relay, &ids[2]));
     assert!(by_admin >= 1 && by_low == 0, "standing is on: admin {by_admin}, lowest id {by_low}");
-    assert!(quiet_agreed_group(&[&nodes[1], &nodes[2], &nodes[3]], &sid, 30).await.is_some(), "one group");
     drop(nodes);
 }
 
@@ -57995,10 +58001,11 @@ async fn g13w2f_review_a_parked_joiners_key_package_reaches_only_its_walk() {
 }
 
 /// Mixed server, owner away: two 0.12.2 admins neither ack nor commit a joiner's
-/// KeyPackage, and the walk still seats it within 20 s through the old rule's committer.
+/// KeyPackage, and the walk still seats it within two walk steps (plus the batch ticks
+/// that judge them) through the old rule's committer, never after a bootstrap re-ask.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
-async fn g13w2f_review_a_mixed_server_seats_a_joiner_past_two_old_admins_within_20s() {
+async fn g13w2f_review_a_mixed_server_seats_a_joiner_past_two_old_admins_within_two_walk_steps() {
     let _g = test_guard();
     let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
@@ -58013,14 +58020,20 @@ async fn g13w2f_review_a_mixed_server_seats_a_joiner_past_two_old_admins_within_
     relay.start_wiretap();
     nodes[4].cmd_tx.send(join_cmd(&sid)).await.unwrap();
     assert!(expect_joined(&mut nodes[4], &sid, 20).await, "the joiner joins");
+    // Two silent targets cost a WALK_STEP each, judged on 2 s batch ticks, then one
+    // commit tick: about 18 s at worst, which a fixed 20 s missed by 46 ms under a full
+    // suite. Any bound below MLS_BOOTSTRAP_TIMEOUT (60 s) still catches a walk that waits
+    // out a re-ask.
+    let bound = super::standing::WALK_STEP * 2 + std::time::Duration::from_secs(13);
     let start = std::time::Instant::now();
-    let seated = wait_until(25, async || nodes[3].mls_members(&sid).await.contains(&ids[4])).await;
+    let seated = wait_until(30, async || nodes[3].mls_members(&sid).await.contains(&ids[4])).await;
     let took = start.elapsed();
-    assert!(seated && took < std::time::Duration::from_secs(20), "seated in {took:?}");
-    assert!(
-        g13w3_sent(&relay, &ids[4], &ids[1], "mls_kp") >= 1 && g13w3_sent(&relay, &ids[4], &ids[2], "mls_kp") >= 1,
-        "the walk tried both admins first",
-    );
+    assert!(seated && took < bound, "seated in {took:?}, bound {bound:?}");
+    // The bound alone cannot tell two steps from three under load: one KeyPackage per
+    // target is what proves the walk took two silent steps and no retry.
+    for target in [&ids[1], &ids[2], &ids[3]] {
+        assert_eq!(g13w3_sent(&relay, &ids[4], target, "mls_kp"), 1, "one KeyPackage to {target}");
+    }
     drop(nodes);
 }
 
@@ -59700,6 +59713,9 @@ async fn w2b_the_first_declaring_leaf_never_makes_a_stranger_the_only_leader() {
     relay.start_wiretap();
     join_and_wait(&mut nodes[3], &sid).await;
     expect_mls_leaf(&nodes[0], &sid, &ids[3], 40).await;
+    // The committer's tree shows the leaf before its commit frame leaves, so the wire
+    // is read once the group agrees.
+    assert!(quiet_agreed_group(&[&nodes[0], &nodes[1], &nodes[2], &nodes[3]], &sid, 30).await.is_some(), "one group");
     let (by_owner, by_stranger) = (mls_commits_from(&relay, &ids[0]), mls_commits_from(&relay, &ids[2]));
     assert!(
         by_owner >= 1 && by_stranger == 0,

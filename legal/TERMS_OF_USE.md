@@ -1,6 +1,6 @@
 # Hollow: Terms of Use
 
-**Last updated: November 14, 2026**
+**Last updated: November 16, 2026**
 
 These Terms of Use ("Terms") govern your access to and use of the Hollow application and related services ("Services") provided by AnonListen ("we", "us", "our"). By using Hollow, you agree to these Terms. Hollow asks you to agree to them before you create, restore or link an identity.
 
@@ -68,11 +68,11 @@ For commercial use without AGPL obligations (proprietary modifications, embeddin
 
 The Hollow name, trademarks, logos, and associated branding are the property of AnonListen (Vitalii Rovinskyi) and are not covered by the open-source licenses.
 
+**You own your copy of Hollow.** Once you download Hollow, it is yours. We cannot remotely disable, lock, or revoke your installed copy of the application. Your data, your keys, and your messages belong to you, not to us. Owning your copy does not change the rules in Section 4, which apply to everything you do with Hollow.
+
 ### Art from the Hollow shop
 
 Hollow shows art from the [Hollow shop](https://shop.anonlisten.com). You buy a piece on the artist's own Ko-fi page, outside Hollow, under the shop's own terms and refunds pages, which the piece's window in the app links to. Under EU consumer law you can usually cancel an online purchase within 14 days. For a digital item delivered at once, that right ends when delivery begins, provided you agreed to the immediate delivery and to losing the right. In the app you give that agreement by ticking the box beside Buy on Ko-fi before you pay, separately for each piece. Hollow installed from an app store shows no prices and no way to buy.
-
-**You own your copy of Hollow.** Once you download Hollow, it is yours. We cannot remotely disable, lock, or revoke your installed copy of the application. Your data, your keys, and your messages belong to you, not to us.
 
 ## 7. Privacy
 

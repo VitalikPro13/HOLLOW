@@ -28,8 +28,8 @@ subprojects {
             extensions.findByType(com.android.build.gradle.LibraryExtension::class.java)
                 ?.defaultConfig?.externalNativeBuild?.cmake?.arguments?.addAll(
                     listOf(
-                        "-DFVP_DEPS_URL=https://github.com/wang-bin/mdk-sdk/releases/download/v0.39.0",
-                        "-DFVP_DEPS_SHA256=cd196c9f6fb1872c4f35184848522ca3ab9c91196da47ca9761d8fb50e3e9cf3",
+                        "-DFVP_DEPS_URL=https://github.com/wang-bin/mdk-sdk/releases/download/v0.40.1",
+                        "-DFVP_DEPS_SHA256=80079993f308bcd0afb5b34421e9f4034dcefb6d901d0f31e23b8508d694630f",
                     ),
                 )
         }

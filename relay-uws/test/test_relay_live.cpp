@@ -1700,7 +1700,9 @@ static void test_door_rooms() {
 }
 
 // What the relay's kernel holds unread of the connection from `client_port`
-// (/proc/net/tcp), -1 when it cannot say.
+// (/proc/net/tcp), -1 when it cannot say. Only an ESTABLISHED socket counts, and the
+// fullest one: an older socket of the same port pair (closing, or in TIME_WAIT) also
+// lists, reads 0, and a last-match read once said 0 bytes for all eight rounds.
 static long relay_unread_from(int client_port) {
     FILE* f = fopen("/proc/net/tcp", "r");
     if (!f) return -1;
@@ -1711,8 +1713,9 @@ static long relay_unread_from(int client_port) {
         unsigned long tx = 0, rx = 0;
         if (sscanf(line, " %*u: %x:%x %x:%x %x %lx:%lx", &local_ip, &local_port, &remote_ip, &remote_port, &state, &tx,
                    &rx) == 7 &&
-            static_cast<int>(local_port) == g_port && static_cast<int>(remote_port) == client_port) {
-            unread = static_cast<long>(rx);
+            static_cast<int>(local_port) == g_port && static_cast<int>(remote_port) == client_port &&
+            state == 0x01) {
+            unread = std::max(unread, static_cast<long>(rx));
         }
     }
     fclose(f);

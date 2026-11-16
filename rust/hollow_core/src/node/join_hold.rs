@@ -248,7 +248,7 @@ impl JoinHold {
     #[cfg(test)]
     fn age(&mut self, server: &str, by: Duration) {
         if let Some(fresh) = self.fresh.get_mut(server) {
-            fresh.since = fresh.since.checked_sub(by).unwrap_or(fresh.since);
+            fresh.since = super::types::earlier_by(fresh.since, by);
         }
     }
 }

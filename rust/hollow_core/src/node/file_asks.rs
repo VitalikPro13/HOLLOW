@@ -700,9 +700,7 @@ pub(crate) async fn retry_stale_asks(
 /// dead connection told us. `last_asked_at` is stamped stale so the next roster
 /// snapshot dispatches at once rather than waiting out a dead socket's window.
 pub(crate) fn reset_on_disconnect(pending: &mut HashMap<String, PendingFileAsk>) {
-    let stale_now = Instant::now()
-        .checked_sub(Duration::from_secs(FILE_ASK_TIMEOUT_SECS))
-        .unwrap_or_else(Instant::now);
+    let stale_now = super::types::instant_ago(Duration::from_secs(FILE_ASK_TIMEOUT_SECS));
     for ask in pending.values_mut() {
         ask.asked.clear();
         ask.negatives.clear();

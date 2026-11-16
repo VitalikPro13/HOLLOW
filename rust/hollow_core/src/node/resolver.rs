@@ -90,7 +90,8 @@ pub(crate) fn disowns(master: &str, device: &str) -> bool {
     if device == master {
         return is_bare_master(master);
     }
-    holds_roster_of(master) && links().read().is_ok_and(|map| map.get(device).map(String::as_str) != Some(master))
+    holds_roster_of(master)
+        && (blind(device) || links().read().is_ok_and(|map| map.get(device).map(String::as_str) != Some(master)))
 }
 
 /// True when `peer_id` is the id of a master whose roster we hold and that roster
@@ -361,6 +362,15 @@ static BLIND: RwLock<Vec<(String, String)>> = RwLock::new(Vec::new());
 pub(crate) fn blind_for_test(observer: &str, device: &str) {
     if let Ok(mut b) = BLIND.write() {
         b.push((observer.to_string(), device.to_string()));
+    }
+    changed();
+}
+
+/// Let the node of `observer` place `device` again, as its roster arriving would.
+#[cfg(test)]
+pub(crate) fn unblind_for_test(observer: &str, device: &str) {
+    if let Ok(mut b) = BLIND.write() {
+        b.retain(|(o, d)| !(o == observer && d == device));
     }
     changed();
 }

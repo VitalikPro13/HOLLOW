@@ -1023,6 +1023,25 @@ pub(crate) fn now_ms() -> i64 {
         .as_millis() as i64
 }
 
+/// `t` moved back by `by`, or by as much of it as the monotonic clock allows: on
+/// Windows `Instant` counts from boot, so on a machine up for less than `by` a plain
+/// `checked_sub` fails and a fallback to `t` would read "due long ago" as "due now".
+pub(crate) fn earlier_by(t: std::time::Instant, by: std::time::Duration) -> std::time::Instant {
+    let mut back = by;
+    while !back.is_zero() {
+        if let Some(earlier) = t.checked_sub(back) {
+            return earlier;
+        }
+        back /= 2;
+    }
+    t
+}
+
+/// [`earlier_by`] from now.
+pub(crate) fn instant_ago(by: std::time::Duration) -> std::time::Instant {
+    earlier_by(std::time::Instant::now(), by)
+}
+
 /// A fresh channel id: the server's first 8 characters, then 4 random bytes.
 ///
 /// ONE definition, called by whoever sends [NodeCommand::CreateChannel], so the
@@ -6394,5 +6413,24 @@ mod standing_wire_tests {
         }
         let request = HavenMessage::MlsKeyPackageRequest { server_id: "s".into(), channel_id: None };
         assert_eq!(request.lane(), Lane::Relay, "a request carries no package");
+    }
+}
+
+#[cfg(test)]
+mod instant_ago_tests {
+    use super::earlier_by;
+    use std::time::{Duration, Instant};
+
+    /// A clock that started less than `by` ago (Windows counts `Instant` from boot)
+    /// still gives an earlier instant, never `t` itself: a "due long ago" mark must
+    /// not turn into "due now" on a freshly booted machine.
+    #[test]
+    fn an_age_past_the_clocks_origin_still_moves_back() {
+        std::thread::sleep(Duration::from_millis(2));
+        let now = Instant::now();
+        let back = earlier_by(now, Duration::MAX);
+        assert!(back < now, "the instant did not move back at all");
+        assert_eq!(earlier_by(now, Duration::from_secs(1)), now - Duration::from_secs(1));
+        assert_eq!(earlier_by(now, Duration::ZERO), now);
     }
 }

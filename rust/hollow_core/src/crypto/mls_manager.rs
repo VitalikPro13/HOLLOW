@@ -2033,7 +2033,7 @@ impl MlsManager {
     /// Ages every held and lapsed commit by `by`, as if it had waited that long.
     #[cfg(test)]
     pub fn age_held_commits(&mut self, by: std::time::Duration) {
-        let age = |since: &mut std::time::Instant| *since = since.checked_sub(by).unwrap_or(*since);
+        let age = |since: &mut std::time::Instant| *since = crate::node::types::earlier_by(*since, by);
         self.held_commits.values_mut().flatten().for_each(|c| age(&mut c.since));
         self.lapsed_commits.values_mut().flatten().for_each(|l| age(&mut l.since));
     }

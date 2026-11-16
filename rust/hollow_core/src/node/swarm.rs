@@ -971,9 +971,8 @@ async fn run_event_loop(
     let mut seed_budget = super::share_handler::SeedBudget::new();
     // Coexistence: any messaging/voice send bumps this; the share scheduler
     // pauses chunk requests while it's recent.
-    let mut last_message_traffic: std::time::Instant = std::time::Instant::now()
-        .checked_sub(std::time::Duration::from_secs(60))
-        .unwrap_or_else(std::time::Instant::now);
+    let mut last_message_traffic: std::time::Instant =
+        super::types::instant_ago(std::time::Duration::from_secs(60));
     // Auto-rejoin every share row with seeding=1 so we keep serving across restarts.
     super::share_handler::auto_rejoin_seeders(&mut share_registry, &bundle_keypair, &ws_cmd_tx);
 

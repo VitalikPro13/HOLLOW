@@ -1,6 +1,6 @@
 // GENERATED CODE - DO NOT MODIFY BY HAND
 // coverage:ignore-file
-// ignore_for_file: type=lint
+// ignore_for_file: type=lint, type=warning, deprecated_member_use, deprecated_member_use_from_same_package
 // ignore_for_file: unused_element, deprecated_member_use, deprecated_member_use_from_same_package, use_function_type_syntax_for_parameters, unnecessary_const, avoid_init_to_null, invalid_override_different_default_values_named, prefer_expression_function_bodies, annotate_overrides, invalid_annotation_target, unnecessary_question_mark
 
 part of 'network.dart';
@@ -9,6 +9,7 @@ part of 'network.dart';
 // FreezedGenerator
 // **************************************************************************
 
+// GENERATED CODE - DO NOT MODIFY BY HAND
 // dart format off
 T _$identity<T>(T value) => value;
 /// @nodoc
@@ -20,7 +21,7 @@ mixin _$NetworkEvent {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent);
 }
 
 
@@ -29,7 +30,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'NetworkEvent()';
+    return 'NetworkEvent()';
 }
 
 
@@ -1144,16 +1145,18 @@ $NetworkEvent_PeerDiscoveredCopyWith<NetworkEvent_PeerDiscovered> get copyWith =
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_PeerDiscovered&&(identical(other.peer, peer) || other.peer == peer));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_PeerDiscovered&&(identical(other.peer, peer) || other.peer == peer));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,peer);
+int get hashCode {
+    return Object.hash(runtimeType,peer);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.peerDiscovered(peer: $peer)';
+    return 'NetworkEvent.peerDiscovered(peer: $peer)';
 }
 
 
@@ -1210,16 +1213,18 @@ $NetworkEvent_PeerExpiredCopyWith<NetworkEvent_PeerExpired> get copyWith => _$Ne
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_PeerExpired&&(identical(other.peerId, peerId) || other.peerId == peerId));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_PeerExpired&&(identical(other.peerId, peerId) || other.peerId == peerId));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,peerId);
+int get hashCode {
+    return Object.hash(runtimeType,peerId);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.peerExpired(peerId: $peerId)';
+    return 'NetworkEvent.peerExpired(peerId: $peerId)';
 }
 
 
@@ -1276,16 +1281,18 @@ $NetworkEvent_PeerDisconnectedCopyWith<NetworkEvent_PeerDisconnected> get copyWi
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_PeerDisconnected&&(identical(other.peerId, peerId) || other.peerId == peerId));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_PeerDisconnected&&(identical(other.peerId, peerId) || other.peerId == peerId));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,peerId);
+int get hashCode {
+    return Object.hash(runtimeType,peerId);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.peerDisconnected(peerId: $peerId)';
+    return 'NetworkEvent.peerDisconnected(peerId: $peerId)';
 }
 
 
@@ -1337,7 +1344,7 @@ class NetworkEvent_RoomCleared extends NetworkEvent {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_RoomCleared);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_RoomCleared);
 }
 
 
@@ -1346,7 +1353,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'NetworkEvent.roomCleared()';
+    return 'NetworkEvent.roomCleared()';
 }
 
 
@@ -1374,16 +1381,18 @@ $NetworkEvent_ListeningCopyWith<NetworkEvent_Listening> get copyWith => _$Networ
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_Listening&&(identical(other.address, address) || other.address == address));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_Listening&&(identical(other.address, address) || other.address == address));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,address);
+int get hashCode {
+    return Object.hash(runtimeType,address);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.listening(address: $address)';
+    return 'NetworkEvent.listening(address: $address)';
 }
 
 
@@ -1450,16 +1459,18 @@ $NetworkEvent_MessageReceivedCopyWith<NetworkEvent_MessageReceived> get copyWith
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_MessageReceived&&(identical(other.fromPeer, fromPeer) || other.fromPeer == fromPeer)&&(identical(other.text, text) || other.text == text)&&(identical(other.timestamp, timestamp) || other.timestamp == timestamp)&&(identical(other.messageId, messageId) || other.messageId == messageId)&&(identical(other.replyToMid, replyToMid) || other.replyToMid == replyToMid)&&(identical(other.linkPreview, linkPreview) || other.linkPreview == linkPreview)&&(identical(other.signature, signature) || other.signature == signature)&&(identical(other.publicKey, publicKey) || other.publicKey == publicKey)&&(identical(other.albumId, albumId) || other.albumId == albumId)&&(identical(other.isOwn, isOwn) || other.isOwn == isOwn)&&(identical(other.duplicate, duplicate) || other.duplicate == duplicate));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_MessageReceived&&(identical(other.fromPeer, fromPeer) || other.fromPeer == fromPeer)&&(identical(other.text, text) || other.text == text)&&(identical(other.timestamp, timestamp) || other.timestamp == timestamp)&&(identical(other.messageId, messageId) || other.messageId == messageId)&&(identical(other.replyToMid, replyToMid) || other.replyToMid == replyToMid)&&(identical(other.linkPreview, linkPreview) || other.linkPreview == linkPreview)&&(identical(other.signature, signature) || other.signature == signature)&&(identical(other.publicKey, publicKey) || other.publicKey == publicKey)&&(identical(other.albumId, albumId) || other.albumId == albumId)&&(identical(other.isOwn, isOwn) || other.isOwn == isOwn)&&(identical(other.duplicate, duplicate) || other.duplicate == duplicate));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,fromPeer,text,timestamp,messageId,replyToMid,linkPreview,signature,publicKey,albumId,isOwn,duplicate);
+int get hashCode {
+    return Object.hash(runtimeType,fromPeer,text,timestamp,messageId,replyToMid,linkPreview,signature,publicKey,albumId,isOwn,duplicate);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.messageReceived(fromPeer: $fromPeer, text: $text, timestamp: $timestamp, messageId: $messageId, replyToMid: $replyToMid, linkPreview: $linkPreview, signature: $signature, publicKey: $publicKey, albumId: $albumId, isOwn: $isOwn, duplicate: $duplicate)';
+    return 'NetworkEvent.messageReceived(fromPeer: $fromPeer, text: $text, timestamp: $timestamp, messageId: $messageId, replyToMid: $replyToMid, linkPreview: $linkPreview, signature: $signature, publicKey: $publicKey, albumId: $albumId, isOwn: $isOwn, duplicate: $duplicate)';
 }
 
 
@@ -1539,16 +1550,18 @@ $NetworkEvent_ChannelMessageReceivedCopyWith<NetworkEvent_ChannelMessageReceived
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ChannelMessageReceived&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.channelId, channelId) || other.channelId == channelId)&&(identical(other.fromPeer, fromPeer) || other.fromPeer == fromPeer)&&(identical(other.text, text) || other.text == text)&&(identical(other.timestamp, timestamp) || other.timestamp == timestamp)&&(identical(other.messageId, messageId) || other.messageId == messageId)&&(identical(other.replyToMid, replyToMid) || other.replyToMid == replyToMid)&&(identical(other.linkPreview, linkPreview) || other.linkPreview == linkPreview)&&(identical(other.signature, signature) || other.signature == signature)&&(identical(other.publicKey, publicKey) || other.publicKey == publicKey)&&(identical(other.albumId, albumId) || other.albumId == albumId)&&(identical(other.replyToOwn, replyToOwn) || other.replyToOwn == replyToOwn)&&(identical(other.duplicate, duplicate) || other.duplicate == duplicate)&&(identical(other.isOwn, isOwn) || other.isOwn == isOwn));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ChannelMessageReceived&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.channelId, channelId) || other.channelId == channelId)&&(identical(other.fromPeer, fromPeer) || other.fromPeer == fromPeer)&&(identical(other.text, text) || other.text == text)&&(identical(other.timestamp, timestamp) || other.timestamp == timestamp)&&(identical(other.messageId, messageId) || other.messageId == messageId)&&(identical(other.replyToMid, replyToMid) || other.replyToMid == replyToMid)&&(identical(other.linkPreview, linkPreview) || other.linkPreview == linkPreview)&&(identical(other.signature, signature) || other.signature == signature)&&(identical(other.publicKey, publicKey) || other.publicKey == publicKey)&&(identical(other.albumId, albumId) || other.albumId == albumId)&&(identical(other.replyToOwn, replyToOwn) || other.replyToOwn == replyToOwn)&&(identical(other.duplicate, duplicate) || other.duplicate == duplicate)&&(identical(other.isOwn, isOwn) || other.isOwn == isOwn));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,serverId,channelId,fromPeer,text,timestamp,messageId,replyToMid,linkPreview,signature,publicKey,albumId,replyToOwn,duplicate,isOwn);
+int get hashCode {
+    return Object.hash(runtimeType,serverId,channelId,fromPeer,text,timestamp,messageId,replyToMid,linkPreview,signature,publicKey,albumId,replyToOwn,duplicate,isOwn);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.channelMessageReceived(serverId: $serverId, channelId: $channelId, fromPeer: $fromPeer, text: $text, timestamp: $timestamp, messageId: $messageId, replyToMid: $replyToMid, linkPreview: $linkPreview, signature: $signature, publicKey: $publicKey, albumId: $albumId, replyToOwn: $replyToOwn, duplicate: $duplicate, isOwn: $isOwn)';
+    return 'NetworkEvent.channelMessageReceived(serverId: $serverId, channelId: $channelId, fromPeer: $fromPeer, text: $text, timestamp: $timestamp, messageId: $messageId, replyToMid: $replyToMid, linkPreview: $linkPreview, signature: $signature, publicKey: $publicKey, albumId: $albumId, replyToOwn: $replyToOwn, duplicate: $duplicate, isOwn: $isOwn)';
 }
 
 
@@ -1622,16 +1635,18 @@ $NetworkEvent_MessageSentCopyWith<NetworkEvent_MessageSent> get copyWith => _$Ne
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_MessageSent&&(identical(other.toPeer, toPeer) || other.toPeer == toPeer)&&(identical(other.messageId, messageId) || other.messageId == messageId)&&(identical(other.timestamp, timestamp) || other.timestamp == timestamp)&&(identical(other.signature, signature) || other.signature == signature)&&(identical(other.publicKey, publicKey) || other.publicKey == publicKey));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_MessageSent&&(identical(other.toPeer, toPeer) || other.toPeer == toPeer)&&(identical(other.messageId, messageId) || other.messageId == messageId)&&(identical(other.timestamp, timestamp) || other.timestamp == timestamp)&&(identical(other.signature, signature) || other.signature == signature)&&(identical(other.publicKey, publicKey) || other.publicKey == publicKey));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,toPeer,messageId,timestamp,signature,publicKey);
+int get hashCode {
+    return Object.hash(runtimeType,toPeer,messageId,timestamp,signature,publicKey);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.messageSent(toPeer: $toPeer, messageId: $messageId, timestamp: $timestamp, signature: $signature, publicKey: $publicKey)';
+    return 'NetworkEvent.messageSent(toPeer: $toPeer, messageId: $messageId, timestamp: $timestamp, signature: $signature, publicKey: $publicKey)';
 }
 
 
@@ -1697,16 +1712,18 @@ $NetworkEvent_ChannelMessageSentCopyWith<NetworkEvent_ChannelMessageSent> get co
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ChannelMessageSent&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.channelId, channelId) || other.channelId == channelId)&&(identical(other.messageId, messageId) || other.messageId == messageId)&&(identical(other.timestamp, timestamp) || other.timestamp == timestamp)&&(identical(other.signature, signature) || other.signature == signature)&&(identical(other.publicKey, publicKey) || other.publicKey == publicKey));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ChannelMessageSent&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.channelId, channelId) || other.channelId == channelId)&&(identical(other.messageId, messageId) || other.messageId == messageId)&&(identical(other.timestamp, timestamp) || other.timestamp == timestamp)&&(identical(other.signature, signature) || other.signature == signature)&&(identical(other.publicKey, publicKey) || other.publicKey == publicKey));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,serverId,channelId,messageId,timestamp,signature,publicKey);
+int get hashCode {
+    return Object.hash(runtimeType,serverId,channelId,messageId,timestamp,signature,publicKey);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.channelMessageSent(serverId: $serverId, channelId: $channelId, messageId: $messageId, timestamp: $timestamp, signature: $signature, publicKey: $publicKey)';
+    return 'NetworkEvent.channelMessageSent(serverId: $serverId, channelId: $channelId, messageId: $messageId, timestamp: $timestamp, signature: $signature, publicKey: $publicKey)';
 }
 
 
@@ -1769,16 +1786,18 @@ $NetworkEvent_MessageSendFailedCopyWith<NetworkEvent_MessageSendFailed> get copy
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_MessageSendFailed&&(identical(other.toPeer, toPeer) || other.toPeer == toPeer)&&(identical(other.error, error) || other.error == error));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_MessageSendFailed&&(identical(other.toPeer, toPeer) || other.toPeer == toPeer)&&(identical(other.error, error) || other.error == error));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,toPeer,error);
+int get hashCode {
+    return Object.hash(runtimeType,toPeer,error);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.messageSendFailed(toPeer: $toPeer, error: $error)';
+    return 'NetworkEvent.messageSendFailed(toPeer: $toPeer, error: $error)';
 }
 
 
@@ -1836,16 +1855,18 @@ $NetworkEvent_SessionEstablishedCopyWith<NetworkEvent_SessionEstablished> get co
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_SessionEstablished&&(identical(other.peerId, peerId) || other.peerId == peerId));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_SessionEstablished&&(identical(other.peerId, peerId) || other.peerId == peerId));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,peerId);
+int get hashCode {
+    return Object.hash(runtimeType,peerId);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.sessionEstablished(peerId: $peerId)';
+    return 'NetworkEvent.sessionEstablished(peerId: $peerId)';
 }
 
 
@@ -1902,16 +1923,18 @@ $NetworkEvent_ErrorCopyWith<NetworkEvent_Error> get copyWith => _$NetworkEvent_E
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_Error&&(identical(other.message, message) || other.message == message));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_Error&&(identical(other.message, message) || other.message == message));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,message);
+int get hashCode {
+    return Object.hash(runtimeType,message);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.error(message: $message)';
+    return 'NetworkEvent.error(message: $message)';
 }
 
 
@@ -1969,16 +1992,18 @@ $NetworkEvent_ServerCreatedCopyWith<NetworkEvent_ServerCreated> get copyWith => 
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ServerCreated&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.name, name) || other.name == name));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ServerCreated&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.name, name) || other.name == name));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,serverId,name);
+int get hashCode {
+    return Object.hash(runtimeType,serverId,name);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.serverCreated(serverId: $serverId, name: $name)';
+    return 'NetworkEvent.serverCreated(serverId: $serverId, name: $name)';
 }
 
 
@@ -2036,16 +2061,18 @@ $NetworkEvent_ServerUpdatedCopyWith<NetworkEvent_ServerUpdated> get copyWith => 
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ServerUpdated&&(identical(other.serverId, serverId) || other.serverId == serverId));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ServerUpdated&&(identical(other.serverId, serverId) || other.serverId == serverId));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,serverId);
+int get hashCode {
+    return Object.hash(runtimeType,serverId);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.serverUpdated(serverId: $serverId)';
+    return 'NetworkEvent.serverUpdated(serverId: $serverId)';
 }
 
 
@@ -2087,7 +2114,7 @@ as String,
 
 
 class NetworkEvent_EmoteAssetsReceived extends NetworkEvent {
-  const NetworkEvent_EmoteAssetsReceived({required final  List<String> hashes}): _hashes = hashes,super._();
+  const NetworkEvent_EmoteAssetsReceived({required  List<String> hashes}): _hashes = hashes,super._();
   
 
  final  List<String> _hashes;
@@ -2108,16 +2135,18 @@ $NetworkEvent_EmoteAssetsReceivedCopyWith<NetworkEvent_EmoteAssetsReceived> get 
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_EmoteAssetsReceived&&const DeepCollectionEquality().equals(other._hashes, _hashes));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_EmoteAssetsReceived&&const DeepCollectionEquality().equals(other.hashes, _hashes));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,const DeepCollectionEquality().hash(_hashes));
+int get hashCode {
+    return Object.hash(runtimeType,const DeepCollectionEquality().hash(_hashes));
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.emoteAssetsReceived(hashes: $hashes)';
+    return 'NetworkEvent.emoteAssetsReceived(hashes: $hashes)';
 }
 
 
@@ -2169,7 +2198,7 @@ class NetworkEvent_PersonalEmotesUpdated extends NetworkEvent {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_PersonalEmotesUpdated);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_PersonalEmotesUpdated);
 }
 
 
@@ -2178,7 +2207,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'NetworkEvent.personalEmotesUpdated()';
+    return 'NetworkEvent.personalEmotesUpdated()';
 }
 
 
@@ -2209,16 +2238,18 @@ $NetworkEvent_ChannelAddedCopyWith<NetworkEvent_ChannelAdded> get copyWith => _$
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ChannelAdded&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.channelId, channelId) || other.channelId == channelId)&&(identical(other.name, name) || other.name == name)&&(identical(other.channelType, channelType) || other.channelType == channelType));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ChannelAdded&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.channelId, channelId) || other.channelId == channelId)&&(identical(other.name, name) || other.name == name)&&(identical(other.channelType, channelType) || other.channelType == channelType));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,serverId,channelId,name,channelType);
+int get hashCode {
+    return Object.hash(runtimeType,serverId,channelId,name,channelType);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.channelAdded(serverId: $serverId, channelId: $channelId, name: $name, channelType: $channelType)';
+    return 'NetworkEvent.channelAdded(serverId: $serverId, channelId: $channelId, name: $name, channelType: $channelType)';
 }
 
 
@@ -2279,16 +2310,18 @@ $NetworkEvent_ChannelRemovedCopyWith<NetworkEvent_ChannelRemoved> get copyWith =
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ChannelRemoved&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.channelId, channelId) || other.channelId == channelId));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ChannelRemoved&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.channelId, channelId) || other.channelId == channelId));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,serverId,channelId);
+int get hashCode {
+    return Object.hash(runtimeType,serverId,channelId);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.channelRemoved(serverId: $serverId, channelId: $channelId)';
+    return 'NetworkEvent.channelRemoved(serverId: $serverId, channelId: $channelId)';
 }
 
 
@@ -2348,16 +2381,18 @@ $NetworkEvent_ChannelRenamedCopyWith<NetworkEvent_ChannelRenamed> get copyWith =
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ChannelRenamed&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.channelId, channelId) || other.channelId == channelId)&&(identical(other.newName, newName) || other.newName == newName));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ChannelRenamed&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.channelId, channelId) || other.channelId == channelId)&&(identical(other.newName, newName) || other.newName == newName));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,serverId,channelId,newName);
+int get hashCode {
+    return Object.hash(runtimeType,serverId,channelId,newName);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.channelRenamed(serverId: $serverId, channelId: $channelId, newName: $newName)';
+    return 'NetworkEvent.channelRenamed(serverId: $serverId, channelId: $channelId, newName: $newName)';
 }
 
 
@@ -2416,16 +2451,18 @@ $NetworkEvent_ServerDeletedCopyWith<NetworkEvent_ServerDeleted> get copyWith => 
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ServerDeleted&&(identical(other.serverId, serverId) || other.serverId == serverId));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ServerDeleted&&(identical(other.serverId, serverId) || other.serverId == serverId));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,serverId);
+int get hashCode {
+    return Object.hash(runtimeType,serverId);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.serverDeleted(serverId: $serverId)';
+    return 'NetworkEvent.serverDeleted(serverId: $serverId)';
 }
 
 
@@ -2483,16 +2520,18 @@ $NetworkEvent_MemberJoinedCopyWith<NetworkEvent_MemberJoined> get copyWith => _$
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_MemberJoined&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.peerId, peerId) || other.peerId == peerId));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_MemberJoined&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.peerId, peerId) || other.peerId == peerId));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,serverId,peerId);
+int get hashCode {
+    return Object.hash(runtimeType,serverId,peerId);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.memberJoined(serverId: $serverId, peerId: $peerId)';
+    return 'NetworkEvent.memberJoined(serverId: $serverId, peerId: $peerId)';
 }
 
 
@@ -2551,16 +2590,18 @@ $NetworkEvent_MemberLeftCopyWith<NetworkEvent_MemberLeft> get copyWith => _$Netw
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_MemberLeft&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.peerId, peerId) || other.peerId == peerId));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_MemberLeft&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.peerId, peerId) || other.peerId == peerId));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,serverId,peerId);
+int get hashCode {
+    return Object.hash(runtimeType,serverId,peerId);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.memberLeft(serverId: $serverId, peerId: $peerId)';
+    return 'NetworkEvent.memberLeft(serverId: $serverId, peerId: $peerId)';
 }
 
 
@@ -2619,16 +2660,18 @@ $NetworkEvent_SyncCompletedCopyWith<NetworkEvent_SyncCompleted> get copyWith => 
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_SyncCompleted&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.opsApplied, opsApplied) || other.opsApplied == opsApplied));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_SyncCompleted&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.opsApplied, opsApplied) || other.opsApplied == opsApplied));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,serverId,opsApplied);
+int get hashCode {
+    return Object.hash(runtimeType,serverId,opsApplied);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.syncCompleted(serverId: $serverId, opsApplied: $opsApplied)';
+    return 'NetworkEvent.syncCompleted(serverId: $serverId, opsApplied: $opsApplied)';
 }
 
 
@@ -2689,16 +2732,18 @@ $NetworkEvent_ServerJoinedCopyWith<NetworkEvent_ServerJoined> get copyWith => _$
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ServerJoined&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.name, name) || other.name == name)&&(identical(other.quiet, quiet) || other.quiet == quiet)&&(identical(other.fromSibling, fromSibling) || other.fromSibling == fromSibling));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ServerJoined&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.name, name) || other.name == name)&&(identical(other.quiet, quiet) || other.quiet == quiet)&&(identical(other.fromSibling, fromSibling) || other.fromSibling == fromSibling));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,serverId,name,quiet,fromSibling);
+int get hashCode {
+    return Object.hash(runtimeType,serverId,name,quiet,fromSibling);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.serverJoined(serverId: $serverId, name: $name, quiet: $quiet, fromSibling: $fromSibling)';
+    return 'NetworkEvent.serverJoined(serverId: $serverId, name: $name, quiet: $quiet, fromSibling: $fromSibling)';
 }
 
 
@@ -2759,16 +2804,18 @@ $NetworkEvent_ServerJoinFailedCopyWith<NetworkEvent_ServerJoinFailed> get copyWi
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ServerJoinFailed&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.reason, reason) || other.reason == reason));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ServerJoinFailed&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.reason, reason) || other.reason == reason));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,serverId,reason);
+int get hashCode {
+    return Object.hash(runtimeType,serverId,reason);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.serverJoinFailed(serverId: $serverId, reason: $reason)';
+    return 'NetworkEvent.serverJoinFailed(serverId: $serverId, reason: $reason)';
 }
 
 
@@ -2826,16 +2873,18 @@ $NetworkEvent_ServerJoinParkedCopyWith<NetworkEvent_ServerJoinParked> get copyWi
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ServerJoinParked&&(identical(other.serverId, serverId) || other.serverId == serverId));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ServerJoinParked&&(identical(other.serverId, serverId) || other.serverId == serverId));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,serverId);
+int get hashCode {
+    return Object.hash(runtimeType,serverId);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.serverJoinParked(serverId: $serverId)';
+    return 'NetworkEvent.serverJoinParked(serverId: $serverId)';
 }
 
 
@@ -2894,16 +2943,18 @@ $NetworkEvent_PendingJoinUpdatedCopyWith<NetworkEvent_PendingJoinUpdated> get co
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_PendingJoinUpdated&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.state, state) || other.state == state)&&(identical(other.reason, reason) || other.reason == reason));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_PendingJoinUpdated&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.state, state) || other.state == state)&&(identical(other.reason, reason) || other.reason == reason));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,serverId,state,reason);
+int get hashCode {
+    return Object.hash(runtimeType,serverId,state,reason);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.pendingJoinUpdated(serverId: $serverId, state: $state, reason: $reason)';
+    return 'NetworkEvent.pendingJoinUpdated(serverId: $serverId, state: $state, reason: $reason)';
 }
 
 
@@ -2963,16 +3014,18 @@ $NetworkEvent_MessageSyncStartedCopyWith<NetworkEvent_MessageSyncStarted> get co
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_MessageSyncStarted&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.peerId, peerId) || other.peerId == peerId));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_MessageSyncStarted&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.peerId, peerId) || other.peerId == peerId));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,serverId,peerId);
+int get hashCode {
+    return Object.hash(runtimeType,serverId,peerId);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.messageSyncStarted(serverId: $serverId, peerId: $peerId)';
+    return 'NetworkEvent.messageSyncStarted(serverId: $serverId, peerId: $peerId)';
 }
 
 
@@ -3031,16 +3084,18 @@ $NetworkEvent_MessageSyncCompletedCopyWith<NetworkEvent_MessageSyncCompleted> ge
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_MessageSyncCompleted&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.newMessageCount, newMessageCount) || other.newMessageCount == newMessageCount));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_MessageSyncCompleted&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.newMessageCount, newMessageCount) || other.newMessageCount == newMessageCount));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,serverId,newMessageCount);
+int get hashCode {
+    return Object.hash(runtimeType,serverId,newMessageCount);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.messageSyncCompleted(serverId: $serverId, newMessageCount: $newMessageCount)';
+    return 'NetworkEvent.messageSyncCompleted(serverId: $serverId, newMessageCount: $newMessageCount)';
 }
 
 
@@ -3099,16 +3154,18 @@ $NetworkEvent_MessageSyncFailedCopyWith<NetworkEvent_MessageSyncFailed> get copy
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_MessageSyncFailed&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.error, error) || other.error == error));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_MessageSyncFailed&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.error, error) || other.error == error));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,serverId,error);
+int get hashCode {
+    return Object.hash(runtimeType,serverId,error);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.messageSyncFailed(serverId: $serverId, error: $error)';
+    return 'NetworkEvent.messageSyncFailed(serverId: $serverId, error: $error)';
 }
 
 
@@ -3169,16 +3226,18 @@ $NetworkEvent_MessageSyncProgressCopyWith<NetworkEvent_MessageSyncProgress> get 
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_MessageSyncProgress&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.channelId, channelId) || other.channelId == channelId)&&(identical(other.receivedCount, receivedCount) || other.receivedCount == receivedCount)&&(identical(other.totalCount, totalCount) || other.totalCount == totalCount));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_MessageSyncProgress&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.channelId, channelId) || other.channelId == channelId)&&(identical(other.receivedCount, receivedCount) || other.receivedCount == receivedCount)&&(identical(other.totalCount, totalCount) || other.totalCount == totalCount));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,serverId,channelId,receivedCount,totalCount);
+int get hashCode {
+    return Object.hash(runtimeType,serverId,channelId,receivedCount,totalCount);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.messageSyncProgress(serverId: $serverId, channelId: $channelId, receivedCount: $receivedCount, totalCount: $totalCount)';
+    return 'NetworkEvent.messageSyncProgress(serverId: $serverId, channelId: $channelId, receivedCount: $receivedCount, totalCount: $totalCount)';
 }
 
 
@@ -3240,16 +3299,18 @@ $NetworkEvent_RoleChangedCopyWith<NetworkEvent_RoleChanged> get copyWith => _$Ne
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_RoleChanged&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.peerId, peerId) || other.peerId == peerId)&&(identical(other.newRole, newRole) || other.newRole == newRole));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_RoleChanged&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.peerId, peerId) || other.peerId == peerId)&&(identical(other.newRole, newRole) || other.newRole == newRole));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,serverId,peerId,newRole);
+int get hashCode {
+    return Object.hash(runtimeType,serverId,peerId,newRole);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.roleChanged(serverId: $serverId, peerId: $peerId, newRole: $newRole)';
+    return 'NetworkEvent.roleChanged(serverId: $serverId, peerId: $peerId, newRole: $newRole)';
 }
 
 
@@ -3309,16 +3370,18 @@ $NetworkEvent_DmSyncCompletedCopyWith<NetworkEvent_DmSyncCompleted> get copyWith
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_DmSyncCompleted&&(identical(other.peerId, peerId) || other.peerId == peerId)&&(identical(other.newMessageCount, newMessageCount) || other.newMessageCount == newMessageCount));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_DmSyncCompleted&&(identical(other.peerId, peerId) || other.peerId == peerId)&&(identical(other.newMessageCount, newMessageCount) || other.newMessageCount == newMessageCount));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,peerId,newMessageCount);
+int get hashCode {
+    return Object.hash(runtimeType,peerId,newMessageCount);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.dmSyncCompleted(peerId: $peerId, newMessageCount: $newMessageCount)';
+    return 'NetworkEvent.dmSyncCompleted(peerId: $peerId, newMessageCount: $newMessageCount)';
 }
 
 
@@ -3376,16 +3439,18 @@ $NetworkEvent_ProfileUpdatedCopyWith<NetworkEvent_ProfileUpdated> get copyWith =
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ProfileUpdated&&(identical(other.peerId, peerId) || other.peerId == peerId));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ProfileUpdated&&(identical(other.peerId, peerId) || other.peerId == peerId));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,peerId);
+int get hashCode {
+    return Object.hash(runtimeType,peerId);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.profileUpdated(peerId: $peerId)';
+    return 'NetworkEvent.profileUpdated(peerId: $peerId)';
 }
 
 
@@ -3442,16 +3507,18 @@ $NetworkEvent_DeviceListUpdatedCopyWith<NetworkEvent_DeviceListUpdated> get copy
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_DeviceListUpdated&&(identical(other.masterPeerId, masterPeerId) || other.masterPeerId == masterPeerId));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_DeviceListUpdated&&(identical(other.masterPeerId, masterPeerId) || other.masterPeerId == masterPeerId));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,masterPeerId);
+int get hashCode {
+    return Object.hash(runtimeType,masterPeerId);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.deviceListUpdated(masterPeerId: $masterPeerId)';
+    return 'NetworkEvent.deviceListUpdated(masterPeerId: $masterPeerId)';
 }
 
 
@@ -3493,7 +3560,7 @@ as String,
 
 
 class NetworkEvent_ReadMarkersReceived extends NetworkEvent {
-  const NetworkEvent_ReadMarkersReceived({required final  List<ReadMarkerEntry> markers}): _markers = markers,super._();
+  const NetworkEvent_ReadMarkersReceived({required  List<ReadMarkerEntry> markers}): _markers = markers,super._();
   
 
  final  List<ReadMarkerEntry> _markers;
@@ -3514,16 +3581,18 @@ $NetworkEvent_ReadMarkersReceivedCopyWith<NetworkEvent_ReadMarkersReceived> get 
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ReadMarkersReceived&&const DeepCollectionEquality().equals(other._markers, _markers));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ReadMarkersReceived&&const DeepCollectionEquality().equals(other.markers, _markers));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,const DeepCollectionEquality().hash(_markers));
+int get hashCode {
+    return Object.hash(runtimeType,const DeepCollectionEquality().hash(_markers));
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.readMarkersReceived(markers: $markers)';
+    return 'NetworkEvent.readMarkersReceived(markers: $markers)';
 }
 
 
@@ -3583,16 +3652,18 @@ $NetworkEvent_SecurityAlertCopyWith<NetworkEvent_SecurityAlert> get copyWith => 
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_SecurityAlert&&(identical(other.peerId, peerId) || other.peerId == peerId)&&(identical(other.kind, kind) || other.kind == kind)&&(identical(other.detail, detail) || other.detail == detail)&&(identical(other.createdAt, createdAt) || other.createdAt == createdAt));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_SecurityAlert&&(identical(other.peerId, peerId) || other.peerId == peerId)&&(identical(other.kind, kind) || other.kind == kind)&&(identical(other.detail, detail) || other.detail == detail)&&(identical(other.createdAt, createdAt) || other.createdAt == createdAt));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,peerId,kind,detail,createdAt);
+int get hashCode {
+    return Object.hash(runtimeType,peerId,kind,detail,createdAt);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.securityAlert(peerId: $peerId, kind: $kind, detail: $detail, createdAt: $createdAt)';
+    return 'NetworkEvent.securityAlert(peerId: $peerId, kind: $kind, detail: $detail, createdAt: $createdAt)';
 }
 
 
@@ -3653,16 +3724,18 @@ $NetworkEvent_DeviceRemovedCopyWith<NetworkEvent_DeviceRemoved> get copyWith => 
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_DeviceRemoved&&(identical(other.by, by) || other.by == by)&&(identical(other.wipeAtMs, wipeAtMs) || other.wipeAtMs == wipeAtMs));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_DeviceRemoved&&(identical(other.by, by) || other.by == by)&&(identical(other.wipeAtMs, wipeAtMs) || other.wipeAtMs == wipeAtMs));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,by,wipeAtMs);
+int get hashCode {
+    return Object.hash(runtimeType,by,wipeAtMs);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.deviceRemoved(by: $by, wipeAtMs: $wipeAtMs)';
+    return 'NetworkEvent.deviceRemoved(by: $by, wipeAtMs: $wipeAtMs)';
 }
 
 
@@ -3715,7 +3788,7 @@ class NetworkEvent_DeviceRestored extends NetworkEvent {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_DeviceRestored);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_DeviceRestored);
 }
 
 
@@ -3724,7 +3797,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'NetworkEvent.deviceRestored()';
+    return 'NetworkEvent.deviceRestored()';
 }
 
 
@@ -3752,16 +3825,18 @@ $NetworkEvent_PendingDeviceAskingCopyWith<NetworkEvent_PendingDeviceAsking> get 
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_PendingDeviceAsking&&(identical(other.devicePeerId, devicePeerId) || other.devicePeerId == devicePeerId));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_PendingDeviceAsking&&(identical(other.devicePeerId, devicePeerId) || other.devicePeerId == devicePeerId));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,devicePeerId);
+int get hashCode {
+    return Object.hash(runtimeType,devicePeerId);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.pendingDeviceAsking(devicePeerId: $devicePeerId)';
+    return 'NetworkEvent.pendingDeviceAsking(devicePeerId: $devicePeerId)';
 }
 
 
@@ -3818,16 +3893,18 @@ $NetworkEvent_DestroyReceivedCopyWith<NetworkEvent_DestroyReceived> get copyWith
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_DestroyReceived&&(identical(other.scope, scope) || other.scope == scope));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_DestroyReceived&&(identical(other.scope, scope) || other.scope == scope));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,scope);
+int get hashCode {
+    return Object.hash(runtimeType,scope);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.destroyReceived(scope: $scope)';
+    return 'NetworkEvent.destroyReceived(scope: $scope)';
 }
 
 
@@ -3885,16 +3962,18 @@ $NetworkEvent_IdentityDestroyedByFriendCopyWith<NetworkEvent_IdentityDestroyedBy
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_IdentityDestroyedByFriend&&(identical(other.masterPeerId, masterPeerId) || other.masterPeerId == masterPeerId)&&(identical(other.issuedAtMs, issuedAtMs) || other.issuedAtMs == issuedAtMs));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_IdentityDestroyedByFriend&&(identical(other.masterPeerId, masterPeerId) || other.masterPeerId == masterPeerId)&&(identical(other.issuedAtMs, issuedAtMs) || other.issuedAtMs == issuedAtMs));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,masterPeerId,issuedAtMs);
+int get hashCode {
+    return Object.hash(runtimeType,masterPeerId,issuedAtMs);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.identityDestroyedByFriend(masterPeerId: $masterPeerId, issuedAtMs: $issuedAtMs)';
+    return 'NetworkEvent.identityDestroyedByFriend(masterPeerId: $masterPeerId, issuedAtMs: $issuedAtMs)';
 }
 
 
@@ -3958,16 +4037,18 @@ $NetworkEvent_ChannelMessageEditedCopyWith<NetworkEvent_ChannelMessageEdited> ge
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ChannelMessageEdited&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.channelId, channelId) || other.channelId == channelId)&&(identical(other.messageId, messageId) || other.messageId == messageId)&&(identical(other.newText, newText) || other.newText == newText)&&(identical(other.editedAt, editedAt) || other.editedAt == editedAt)&&(identical(other.signature, signature) || other.signature == signature)&&(identical(other.publicKey, publicKey) || other.publicKey == publicKey));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ChannelMessageEdited&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.channelId, channelId) || other.channelId == channelId)&&(identical(other.messageId, messageId) || other.messageId == messageId)&&(identical(other.newText, newText) || other.newText == newText)&&(identical(other.editedAt, editedAt) || other.editedAt == editedAt)&&(identical(other.signature, signature) || other.signature == signature)&&(identical(other.publicKey, publicKey) || other.publicKey == publicKey));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,serverId,channelId,messageId,newText,editedAt,signature,publicKey);
+int get hashCode {
+    return Object.hash(runtimeType,serverId,channelId,messageId,newText,editedAt,signature,publicKey);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.channelMessageEdited(serverId: $serverId, channelId: $channelId, messageId: $messageId, newText: $newText, editedAt: $editedAt, signature: $signature, publicKey: $publicKey)';
+    return 'NetworkEvent.channelMessageEdited(serverId: $serverId, channelId: $channelId, messageId: $messageId, newText: $newText, editedAt: $editedAt, signature: $signature, publicKey: $publicKey)';
 }
 
 
@@ -4035,16 +4116,18 @@ $NetworkEvent_DmMessageEditedCopyWith<NetworkEvent_DmMessageEdited> get copyWith
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_DmMessageEdited&&(identical(other.peerId, peerId) || other.peerId == peerId)&&(identical(other.messageId, messageId) || other.messageId == messageId)&&(identical(other.newText, newText) || other.newText == newText)&&(identical(other.editedAt, editedAt) || other.editedAt == editedAt)&&(identical(other.signature, signature) || other.signature == signature)&&(identical(other.publicKey, publicKey) || other.publicKey == publicKey));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_DmMessageEdited&&(identical(other.peerId, peerId) || other.peerId == peerId)&&(identical(other.messageId, messageId) || other.messageId == messageId)&&(identical(other.newText, newText) || other.newText == newText)&&(identical(other.editedAt, editedAt) || other.editedAt == editedAt)&&(identical(other.signature, signature) || other.signature == signature)&&(identical(other.publicKey, publicKey) || other.publicKey == publicKey));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,peerId,messageId,newText,editedAt,signature,publicKey);
+int get hashCode {
+    return Object.hash(runtimeType,peerId,messageId,newText,editedAt,signature,publicKey);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.dmMessageEdited(peerId: $peerId, messageId: $messageId, newText: $newText, editedAt: $editedAt, signature: $signature, publicKey: $publicKey)';
+    return 'NetworkEvent.dmMessageEdited(peerId: $peerId, messageId: $messageId, newText: $newText, editedAt: $editedAt, signature: $signature, publicKey: $publicKey)';
 }
 
 
@@ -4109,16 +4192,18 @@ $NetworkEvent_ChannelLinkPreviewUpdatedCopyWith<NetworkEvent_ChannelLinkPreviewU
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ChannelLinkPreviewUpdated&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.channelId, channelId) || other.channelId == channelId)&&(identical(other.messageId, messageId) || other.messageId == messageId)&&(identical(other.preview, preview) || other.preview == preview));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ChannelLinkPreviewUpdated&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.channelId, channelId) || other.channelId == channelId)&&(identical(other.messageId, messageId) || other.messageId == messageId)&&(identical(other.preview, preview) || other.preview == preview));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,serverId,channelId,messageId,preview);
+int get hashCode {
+    return Object.hash(runtimeType,serverId,channelId,messageId,preview);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.channelLinkPreviewUpdated(serverId: $serverId, channelId: $channelId, messageId: $messageId, preview: $preview)';
+    return 'NetworkEvent.channelLinkPreviewUpdated(serverId: $serverId, channelId: $channelId, messageId: $messageId, preview: $preview)';
 }
 
 
@@ -4180,16 +4265,18 @@ $NetworkEvent_DmLinkPreviewUpdatedCopyWith<NetworkEvent_DmLinkPreviewUpdated> ge
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_DmLinkPreviewUpdated&&(identical(other.peerId, peerId) || other.peerId == peerId)&&(identical(other.messageId, messageId) || other.messageId == messageId)&&(identical(other.preview, preview) || other.preview == preview));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_DmLinkPreviewUpdated&&(identical(other.peerId, peerId) || other.peerId == peerId)&&(identical(other.messageId, messageId) || other.messageId == messageId)&&(identical(other.preview, preview) || other.preview == preview));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,peerId,messageId,preview);
+int get hashCode {
+    return Object.hash(runtimeType,peerId,messageId,preview);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.dmLinkPreviewUpdated(peerId: $peerId, messageId: $messageId, preview: $preview)';
+    return 'NetworkEvent.dmLinkPreviewUpdated(peerId: $peerId, messageId: $messageId, preview: $preview)';
 }
 
 
@@ -4251,16 +4338,18 @@ $NetworkEvent_ChannelMessageDeletedCopyWith<NetworkEvent_ChannelMessageDeleted> 
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ChannelMessageDeleted&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.channelId, channelId) || other.channelId == channelId)&&(identical(other.messageId, messageId) || other.messageId == messageId)&&(identical(other.deletedAt, deletedAt) || other.deletedAt == deletedAt));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ChannelMessageDeleted&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.channelId, channelId) || other.channelId == channelId)&&(identical(other.messageId, messageId) || other.messageId == messageId)&&(identical(other.deletedAt, deletedAt) || other.deletedAt == deletedAt));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,serverId,channelId,messageId,deletedAt);
+int get hashCode {
+    return Object.hash(runtimeType,serverId,channelId,messageId,deletedAt);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.channelMessageDeleted(serverId: $serverId, channelId: $channelId, messageId: $messageId, deletedAt: $deletedAt)';
+    return 'NetworkEvent.channelMessageDeleted(serverId: $serverId, channelId: $channelId, messageId: $messageId, deletedAt: $deletedAt)';
 }
 
 
@@ -4322,16 +4411,18 @@ $NetworkEvent_DmMessageDeletedCopyWith<NetworkEvent_DmMessageDeleted> get copyWi
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_DmMessageDeleted&&(identical(other.peerId, peerId) || other.peerId == peerId)&&(identical(other.messageId, messageId) || other.messageId == messageId)&&(identical(other.deletedAt, deletedAt) || other.deletedAt == deletedAt));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_DmMessageDeleted&&(identical(other.peerId, peerId) || other.peerId == peerId)&&(identical(other.messageId, messageId) || other.messageId == messageId)&&(identical(other.deletedAt, deletedAt) || other.deletedAt == deletedAt));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,peerId,messageId,deletedAt);
+int get hashCode {
+    return Object.hash(runtimeType,peerId,messageId,deletedAt);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.dmMessageDeleted(peerId: $peerId, messageId: $messageId, deletedAt: $deletedAt)';
+    return 'NetworkEvent.dmMessageDeleted(peerId: $peerId, messageId: $messageId, deletedAt: $deletedAt)';
 }
 
 
@@ -4395,16 +4486,18 @@ $NetworkEvent_ChannelReactionAddedCopyWith<NetworkEvent_ChannelReactionAdded> ge
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ChannelReactionAdded&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.channelId, channelId) || other.channelId == channelId)&&(identical(other.messageId, messageId) || other.messageId == messageId)&&(identical(other.emoji, emoji) || other.emoji == emoji)&&(identical(other.reactor, reactor) || other.reactor == reactor)&&(identical(other.addedAt, addedAt) || other.addedAt == addedAt));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ChannelReactionAdded&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.channelId, channelId) || other.channelId == channelId)&&(identical(other.messageId, messageId) || other.messageId == messageId)&&(identical(other.emoji, emoji) || other.emoji == emoji)&&(identical(other.reactor, reactor) || other.reactor == reactor)&&(identical(other.addedAt, addedAt) || other.addedAt == addedAt));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,serverId,channelId,messageId,emoji,reactor,addedAt);
+int get hashCode {
+    return Object.hash(runtimeType,serverId,channelId,messageId,emoji,reactor,addedAt);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.channelReactionAdded(serverId: $serverId, channelId: $channelId, messageId: $messageId, emoji: $emoji, reactor: $reactor, addedAt: $addedAt)';
+    return 'NetworkEvent.channelReactionAdded(serverId: $serverId, channelId: $channelId, messageId: $messageId, emoji: $emoji, reactor: $reactor, addedAt: $addedAt)';
 }
 
 
@@ -4470,16 +4563,18 @@ $NetworkEvent_DmReactionAddedCopyWith<NetworkEvent_DmReactionAdded> get copyWith
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_DmReactionAdded&&(identical(other.peerId, peerId) || other.peerId == peerId)&&(identical(other.messageId, messageId) || other.messageId == messageId)&&(identical(other.emoji, emoji) || other.emoji == emoji)&&(identical(other.reactor, reactor) || other.reactor == reactor)&&(identical(other.addedAt, addedAt) || other.addedAt == addedAt));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_DmReactionAdded&&(identical(other.peerId, peerId) || other.peerId == peerId)&&(identical(other.messageId, messageId) || other.messageId == messageId)&&(identical(other.emoji, emoji) || other.emoji == emoji)&&(identical(other.reactor, reactor) || other.reactor == reactor)&&(identical(other.addedAt, addedAt) || other.addedAt == addedAt));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,peerId,messageId,emoji,reactor,addedAt);
+int get hashCode {
+    return Object.hash(runtimeType,peerId,messageId,emoji,reactor,addedAt);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.dmReactionAdded(peerId: $peerId, messageId: $messageId, emoji: $emoji, reactor: $reactor, addedAt: $addedAt)';
+    return 'NetworkEvent.dmReactionAdded(peerId: $peerId, messageId: $messageId, emoji: $emoji, reactor: $reactor, addedAt: $addedAt)';
 }
 
 
@@ -4545,16 +4640,18 @@ $NetworkEvent_ChannelReactionRemovedCopyWith<NetworkEvent_ChannelReactionRemoved
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ChannelReactionRemoved&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.channelId, channelId) || other.channelId == channelId)&&(identical(other.messageId, messageId) || other.messageId == messageId)&&(identical(other.emoji, emoji) || other.emoji == emoji)&&(identical(other.reactor, reactor) || other.reactor == reactor)&&(identical(other.removedAt, removedAt) || other.removedAt == removedAt));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ChannelReactionRemoved&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.channelId, channelId) || other.channelId == channelId)&&(identical(other.messageId, messageId) || other.messageId == messageId)&&(identical(other.emoji, emoji) || other.emoji == emoji)&&(identical(other.reactor, reactor) || other.reactor == reactor)&&(identical(other.removedAt, removedAt) || other.removedAt == removedAt));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,serverId,channelId,messageId,emoji,reactor,removedAt);
+int get hashCode {
+    return Object.hash(runtimeType,serverId,channelId,messageId,emoji,reactor,removedAt);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.channelReactionRemoved(serverId: $serverId, channelId: $channelId, messageId: $messageId, emoji: $emoji, reactor: $reactor, removedAt: $removedAt)';
+    return 'NetworkEvent.channelReactionRemoved(serverId: $serverId, channelId: $channelId, messageId: $messageId, emoji: $emoji, reactor: $reactor, removedAt: $removedAt)';
 }
 
 
@@ -4620,16 +4717,18 @@ $NetworkEvent_DmReactionRemovedCopyWith<NetworkEvent_DmReactionRemoved> get copy
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_DmReactionRemoved&&(identical(other.peerId, peerId) || other.peerId == peerId)&&(identical(other.messageId, messageId) || other.messageId == messageId)&&(identical(other.emoji, emoji) || other.emoji == emoji)&&(identical(other.reactor, reactor) || other.reactor == reactor)&&(identical(other.removedAt, removedAt) || other.removedAt == removedAt));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_DmReactionRemoved&&(identical(other.peerId, peerId) || other.peerId == peerId)&&(identical(other.messageId, messageId) || other.messageId == messageId)&&(identical(other.emoji, emoji) || other.emoji == emoji)&&(identical(other.reactor, reactor) || other.reactor == reactor)&&(identical(other.removedAt, removedAt) || other.removedAt == removedAt));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,peerId,messageId,emoji,reactor,removedAt);
+int get hashCode {
+    return Object.hash(runtimeType,peerId,messageId,emoji,reactor,removedAt);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.dmReactionRemoved(peerId: $peerId, messageId: $messageId, emoji: $emoji, reactor: $reactor, removedAt: $removedAt)';
+    return 'NetworkEvent.dmReactionRemoved(peerId: $peerId, messageId: $messageId, emoji: $emoji, reactor: $reactor, removedAt: $removedAt)';
 }
 
 
@@ -4690,16 +4789,18 @@ $NetworkEvent_FriendRequestReceivedCopyWith<NetworkEvent_FriendRequestReceived> 
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_FriendRequestReceived&&(identical(other.peerId, peerId) || other.peerId == peerId));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_FriendRequestReceived&&(identical(other.peerId, peerId) || other.peerId == peerId));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,peerId);
+int get hashCode {
+    return Object.hash(runtimeType,peerId);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.friendRequestReceived(peerId: $peerId)';
+    return 'NetworkEvent.friendRequestReceived(peerId: $peerId)';
 }
 
 
@@ -4756,16 +4857,18 @@ $NetworkEvent_FriendRequestAcceptedCopyWith<NetworkEvent_FriendRequestAccepted> 
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_FriendRequestAccepted&&(identical(other.peerId, peerId) || other.peerId == peerId));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_FriendRequestAccepted&&(identical(other.peerId, peerId) || other.peerId == peerId));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,peerId);
+int get hashCode {
+    return Object.hash(runtimeType,peerId);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.friendRequestAccepted(peerId: $peerId)';
+    return 'NetworkEvent.friendRequestAccepted(peerId: $peerId)';
 }
 
 
@@ -4822,16 +4925,18 @@ $NetworkEvent_FriendRequestRejectedCopyWith<NetworkEvent_FriendRequestRejected> 
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_FriendRequestRejected&&(identical(other.peerId, peerId) || other.peerId == peerId));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_FriendRequestRejected&&(identical(other.peerId, peerId) || other.peerId == peerId));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,peerId);
+int get hashCode {
+    return Object.hash(runtimeType,peerId);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.friendRequestRejected(peerId: $peerId)';
+    return 'NetworkEvent.friendRequestRejected(peerId: $peerId)';
 }
 
 
@@ -4888,16 +4993,18 @@ $NetworkEvent_FriendRemovedCopyWith<NetworkEvent_FriendRemoved> get copyWith => 
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_FriendRemoved&&(identical(other.peerId, peerId) || other.peerId == peerId));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_FriendRemoved&&(identical(other.peerId, peerId) || other.peerId == peerId));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,peerId);
+int get hashCode {
+    return Object.hash(runtimeType,peerId);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.friendRemoved(peerId: $peerId)';
+    return 'NetworkEvent.friendRemoved(peerId: $peerId)';
 }
 
 
@@ -4954,16 +5061,18 @@ $NetworkEvent_FriendsBackfilledCopyWith<NetworkEvent_FriendsBackfilled> get copy
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_FriendsBackfilled&&(identical(other.count, count) || other.count == count));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_FriendsBackfilled&&(identical(other.count, count) || other.count == count));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,count);
+int get hashCode {
+    return Object.hash(runtimeType,count);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.friendsBackfilled(count: $count)';
+    return 'NetworkEvent.friendsBackfilled(count: $count)';
 }
 
 
@@ -5015,7 +5124,7 @@ class NetworkEvent_BlockListChanged extends NetworkEvent {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_BlockListChanged);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_BlockListChanged);
 }
 
 
@@ -5024,7 +5133,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'NetworkEvent.blockListChanged()';
+    return 'NetworkEvent.blockListChanged()';
 }
 
 
@@ -5052,16 +5161,18 @@ $NetworkEvent_AgeGateChangedCopyWith<NetworkEvent_AgeGateChanged> get copyWith =
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_AgeGateChanged&&(identical(other.allowed, allowed) || other.allowed == allowed));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_AgeGateChanged&&(identical(other.allowed, allowed) || other.allowed == allowed));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,allowed);
+int get hashCode {
+    return Object.hash(runtimeType,allowed);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.ageGateChanged(allowed: $allowed)';
+    return 'NetworkEvent.ageGateChanged(allowed: $allowed)';
 }
 
 
@@ -5118,16 +5229,18 @@ $NetworkEvent_NicknameClaimedCopyWith<NetworkEvent_NicknameClaimed> get copyWith
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_NicknameClaimed&&(identical(other.nickname, nickname) || other.nickname == nickname));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_NicknameClaimed&&(identical(other.nickname, nickname) || other.nickname == nickname));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,nickname);
+int get hashCode {
+    return Object.hash(runtimeType,nickname);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.nicknameClaimed(nickname: $nickname)';
+    return 'NetworkEvent.nicknameClaimed(nickname: $nickname)';
 }
 
 
@@ -5179,7 +5292,7 @@ class NetworkEvent_NicknameReleased extends NetworkEvent {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_NicknameReleased);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_NicknameReleased);
 }
 
 
@@ -5188,7 +5301,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'NetworkEvent.nicknameReleased()';
+    return 'NetworkEvent.nicknameReleased()';
 }
 
 
@@ -5216,16 +5329,18 @@ $NetworkEvent_NicknameClaimFailedCopyWith<NetworkEvent_NicknameClaimFailed> get 
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_NicknameClaimFailed&&(identical(other.error, error) || other.error == error));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_NicknameClaimFailed&&(identical(other.error, error) || other.error == error));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,error);
+int get hashCode {
+    return Object.hash(runtimeType,error);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.nicknameClaimFailed(error: $error)';
+    return 'NetworkEvent.nicknameClaimFailed(error: $error)';
 }
 
 
@@ -5283,16 +5398,18 @@ $NetworkEvent_NicknameResolveFailedCopyWith<NetworkEvent_NicknameResolveFailed> 
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_NicknameResolveFailed&&(identical(other.nickname, nickname) || other.nickname == nickname)&&(identical(other.error, error) || other.error == error));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_NicknameResolveFailed&&(identical(other.nickname, nickname) || other.nickname == nickname)&&(identical(other.error, error) || other.error == error));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,nickname,error);
+int get hashCode {
+    return Object.hash(runtimeType,nickname,error);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.nicknameResolveFailed(nickname: $nickname, error: $error)';
+    return 'NetworkEvent.nicknameResolveFailed(nickname: $nickname, error: $error)';
 }
 
 
@@ -5351,16 +5468,18 @@ $NetworkEvent_NicknameResolvedCopyWith<NetworkEvent_NicknameResolved> get copyWi
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_NicknameResolved&&(identical(other.nickname, nickname) || other.nickname == nickname)&&(identical(other.masterId, masterId) || other.masterId == masterId));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_NicknameResolved&&(identical(other.nickname, nickname) || other.nickname == nickname)&&(identical(other.masterId, masterId) || other.masterId == masterId));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,nickname,masterId);
+int get hashCode {
+    return Object.hash(runtimeType,nickname,masterId);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.nicknameResolved(nickname: $nickname, masterId: $masterId)';
+    return 'NetworkEvent.nicknameResolved(nickname: $nickname, masterId: $masterId)';
 }
 
 
@@ -5413,7 +5532,7 @@ class NetworkEvent_RelayDisconnected extends NetworkEvent {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_RelayDisconnected);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_RelayDisconnected);
 }
 
 
@@ -5422,7 +5541,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'NetworkEvent.relayDisconnected()';
+    return 'NetworkEvent.relayDisconnected()';
 }
 
 
@@ -5445,7 +5564,7 @@ class NetworkEvent_RelayConnected extends NetworkEvent {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_RelayConnected);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_RelayConnected);
 }
 
 
@@ -5454,7 +5573,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'NetworkEvent.relayConnected()';
+    return 'NetworkEvent.relayConnected()';
 }
 
 
@@ -5482,16 +5601,18 @@ $NetworkEvent_RelayConnectingCopyWith<NetworkEvent_RelayConnecting> get copyWith
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_RelayConnecting&&(identical(other.reconnecting, reconnecting) || other.reconnecting == reconnecting));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_RelayConnecting&&(identical(other.reconnecting, reconnecting) || other.reconnecting == reconnecting));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,reconnecting);
+int get hashCode {
+    return Object.hash(runtimeType,reconnecting);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.relayConnecting(reconnecting: $reconnecting)';
+    return 'NetworkEvent.relayConnecting(reconnecting: $reconnecting)';
 }
 
 
@@ -5543,7 +5664,7 @@ class NetworkEvent_RelaySuspended extends NetworkEvent {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_RelaySuspended);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_RelaySuspended);
 }
 
 
@@ -5552,7 +5673,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'NetworkEvent.relaySuspended()';
+    return 'NetworkEvent.relaySuspended()';
 }
 
 
@@ -5580,16 +5701,18 @@ $NetworkEvent_RelayClockOffsetCopyWith<NetworkEvent_RelayClockOffset> get copyWi
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_RelayClockOffset&&(identical(other.offsetSecs, offsetSecs) || other.offsetSecs == offsetSecs));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_RelayClockOffset&&(identical(other.offsetSecs, offsetSecs) || other.offsetSecs == offsetSecs));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,offsetSecs);
+int get hashCode {
+    return Object.hash(runtimeType,offsetSecs);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.relayClockOffset(offsetSecs: $offsetSecs)';
+    return 'NetworkEvent.relayClockOffset(offsetSecs: $offsetSecs)';
 }
 
 
@@ -5631,7 +5754,7 @@ as PlatformInt64?,
 
 
 class NetworkEvent_ChannelNotificationHint extends NetworkEvent {
-  const NetworkEvent_ChannelNotificationHint({required this.serverId, required this.channelId, required this.fromPeer, required this.messageId, required this.hasEveryone, required final  List<String> mentionedNames, required this.isReplyToOwn}): _mentionedNames = mentionedNames,super._();
+  const NetworkEvent_ChannelNotificationHint({required this.serverId, required this.channelId, required this.fromPeer, required this.messageId, required this.hasEveryone, required  List<String> mentionedNames, required this.isReplyToOwn}): _mentionedNames = mentionedNames,super._();
   
 
  final  String serverId;
@@ -5660,16 +5783,18 @@ $NetworkEvent_ChannelNotificationHintCopyWith<NetworkEvent_ChannelNotificationHi
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ChannelNotificationHint&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.channelId, channelId) || other.channelId == channelId)&&(identical(other.fromPeer, fromPeer) || other.fromPeer == fromPeer)&&(identical(other.messageId, messageId) || other.messageId == messageId)&&(identical(other.hasEveryone, hasEveryone) || other.hasEveryone == hasEveryone)&&const DeepCollectionEquality().equals(other._mentionedNames, _mentionedNames)&&(identical(other.isReplyToOwn, isReplyToOwn) || other.isReplyToOwn == isReplyToOwn));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ChannelNotificationHint&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.channelId, channelId) || other.channelId == channelId)&&(identical(other.fromPeer, fromPeer) || other.fromPeer == fromPeer)&&(identical(other.messageId, messageId) || other.messageId == messageId)&&(identical(other.hasEveryone, hasEveryone) || other.hasEveryone == hasEveryone)&&const DeepCollectionEquality().equals(other.mentionedNames, _mentionedNames)&&(identical(other.isReplyToOwn, isReplyToOwn) || other.isReplyToOwn == isReplyToOwn));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,serverId,channelId,fromPeer,messageId,hasEveryone,const DeepCollectionEquality().hash(_mentionedNames),isReplyToOwn);
+int get hashCode {
+    return Object.hash(runtimeType,serverId,channelId,fromPeer,messageId,hasEveryone,const DeepCollectionEquality().hash(_mentionedNames),isReplyToOwn);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.channelNotificationHint(serverId: $serverId, channelId: $channelId, fromPeer: $fromPeer, messageId: $messageId, hasEveryone: $hasEveryone, mentionedNames: $mentionedNames, isReplyToOwn: $isReplyToOwn)';
+    return 'NetworkEvent.channelNotificationHint(serverId: $serverId, channelId: $channelId, fromPeer: $fromPeer, messageId: $messageId, hasEveryone: $hasEveryone, mentionedNames: $mentionedNames, isReplyToOwn: $isReplyToOwn)';
 }
 
 
@@ -5734,16 +5859,18 @@ $NetworkEvent_TypingStartedCopyWith<NetworkEvent_TypingStarted> get copyWith => 
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_TypingStarted&&(identical(other.peerId, peerId) || other.peerId == peerId)&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.channelId, channelId) || other.channelId == channelId));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_TypingStarted&&(identical(other.peerId, peerId) || other.peerId == peerId)&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.channelId, channelId) || other.channelId == channelId));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,peerId,serverId,channelId);
+int get hashCode {
+    return Object.hash(runtimeType,peerId,serverId,channelId);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.typingStarted(peerId: $peerId, serverId: $serverId, channelId: $channelId)';
+    return 'NetworkEvent.typingStarted(peerId: $peerId, serverId: $serverId, channelId: $channelId)';
 }
 
 
@@ -5803,16 +5930,18 @@ $NetworkEvent_PeerStatusChangedCopyWith<NetworkEvent_PeerStatusChanged> get copy
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_PeerStatusChanged&&(identical(other.peerId, peerId) || other.peerId == peerId)&&(identical(other.status, status) || other.status == status));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_PeerStatusChanged&&(identical(other.peerId, peerId) || other.peerId == peerId)&&(identical(other.status, status) || other.status == status));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,peerId,status);
+int get hashCode {
+    return Object.hash(runtimeType,peerId,status);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.peerStatusChanged(peerId: $peerId, status: $status)';
+    return 'NetworkEvent.peerStatusChanged(peerId: $peerId, status: $status)';
 }
 
 
@@ -5872,16 +6001,18 @@ $NetworkEvent_MessagePinnedCopyWith<NetworkEvent_MessagePinned> get copyWith => 
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_MessagePinned&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.channelId, channelId) || other.channelId == channelId)&&(identical(other.messageId, messageId) || other.messageId == messageId));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_MessagePinned&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.channelId, channelId) || other.channelId == channelId)&&(identical(other.messageId, messageId) || other.messageId == messageId));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,serverId,channelId,messageId);
+int get hashCode {
+    return Object.hash(runtimeType,serverId,channelId,messageId);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.messagePinned(serverId: $serverId, channelId: $channelId, messageId: $messageId)';
+    return 'NetworkEvent.messagePinned(serverId: $serverId, channelId: $channelId, messageId: $messageId)';
 }
 
 
@@ -5942,16 +6073,18 @@ $NetworkEvent_MessageUnpinnedCopyWith<NetworkEvent_MessageUnpinned> get copyWith
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_MessageUnpinned&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.channelId, channelId) || other.channelId == channelId)&&(identical(other.messageId, messageId) || other.messageId == messageId));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_MessageUnpinned&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.channelId, channelId) || other.channelId == channelId)&&(identical(other.messageId, messageId) || other.messageId == messageId));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,serverId,channelId,messageId);
+int get hashCode {
+    return Object.hash(runtimeType,serverId,channelId,messageId);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.messageUnpinned(serverId: $serverId, channelId: $channelId, messageId: $messageId)';
+    return 'NetworkEvent.messageUnpinned(serverId: $serverId, channelId: $channelId, messageId: $messageId)';
 }
 
 
@@ -6028,16 +6161,18 @@ $NetworkEvent_FileHeaderReceivedCopyWith<NetworkEvent_FileHeaderReceived> get co
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_FileHeaderReceived&&(identical(other.fileId, fileId) || other.fileId == fileId)&&(identical(other.fileName, fileName) || other.fileName == fileName)&&(identical(other.sizeBytes, sizeBytes) || other.sizeBytes == sizeBytes)&&(identical(other.isImage, isImage) || other.isImage == isImage)&&(identical(other.width, width) || other.width == width)&&(identical(other.height, height) || other.height == height)&&(identical(other.messageId, messageId) || other.messageId == messageId)&&(identical(other.senderId, senderId) || other.senderId == senderId)&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.channelId, channelId) || other.channelId == channelId)&&(identical(other.videoThumb, videoThumb) || other.videoThumb == videoThumb)&&(identical(other.shareRootHash, shareRootHash) || other.shareRootHash == shareRootHash)&&(identical(other.shareKeyHex, shareKeyHex) || other.shareKeyHex == shareKeyHex)&&(identical(other.thumbB64, thumbB64) || other.thumbB64 == thumbB64));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_FileHeaderReceived&&(identical(other.fileId, fileId) || other.fileId == fileId)&&(identical(other.fileName, fileName) || other.fileName == fileName)&&(identical(other.sizeBytes, sizeBytes) || other.sizeBytes == sizeBytes)&&(identical(other.isImage, isImage) || other.isImage == isImage)&&(identical(other.width, width) || other.width == width)&&(identical(other.height, height) || other.height == height)&&(identical(other.messageId, messageId) || other.messageId == messageId)&&(identical(other.senderId, senderId) || other.senderId == senderId)&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.channelId, channelId) || other.channelId == channelId)&&(identical(other.videoThumb, videoThumb) || other.videoThumb == videoThumb)&&(identical(other.shareRootHash, shareRootHash) || other.shareRootHash == shareRootHash)&&(identical(other.shareKeyHex, shareKeyHex) || other.shareKeyHex == shareKeyHex)&&(identical(other.thumbB64, thumbB64) || other.thumbB64 == thumbB64));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,fileId,fileName,sizeBytes,isImage,width,height,messageId,senderId,serverId,channelId,videoThumb,shareRootHash,shareKeyHex,thumbB64);
+int get hashCode {
+    return Object.hash(runtimeType,fileId,fileName,sizeBytes,isImage,width,height,messageId,senderId,serverId,channelId,videoThumb,shareRootHash,shareKeyHex,thumbB64);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.fileHeaderReceived(fileId: $fileId, fileName: $fileName, sizeBytes: $sizeBytes, isImage: $isImage, width: $width, height: $height, messageId: $messageId, senderId: $senderId, serverId: $serverId, channelId: $channelId, videoThumb: $videoThumb, shareRootHash: $shareRootHash, shareKeyHex: $shareKeyHex, thumbB64: $thumbB64)';
+    return 'NetworkEvent.fileHeaderReceived(fileId: $fileId, fileName: $fileName, sizeBytes: $sizeBytes, isImage: $isImage, width: $width, height: $height, messageId: $messageId, senderId: $senderId, serverId: $serverId, channelId: $channelId, videoThumb: $videoThumb, shareRootHash: $shareRootHash, shareKeyHex: $shareKeyHex, thumbB64: $thumbB64)';
 }
 
 
@@ -6109,16 +6244,18 @@ $NetworkEvent_FileProgressCopyWith<NetworkEvent_FileProgress> get copyWith => _$
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_FileProgress&&(identical(other.fileId, fileId) || other.fileId == fileId)&&(identical(other.chunksReceived, chunksReceived) || other.chunksReceived == chunksReceived)&&(identical(other.totalChunks, totalChunks) || other.totalChunks == totalChunks));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_FileProgress&&(identical(other.fileId, fileId) || other.fileId == fileId)&&(identical(other.chunksReceived, chunksReceived) || other.chunksReceived == chunksReceived)&&(identical(other.totalChunks, totalChunks) || other.totalChunks == totalChunks));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,fileId,chunksReceived,totalChunks);
+int get hashCode {
+    return Object.hash(runtimeType,fileId,chunksReceived,totalChunks);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.fileProgress(fileId: $fileId, chunksReceived: $chunksReceived, totalChunks: $totalChunks)';
+    return 'NetworkEvent.fileProgress(fileId: $fileId, chunksReceived: $chunksReceived, totalChunks: $totalChunks)';
 }
 
 
@@ -6178,16 +6315,18 @@ $NetworkEvent_FileCompletedCopyWith<NetworkEvent_FileCompleted> get copyWith => 
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_FileCompleted&&(identical(other.fileId, fileId) || other.fileId == fileId)&&(identical(other.diskPath, diskPath) || other.diskPath == diskPath));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_FileCompleted&&(identical(other.fileId, fileId) || other.fileId == fileId)&&(identical(other.diskPath, diskPath) || other.diskPath == diskPath));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,fileId,diskPath);
+int get hashCode {
+    return Object.hash(runtimeType,fileId,diskPath);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.fileCompleted(fileId: $fileId, diskPath: $diskPath)';
+    return 'NetworkEvent.fileCompleted(fileId: $fileId, diskPath: $diskPath)';
 }
 
 
@@ -6246,16 +6385,18 @@ $NetworkEvent_FileFailedCopyWith<NetworkEvent_FileFailed> get copyWith => _$Netw
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_FileFailed&&(identical(other.fileId, fileId) || other.fileId == fileId)&&(identical(other.error, error) || other.error == error));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_FileFailed&&(identical(other.fileId, fileId) || other.fileId == fileId)&&(identical(other.error, error) || other.error == error));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,fileId,error);
+int get hashCode {
+    return Object.hash(runtimeType,fileId,error);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.fileFailed(fileId: $fileId, error: $error)';
+    return 'NetworkEvent.fileFailed(fileId: $fileId, error: $error)';
 }
 
 
@@ -6315,16 +6456,18 @@ $NetworkEvent_FileAvailabilityCopyWith<NetworkEvent_FileAvailability> get copyWi
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_FileAvailability&&(identical(other.fileId, fileId) || other.fileId == fileId)&&(identical(other.state, state) || other.state == state)&&(identical(other.peerId, peerId) || other.peerId == peerId));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_FileAvailability&&(identical(other.fileId, fileId) || other.fileId == fileId)&&(identical(other.state, state) || other.state == state)&&(identical(other.peerId, peerId) || other.peerId == peerId));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,fileId,state,peerId);
+int get hashCode {
+    return Object.hash(runtimeType,fileId,state,peerId);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.fileAvailability(fileId: $fileId, state: $state, peerId: $peerId)';
+    return 'NetworkEvent.fileAvailability(fileId: $fileId, state: $state, peerId: $peerId)';
 }
 
 
@@ -6368,7 +6511,7 @@ as String,
 
 
 class NetworkEvent_TurnCredentials extends NetworkEvent {
-  const NetworkEvent_TurnCredentials({required this.username, required this.password, required this.ttl, required final  List<String> uris}): _uris = uris,super._();
+  const NetworkEvent_TurnCredentials({required this.username, required this.password, required this.ttl, required  List<String> uris}): _uris = uris,super._();
   
 
  final  String username;
@@ -6392,16 +6535,18 @@ $NetworkEvent_TurnCredentialsCopyWith<NetworkEvent_TurnCredentials> get copyWith
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_TurnCredentials&&(identical(other.username, username) || other.username == username)&&(identical(other.password, password) || other.password == password)&&(identical(other.ttl, ttl) || other.ttl == ttl)&&const DeepCollectionEquality().equals(other._uris, _uris));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_TurnCredentials&&(identical(other.username, username) || other.username == username)&&(identical(other.password, password) || other.password == password)&&(identical(other.ttl, ttl) || other.ttl == ttl)&&const DeepCollectionEquality().equals(other.uris, _uris));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,username,password,ttl,const DeepCollectionEquality().hash(_uris));
+int get hashCode {
+    return Object.hash(runtimeType,username,password,ttl,const DeepCollectionEquality().hash(_uris));
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.turnCredentials(username: $username, password: $password, ttl: $ttl, uris: $uris)';
+    return 'NetworkEvent.turnCredentials(username: $username, password: $password, ttl: $ttl, uris: $uris)';
 }
 
 
@@ -6461,16 +6606,18 @@ $NetworkEvent_LinkCodeClaimedCopyWith<NetworkEvent_LinkCodeClaimed> get copyWith
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_LinkCodeClaimed&&(identical(other.code, code) || other.code == code));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_LinkCodeClaimed&&(identical(other.code, code) || other.code == code));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,code);
+int get hashCode {
+    return Object.hash(runtimeType,code);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.linkCodeClaimed(code: $code)';
+    return 'NetworkEvent.linkCodeClaimed(code: $code)';
 }
 
 
@@ -6528,16 +6675,18 @@ $NetworkEvent_LinkCodeErrorCopyWith<NetworkEvent_LinkCodeError> get copyWith => 
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_LinkCodeError&&(identical(other.error, error) || other.error == error)&&(identical(other.code, code) || other.code == code));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_LinkCodeError&&(identical(other.error, error) || other.error == error)&&(identical(other.code, code) || other.code == code));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,error,code);
+int get hashCode {
+    return Object.hash(runtimeType,error,code);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.linkCodeError(error: $error, code: $code)';
+    return 'NetworkEvent.linkCodeError(error: $error, code: $code)';
 }
 
 
@@ -6600,16 +6749,18 @@ $NetworkEvent_SiblingLinkAvailableCopyWith<NetworkEvent_SiblingLinkAvailable> ge
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_SiblingLinkAvailable&&(identical(other.peerId, peerId) || other.peerId == peerId)&&(identical(other.theirMsgCount, theirMsgCount) || other.theirMsgCount == theirMsgCount)&&(identical(other.theirFriendCount, theirFriendCount) || other.theirFriendCount == theirFriendCount)&&(identical(other.theirHasProfile, theirHasProfile) || other.theirHasProfile == theirHasProfile)&&(identical(other.kind, kind) || other.kind == kind));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_SiblingLinkAvailable&&(identical(other.peerId, peerId) || other.peerId == peerId)&&(identical(other.theirMsgCount, theirMsgCount) || other.theirMsgCount == theirMsgCount)&&(identical(other.theirFriendCount, theirFriendCount) || other.theirFriendCount == theirFriendCount)&&(identical(other.theirHasProfile, theirHasProfile) || other.theirHasProfile == theirHasProfile)&&(identical(other.kind, kind) || other.kind == kind));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,peerId,theirMsgCount,theirFriendCount,theirHasProfile,kind);
+int get hashCode {
+    return Object.hash(runtimeType,peerId,theirMsgCount,theirFriendCount,theirHasProfile,kind);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.siblingLinkAvailable(peerId: $peerId, theirMsgCount: $theirMsgCount, theirFriendCount: $theirFriendCount, theirHasProfile: $theirHasProfile, kind: $kind)';
+    return 'NetworkEvent.siblingLinkAvailable(peerId: $peerId, theirMsgCount: $theirMsgCount, theirFriendCount: $theirFriendCount, theirHasProfile: $theirHasProfile, kind: $kind)';
 }
 
 
@@ -6672,16 +6823,18 @@ $NetworkEvent_LinkProgressCopyWith<NetworkEvent_LinkProgress> get copyWith => _$
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_LinkProgress&&(identical(other.linkId, linkId) || other.linkId == linkId)&&(identical(other.bytesReceived, bytesReceived) || other.bytesReceived == bytesReceived)&&(identical(other.totalBytes, totalBytes) || other.totalBytes == totalBytes));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_LinkProgress&&(identical(other.linkId, linkId) || other.linkId == linkId)&&(identical(other.bytesReceived, bytesReceived) || other.bytesReceived == bytesReceived)&&(identical(other.totalBytes, totalBytes) || other.totalBytes == totalBytes));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,linkId,bytesReceived,totalBytes);
+int get hashCode {
+    return Object.hash(runtimeType,linkId,bytesReceived,totalBytes);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.linkProgress(linkId: $linkId, bytesReceived: $bytesReceived, totalBytes: $totalBytes)';
+    return 'NetworkEvent.linkProgress(linkId: $linkId, bytesReceived: $bytesReceived, totalBytes: $totalBytes)';
 }
 
 
@@ -6743,16 +6896,18 @@ $NetworkEvent_LinkCompleteCopyWith<NetworkEvent_LinkComplete> get copyWith => _$
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_LinkComplete&&(identical(other.linkId, linkId) || other.linkId == linkId)&&(identical(other.msgCount, msgCount) || other.msgCount == msgCount)&&(identical(other.friendCount, friendCount) || other.friendCount == friendCount)&&(identical(other.serverCount, serverCount) || other.serverCount == serverCount));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_LinkComplete&&(identical(other.linkId, linkId) || other.linkId == linkId)&&(identical(other.msgCount, msgCount) || other.msgCount == msgCount)&&(identical(other.friendCount, friendCount) || other.friendCount == friendCount)&&(identical(other.serverCount, serverCount) || other.serverCount == serverCount));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,linkId,msgCount,friendCount,serverCount);
+int get hashCode {
+    return Object.hash(runtimeType,linkId,msgCount,friendCount,serverCount);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.linkComplete(linkId: $linkId, msgCount: $msgCount, friendCount: $friendCount, serverCount: $serverCount)';
+    return 'NetworkEvent.linkComplete(linkId: $linkId, msgCount: $msgCount, friendCount: $friendCount, serverCount: $serverCount)';
 }
 
 
@@ -6813,16 +6968,18 @@ $NetworkEvent_LinkFailedCopyWith<NetworkEvent_LinkFailed> get copyWith => _$Netw
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_LinkFailed&&(identical(other.linkId, linkId) || other.linkId == linkId)&&(identical(other.error, error) || other.error == error));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_LinkFailed&&(identical(other.linkId, linkId) || other.linkId == linkId)&&(identical(other.error, error) || other.error == error));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,linkId,error);
+int get hashCode {
+    return Object.hash(runtimeType,linkId,error);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.linkFailed(linkId: $linkId, error: $error)';
+    return 'NetworkEvent.linkFailed(linkId: $linkId, error: $error)';
 }
 
 
@@ -6880,16 +7037,18 @@ $NetworkEvent_LinkPushCompleteCopyWith<NetworkEvent_LinkPushComplete> get copyWi
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_LinkPushComplete&&(identical(other.bytes, bytes) || other.bytes == bytes));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_LinkPushComplete&&(identical(other.bytes, bytes) || other.bytes == bytes));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,bytes);
+int get hashCode {
+    return Object.hash(runtimeType,bytes);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.linkPushComplete(bytes: $bytes)';
+    return 'NetworkEvent.linkPushComplete(bytes: $bytes)';
 }
 
 
@@ -6949,16 +7108,18 @@ $NetworkEvent_ShardStoredCopyWith<NetworkEvent_ShardStored> get copyWith => _$Ne
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ShardStored&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.contentId, contentId) || other.contentId == contentId)&&(identical(other.shardIndex, shardIndex) || other.shardIndex == shardIndex)&&(identical(other.fromPeer, fromPeer) || other.fromPeer == fromPeer));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ShardStored&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.contentId, contentId) || other.contentId == contentId)&&(identical(other.shardIndex, shardIndex) || other.shardIndex == shardIndex)&&(identical(other.fromPeer, fromPeer) || other.fromPeer == fromPeer));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,serverId,contentId,shardIndex,fromPeer);
+int get hashCode {
+    return Object.hash(runtimeType,serverId,contentId,shardIndex,fromPeer);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.shardStored(serverId: $serverId, contentId: $contentId, shardIndex: $shardIndex, fromPeer: $fromPeer)';
+    return 'NetworkEvent.shardStored(serverId: $serverId, contentId: $contentId, shardIndex: $shardIndex, fromPeer: $fromPeer)';
 }
 
 
@@ -7022,16 +7183,18 @@ $NetworkEvent_ShardStoreAckReceivedCopyWith<NetworkEvent_ShardStoreAckReceived> 
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ShardStoreAckReceived&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.contentId, contentId) || other.contentId == contentId)&&(identical(other.shardIndex, shardIndex) || other.shardIndex == shardIndex)&&(identical(other.success, success) || other.success == success)&&(identical(other.error, error) || other.error == error));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ShardStoreAckReceived&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.contentId, contentId) || other.contentId == contentId)&&(identical(other.shardIndex, shardIndex) || other.shardIndex == shardIndex)&&(identical(other.success, success) || other.success == success)&&(identical(other.error, error) || other.error == error));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,serverId,contentId,shardIndex,success,error);
+int get hashCode {
+    return Object.hash(runtimeType,serverId,contentId,shardIndex,success,error);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.shardStoreAckReceived(serverId: $serverId, contentId: $contentId, shardIndex: $shardIndex, success: $success, error: $error)';
+    return 'NetworkEvent.shardStoreAckReceived(serverId: $serverId, contentId: $contentId, shardIndex: $shardIndex, success: $success, error: $error)';
 }
 
 
@@ -7096,16 +7259,18 @@ $NetworkEvent_ShardStoreFailedCopyWith<NetworkEvent_ShardStoreFailed> get copyWi
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ShardStoreFailed&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.contentId, contentId) || other.contentId == contentId)&&(identical(other.shardIndex, shardIndex) || other.shardIndex == shardIndex)&&(identical(other.targetPeer, targetPeer) || other.targetPeer == targetPeer)&&(identical(other.error, error) || other.error == error));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ShardStoreFailed&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.contentId, contentId) || other.contentId == contentId)&&(identical(other.shardIndex, shardIndex) || other.shardIndex == shardIndex)&&(identical(other.targetPeer, targetPeer) || other.targetPeer == targetPeer)&&(identical(other.error, error) || other.error == error));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,serverId,contentId,shardIndex,targetPeer,error);
+int get hashCode {
+    return Object.hash(runtimeType,serverId,contentId,shardIndex,targetPeer,error);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.shardStoreFailed(serverId: $serverId, contentId: $contentId, shardIndex: $shardIndex, targetPeer: $targetPeer, error: $error)';
+    return 'NetworkEvent.shardStoreFailed(serverId: $serverId, contentId: $contentId, shardIndex: $shardIndex, targetPeer: $targetPeer, error: $error)';
 }
 
 
@@ -7167,16 +7332,18 @@ $NetworkEvent_ShardDeletedCopyWith<NetworkEvent_ShardDeleted> get copyWith => _$
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ShardDeleted&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.contentId, contentId) || other.contentId == contentId));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ShardDeleted&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.contentId, contentId) || other.contentId == contentId));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,serverId,contentId);
+int get hashCode {
+    return Object.hash(runtimeType,serverId,contentId);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.shardDeleted(serverId: $serverId, contentId: $contentId)';
+    return 'NetworkEvent.shardDeleted(serverId: $serverId, contentId: $contentId)';
 }
 
 
@@ -7237,16 +7404,18 @@ $NetworkEvent_ShardReceivedCopyWith<NetworkEvent_ShardReceived> get copyWith => 
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ShardReceived&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.contentId, contentId) || other.contentId == contentId)&&(identical(other.shardIndex, shardIndex) || other.shardIndex == shardIndex)&&(identical(other.fromPeer, fromPeer) || other.fromPeer == fromPeer));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ShardReceived&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.contentId, contentId) || other.contentId == contentId)&&(identical(other.shardIndex, shardIndex) || other.shardIndex == shardIndex)&&(identical(other.fromPeer, fromPeer) || other.fromPeer == fromPeer));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,serverId,contentId,shardIndex,fromPeer);
+int get hashCode {
+    return Object.hash(runtimeType,serverId,contentId,shardIndex,fromPeer);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.shardReceived(serverId: $serverId, contentId: $contentId, shardIndex: $shardIndex, fromPeer: $fromPeer)';
+    return 'NetworkEvent.shardReceived(serverId: $serverId, contentId: $contentId, shardIndex: $shardIndex, fromPeer: $fromPeer)';
 }
 
 
@@ -7309,16 +7478,18 @@ $NetworkEvent_ShardRequestFailedCopyWith<NetworkEvent_ShardRequestFailed> get co
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ShardRequestFailed&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.contentId, contentId) || other.contentId == contentId)&&(identical(other.shardIndex, shardIndex) || other.shardIndex == shardIndex)&&(identical(other.error, error) || other.error == error));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ShardRequestFailed&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.contentId, contentId) || other.contentId == contentId)&&(identical(other.shardIndex, shardIndex) || other.shardIndex == shardIndex)&&(identical(other.error, error) || other.error == error));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,serverId,contentId,shardIndex,error);
+int get hashCode {
+    return Object.hash(runtimeType,serverId,contentId,shardIndex,error);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.shardRequestFailed(serverId: $serverId, contentId: $contentId, shardIndex: $shardIndex, error: $error)';
+    return 'NetworkEvent.shardRequestFailed(serverId: $serverId, contentId: $contentId, shardIndex: $shardIndex, error: $error)';
 }
 
 
@@ -7381,16 +7552,18 @@ $NetworkEvent_VaultUploadProgressCopyWith<NetworkEvent_VaultUploadProgress> get 
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_VaultUploadProgress&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.contentId, contentId) || other.contentId == contentId)&&(identical(other.phase, phase) || other.phase == phase)&&(identical(other.progress, progress) || other.progress == progress));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_VaultUploadProgress&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.contentId, contentId) || other.contentId == contentId)&&(identical(other.phase, phase) || other.phase == phase)&&(identical(other.progress, progress) || other.progress == progress));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,serverId,contentId,phase,progress);
+int get hashCode {
+    return Object.hash(runtimeType,serverId,contentId,phase,progress);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.vaultUploadProgress(serverId: $serverId, contentId: $contentId, phase: $phase, progress: $progress)';
+    return 'NetworkEvent.vaultUploadProgress(serverId: $serverId, contentId: $contentId, phase: $phase, progress: $progress)';
 }
 
 
@@ -7452,16 +7625,18 @@ $NetworkEvent_VaultUploadCompleteCopyWith<NetworkEvent_VaultUploadComplete> get 
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_VaultUploadComplete&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.contentId, contentId) || other.contentId == contentId)&&(identical(other.channelId, channelId) || other.channelId == channelId));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_VaultUploadComplete&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.contentId, contentId) || other.contentId == contentId)&&(identical(other.channelId, channelId) || other.channelId == channelId));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,serverId,contentId,channelId);
+int get hashCode {
+    return Object.hash(runtimeType,serverId,contentId,channelId);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.vaultUploadComplete(serverId: $serverId, contentId: $contentId, channelId: $channelId)';
+    return 'NetworkEvent.vaultUploadComplete(serverId: $serverId, contentId: $contentId, channelId: $channelId)';
 }
 
 
@@ -7522,16 +7697,18 @@ $NetworkEvent_VaultUploadFailedCopyWith<NetworkEvent_VaultUploadFailed> get copy
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_VaultUploadFailed&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.contentId, contentId) || other.contentId == contentId)&&(identical(other.error, error) || other.error == error));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_VaultUploadFailed&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.contentId, contentId) || other.contentId == contentId)&&(identical(other.error, error) || other.error == error));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,serverId,contentId,error);
+int get hashCode {
+    return Object.hash(runtimeType,serverId,contentId,error);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.vaultUploadFailed(serverId: $serverId, contentId: $contentId, error: $error)';
+    return 'NetworkEvent.vaultUploadFailed(serverId: $serverId, contentId: $contentId, error: $error)';
 }
 
 
@@ -7593,16 +7770,18 @@ $NetworkEvent_VaultDownloadProgressCopyWith<NetworkEvent_VaultDownloadProgress> 
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_VaultDownloadProgress&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.contentId, contentId) || other.contentId == contentId)&&(identical(other.phase, phase) || other.phase == phase)&&(identical(other.progress, progress) || other.progress == progress));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_VaultDownloadProgress&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.contentId, contentId) || other.contentId == contentId)&&(identical(other.phase, phase) || other.phase == phase)&&(identical(other.progress, progress) || other.progress == progress));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,serverId,contentId,phase,progress);
+int get hashCode {
+    return Object.hash(runtimeType,serverId,contentId,phase,progress);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.vaultDownloadProgress(serverId: $serverId, contentId: $contentId, phase: $phase, progress: $progress)';
+    return 'NetworkEvent.vaultDownloadProgress(serverId: $serverId, contentId: $contentId, phase: $phase, progress: $progress)';
 }
 
 
@@ -7664,16 +7843,18 @@ $NetworkEvent_VaultDownloadCompleteCopyWith<NetworkEvent_VaultDownloadComplete> 
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_VaultDownloadComplete&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.contentId, contentId) || other.contentId == contentId)&&(identical(other.diskPath, diskPath) || other.diskPath == diskPath));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_VaultDownloadComplete&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.contentId, contentId) || other.contentId == contentId)&&(identical(other.diskPath, diskPath) || other.diskPath == diskPath));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,serverId,contentId,diskPath);
+int get hashCode {
+    return Object.hash(runtimeType,serverId,contentId,diskPath);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.vaultDownloadComplete(serverId: $serverId, contentId: $contentId, diskPath: $diskPath)';
+    return 'NetworkEvent.vaultDownloadComplete(serverId: $serverId, contentId: $contentId, diskPath: $diskPath)';
 }
 
 
@@ -7734,16 +7915,18 @@ $NetworkEvent_VaultDownloadFailedCopyWith<NetworkEvent_VaultDownloadFailed> get 
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_VaultDownloadFailed&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.contentId, contentId) || other.contentId == contentId)&&(identical(other.error, error) || other.error == error));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_VaultDownloadFailed&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.contentId, contentId) || other.contentId == contentId)&&(identical(other.error, error) || other.error == error));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,serverId,contentId,error);
+int get hashCode {
+    return Object.hash(runtimeType,serverId,contentId,error);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.vaultDownloadFailed(serverId: $serverId, contentId: $contentId, error: $error)';
+    return 'NetworkEvent.vaultDownloadFailed(serverId: $serverId, contentId: $contentId, error: $error)';
 }
 
 
@@ -7803,16 +7986,18 @@ $NetworkEvent_RebalanceStartedCopyWith<NetworkEvent_RebalanceStarted> get copyWi
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_RebalanceStarted&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.shardsToMove, shardsToMove) || other.shardsToMove == shardsToMove));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_RebalanceStarted&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.shardsToMove, shardsToMove) || other.shardsToMove == shardsToMove));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,serverId,shardsToMove);
+int get hashCode {
+    return Object.hash(runtimeType,serverId,shardsToMove);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.rebalanceStarted(serverId: $serverId, shardsToMove: $shardsToMove)';
+    return 'NetworkEvent.rebalanceStarted(serverId: $serverId, shardsToMove: $shardsToMove)';
 }
 
 
@@ -7872,16 +8057,18 @@ $NetworkEvent_RebalanceProgressCopyWith<NetworkEvent_RebalanceProgress> get copy
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_RebalanceProgress&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.moved, moved) || other.moved == moved)&&(identical(other.total, total) || other.total == total));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_RebalanceProgress&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.moved, moved) || other.moved == moved)&&(identical(other.total, total) || other.total == total));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,serverId,moved,total);
+int get hashCode {
+    return Object.hash(runtimeType,serverId,moved,total);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.rebalanceProgress(serverId: $serverId, moved: $moved, total: $total)';
+    return 'NetworkEvent.rebalanceProgress(serverId: $serverId, moved: $moved, total: $total)';
 }
 
 
@@ -7940,16 +8127,18 @@ $NetworkEvent_RebalanceCompletedCopyWith<NetworkEvent_RebalanceCompleted> get co
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_RebalanceCompleted&&(identical(other.serverId, serverId) || other.serverId == serverId));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_RebalanceCompleted&&(identical(other.serverId, serverId) || other.serverId == serverId));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,serverId);
+int get hashCode {
+    return Object.hash(runtimeType,serverId);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.rebalanceCompleted(serverId: $serverId)';
+    return 'NetworkEvent.rebalanceCompleted(serverId: $serverId)';
 }
 
 
@@ -8009,16 +8198,18 @@ $NetworkEvent_VaultUploadReplicationFallbackCopyWith<NetworkEvent_VaultUploadRep
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_VaultUploadReplicationFallback&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.contentId, contentId) || other.contentId == contentId)&&(identical(other.online, online) || other.online == online)&&(identical(other.needed, needed) || other.needed == needed));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_VaultUploadReplicationFallback&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.contentId, contentId) || other.contentId == contentId)&&(identical(other.online, online) || other.online == online)&&(identical(other.needed, needed) || other.needed == needed));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,serverId,contentId,online,needed);
+int get hashCode {
+    return Object.hash(runtimeType,serverId,contentId,online,needed);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.vaultUploadReplicationFallback(serverId: $serverId, contentId: $contentId, online: $online, needed: $needed)';
+    return 'NetworkEvent.vaultUploadReplicationFallback(serverId: $serverId, contentId: $contentId, online: $online, needed: $needed)';
 }
 
 
@@ -8078,16 +8269,18 @@ $NetworkEvent_KeyExchangeStartedCopyWith<NetworkEvent_KeyExchangeStarted> get co
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_KeyExchangeStarted&&(identical(other.peerId, peerId) || other.peerId == peerId));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_KeyExchangeStarted&&(identical(other.peerId, peerId) || other.peerId == peerId));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,peerId);
+int get hashCode {
+    return Object.hash(runtimeType,peerId);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.keyExchangeStarted(peerId: $peerId)';
+    return 'NetworkEvent.keyExchangeStarted(peerId: $peerId)';
 }
 
 
@@ -8145,16 +8338,18 @@ $NetworkEvent_KeyExchangeProgressCopyWith<NetworkEvent_KeyExchangeProgress> get 
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_KeyExchangeProgress&&(identical(other.peerId, peerId) || other.peerId == peerId)&&(identical(other.stage, stage) || other.stage == stage));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_KeyExchangeProgress&&(identical(other.peerId, peerId) || other.peerId == peerId)&&(identical(other.stage, stage) || other.stage == stage));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,peerId,stage);
+int get hashCode {
+    return Object.hash(runtimeType,peerId,stage);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.keyExchangeProgress(peerId: $peerId, stage: $stage)';
+    return 'NetworkEvent.keyExchangeProgress(peerId: $peerId, stage: $stage)';
 }
 
 
@@ -8215,16 +8410,18 @@ $NetworkEvent_WebRtcSignalCopyWith<NetworkEvent_WebRtcSignal> get copyWith => _$
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_WebRtcSignal&&(identical(other.peerId, peerId) || other.peerId == peerId)&&(identical(other.signalType, signalType) || other.signalType == signalType)&&(identical(other.payload, payload) || other.payload == payload)&&(identical(other.connId, connId) || other.connId == connId));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_WebRtcSignal&&(identical(other.peerId, peerId) || other.peerId == peerId)&&(identical(other.signalType, signalType) || other.signalType == signalType)&&(identical(other.payload, payload) || other.payload == payload)&&(identical(other.connId, connId) || other.connId == connId));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,peerId,signalType,payload,connId);
+int get hashCode {
+    return Object.hash(runtimeType,peerId,signalType,payload,connId);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.webRtcSignal(peerId: $peerId, signalType: $signalType, payload: $payload, connId: $connId)';
+    return 'NetworkEvent.webRtcSignal(peerId: $peerId, signalType: $signalType, payload: $payload, connId: $connId)';
 }
 
 
@@ -8290,16 +8487,18 @@ $NetworkEvent_WebRtcSendFileCopyWith<NetworkEvent_WebRtcSendFile> get copyWith =
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_WebRtcSendFile&&(identical(other.peerId, peerId) || other.peerId == peerId)&&(identical(other.transferId, transferId) || other.transferId == transferId)&&(identical(other.filePath, filePath) || other.filePath == filePath)&&(identical(other.totalSize, totalSize) || other.totalSize == totalSize)&&(identical(other.kind, kind) || other.kind == kind)&&(identical(other.shardIndex, shardIndex) || other.shardIndex == shardIndex)&&(identical(other.chunkIndex, chunkIndex) || other.chunkIndex == chunkIndex));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_WebRtcSendFile&&(identical(other.peerId, peerId) || other.peerId == peerId)&&(identical(other.transferId, transferId) || other.transferId == transferId)&&(identical(other.filePath, filePath) || other.filePath == filePath)&&(identical(other.totalSize, totalSize) || other.totalSize == totalSize)&&(identical(other.kind, kind) || other.kind == kind)&&(identical(other.shardIndex, shardIndex) || other.shardIndex == shardIndex)&&(identical(other.chunkIndex, chunkIndex) || other.chunkIndex == chunkIndex));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,peerId,transferId,filePath,totalSize,kind,shardIndex,chunkIndex);
+int get hashCode {
+    return Object.hash(runtimeType,peerId,transferId,filePath,totalSize,kind,shardIndex,chunkIndex);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.webRtcSendFile(peerId: $peerId, transferId: $transferId, filePath: $filePath, totalSize: $totalSize, kind: $kind, shardIndex: $shardIndex, chunkIndex: $chunkIndex)';
+    return 'NetworkEvent.webRtcSendFile(peerId: $peerId, transferId: $transferId, filePath: $filePath, totalSize: $totalSize, kind: $kind, shardIndex: $shardIndex, chunkIndex: $chunkIndex)';
 }
 
 
@@ -8364,16 +8563,18 @@ $NetworkEvent_CallSignalCopyWith<NetworkEvent_CallSignal> get copyWith => _$Netw
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_CallSignal&&(identical(other.peerId, peerId) || other.peerId == peerId)&&(identical(other.signalType, signalType) || other.signalType == signalType)&&(identical(other.payload, payload) || other.payload == payload));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_CallSignal&&(identical(other.peerId, peerId) || other.peerId == peerId)&&(identical(other.signalType, signalType) || other.signalType == signalType)&&(identical(other.payload, payload) || other.payload == payload));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,peerId,signalType,payload);
+int get hashCode {
+    return Object.hash(runtimeType,peerId,signalType,payload);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.callSignal(peerId: $peerId, signalType: $signalType, payload: $payload)';
+    return 'NetworkEvent.callSignal(peerId: $peerId, signalType: $signalType, payload: $payload)';
 }
 
 
@@ -8437,16 +8638,18 @@ $NetworkEvent_SiblingCallStateCopyWith<NetworkEvent_SiblingCallState> get copyWi
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_SiblingCallState&&(identical(other.device, device) || other.device == device)&&(identical(other.active, active) || other.active == active)&&(identical(other.kind, kind) || other.kind == kind)&&(identical(other.with_, with_) || other.with_ == with_)&&(identical(other.channel, channel) || other.channel == channel)&&(identical(other.startedMs, startedMs) || other.startedMs == startedMs));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_SiblingCallState&&(identical(other.device, device) || other.device == device)&&(identical(other.active, active) || other.active == active)&&(identical(other.kind, kind) || other.kind == kind)&&(identical(other.with_, with_) || other.with_ == with_)&&(identical(other.channel, channel) || other.channel == channel)&&(identical(other.startedMs, startedMs) || other.startedMs == startedMs));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,device,active,kind,with_,channel,startedMs);
+int get hashCode {
+    return Object.hash(runtimeType,device,active,kind,with_,channel,startedMs);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.siblingCallState(device: $device, active: $active, kind: $kind, with_: $with_, channel: $channel, startedMs: $startedMs)';
+    return 'NetworkEvent.siblingCallState(device: $device, active: $active, kind: $kind, with_: $with_, channel: $channel, startedMs: $startedMs)';
 }
 
 
@@ -8503,7 +8706,7 @@ class NetworkEvent_DeviceKindsChanged extends NetworkEvent {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_DeviceKindsChanged);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_DeviceKindsChanged);
 }
 
 
@@ -8512,7 +8715,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'NetworkEvent.deviceKindsChanged()';
+    return 'NetworkEvent.deviceKindsChanged()';
 }
 
 
@@ -8543,16 +8746,18 @@ $NetworkEvent_VoiceChannelJoinedCopyWith<NetworkEvent_VoiceChannelJoined> get co
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_VoiceChannelJoined&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.channelId, channelId) || other.channelId == channelId)&&(identical(other.peerId, peerId) || other.peerId == peerId)&&(identical(other.isSelf, isSelf) || other.isSelf == isSelf));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_VoiceChannelJoined&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.channelId, channelId) || other.channelId == channelId)&&(identical(other.peerId, peerId) || other.peerId == peerId)&&(identical(other.isSelf, isSelf) || other.isSelf == isSelf));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,serverId,channelId,peerId,isSelf);
+int get hashCode {
+    return Object.hash(runtimeType,serverId,channelId,peerId,isSelf);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.voiceChannelJoined(serverId: $serverId, channelId: $channelId, peerId: $peerId, isSelf: $isSelf)';
+    return 'NetworkEvent.voiceChannelJoined(serverId: $serverId, channelId: $channelId, peerId: $peerId, isSelf: $isSelf)';
 }
 
 
@@ -8615,16 +8820,18 @@ $NetworkEvent_VoiceChannelLeftCopyWith<NetworkEvent_VoiceChannelLeft> get copyWi
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_VoiceChannelLeft&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.channelId, channelId) || other.channelId == channelId)&&(identical(other.peerId, peerId) || other.peerId == peerId)&&(identical(other.isSelf, isSelf) || other.isSelf == isSelf));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_VoiceChannelLeft&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.channelId, channelId) || other.channelId == channelId)&&(identical(other.peerId, peerId) || other.peerId == peerId)&&(identical(other.isSelf, isSelf) || other.isSelf == isSelf));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,serverId,channelId,peerId,isSelf);
+int get hashCode {
+    return Object.hash(runtimeType,serverId,channelId,peerId,isSelf);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.voiceChannelLeft(serverId: $serverId, channelId: $channelId, peerId: $peerId, isSelf: $isSelf)';
+    return 'NetworkEvent.voiceChannelLeft(serverId: $serverId, channelId: $channelId, peerId: $peerId, isSelf: $isSelf)';
 }
 
 
@@ -8688,16 +8895,18 @@ $NetworkEvent_VoiceChannelSignalCopyWith<NetworkEvent_VoiceChannelSignal> get co
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_VoiceChannelSignal&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.channelId, channelId) || other.channelId == channelId)&&(identical(other.peerId, peerId) || other.peerId == peerId)&&(identical(other.signalType, signalType) || other.signalType == signalType)&&(identical(other.payload, payload) || other.payload == payload));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_VoiceChannelSignal&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.channelId, channelId) || other.channelId == channelId)&&(identical(other.peerId, peerId) || other.peerId == peerId)&&(identical(other.signalType, signalType) || other.signalType == signalType)&&(identical(other.payload, payload) || other.payload == payload));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,serverId,channelId,peerId,signalType,payload);
+int get hashCode {
+    return Object.hash(runtimeType,serverId,channelId,peerId,signalType,payload);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.voiceChannelSignal(serverId: $serverId, channelId: $channelId, peerId: $peerId, signalType: $signalType, payload: $payload)';
+    return 'NetworkEvent.voiceChannelSignal(serverId: $serverId, channelId: $channelId, peerId: $peerId, signalType: $signalType, payload: $payload)';
 }
 
 
@@ -8760,16 +8969,18 @@ $NetworkEvent_ForwarderSignalCopyWith<NetworkEvent_ForwarderSignal> get copyWith
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ForwarderSignal&&(identical(other.fromPeer, fromPeer) || other.fromPeer == fromPeer)&&(identical(other.signalType, signalType) || other.signalType == signalType)&&(identical(other.payload, payload) || other.payload == payload));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ForwarderSignal&&(identical(other.fromPeer, fromPeer) || other.fromPeer == fromPeer)&&(identical(other.signalType, signalType) || other.signalType == signalType)&&(identical(other.payload, payload) || other.payload == payload));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,fromPeer,signalType,payload);
+int get hashCode {
+    return Object.hash(runtimeType,fromPeer,signalType,payload);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.forwarderSignal(fromPeer: $fromPeer, signalType: $signalType, payload: $payload)';
+    return 'NetworkEvent.forwarderSignal(fromPeer: $fromPeer, signalType: $signalType, payload: $payload)';
 }
 
 
@@ -8829,16 +9040,18 @@ $NetworkEvent_MediaForwarderInfoCopyWith<NetworkEvent_MediaForwarderInfo> get co
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_MediaForwarderInfo&&(identical(other.peerId, peerId) || other.peerId == peerId)&&(identical(other.online, online) || other.online == online));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_MediaForwarderInfo&&(identical(other.peerId, peerId) || other.peerId == peerId)&&(identical(other.online, online) || other.online == online));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,peerId,online);
+int get hashCode {
+    return Object.hash(runtimeType,peerId,online);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.mediaForwarderInfo(peerId: $peerId, online: $online)';
+    return 'NetworkEvent.mediaForwarderInfo(peerId: $peerId, online: $online)';
 }
 
 
@@ -8896,16 +9109,18 @@ $NetworkEvent_GossipConnectCopyWith<NetworkEvent_GossipConnect> get copyWith => 
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_GossipConnect&&(identical(other.peerId, peerId) || other.peerId == peerId));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_GossipConnect&&(identical(other.peerId, peerId) || other.peerId == peerId));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,peerId);
+int get hashCode {
+    return Object.hash(runtimeType,peerId);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.gossipConnect(peerId: $peerId)';
+    return 'NetworkEvent.gossipConnect(peerId: $peerId)';
 }
 
 
@@ -8962,16 +9177,18 @@ $NetworkEvent_GossipDisconnectCopyWith<NetworkEvent_GossipDisconnect> get copyWi
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_GossipDisconnect&&(identical(other.peerId, peerId) || other.peerId == peerId));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_GossipDisconnect&&(identical(other.peerId, peerId) || other.peerId == peerId));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,peerId);
+int get hashCode {
+    return Object.hash(runtimeType,peerId);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.gossipDisconnect(peerId: $peerId)';
+    return 'NetworkEvent.gossipDisconnect(peerId: $peerId)';
 }
 
 
@@ -9037,16 +9254,18 @@ $NetworkEvent_GossipRelayFileCopyWith<NetworkEvent_GossipRelayFile> get copyWith
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_GossipRelayFile&&(identical(other.broadcastId, broadcastId) || other.broadcastId == broadcastId)&&(identical(other.ttl, ttl) || other.ttl == ttl)&&(identical(other.originPeerId, originPeerId) || other.originPeerId == originPeerId)&&(identical(other.filePath, filePath) || other.filePath == filePath)&&(identical(other.totalSize, totalSize) || other.totalSize == totalSize)&&(identical(other.kind, kind) || other.kind == kind)&&(identical(other.shardIndex, shardIndex) || other.shardIndex == shardIndex)&&(identical(other.excludePeerId, excludePeerId) || other.excludePeerId == excludePeerId)&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.channelId, channelId) || other.channelId == channelId));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_GossipRelayFile&&(identical(other.broadcastId, broadcastId) || other.broadcastId == broadcastId)&&(identical(other.ttl, ttl) || other.ttl == ttl)&&(identical(other.originPeerId, originPeerId) || other.originPeerId == originPeerId)&&(identical(other.filePath, filePath) || other.filePath == filePath)&&(identical(other.totalSize, totalSize) || other.totalSize == totalSize)&&(identical(other.kind, kind) || other.kind == kind)&&(identical(other.shardIndex, shardIndex) || other.shardIndex == shardIndex)&&(identical(other.excludePeerId, excludePeerId) || other.excludePeerId == excludePeerId)&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.channelId, channelId) || other.channelId == channelId));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,broadcastId,ttl,originPeerId,filePath,totalSize,kind,shardIndex,excludePeerId,serverId,channelId);
+int get hashCode {
+    return Object.hash(runtimeType,broadcastId,ttl,originPeerId,filePath,totalSize,kind,shardIndex,excludePeerId,serverId,channelId);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.gossipRelayFile(broadcastId: $broadcastId, ttl: $ttl, originPeerId: $originPeerId, filePath: $filePath, totalSize: $totalSize, kind: $kind, shardIndex: $shardIndex, excludePeerId: $excludePeerId, serverId: $serverId, channelId: $channelId)';
+    return 'NetworkEvent.gossipRelayFile(broadcastId: $broadcastId, ttl: $ttl, originPeerId: $originPeerId, filePath: $filePath, totalSize: $totalSize, kind: $kind, shardIndex: $shardIndex, excludePeerId: $excludePeerId, serverId: $serverId, channelId: $channelId)';
 }
 
 
@@ -9097,7 +9316,7 @@ as String,
 
 
 class NetworkEvent_GossipRelayOp extends NetworkEvent {
-  const NetworkEvent_GossipRelayOp({required final  List<String> targets, required this.payload}): _targets = targets,super._();
+  const NetworkEvent_GossipRelayOp({required  List<String> targets, required this.payload}): _targets = targets,super._();
   
 
  final  List<String> _targets;
@@ -9119,16 +9338,18 @@ $NetworkEvent_GossipRelayOpCopyWith<NetworkEvent_GossipRelayOp> get copyWith => 
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_GossipRelayOp&&const DeepCollectionEquality().equals(other._targets, _targets)&&const DeepCollectionEquality().equals(other.payload, payload));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_GossipRelayOp&&const DeepCollectionEquality().equals(other.targets, _targets)&&const DeepCollectionEquality().equals(other.payload, payload));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,const DeepCollectionEquality().hash(_targets),const DeepCollectionEquality().hash(payload));
+int get hashCode {
+    return Object.hash(runtimeType,const DeepCollectionEquality().hash(_targets),const DeepCollectionEquality().hash(payload));
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.gossipRelayOp(targets: $targets, payload: $payload)';
+    return 'NetworkEvent.gossipRelayOp(targets: $targets, payload: $payload)';
 }
 
 
@@ -9171,7 +9392,7 @@ as Uint8List,
 
 
 class NetworkEvent_VoiceChannelModeChanged extends NetworkEvent {
-  const NetworkEvent_VoiceChannelModeChanged({required this.serverId, required this.channelId, required this.mode, required final  List<String> gossipNeighbors}): _gossipNeighbors = gossipNeighbors,super._();
+  const NetworkEvent_VoiceChannelModeChanged({required this.serverId, required this.channelId, required this.mode, required  List<String> gossipNeighbors}): _gossipNeighbors = gossipNeighbors,super._();
   
 
  final  String serverId;
@@ -9195,16 +9416,18 @@ $NetworkEvent_VoiceChannelModeChangedCopyWith<NetworkEvent_VoiceChannelModeChang
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_VoiceChannelModeChanged&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.channelId, channelId) || other.channelId == channelId)&&(identical(other.mode, mode) || other.mode == mode)&&const DeepCollectionEquality().equals(other._gossipNeighbors, _gossipNeighbors));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_VoiceChannelModeChanged&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.channelId, channelId) || other.channelId == channelId)&&(identical(other.mode, mode) || other.mode == mode)&&const DeepCollectionEquality().equals(other.gossipNeighbors, _gossipNeighbors));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,serverId,channelId,mode,const DeepCollectionEquality().hash(_gossipNeighbors));
+int get hashCode {
+    return Object.hash(runtimeType,serverId,channelId,mode,const DeepCollectionEquality().hash(_gossipNeighbors));
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.voiceChannelModeChanged(serverId: $serverId, channelId: $channelId, mode: $mode, gossipNeighbors: $gossipNeighbors)';
+    return 'NetworkEvent.voiceChannelModeChanged(serverId: $serverId, channelId: $channelId, mode: $mode, gossipNeighbors: $gossipNeighbors)';
 }
 
 
@@ -9267,16 +9490,18 @@ $NetworkEvent_MlsEpochChangedCopyWith<NetworkEvent_MlsEpochChanged> get copyWith
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_MlsEpochChanged&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.epoch, epoch) || other.epoch == epoch)&&const DeepCollectionEquality().equals(other.sframeKey, sframeKey)&&(identical(other.channelId, channelId) || other.channelId == channelId));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_MlsEpochChanged&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.epoch, epoch) || other.epoch == epoch)&&const DeepCollectionEquality().equals(other.sframeKey, sframeKey)&&(identical(other.channelId, channelId) || other.channelId == channelId));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,serverId,epoch,const DeepCollectionEquality().hash(sframeKey),channelId);
+int get hashCode {
+    return Object.hash(runtimeType,serverId,epoch,const DeepCollectionEquality().hash(sframeKey),channelId);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.mlsEpochChanged(serverId: $serverId, epoch: $epoch, sframeKey: $sframeKey, channelId: $channelId)';
+    return 'NetworkEvent.mlsEpochChanged(serverId: $serverId, epoch: $epoch, sframeKey: $sframeKey, channelId: $channelId)';
 }
 
 
@@ -9339,16 +9564,18 @@ $NetworkEvent_ConferenceJoinRequestReceivedCopyWith<NetworkEvent_ConferenceJoinR
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ConferenceJoinRequestReceived&&(identical(other.confId, confId) || other.confId == confId)&&(identical(other.peerId, peerId) || other.peerId == peerId)&&(identical(other.displayName, displayName) || other.displayName == displayName)&&(identical(other.avatarHash, avatarHash) || other.avatarHash == avatarHash));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ConferenceJoinRequestReceived&&(identical(other.confId, confId) || other.confId == confId)&&(identical(other.peerId, peerId) || other.peerId == peerId)&&(identical(other.displayName, displayName) || other.displayName == displayName)&&(identical(other.avatarHash, avatarHash) || other.avatarHash == avatarHash));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,confId,peerId,displayName,avatarHash);
+int get hashCode {
+    return Object.hash(runtimeType,confId,peerId,displayName,avatarHash);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.conferenceJoinRequestReceived(confId: $confId, peerId: $peerId, displayName: $displayName, avatarHash: $avatarHash)';
+    return 'NetworkEvent.conferenceJoinRequestReceived(confId: $confId, peerId: $peerId, displayName: $displayName, avatarHash: $avatarHash)';
 }
 
 
@@ -9409,16 +9636,18 @@ $NetworkEvent_ConferenceJoinDeniedCopyWith<NetworkEvent_ConferenceJoinDenied> ge
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ConferenceJoinDenied&&(identical(other.confId, confId) || other.confId == confId)&&(identical(other.reason, reason) || other.reason == reason));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ConferenceJoinDenied&&(identical(other.confId, confId) || other.confId == confId)&&(identical(other.reason, reason) || other.reason == reason));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,confId,reason);
+int get hashCode {
+    return Object.hash(runtimeType,confId,reason);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.conferenceJoinDenied(confId: $confId, reason: $reason)';
+    return 'NetworkEvent.conferenceJoinDenied(confId: $confId, reason: $reason)';
 }
 
 
@@ -9479,16 +9708,18 @@ $NetworkEvent_ConferenceLobbyInfoCopyWith<NetworkEvent_ConferenceLobbyInfo> get 
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ConferenceLobbyInfo&&(identical(other.confId, confId) || other.confId == confId)&&(identical(other.hostPeerId, hostPeerId) || other.hostPeerId == hostPeerId)&&(identical(other.hostName, hostName) || other.hostName == hostName)&&(identical(other.hostAvatarHash, hostAvatarHash) || other.hostAvatarHash == hostAvatarHash));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ConferenceLobbyInfo&&(identical(other.confId, confId) || other.confId == confId)&&(identical(other.hostPeerId, hostPeerId) || other.hostPeerId == hostPeerId)&&(identical(other.hostName, hostName) || other.hostName == hostName)&&(identical(other.hostAvatarHash, hostAvatarHash) || other.hostAvatarHash == hostAvatarHash));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,confId,hostPeerId,hostName,hostAvatarHash);
+int get hashCode {
+    return Object.hash(runtimeType,confId,hostPeerId,hostName,hostAvatarHash);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.conferenceLobbyInfo(confId: $confId, hostPeerId: $hostPeerId, hostName: $hostName, hostAvatarHash: $hostAvatarHash)';
+    return 'NetworkEvent.conferenceLobbyInfo(confId: $confId, hostPeerId: $hostPeerId, hostName: $hostName, hostAvatarHash: $hostAvatarHash)';
 }
 
 
@@ -9548,16 +9779,18 @@ $NetworkEvent_ConferenceAdmittedCopyWith<NetworkEvent_ConferenceAdmitted> get co
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ConferenceAdmitted&&(identical(other.confId, confId) || other.confId == confId));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ConferenceAdmitted&&(identical(other.confId, confId) || other.confId == confId));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,confId);
+int get hashCode {
+    return Object.hash(runtimeType,confId);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.conferenceAdmitted(confId: $confId)';
+    return 'NetworkEvent.conferenceAdmitted(confId: $confId)';
 }
 
 
@@ -9617,16 +9850,18 @@ $NetworkEvent_ConferenceChatMessageCopyWith<NetworkEvent_ConferenceChatMessage> 
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ConferenceChatMessage&&(identical(other.confId, confId) || other.confId == confId)&&(identical(other.senderPeerId, senderPeerId) || other.senderPeerId == senderPeerId)&&(identical(other.text, text) || other.text == text)&&(identical(other.timestamp, timestamp) || other.timestamp == timestamp));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ConferenceChatMessage&&(identical(other.confId, confId) || other.confId == confId)&&(identical(other.senderPeerId, senderPeerId) || other.senderPeerId == senderPeerId)&&(identical(other.text, text) || other.text == text)&&(identical(other.timestamp, timestamp) || other.timestamp == timestamp));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,confId,senderPeerId,text,timestamp);
+int get hashCode {
+    return Object.hash(runtimeType,confId,senderPeerId,text,timestamp);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.conferenceChatMessage(confId: $confId, senderPeerId: $senderPeerId, text: $text, timestamp: $timestamp)';
+    return 'NetworkEvent.conferenceChatMessage(confId: $confId, senderPeerId: $senderPeerId, text: $text, timestamp: $timestamp)';
 }
 
 
@@ -9687,16 +9922,18 @@ $NetworkEvent_ConferenceEndedCopyWith<NetworkEvent_ConferenceEnded> get copyWith
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ConferenceEnded&&(identical(other.confId, confId) || other.confId == confId)&&(identical(other.byPeerId, byPeerId) || other.byPeerId == byPeerId));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ConferenceEnded&&(identical(other.confId, confId) || other.confId == confId)&&(identical(other.byPeerId, byPeerId) || other.byPeerId == byPeerId));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,confId,byPeerId);
+int get hashCode {
+    return Object.hash(runtimeType,confId,byPeerId);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.conferenceEnded(confId: $confId, byPeerId: $byPeerId)';
+    return 'NetworkEvent.conferenceEnded(confId: $confId, byPeerId: $byPeerId)';
 }
 
 
@@ -9755,16 +9992,18 @@ $NetworkEvent_ConferenceKickedCopyWith<NetworkEvent_ConferenceKicked> get copyWi
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ConferenceKicked&&(identical(other.confId, confId) || other.confId == confId)&&(identical(other.byPeerId, byPeerId) || other.byPeerId == byPeerId));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ConferenceKicked&&(identical(other.confId, confId) || other.confId == confId)&&(identical(other.byPeerId, byPeerId) || other.byPeerId == byPeerId));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,confId,byPeerId);
+int get hashCode {
+    return Object.hash(runtimeType,confId,byPeerId);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.conferenceKicked(confId: $confId, byPeerId: $byPeerId)';
+    return 'NetworkEvent.conferenceKicked(confId: $confId, byPeerId: $byPeerId)';
 }
 
 
@@ -9823,16 +10062,18 @@ $NetworkEvent_RecoveryPoolCreatedCopyWith<NetworkEvent_RecoveryPoolCreated> get 
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_RecoveryPoolCreated&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.inviteLink, inviteLink) || other.inviteLink == inviteLink));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_RecoveryPoolCreated&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.inviteLink, inviteLink) || other.inviteLink == inviteLink));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,serverId,inviteLink);
+int get hashCode {
+    return Object.hash(runtimeType,serverId,inviteLink);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.recoveryPoolCreated(serverId: $serverId, inviteLink: $inviteLink)';
+    return 'NetworkEvent.recoveryPoolCreated(serverId: $serverId, inviteLink: $inviteLink)';
 }
 
 
@@ -9890,16 +10131,18 @@ $NetworkEvent_RecoveryPoolJoinedCopyWith<NetworkEvent_RecoveryPoolJoined> get co
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_RecoveryPoolJoined&&(identical(other.serverId, serverId) || other.serverId == serverId));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_RecoveryPoolJoined&&(identical(other.serverId, serverId) || other.serverId == serverId));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,serverId);
+int get hashCode {
+    return Object.hash(runtimeType,serverId);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.recoveryPoolJoined(serverId: $serverId)';
+    return 'NetworkEvent.recoveryPoolJoined(serverId: $serverId)';
 }
 
 
@@ -9957,16 +10200,18 @@ $NetworkEvent_RecoveryPoolJoinFailedCopyWith<NetworkEvent_RecoveryPoolJoinFailed
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_RecoveryPoolJoinFailed&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.reason, reason) || other.reason == reason));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_RecoveryPoolJoinFailed&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.reason, reason) || other.reason == reason));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,serverId,reason);
+int get hashCode {
+    return Object.hash(runtimeType,serverId,reason);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.recoveryPoolJoinFailed(serverId: $serverId, reason: $reason)';
+    return 'NetworkEvent.recoveryPoolJoinFailed(serverId: $serverId, reason: $reason)';
 }
 
 
@@ -10025,16 +10270,18 @@ $NetworkEvent_RecoveryPoolMemberJoinedCopyWith<NetworkEvent_RecoveryPoolMemberJo
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_RecoveryPoolMemberJoined&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.peerId, peerId) || other.peerId == peerId));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_RecoveryPoolMemberJoined&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.peerId, peerId) || other.peerId == peerId));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,serverId,peerId);
+int get hashCode {
+    return Object.hash(runtimeType,serverId,peerId);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.recoveryPoolMemberJoined(serverId: $serverId, peerId: $peerId)';
+    return 'NetworkEvent.recoveryPoolMemberJoined(serverId: $serverId, peerId: $peerId)';
 }
 
 
@@ -10093,16 +10340,18 @@ $NetworkEvent_RecoveryPoolMemberLeftCopyWith<NetworkEvent_RecoveryPoolMemberLeft
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_RecoveryPoolMemberLeft&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.peerId, peerId) || other.peerId == peerId));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_RecoveryPoolMemberLeft&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.peerId, peerId) || other.peerId == peerId));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,serverId,peerId);
+int get hashCode {
+    return Object.hash(runtimeType,serverId,peerId);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.recoveryPoolMemberLeft(serverId: $serverId, peerId: $peerId)';
+    return 'NetworkEvent.recoveryPoolMemberLeft(serverId: $serverId, peerId: $peerId)';
 }
 
 
@@ -10165,16 +10414,18 @@ $NetworkEvent_RecoveryPoolStatusCopyWith<NetworkEvent_RecoveryPoolStatus> get co
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_RecoveryPoolStatus&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.totalFiles, totalFiles) || other.totalFiles == totalFiles)&&(identical(other.reconstructable, reconstructable) || other.reconstructable == reconstructable)&&(identical(other.partial, partial) || other.partial == partial)&&(identical(other.noShards, noShards) || other.noShards == noShards)&&(identical(other.progressPct, progressPct) || other.progressPct == progressPct));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_RecoveryPoolStatus&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.totalFiles, totalFiles) || other.totalFiles == totalFiles)&&(identical(other.reconstructable, reconstructable) || other.reconstructable == reconstructable)&&(identical(other.partial, partial) || other.partial == partial)&&(identical(other.noShards, noShards) || other.noShards == noShards)&&(identical(other.progressPct, progressPct) || other.progressPct == progressPct));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,serverId,totalFiles,reconstructable,partial,noShards,progressPct);
+int get hashCode {
+    return Object.hash(runtimeType,serverId,totalFiles,reconstructable,partial,noShards,progressPct);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.recoveryPoolStatus(serverId: $serverId, totalFiles: $totalFiles, reconstructable: $reconstructable, partial: $partial, noShards: $noShards, progressPct: $progressPct)';
+    return 'NetworkEvent.recoveryPoolStatus(serverId: $serverId, totalFiles: $totalFiles, reconstructable: $reconstructable, partial: $partial, noShards: $noShards, progressPct: $progressPct)';
 }
 
 
@@ -10238,16 +10489,18 @@ $NetworkEvent_RecoveryPoolShardTransferredCopyWith<NetworkEvent_RecoveryPoolShar
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_RecoveryPoolShardTransferred&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.contentId, contentId) || other.contentId == contentId)&&(identical(other.shardIndex, shardIndex) || other.shardIndex == shardIndex));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_RecoveryPoolShardTransferred&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.contentId, contentId) || other.contentId == contentId)&&(identical(other.shardIndex, shardIndex) || other.shardIndex == shardIndex));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,serverId,contentId,shardIndex);
+int get hashCode {
+    return Object.hash(runtimeType,serverId,contentId,shardIndex);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.recoveryPoolShardTransferred(serverId: $serverId, contentId: $contentId, shardIndex: $shardIndex)';
+    return 'NetworkEvent.recoveryPoolShardTransferred(serverId: $serverId, contentId: $contentId, shardIndex: $shardIndex)';
 }
 
 
@@ -10308,16 +10561,18 @@ $NetworkEvent_RecoveryPoolFileRecoveredCopyWith<NetworkEvent_RecoveryPoolFileRec
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_RecoveryPoolFileRecovered&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.contentId, contentId) || other.contentId == contentId)&&(identical(other.diskPath, diskPath) || other.diskPath == diskPath));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_RecoveryPoolFileRecovered&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.contentId, contentId) || other.contentId == contentId)&&(identical(other.diskPath, diskPath) || other.diskPath == diskPath));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,serverId,contentId,diskPath);
+int get hashCode {
+    return Object.hash(runtimeType,serverId,contentId,diskPath);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.recoveryPoolFileRecovered(serverId: $serverId, contentId: $contentId, diskPath: $diskPath)';
+    return 'NetworkEvent.recoveryPoolFileRecovered(serverId: $serverId, contentId: $contentId, diskPath: $diskPath)';
 }
 
 
@@ -10376,16 +10631,18 @@ $NetworkEvent_RecoveryPoolStoppedCopyWith<NetworkEvent_RecoveryPoolStopped> get 
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_RecoveryPoolStopped&&(identical(other.serverId, serverId) || other.serverId == serverId));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_RecoveryPoolStopped&&(identical(other.serverId, serverId) || other.serverId == serverId));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,serverId);
+int get hashCode {
+    return Object.hash(runtimeType,serverId);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.recoveryPoolStopped(serverId: $serverId)';
+    return 'NetworkEvent.recoveryPoolStopped(serverId: $serverId)';
 }
 
 
@@ -10445,16 +10702,18 @@ $NetworkEvent_ShareManifestReadyCopyWith<NetworkEvent_ShareManifestReady> get co
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ShareManifestReady&&(identical(other.rootHash, rootHash) || other.rootHash == rootHash)&&(identical(other.fileName, fileName) || other.fileName == fileName)&&(identical(other.totalSize, totalSize) || other.totalSize == totalSize)&&(identical(other.chunkCount, chunkCount) || other.chunkCount == chunkCount));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ShareManifestReady&&(identical(other.rootHash, rootHash) || other.rootHash == rootHash)&&(identical(other.fileName, fileName) || other.fileName == fileName)&&(identical(other.totalSize, totalSize) || other.totalSize == totalSize)&&(identical(other.chunkCount, chunkCount) || other.chunkCount == chunkCount));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,rootHash,fileName,totalSize,chunkCount);
+int get hashCode {
+    return Object.hash(runtimeType,rootHash,fileName,totalSize,chunkCount);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.shareManifestReady(rootHash: $rootHash, fileName: $fileName, totalSize: $totalSize, chunkCount: $chunkCount)';
+    return 'NetworkEvent.shareManifestReady(rootHash: $rootHash, fileName: $fileName, totalSize: $totalSize, chunkCount: $chunkCount)';
 }
 
 
@@ -10519,16 +10778,18 @@ $NetworkEvent_ShareProgressCopyWith<NetworkEvent_ShareProgress> get copyWith => 
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ShareProgress&&(identical(other.rootHash, rootHash) || other.rootHash == rootHash)&&(identical(other.chunksHave, chunksHave) || other.chunksHave == chunksHave)&&(identical(other.chunksTotal, chunksTotal) || other.chunksTotal == chunksTotal)&&(identical(other.seeders, seeders) || other.seeders == seeders)&&(identical(other.leechers, leechers) || other.leechers == leechers)&&(identical(other.bytesPerSec, bytesPerSec) || other.bytesPerSec == bytesPerSec));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ShareProgress&&(identical(other.rootHash, rootHash) || other.rootHash == rootHash)&&(identical(other.chunksHave, chunksHave) || other.chunksHave == chunksHave)&&(identical(other.chunksTotal, chunksTotal) || other.chunksTotal == chunksTotal)&&(identical(other.seeders, seeders) || other.seeders == seeders)&&(identical(other.leechers, leechers) || other.leechers == leechers)&&(identical(other.bytesPerSec, bytesPerSec) || other.bytesPerSec == bytesPerSec));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,rootHash,chunksHave,chunksTotal,seeders,leechers,bytesPerSec);
+int get hashCode {
+    return Object.hash(runtimeType,rootHash,chunksHave,chunksTotal,seeders,leechers,bytesPerSec);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.shareProgress(rootHash: $rootHash, chunksHave: $chunksHave, chunksTotal: $chunksTotal, seeders: $seeders, leechers: $leechers, bytesPerSec: $bytesPerSec)';
+    return 'NetworkEvent.shareProgress(rootHash: $rootHash, chunksHave: $chunksHave, chunksTotal: $chunksTotal, seeders: $seeders, leechers: $leechers, bytesPerSec: $bytesPerSec)';
 }
 
 
@@ -10591,16 +10852,18 @@ $NetworkEvent_ShareCompletedCopyWith<NetworkEvent_ShareCompleted> get copyWith =
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ShareCompleted&&(identical(other.rootHash, rootHash) || other.rootHash == rootHash)&&(identical(other.diskPath, diskPath) || other.diskPath == diskPath));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ShareCompleted&&(identical(other.rootHash, rootHash) || other.rootHash == rootHash)&&(identical(other.diskPath, diskPath) || other.diskPath == diskPath));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,rootHash,diskPath);
+int get hashCode {
+    return Object.hash(runtimeType,rootHash,diskPath);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.shareCompleted(rootHash: $rootHash, diskPath: $diskPath)';
+    return 'NetworkEvent.shareCompleted(rootHash: $rootHash, diskPath: $diskPath)';
 }
 
 
@@ -10659,16 +10922,18 @@ $NetworkEvent_ShareFailedCopyWith<NetworkEvent_ShareFailed> get copyWith => _$Ne
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ShareFailed&&(identical(other.rootHash, rootHash) || other.rootHash == rootHash)&&(identical(other.error, error) || other.error == error));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ShareFailed&&(identical(other.rootHash, rootHash) || other.rootHash == rootHash)&&(identical(other.error, error) || other.error == error));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,rootHash,error);
+int get hashCode {
+    return Object.hash(runtimeType,rootHash,error);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.shareFailed(rootHash: $rootHash, error: $error)';
+    return 'NetworkEvent.shareFailed(rootHash: $rootHash, error: $error)';
 }
 
 
@@ -10730,16 +10995,18 @@ $NetworkEvent_ShareSeedingChangedCopyWith<NetworkEvent_ShareSeedingChanged> get 
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ShareSeedingChanged&&(identical(other.rootHash, rootHash) || other.rootHash == rootHash)&&(identical(other.seeding, seeding) || other.seeding == seeding)&&(identical(other.seeders, seeders) || other.seeders == seeders)&&(identical(other.leechers, leechers) || other.leechers == leechers)&&(identical(other.bytesUploaded, bytesUploaded) || other.bytesUploaded == bytesUploaded));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ShareSeedingChanged&&(identical(other.rootHash, rootHash) || other.rootHash == rootHash)&&(identical(other.seeding, seeding) || other.seeding == seeding)&&(identical(other.seeders, seeders) || other.seeders == seeders)&&(identical(other.leechers, leechers) || other.leechers == leechers)&&(identical(other.bytesUploaded, bytesUploaded) || other.bytesUploaded == bytesUploaded));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,rootHash,seeding,seeders,leechers,bytesUploaded);
+int get hashCode {
+    return Object.hash(runtimeType,rootHash,seeding,seeders,leechers,bytesUploaded);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.shareSeedingChanged(rootHash: $rootHash, seeding: $seeding, seeders: $seeders, leechers: $leechers, bytesUploaded: $bytesUploaded)';
+    return 'NetworkEvent.shareSeedingChanged(rootHash: $rootHash, seeding: $seeding, seeders: $seeders, leechers: $leechers, bytesUploaded: $bytesUploaded)';
 }
 
 
@@ -10803,16 +11070,18 @@ $NetworkEvent_ShareCreatedCopyWith<NetworkEvent_ShareCreated> get copyWith => _$
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ShareCreated&&(identical(other.rootHash, rootHash) || other.rootHash == rootHash)&&(identical(other.link, link) || other.link == link)&&(identical(other.fileName, fileName) || other.fileName == fileName)&&(identical(other.totalSize, totalSize) || other.totalSize == totalSize));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ShareCreated&&(identical(other.rootHash, rootHash) || other.rootHash == rootHash)&&(identical(other.link, link) || other.link == link)&&(identical(other.fileName, fileName) || other.fileName == fileName)&&(identical(other.totalSize, totalSize) || other.totalSize == totalSize));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,rootHash,link,fileName,totalSize);
+int get hashCode {
+    return Object.hash(runtimeType,rootHash,link,fileName,totalSize);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.shareCreated(rootHash: $rootHash, link: $link, fileName: $fileName, totalSize: $totalSize)';
+    return 'NetworkEvent.shareCreated(rootHash: $rootHash, link: $link, fileName: $fileName, totalSize: $totalSize)';
 }
 
 
@@ -10875,16 +11144,18 @@ $NetworkEvent_ShareCreatedHiddenCopyWith<NetworkEvent_ShareCreatedHidden> get co
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ShareCreatedHidden&&(identical(other.rootHash, rootHash) || other.rootHash == rootHash)&&(identical(other.keyHex, keyHex) || other.keyHex == keyHex)&&(identical(other.fileName, fileName) || other.fileName == fileName)&&(identical(other.totalSize, totalSize) || other.totalSize == totalSize));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ShareCreatedHidden&&(identical(other.rootHash, rootHash) || other.rootHash == rootHash)&&(identical(other.keyHex, keyHex) || other.keyHex == keyHex)&&(identical(other.fileName, fileName) || other.fileName == fileName)&&(identical(other.totalSize, totalSize) || other.totalSize == totalSize));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,rootHash,keyHex,fileName,totalSize);
+int get hashCode {
+    return Object.hash(runtimeType,rootHash,keyHex,fileName,totalSize);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.shareCreatedHidden(rootHash: $rootHash, keyHex: $keyHex, fileName: $fileName, totalSize: $totalSize)';
+    return 'NetworkEvent.shareCreatedHidden(rootHash: $rootHash, keyHex: $keyHex, fileName: $fileName, totalSize: $totalSize)';
 }
 
 
@@ -10929,7 +11200,7 @@ as BigInt,
 
 
 class NetworkEvent_ShareList extends NetworkEvent {
-  const NetworkEvent_ShareList({required final  List<ShareEntry> entries}): _entries = entries,super._();
+  const NetworkEvent_ShareList({required  List<ShareEntry> entries}): _entries = entries,super._();
   
 
  final  List<ShareEntry> _entries;
@@ -10950,16 +11221,18 @@ $NetworkEvent_ShareListCopyWith<NetworkEvent_ShareList> get copyWith => _$Networ
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ShareList&&const DeepCollectionEquality().equals(other._entries, _entries));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ShareList&&const DeepCollectionEquality().equals(other.entries, _entries));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,const DeepCollectionEquality().hash(_entries));
+int get hashCode {
+    return Object.hash(runtimeType,const DeepCollectionEquality().hash(_entries));
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.shareList(entries: $entries)';
+    return 'NetworkEvent.shareList(entries: $entries)';
 }
 
 
@@ -11017,16 +11290,18 @@ $NetworkEvent_ShareNeedWebRtcCopyWith<NetworkEvent_ShareNeedWebRtc> get copyWith
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ShareNeedWebRtc&&(identical(other.peerId, peerId) || other.peerId == peerId)&&(identical(other.hidden, hidden) || other.hidden == hidden));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ShareNeedWebRtc&&(identical(other.peerId, peerId) || other.peerId == peerId)&&(identical(other.hidden, hidden) || other.hidden == hidden));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,peerId,hidden);
+int get hashCode {
+    return Object.hash(runtimeType,peerId,hidden);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.shareNeedWebRtc(peerId: $peerId, hidden: $hidden)';
+    return 'NetworkEvent.shareNeedWebRtc(peerId: $peerId, hidden: $hidden)';
 }
 
 
@@ -11084,16 +11359,18 @@ $NetworkEvent_LicenseErrorCopyWith<NetworkEvent_LicenseError> get copyWith => _$
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_LicenseError&&(identical(other.reason, reason) || other.reason == reason));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_LicenseError&&(identical(other.reason, reason) || other.reason == reason));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,reason);
+int get hashCode {
+    return Object.hash(runtimeType,reason);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.licenseError(reason: $reason)';
+    return 'NetworkEvent.licenseError(reason: $reason)';
 }
 
 
@@ -11150,16 +11427,18 @@ $NetworkEvent_ServerUnavailableCopyWith<NetworkEvent_ServerUnavailable> get copy
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ServerUnavailable&&(identical(other.serverId, serverId) || other.serverId == serverId));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ServerUnavailable&&(identical(other.serverId, serverId) || other.serverId == serverId));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,serverId);
+int get hashCode {
+    return Object.hash(runtimeType,serverId);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.serverUnavailable(serverId: $serverId)';
+    return 'NetworkEvent.serverUnavailable(serverId: $serverId)';
 }
 
 
@@ -11216,16 +11495,18 @@ $NetworkEvent_ServerAvailableCopyWith<NetworkEvent_ServerAvailable> get copyWith
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ServerAvailable&&(identical(other.serverId, serverId) || other.serverId == serverId));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_ServerAvailable&&(identical(other.serverId, serverId) || other.serverId == serverId));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,serverId);
+int get hashCode {
+    return Object.hash(runtimeType,serverId);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.serverAvailable(serverId: $serverId)';
+    return 'NetworkEvent.serverAvailable(serverId: $serverId)';
 }
 
 
@@ -11282,16 +11563,18 @@ $NetworkEvent_RelayDeniedCopyWith<NetworkEvent_RelayDenied> get copyWith => _$Ne
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_RelayDenied&&(identical(other.kind, kind) || other.kind == kind));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_RelayDenied&&(identical(other.kind, kind) || other.kind == kind));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,kind);
+int get hashCode {
+    return Object.hash(runtimeType,kind);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.relayDenied(kind: $kind)';
+    return 'NetworkEvent.relayDenied(kind: $kind)';
 }
 
 
@@ -11349,16 +11632,18 @@ $NetworkEvent_TwitchJoinRejectedCopyWith<NetworkEvent_TwitchJoinRejected> get co
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_TwitchJoinRejected&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.reason, reason) || other.reason == reason));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_TwitchJoinRejected&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.reason, reason) || other.reason == reason));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,serverId,reason);
+int get hashCode {
+    return Object.hash(runtimeType,serverId,reason);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.twitchJoinRejected(serverId: $serverId, reason: $reason)';
+    return 'NetworkEvent.twitchJoinRejected(serverId: $serverId, reason: $reason)';
 }
 
 
@@ -11417,16 +11702,18 @@ $NetworkEvent_RoomBudgetUpdateCopyWith<NetworkEvent_RoomBudgetUpdate> get copyWi
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_RoomBudgetUpdate&&(identical(other.joined, joined) || other.joined == joined)&&(identical(other.limit, limit) || other.limit == limit));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_RoomBudgetUpdate&&(identical(other.joined, joined) || other.joined == joined)&&(identical(other.limit, limit) || other.limit == limit));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,joined,limit);
+int get hashCode {
+    return Object.hash(runtimeType,joined,limit);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.roomBudgetUpdate(joined: $joined, limit: $limit)';
+    return 'NetworkEvent.roomBudgetUpdate(joined: $joined, limit: $limit)';
 }
 
 
@@ -11484,16 +11771,18 @@ $NetworkEvent_RoomCapHitCopyWith<NetworkEvent_RoomCapHit> get copyWith => _$Netw
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_RoomCapHit&&(identical(other.room, room) || other.room == room));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_RoomCapHit&&(identical(other.room, room) || other.room == room));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,room);
+int get hashCode {
+    return Object.hash(runtimeType,room);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.roomCapHit(room: $room)';
+    return 'NetworkEvent.roomCapHit(room: $room)';
 }
 
 
@@ -11535,7 +11824,7 @@ as String,
 
 
 class NetworkEvent_PublicChannelListReceived extends NetworkEvent {
-  const NetworkEvent_PublicChannelListReceived({required this.serverId, required this.serverName, required final  List<PublicChannelEntryFfi> channels, this.serverAvatar, this.serverBannerThumb}): _channels = channels,super._();
+  const NetworkEvent_PublicChannelListReceived({required this.serverId, required this.serverName, required  List<PublicChannelEntryFfi> channels, this.serverAvatar, this.serverBannerThumb}): _channels = channels,super._();
   
 
  final  String serverId;
@@ -11560,16 +11849,18 @@ $NetworkEvent_PublicChannelListReceivedCopyWith<NetworkEvent_PublicChannelListRe
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_PublicChannelListReceived&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.serverName, serverName) || other.serverName == serverName)&&const DeepCollectionEquality().equals(other._channels, _channels)&&const DeepCollectionEquality().equals(other.serverAvatar, serverAvatar)&&const DeepCollectionEquality().equals(other.serverBannerThumb, serverBannerThumb));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_PublicChannelListReceived&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.serverName, serverName) || other.serverName == serverName)&&const DeepCollectionEquality().equals(other.channels, _channels)&&const DeepCollectionEquality().equals(other.serverAvatar, serverAvatar)&&const DeepCollectionEquality().equals(other.serverBannerThumb, serverBannerThumb));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,serverId,serverName,const DeepCollectionEquality().hash(_channels),const DeepCollectionEquality().hash(serverAvatar),const DeepCollectionEquality().hash(serverBannerThumb));
+int get hashCode {
+    return Object.hash(runtimeType,serverId,serverName,const DeepCollectionEquality().hash(_channels),const DeepCollectionEquality().hash(serverAvatar),const DeepCollectionEquality().hash(serverBannerThumb));
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.publicChannelListReceived(serverId: $serverId, serverName: $serverName, channels: $channels, serverAvatar: $serverAvatar, serverBannerThumb: $serverBannerThumb)';
+    return 'NetworkEvent.publicChannelListReceived(serverId: $serverId, serverName: $serverName, channels: $channels, serverAvatar: $serverAvatar, serverBannerThumb: $serverBannerThumb)';
 }
 
 
@@ -11615,7 +11906,7 @@ as Uint8List?,
 
 
 class NetworkEvent_PublicChannelSyncReceived extends NetworkEvent {
-  const NetworkEvent_PublicChannelSyncReceived({required this.serverId, required this.channelId, required final  List<GuestSyncMessageFfi> messages, required this.hasMore, required final  List<SyncSenderProfileFfi> senderProfiles}): _messages = messages,_senderProfiles = senderProfiles,super._();
+  const NetworkEvent_PublicChannelSyncReceived({required this.serverId, required this.channelId, required  List<GuestSyncMessageFfi> messages, required this.hasMore, required  List<SyncSenderProfileFfi> senderProfiles}): _messages = messages,_senderProfiles = senderProfiles,super._();
   
 
  final  String serverId;
@@ -11646,16 +11937,18 @@ $NetworkEvent_PublicChannelSyncReceivedCopyWith<NetworkEvent_PublicChannelSyncRe
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_PublicChannelSyncReceived&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.channelId, channelId) || other.channelId == channelId)&&const DeepCollectionEquality().equals(other._messages, _messages)&&(identical(other.hasMore, hasMore) || other.hasMore == hasMore)&&const DeepCollectionEquality().equals(other._senderProfiles, _senderProfiles));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_PublicChannelSyncReceived&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.channelId, channelId) || other.channelId == channelId)&&const DeepCollectionEquality().equals(other.messages, _messages)&&(identical(other.hasMore, hasMore) || other.hasMore == hasMore)&&const DeepCollectionEquality().equals(other.senderProfiles, _senderProfiles));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,serverId,channelId,const DeepCollectionEquality().hash(_messages),hasMore,const DeepCollectionEquality().hash(_senderProfiles));
+int get hashCode {
+    return Object.hash(runtimeType,serverId,channelId,const DeepCollectionEquality().hash(_messages),hasMore,const DeepCollectionEquality().hash(_senderProfiles));
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.publicChannelSyncReceived(serverId: $serverId, channelId: $channelId, messages: $messages, hasMore: $hasMore, senderProfiles: $senderProfiles)';
+    return 'NetworkEvent.publicChannelSyncReceived(serverId: $serverId, channelId: $channelId, messages: $messages, hasMore: $hasMore, senderProfiles: $senderProfiles)';
 }
 
 
@@ -11720,16 +12013,18 @@ $NetworkEvent_PublicChannelConfigChangedCopyWith<NetworkEvent_PublicChannelConfi
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_PublicChannelConfigChanged&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.channelId, channelId) || other.channelId == channelId)&&(identical(other.isPublic, isPublic) || other.isPublic == isPublic)&&(identical(other.channelName, channelName) || other.channelName == channelName)&&(identical(other.category, category) || other.category == category));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_PublicChannelConfigChanged&&(identical(other.serverId, serverId) || other.serverId == serverId)&&(identical(other.channelId, channelId) || other.channelId == channelId)&&(identical(other.isPublic, isPublic) || other.isPublic == isPublic)&&(identical(other.channelName, channelName) || other.channelName == channelName)&&(identical(other.category, category) || other.category == category));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,serverId,channelId,isPublic,channelName,category);
+int get hashCode {
+    return Object.hash(runtimeType,serverId,channelId,isPublic,channelName,category);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.publicChannelConfigChanged(serverId: $serverId, channelId: $channelId, isPublic: $isPublic, channelName: $channelName, category: $category)';
+    return 'NetworkEvent.publicChannelConfigChanged(serverId: $serverId, channelId: $channelId, isPublic: $isPublic, channelName: $channelName, category: $category)';
 }
 
 
@@ -11790,16 +12085,18 @@ $NetworkEvent_OverlayLookReceivedCopyWith<NetworkEvent_OverlayLookReceived> get 
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_OverlayLookReceived&&(identical(other.master, master) || other.master == master));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_OverlayLookReceived&&(identical(other.master, master) || other.master == master));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,master);
+int get hashCode {
+    return Object.hash(runtimeType,master);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.overlayLookReceived(master: $master)';
+    return 'NetworkEvent.overlayLookReceived(master: $master)';
 }
 
 
@@ -11856,16 +12153,18 @@ $NetworkEvent_OverlayPersonRemovedCopyWith<NetworkEvent_OverlayPersonRemoved> ge
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_OverlayPersonRemoved&&(identical(other.master, master) || other.master == master));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_OverlayPersonRemoved&&(identical(other.master, master) || other.master == master));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,master);
+int get hashCode {
+    return Object.hash(runtimeType,master);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.overlayPersonRemoved(master: $master)';
+    return 'NetworkEvent.overlayPersonRemoved(master: $master)';
 }
 
 
@@ -11922,16 +12221,18 @@ $NetworkEvent_OverlayFieldChangedCopyWith<NetworkEvent_OverlayFieldChanged> get 
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_OverlayFieldChanged&&(identical(other.master, master) || other.master == master));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_OverlayFieldChanged&&(identical(other.master, master) || other.master == master));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,master);
+int get hashCode {
+    return Object.hash(runtimeType,master);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.overlayFieldChanged(master: $master)';
+    return 'NetworkEvent.overlayFieldChanged(master: $master)';
 }
 
 
@@ -11988,16 +12289,18 @@ $NetworkEvent_OverlayPortChangedCopyWith<NetworkEvent_OverlayPortChanged> get co
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_OverlayPortChanged&&(identical(other.port, port) || other.port == port));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_OverlayPortChanged&&(identical(other.port, port) || other.port == port));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,port);
+int get hashCode {
+    return Object.hash(runtimeType,port);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.overlayPortChanged(port: $port)';
+    return 'NetworkEvent.overlayPortChanged(port: $port)';
 }
 
 
@@ -12054,16 +12357,18 @@ $NetworkEvent_OverlayStreamsChangedCopyWith<NetworkEvent_OverlayStreamsChanged> 
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_OverlayStreamsChanged&&(identical(other.open, open) || other.open == open));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NetworkEvent_OverlayStreamsChanged&&(identical(other.open, open) || other.open == open));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,open);
+int get hashCode {
+    return Object.hash(runtimeType,open);
+}
 
 @override
 String toString() {
-  return 'NetworkEvent.overlayStreamsChanged(open: $open)';
+    return 'NetworkEvent.overlayStreamsChanged(open: $open)';
 }
 
 

@@ -280,9 +280,7 @@ pub(crate) fn retry_stale_asks(
 pub(crate) fn reset_asked_on_disconnect(pending: &mut HashMap<String, PendingAsk>) {
     // Let the next sweep act immediately rather than waiting out a staleness
     // window measured against the dead socket.
-    let stale_now = Instant::now()
-        .checked_sub(Duration::from_secs(ASSET_RETRY_SECS))
-        .unwrap_or_else(Instant::now);
+    let stale_now = super::types::instant_ago(Duration::from_secs(ASSET_RETRY_SECS));
     for ask in pending.values_mut() {
         ask.asked.clear();
         ask.last_asked_at = stale_now;

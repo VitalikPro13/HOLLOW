@@ -343,6 +343,39 @@ Tests: `mailbox_requires_a_roster_that_counts_the_device`,
   hoping a 2 ms writer thread wins the gap, and their overrides are per thread, since
   `cargo test` runs the two side by side.
 
+## Flakes closed in track t15-deps-flakes (2026-11-16)
+
+- **A committer's tree runs ahead of its wire.** A node merges its own commit, so
+  `expect_mls_leaf` on the COMMITTER passes, before the commit frame leaves (it waits for the
+  save, `AfterMlsSave`). Counting `mls_commits_from` right then read 0 for everyone
+  (`g13w2f_the_last_upgrade_turns_standing_on_without_a_fork`: "admin 0, lowest id 0", 1 in
+  30 on the PC, flaky on CI). Read the wiretap after `quiet_agreed_group` over the members,
+  never after the committer's own leaf; the same order now holds in
+  `g13w2f_a_rejoiner_goes_to_the_back_of_the_line`, `g13w2f_a_squatted_old_leaf_...` and
+  `w2b_the_first_declaring_leaf_never_makes_a_stranger_the_only_leader`.
+- **One node's lagging roster is per-observer blindness, never `forget`.** The md-mls scene
+  (`md_mls_commit_before_the_roster`) used a global `forget` so o1 could not place the new
+  device. The resolver is shared, so that hit every node: a roster ingest still landing
+  linked it again for o1 (the held add merged instead of lapsing, "the held add outlived
+  its bound", 1 in 30 on the mini), and the longer it stayed forgotten the likelier the
+  friend disowned the leaf too and committed it out
+  (`md_review_mls_a_restart_inside_a_held_add_still_heals_once_placed`, "the restarted
+  device never read the new device"). The scene now calls
+  `resolver::blind_for_test(o1, o2)` and the tests place the device with
+  `unblind_for_test`; `resolver::disowns` honours the blindness (cfg(test) only; `blind`
+  is a constant false in builds).
+- **A bound on product timers comes from their constants.**
+  `g13w2f_review_a_mixed_server_seats_a_joiner_past_two_old_admins_within_two_walk_steps`
+  (was `_within_20s`) asserted a fixed 20 s for two silent walk targets, which costs two
+  `WALK_STEP`s judged on 2 s batch ticks plus a commit tick, about 18 s at worst; a full PC
+  suite took 20.046 s. The bound is now `2 * WALK_STEP + 13 s`, still far under the
+  60 s bootstrap re-ask it exists to rule out.
+- **`Instant` on Windows counts from boot.** `checked_sub(1 h)` fails on a PC up for less
+  than an hour, so `.unwrap_or(now)` turned "due long ago" into "due now": test agers
+  (`age_held_commits`, `join_hold::age`) silently aged nothing, and `lock_keeper::nudge`
+  waited out its stagger after a removal. Move an `Instant` back only through
+  `types::earlier_by` / `types::instant_ago` (as far back as the clock allows).
+
 ## Waits that a duplicate or an earlier frame can satisfy (session 22, 2026-10-01)
 
 Three load-only flakes in one session had one shape: the wait matched SOME event or frame,

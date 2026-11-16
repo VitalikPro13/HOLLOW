@@ -742,7 +742,7 @@ impl Want {
     /// Something newer to fetch: every device may be asked at once, and the answers of
     /// those already asked still count.
     fn ask_again_now(&mut self) {
-        let long_ago = Instant::now().checked_sub(ASK_RETRY).unwrap_or_else(Instant::now);
+        let long_ago = super::types::instant_ago(ASK_RETRY);
         for at in self.asked.values_mut() {
             *at = (*at).min(long_ago);
         }

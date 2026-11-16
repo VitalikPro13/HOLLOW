@@ -69,6 +69,9 @@ release pipeline is the `release` skill.
   `fire_and_forget` coroutine (a WinRT failure = terminate), so App Lock calls it on phones only;
   a desktop biometric feature must fork it first. Both guarded by
   `test/windows_audio_plugin_guard_test.dart`.
+- `std::time::Instant` counts from boot on Windows: `now.checked_sub(d)` fails on a machine up
+  for less than `d`. Never write "long ago" as `checked_sub(d).unwrap_or(now)` (it becomes
+  "now"); use `node::types::instant_ago` / `earlier_by` (wiki `rust_test_harness`, t15).
 - Known, not fixed: the vendored `setSourceUrl`/`setSourceBytes` threads hold a raw `AudioPlayer*`,
   so a dispose landing mid-set is a use-after-free (mostly unreachable: `SoundService` awaits play).
 
@@ -127,10 +130,12 @@ release pipeline is the `release` skill.
 - Flutter 3.47.9 everywhere (CI, `release-apple.yml`, BUILDING.md, and the old iMac that signs
   Apple builds). Bump all of them together. Wiki `couplings_gotchas` "Flutter 3.47.9
   upgrade leftovers".
-- mdk (fvp's media engine) = the 0.39.0 release asset pinned by SHA-256 on Windows, Linux and
-  Android (`FVP_DEPS_URL` + `FVP_DEPS_SHA256`; a wrong digest fails the build); Apple takes it
-  through fvp's checksummed Swift package, never a CocoaPods pin (it embedded mdk twice).
-  Never let fvp fall back to the SourceForge nightly.
+- mdk (fvp's media engine) = the 0.40.1 release asset (fvp 0.40.0) pinned by SHA-256 on
+  Windows, Linux and Android (`FVP_DEPS_URL` + `FVP_DEPS_SHA256`; a wrong digest fails the
+  build); Apple takes it through fvp's checksummed Swift package, never a CocoaPods pin (it
+  embedded mdk twice; fvp's podspec still says 0.39, ignore it). Never let fvp fall back to
+  the SourceForge nightly. `test/mdk_pin_guard_test.dart` fails when the three pins and the
+  resolved fvp's `Package.swift` name different mdk versions.
 - `build_release.ps1` refuses to build with any `NATIVEAPI_*` variable set (tray_manager 0.7
   would bundle a WinUI runtime). Linux build deps are the X11 and Xi headers (libx11-dev,
   libxi-dev), not AppIndicator (the flatpak still carries its AppIndicator module).

@@ -60,6 +60,20 @@ void main() {
         .setMockMethodCallHandler(webrtc, null);
   });
 
+  // Listening resumes on a real timer after a teardown that awaits platform
+  // channels, so a fixed sleep raced it on a loaded machine (7 of 30 runs
+  // during app builds). Polls until listening, at most 2 s.
+  Future<void> untilListening() async {
+    final deadline = DateTime.now().add(const Duration(seconds: 2));
+    while (!listen.status.value.listening &&
+        DateTime.now().isBefore(deadline)) {
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+    }
+  }
+
+  String why() => 'holds ${listen.holds}, on ${listen.status.value.on}, '
+      'mic events $events';
+
   group('the call capture waits for the mic', () {
     test('joining a voice channel', () async {
       await listen.turnOn();
@@ -104,9 +118,9 @@ void main() {
           reason: 'the mic must be free before the call can open it');
 
       await calls.endCall();
-      await Future<void>.delayed(const Duration(milliseconds: 80));
+      await untilListening();
       expect(c.read(callProvider).status, CallStatus.idle);
-      expect(listen.status.value.listening, isTrue);
+      expect(listen.status.value.listening, isTrue, reason: why());
       expect(listen.holds, isEmpty);
     });
   });
@@ -130,9 +144,9 @@ void main() {
       final r = room();
 
       await r.vc.leaveChannel();
-      await Future<void>.delayed(const Duration(milliseconds: 80));
+      await untilListening();
 
-      expect(listen.status.value.listening, isTrue);
+      expect(listen.status.value.listening, isTrue, reason: why());
       expect(events.lastIndexOf('mic-open'),
           greaterThan(events.indexOf('mesh-closed')));
     });

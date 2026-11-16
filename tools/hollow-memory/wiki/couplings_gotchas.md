@@ -792,7 +792,7 @@ let _ = state.apply_op(&op);
 
 ### fvp's mdk SDK is pinned per platform, never the nightly
 
-**Rule:** fvp downloads the native mdk SDK (the decoder for peer video) from SourceForge's nightly, with no checksum, unless `FVP_DEPS_URL` + `FVP_DEPS_SHA256` are set. Windows and Linux pin it in `third_party/mdk/mdk_pin.cmake` (included by `windows/` and `linux/CMakeLists.txt` before the plugins), Android in `android/build.gradle.kts` (cmake arguments for the `fvp` subproject), Apple through fvp's own Swift package `binaryTarget` checksum. All four must name the same mdk release (0.39.0 for fvp 0.39.1).
+**Rule:** fvp downloads the native mdk SDK (the decoder for peer video) from SourceForge's nightly, with no checksum, unless `FVP_DEPS_URL` + `FVP_DEPS_SHA256` are set. Windows and Linux pin it in `third_party/mdk/mdk_pin.cmake` (included by `windows/` and `linux/CMakeLists.txt` before the plugins), Android in `android/build.gradle.kts` (cmake arguments for the `fvp` subproject), Apple through fvp's own Swift package `binaryTarget` checksum. All four must name the same mdk release (0.40.1 for fvp 0.40.0; `test/mdk_pin_guard_test.dart` checks it).
 
 **Why:** a fresh pub cache pulled whatever the nightly held that day: 0.14's first builds shipped mdk 0.40.1 on Windows and Android while Apple had 0.39.0, a native parser of untrusted bytes with no fixed version.
 

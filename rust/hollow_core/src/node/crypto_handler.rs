@@ -3329,7 +3329,7 @@ pub(crate) const MLS_WELCOME_GRACE: std::time::Duration = std::time::Duration::f
 /// Welcome we could open is coming.
 pub(crate) fn welcome_grace_start(welcome_due: bool) -> std::time::Instant {
     let now = std::time::Instant::now();
-    if welcome_due { now } else { now.checked_sub(MLS_WELCOME_GRACE).unwrap_or(now) }
+    if welcome_due { now } else { super::types::earlier_by(now, MLS_WELCOME_GRACE) }
 }
 
 /// Apply one MlsCommit frame. Shared by the `MlsCommit` broadcast arm and the

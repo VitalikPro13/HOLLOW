@@ -592,7 +592,7 @@ that is a join regression in mixed servers.
   and a non-coordinator forwards.
 - An ack from anyone but the device we sent to is ignored; a forged `Cannot` only moves us to the
   next target in OUR order, never toward X faster than the order allows.
-- Test 20 `g13w2f_review_a_mixed_server_seats_a_joiner_past_two_old_admins_within_20s`, test 17
+- Test 20 `g13w2f_review_a_mixed_server_seats_a_joiner_past_two_old_admins_within_two_walk_steps` (was `_within_20s`; the bound is 2 x `WALK_STEP` + 13 s since t15), test 17
   extended to assert the step time.
 
 ### 10.5 Tests and units added in v2.1

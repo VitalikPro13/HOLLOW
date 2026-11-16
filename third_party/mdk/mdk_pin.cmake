@@ -8,16 +8,16 @@
 # carry (Windows ships mdk-sdk-windows-x64-vs2026.7z, the nightly's
 # mdk-sdk-windows-x64.7z), so the asset is fetched here under fvp's name and handed
 # over through a file:// URL. fvp checks the sha256 again before extracting.
-set(HOLLOW_MDK_VERSION "0.39.0")
+set(HOLLOW_MDK_VERSION "0.40.1")
 set(_hollow_mdk_release "https://github.com/wang-bin/mdk-sdk/releases/download/v${HOLLOW_MDK_VERSION}")
 if(WIN32)
   set(_hollow_mdk_asset "mdk-sdk-windows-x64-vs2026.7z")
   set(_hollow_mdk_file "mdk-sdk-windows-x64.7z")
-  set(_hollow_mdk_sha256 "e492fd45f3a6828e44f75ce665708c9040abaa60602605437b71c95c714808e3")
+  set(_hollow_mdk_sha256 "15b37964a57c62edd4abd078c5866cd4ff35f70c0dd1ca1b0a3d463213df8338")
 elseif(CMAKE_SYSTEM_NAME MATCHES "Linux")
   set(_hollow_mdk_asset "mdk-sdk-linux-x64.tar.xz")
   set(_hollow_mdk_file "mdk-sdk-linux-x64.tar.xz")
-  set(_hollow_mdk_sha256 "0394c7443060f29bb420aa0ec8b278ec5ef61d3e84d1d3877c41c967c614980a")
+  set(_hollow_mdk_sha256 "e53a38b6bcdce99cea852ecff25b0e4acc67539418a04b7c27868c24c130021d")
 else()
   return()
 endif()
