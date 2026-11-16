@@ -270,15 +270,47 @@ pub struct JoinAsk {
     /// so an admission after an invite reset tells the old link from the new one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
+    /// The joiner's own leave this ask follows, signed (`hollow-join-ask3`): an ask made
+    /// before a later leave of ours never re-admits us, in the fold as well as live.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follows: Option<AskFollows>,
+}
+
+/// What a rejoin's ask names of the leave before it (w2-d follow-up, HOL-SEC-207).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AskFollows {
+    /// The leave that ended our membership as members fold it (`LeaveBook::ask_floor`).
+    pub leave: super::hlc::HlcTimestamp,
+    /// Our wall clock when the ask was signed: `at` may sit past the wall by a clock
+    /// lead, so an ask whose named leave was followed by another counts by this instead.
+    pub made: i64,
 }
 
 impl JoinAsk {
     fn signing_payload(server_id: &str, joiner: &str, at: i64, key: Option<&str>) -> Vec<u8> {
-        let head: &[u8] = if key.is_some() { b"hollow-join-ask2\0" } else { b"hollow-join-ask1\0" };
+        Self::signing_payload_full(server_id, joiner, at, key, None)
+    }
+
+    fn signing_payload_full(server_id: &str, joiner: &str, at: i64, key: Option<&str>, follows: Option<&AskFollows>) -> Vec<u8> {
+        let head: &[u8] = match (follows, key) {
+            (Some(_), _) => b"hollow-join-ask3\0",
+            (None, Some(_)) => b"hollow-join-ask2\0",
+            (None, None) => b"hollow-join-ask1\0",
+        };
         let mut out = [head, server_id.as_bytes(), b"\0", joiner.as_bytes(), b"\0", at.to_string().as_bytes()].concat();
         if let Some(key) = key {
             out.push(0);
             out.extend_from_slice(key.as_bytes());
+        }
+        if let Some(f) = follows {
+            // ask3 always carries the key slot, empty for none, so no field can shift.
+            if key.is_none() {
+                out.push(0);
+            }
+            for field in [f.leave.physical_ms.to_string(), f.leave.counter.to_string(), f.leave.actor.clone(), f.made.to_string()] {
+                out.push(0);
+                out.extend_from_slice(field.as_bytes());
+            }
         }
         out
     }
@@ -301,9 +333,41 @@ impl JoinAsk {
     }
 
     fn sign_with(server_id: &str, at: i64, key: Option<String>, keypair: &NativeKeypair) -> Self {
+        Self::sign_full(server_id, at, key, None, keypair)
+    }
+
+    /// `keypair`'s ask to join `server_id` at `at`, with the invite key `key` (none when
+    /// `None`; `None` back when `key` is no key) and, for a rejoin, the leave of ours it
+    /// follows, signed at our wall clock `made`. The leave is named only when `at` leads
+    /// `made`: an ask stamped at or before the wall clock signs the exact 0.14.0 bytes.
+    pub fn sign_rejoin(
+        server_id: &str,
+        at: i64,
+        key: Option<&str>,
+        follows: Option<&super::hlc::HlcTimestamp>,
+        made: i64,
+        keypair: &NativeKeypair,
+    ) -> Option<Self> {
+        let key = match key {
+            Some(key) => Some(crate::node::sealed_box::key_from_text(key).map(|k| crate::node::sealed_box::key_to_text(&k))?),
+            None => None,
+        };
+        // A 0.14.0 replica keeps an ask3 admission unread and never counts the joiner, so
+        // ask3 only where the old rule cannot judge: a stamp past our own wall clock (an
+        // ask stamped at or before its signing is judged by that stamp, HOL-SEC-207). A
+        // leave clock whose actor is no peer id is no leave of ours: the ask names none.
+        let follows = follows
+            .filter(|_| at > made)
+            .filter(|leave| crate::node::witness::peer_id_shape(&leave.actor))
+            .map(|leave| AskFollows { leave: leave.clone(), made });
+        Some(Self::sign_full(server_id, at, key, follows, keypair))
+    }
+
+    fn sign_full(server_id: &str, at: i64, key: Option<String>, follows: Option<AskFollows>, keypair: &NativeKeypair) -> Self {
         let b64 = base64::engine::general_purpose::STANDARD;
-        let sig = keypair.sign(&Self::signing_payload(server_id, &keypair.peer_id(), at, key.as_deref()));
-        Self { at, sig: b64.encode(sig), pk: b64.encode(keypair.public_key_protobuf()), key }
+        let payload = Self::signing_payload_full(server_id, &keypair.peer_id(), at, key.as_deref(), follows.as_ref());
+        let sig = keypair.sign(&payload);
+        Self { at, sig: b64.encode(sig), pk: b64.encode(keypair.public_key_protobuf()), key, follows }
     }
 
     /// Whether `joiner`'s own key signed this ask for `server_id`.
@@ -313,12 +377,35 @@ impl JoinAsk {
         if self.key.as_deref().is_some_and(|key| !Self::canonical_key(key)) {
             return false;
         }
-        let payload = Self::signing_payload(server_id, joiner, self.at, self.key.as_deref());
+        // HOL-SEC-143: the one free-text field the payload joins is a peer id, never a
+        // separator.
+        if self.follows.as_ref().is_some_and(|f| !crate::node::witness::peer_id_shape(&f.leave.actor)) {
+            return false;
+        }
+        let payload = Self::signing_payload_full(server_id, joiner, self.at, self.key.as_deref(), self.follows.as_ref());
         NativeKeypair::peer_id_from_pubkey_protobuf(&pk).is_some_and(|id| id == joiner)
             && matches!(
                 NativeKeypair::verify_peer_signature(&pk, &sig, &payload),
                 Ok(true)
             )
+    }
+
+    /// Whether a 0.14.0 replica reads this ask whole and verifies it: its `JoinAsk` (the
+    /// struct below, as 0.14.0 declared it) must re-serialize to the same bytes, else its
+    /// `read_op` keeps the admission unread, and only the ask1/ask2 payload verifies there.
+    #[cfg(test)]
+    pub(crate) fn reads_as_0140(&self, server_id: &str, joiner: &str) -> bool {
+        #[derive(Serialize, Deserialize)]
+        struct JoinAsk0140 {
+            at: i64,
+            sig: String,
+            pk: String,
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            key: Option<String>,
+        }
+        let Ok(json) = serde_json::to_string(self) else { return false };
+        let whole = serde_json::from_str::<JoinAsk0140>(&json).is_ok_and(|old| serde_json::to_string(&old).is_ok_and(|again| again == json));
+        whole && JoinAsk { follows: None, ..self.clone() }.verifies(server_id, joiner)
     }
 }
 
@@ -899,6 +986,7 @@ mod tests {
             sig: b64.encode(mallory.0.sign(&JoinAsk::signing_payload("srv", &carol.1, 5, None))),
             pk: mallory.2.clone(),
             key: None,
+            follows: None,
         };
         assert!(!in_her_name.verifies("srv", &carol.1), "an ask in someone else's name");
     }
@@ -920,6 +1008,66 @@ mod tests {
         assert!(!json.contains("\"key\""), "a keyless ask keeps the bytes it always had");
     }
 
+    /// The ask3 payload, pinned: its own head (never an ask1 or ask2 one with more bytes),
+    /// an empty key slot when no key is named, then the leave's three parts and `made`.
+    #[test]
+    fn a_rejoin_ask_payload_is_pinned() {
+        let follows = AskFollows { leave: super::super::hlc::HlcTimestamp { physical_ms: 9, counter: 1, actor: "A".into() }, made: 4 };
+        assert_eq!(JoinAsk::signing_payload_full("s", "j", 5, None, Some(&follows)), b"hollow-join-ask3\x00s\x00j\x005\x00\x009\x001\x00A\x004".to_vec());
+        assert_eq!(JoinAsk::signing_payload_full("s", "j", 5, Some("K"), Some(&follows)), b"hollow-join-ask3\x00s\x00j\x005\x00K\x009\x001\x00A\x004".to_vec());
+        assert_eq!(JoinAsk::signing_payload_full("s", "j", 5, Some("K"), None), b"hollow-join-ask2\x00s\x00j\x005\x00K".to_vec());
+        assert_eq!(JoinAsk::signing_payload_full("s", "j", 5, None, None), b"hollow-join-ask1\x00s\x00j\x005".to_vec());
+    }
+
+    /// HOL-SEC-207 compatibility: a rejoin whose stamp does not lead the wall clock signs
+    /// the exact ask 0.14.0 signed, which a 0.14.0 replica reads whole and counts; only a
+    /// stamp past the wall clock names the leave (ask3), which that replica cannot read.
+    #[test]
+    fn a_rejoin_without_a_clock_lead_signs_the_0140_ask() {
+        let carol = crate::crdt::testkeys::keys(31);
+        let key = crate::node::sealed_box::key_to_text(&[7; 32]);
+        let leave = super::super::hlc::HlcTimestamp { physical_ms: 9, counter: 1, actor: carol.1.clone() };
+        for made in [5, 6, 1_700_000_000_000] {
+            let keyed = JoinAsk::sign_rejoin("srv", 5, Some(&key), Some(&leave), made, &carol.0).unwrap();
+            assert_eq!(keyed, JoinAsk::sign_for_invite("srv", 5, &key, &carol.0).unwrap(), "made {made}: not the 0.14.0 ask2");
+            assert!(keyed.reads_as_0140("srv", &carol.1), "made {made}: a 0.14.0 replica cannot read it");
+            let keyless = JoinAsk::sign_rejoin("srv", 5, None, Some(&leave), made, &carol.0).unwrap();
+            assert_eq!(keyless, JoinAsk::sign("srv", 5, &carol.0), "made {made}: not the 0.14.0 ask1");
+            assert!(keyless.reads_as_0140("srv", &carol.1));
+        }
+        let json = serde_json::to_string(&JoinAsk::sign_rejoin("srv", 5, Some(&key), Some(&leave), 5, &carol.0).unwrap()).unwrap();
+        let mut fields: Vec<String> = serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&json).unwrap().keys().cloned().collect();
+        fields.sort();
+        assert_eq!(fields, ["at", "key", "pk", "sig"], "the 0.14.0 ask2 fields, no more");
+        assert!(json.starts_with("{\"at\":5,\"sig\":\""), "the 0.14.0 field order");
+        let led = JoinAsk::sign_rejoin("srv", 5, Some(&key), Some(&leave), 4, &carol.0).unwrap();
+        assert_eq!(led.follows.as_ref().map(|f| (&f.leave, f.made)), Some((&leave, 4)), "a lead names the leave");
+        assert!(led.verifies("srv", &carol.1));
+        assert!(!led.reads_as_0140("srv", &carol.1), "control: a 0.14.0 replica reads no ask3");
+    }
+
+    /// HOL-SEC-143 for the leave a rejoin names: its actor is a peer id, so no field of the
+    /// signed payload can carry a separator into the next, even under a valid signature.
+    #[test]
+    fn a_rejoin_ask_names_a_leave_by_a_peer_id() {
+        use base64::Engine as _;
+        let carol = crate::crdt::testkeys::keys(31);
+        let hand_signed = |actor: &str| {
+            let follows = AskFollows { leave: super::super::hlc::HlcTimestamp { physical_ms: 9, counter: 1, actor: actor.into() }, made: 4 };
+            let sig = carol.0.sign(&JoinAsk::signing_payload_full("srv", &carol.1, 5, None, Some(&follows)));
+            JoinAsk { at: 5, sig: base64::engine::general_purpose::STANDARD.encode(sig), pk: carol.2.clone(), key: None, follows: Some(follows) }
+        };
+        assert!(hand_signed(&carol.1).verifies("srv", &carol.1), "control: a peer id");
+        for junk in [format!("{}\0123", carol.1), String::new(), "x".into()] {
+            assert!(!hand_signed(&junk).verifies("srv", &carol.1), "{junk:?} verified");
+        }
+        let signed = JoinAsk::sign_rejoin(
+            "srv", 5, None, Some(&super::super::hlc::HlcTimestamp { physical_ms: 9, counter: 1, actor: "x\0y".into() }), 4, &carol.0,
+        )
+        .unwrap();
+        assert!(signed.follows.is_none(), "the signer names no leave whose actor is no peer id");
+    }
+
     /// HOL-SEC-143/154 for the ask's key: the signer names only a key, and the verifier
     /// takes a key only in the text form an honest signer writes, so a key field never
     /// carries a separator or anything else the signing payload could be split on.
@@ -931,7 +1079,7 @@ mod tests {
         let good = crate::node::sealed_box::key_to_text(&[7; 32]);
         let hand_signed = |key: &str| {
             let sig = carol.0.sign(&JoinAsk::signing_payload("srv", &carol.1, 5, Some(key)));
-            JoinAsk { at: 5, sig: base64::engine::general_purpose::STANDARD.encode(sig), pk: carol.2.clone(), key: Some(key.to_string()) }
+            JoinAsk { at: 5, sig: base64::engine::general_purpose::STANDARD.encode(sig), pk: carol.2.clone(), key: Some(key.to_string()), follows: None }
         };
         assert!(hand_signed(&good).verifies("srv", &carol.1), "control: a canonical key");
         for junk in ["not a key\0with nul", "", &format!("{good}=")] {

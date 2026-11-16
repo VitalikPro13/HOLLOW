@@ -963,10 +963,8 @@ impl PendingJoin {
         let at = at.max(self.requested_at.saturating_add(1));
         self.requested_at = at;
         // A key that is no key signs no ask: never a keyless one in its place.
-        self.ask = match self.join_key.as_deref() {
-            Some(key) => crate::crdt::operations::JoinAsk::sign_for_invite(server_id, at, key, master),
-            None => Some(crate::crdt::operations::JoinAsk::sign(server_id, at, master)),
-        };
+        self.ask =
+            crate::crdt::operations::JoinAsk::sign_rejoin(server_id, at, self.join_key.as_deref(), self.follows_leave.as_ref(), now_ms(), master);
     }
 }
 

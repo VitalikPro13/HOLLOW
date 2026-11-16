@@ -2209,7 +2209,9 @@ pub(crate) async fn handle_join_server(
     // The request NONCE. Every answer names it, so an answer replayed out of a
     // three-day ring can never resolve the join the user made afterwards.
     let requested_at = ask_stamp(ask_floor.past_ms);
-    let Some(ask) = crate::crdt::operations::JoinAsk::sign_for_invite(&server_id, requested_at, &join_key, master_keypair) else {
+    let Some(ask) = crate::crdt::operations::JoinAsk::sign_rejoin(
+        &server_id, requested_at, Some(&join_key), ask_floor.follows.as_ref(), super::types::now_ms(), master_keypair,
+    ) else {
         hollow_log!("[HOLLOW-CRDT] Join of {server_id} refused here: its invite's join key is no key");
         return;
     };

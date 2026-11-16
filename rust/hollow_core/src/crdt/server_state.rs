@@ -2526,12 +2526,23 @@ impl ServerState {
             return false;
         }
         let event = MemberEvent::Admit { at: op.hlc.clone(), by: op.author.clone(), ask: ask.at, name: String::new() };
-        let extends = match super::members::admission(&self.events_of(target), &event) {
+        let events = self.events_of(target);
+        let extends = match super::members::admission(&events, &event) {
             super::members::Admission::Repeat => return true,
             super::members::Admission::Ignored | super::members::Admission::Rewrites => return false,
             super::members::Admission::Extends => true,
             super::members::Admission::Opens => false,
         };
+        // HOL-SEC-207: a rejoin's ask names the leave it follows. When a later leave or
+        // removal closed the span before this admission, the ask was made before it unless
+        // signed after it: its stamp, which may sit past the wall by a clock lead, does not
+        // count (the live gate's seal rule, at the fold).
+        if let Some(follows) = ask.follows.as_ref() {
+            let later_leave = super::members::closer_before(&events, &op.hlc).filter(|l| *l > follows.leave);
+            if later_leave.is_some_and(|l| i128::from(follows.made) <= i128::from(l.physical_ms)) {
+                return false;
+            }
+        }
         // An ask made with a link an invite reset retired opens no span after the reset,
         // nor does one naming no link (an older client) once any reset is held; before any
         // key is in force (a joiner whose fold has not taken one) nothing compares.

@@ -120,6 +120,13 @@ pub(crate) fn derive(events: &[MemberEvent]) -> Vec<MemberSpan> {
     spans
 }
 
+/// The clock of the op (the member's own leave or a removal) that closed its last span
+/// before `at`, when the record knows it exactly.
+pub(crate) fn closer_before(events: &[MemberEvent], at: &HlcTimestamp) -> Option<HlcTimestamp> {
+    let before: Vec<MemberEvent> = events.iter().filter(|e| e.at() < at).cloned().collect();
+    derive(&before).last().filter(|s| s.until_ms != u64::MAX)?.until_hlc.clone()
+}
+
 fn opens(ask: i64, spent: Option<i64>, last_leave: Option<u64>) -> bool {
     ask == LEGACY_ASK
         || (spent.is_none_or(|s| ask > s) && last_leave.is_none_or(|l| i128::from(ask) > i128::from(l)))

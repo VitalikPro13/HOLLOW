@@ -3749,6 +3749,193 @@ mod tests {
         assert!(!r.is_member(&id(2)), "an ask signed before the asker's own leave brought it back");
     }
 
+    /// HOL-SEC-207 (w2-d follow-up): J leaves inside a clock lead, rejoins on an ask
+    /// stamped past that leave and naming it, and leaves again inside the same lead. A
+    /// spare ask of that rejoin (a re-ask, stamped past the second leave too) handed to a
+    /// member after it re-admits nobody, whoever authors the admission. An ask naming the
+    /// second leave, or signed after it, still does.
+    #[test]
+    fn a_spare_reask_folds_out_after_a_second_leave() {
+        let (owner, founding) = founded(1);
+        let sid = owner.server_id.clone();
+        let t = founding.hlc.physical_ms;
+        let ask = |at: u64, leave: &CrdtOp, made: u64| {
+            let ask = crate::crdt::operations::JoinAsk::sign_rejoin(&sid, at as i64, None, Some(&leave.hlc), made as i64, &keys(2).0).unwrap();
+            assert!(ask.follows.is_some(), "an ask stamped past its signing names the leave");
+            ask
+        };
+        let admit = |ask| P::MemberAdded { peer_id: id(2), display_name: "m".into(), follow: None, ask: Some(ask) };
+        // The lead: J's clock sits 100 ms past the wall (`t + 1`).
+        let first_leave = op_at(2, &sid, t + 100, P::MemberRemoved { peer_id: id(2), seen: None });
+        let second_leave = op_at(2, &sid, t + 103, P::MemberRemoved { peer_id: id(2), seen: None });
+        let history = vec![
+            founding.clone(),
+            op_at(1, &sid, t + 1, add(&sid, 2)),
+            op_at(1, &sid, t + 2, add(&sid, 3)),
+            first_leave.clone(),
+            op_at(3, &sid, t + 102, admit(ask(t + 101, &first_leave, t + 1))),
+            second_leave.clone(),
+        ];
+        let mut r = joiner(&sid, 9);
+        r.ingest_remote(&history);
+        assert!(!r.is_member(&id(2)), "precondition: J left twice");
+        let spare = op_at(3, &sid, t + 105, admit(ask(t + 104, &first_leave, t + 2)));
+        assert!(!r.op_allowed(&spare), "a spare ask from before the second leave re-admitted J");
+        r.ingest_remote(std::slice::from_ref(&spare));
+        assert!(!r.is_member(&id(2)), "a spare ask from before the second leave re-admitted J");
+        let at_the_leave = op_at(3, &sid, t + 105, admit(ask(t + 104, &first_leave, t + 103)));
+        assert!(!r.op_allowed(&at_the_leave), "an ask signed at the second leave's own millisecond counts as before it");
+        let unheard = op_at(3, &sid, t + 106, admit(ask(t + 105, &first_leave, t + 104)));
+        assert!(r.op_allowed(&unheard), "an ask signed after the second leave, naming the first, counts by when it was signed");
+        let fresh = op_at(3, &sid, t + 106, admit(ask(t + 104, &second_leave, t + 3)));
+        r.ingest_remote(std::slice::from_ref(&fresh));
+        assert!(r.is_member(&id(2)), "J's own ask naming its second leave re-admits it");
+        // The owner kicks J inside the lead: an ask J made before the kick, naming its own
+        // last leave, brings it back no more than one from before a leave would.
+        r.ingest_remote(&[op_at(1, &sid, t + 108, P::MemberRemoved { peer_id: id(2), seen: None })]);
+        assert!(!r.is_member(&id(2)), "precondition: J was kicked");
+        let pre_kick = op_at(3, &sid, t + 110, admit(ask(t + 109, &second_leave, t + 4)));
+        assert!(!r.op_allowed(&pre_kick), "an ask made before the kick re-admitted J");
+        let after_kick = op_at(3, &sid, t + 111, admit(ask(t + 110, &second_leave, t + 109)));
+        assert!(r.op_allowed(&after_kick), "an ask J signed after the kick is judged as any rejoin");
+        // Judged at its own point: an earlier admission on the rejoin's own ask moves that
+        // span back, though leaves and a kick came after it.
+        let earlier = op_at(3, &sid, t + 101, admit(ask(t + 101, &first_leave, t + 1)));
+        assert!(r.op_allowed(&earlier), "the later leaves judged an admission dated before them");
+    }
+
+    /// HOL-SEC-207: the verdict does not hang on arrival order. A hears the second leave
+    /// before the spare admission; B hears the spare first (J still in on its rejoin, so it
+    /// only repeats) and the second leave late; C takes them in one batch.
+    #[test]
+    fn a_spare_reask_folds_out_whichever_arrives_first() {
+        let (_owner, founding) = founded(1);
+        let sid = founding.server_id.clone();
+        let t = founding.hlc.physical_ms;
+        let ask = |at: u64, leave: &CrdtOp, made: u64| {
+            crate::crdt::operations::JoinAsk::sign_rejoin(&sid, at as i64, None, Some(&leave.hlc), made as i64, &keys(2).0).unwrap()
+        };
+        let admit = |ask| P::MemberAdded { peer_id: id(2), display_name: "m".into(), follow: None, ask: Some(ask) };
+        let first_leave = op_at(2, &sid, t + 100, P::MemberRemoved { peer_id: id(2), seen: None });
+        let second_leave = op_at(2, &sid, t + 103, P::MemberRemoved { peer_id: id(2), seen: None });
+        let base = vec![
+            founding.clone(),
+            op_at(1, &sid, t + 1, add(&sid, 2)),
+            op_at(1, &sid, t + 2, add(&sid, 3)),
+            first_leave.clone(),
+            op_at(3, &sid, t + 102, admit(ask(t + 101, &first_leave, t + 1))),
+        ];
+        let spare = op_at(3, &sid, t + 105, admit(ask(t + 104, &first_leave, t + 2)));
+
+        let mut a = joiner(&sid, 9);
+        a.ingest_remote(&base);
+        a.ingest_remote(std::slice::from_ref(&second_leave));
+        a.ingest_remote(std::slice::from_ref(&spare));
+
+        let mut b = joiner(&sid, 8);
+        b.ingest_remote(&base);
+        b.ingest_remote(std::slice::from_ref(&spare));
+        b.ingest_remote(std::slice::from_ref(&second_leave));
+
+        let mut c = joiner(&sid, 7);
+        let mut all = base.clone();
+        all.push(spare.clone());
+        all.push(second_leave.clone());
+        c.ingest_remote(&all);
+
+        assert!(!a.is_member(&id(2)), "A: leave first, spare refused");
+        assert_eq!(a.is_member(&id(2)), c.is_member(&id(2)), "one batch disagrees with leave-first");
+        assert_eq!(a.is_member(&id(2)), b.is_member(&id(2)), "spare-first then late leave disagrees with leave-first");
+    }
+
+    /// HOL-SEC-207 on an owner checkpoint base: the leave that closed J's span before the
+    /// spare is read from the base's record, not only from ops the replica folded.
+    #[test]
+    fn a_spare_reask_folds_out_on_a_checkpoint_base() {
+        let (mut owner, founding) = founded(1);
+        let sid = owner.server_id.clone();
+        let t = founding.hlc.physical_ms;
+        let ask = |at: u64, leave: &CrdtOp, made: u64| {
+            crate::crdt::operations::JoinAsk::sign_rejoin(&sid, at as i64, None, Some(&leave.hlc), made as i64, &keys(2).0).unwrap()
+        };
+        let admit = |ask| P::MemberAdded { peer_id: id(2), display_name: "m".into(), follow: None, ask: Some(ask) };
+        let first_leave = op_at(2, &sid, t + 100, P::MemberRemoved { peer_id: id(2), seen: None });
+        let second_leave = op_at(2, &sid, t + 103, P::MemberRemoved { peer_id: id(2), seen: None });
+        let base = vec![
+            op_at(1, &sid, t + 1, add(&sid, 2)),
+            op_at(1, &sid, t + 2, add(&sid, 3)),
+            first_leave.clone(),
+            op_at(3, &sid, t + 102, admit(ask(t + 101, &first_leave, t + 1))),
+            second_leave.clone(),
+        ];
+        owner.ingest_remote(&base);
+        assert!(!owner.is_member(&id(2)));
+        let cp = checkpoint(&mut owner);
+        let spare = op_at(3, &sid, t + 105, admit(ask(t + 104, &first_leave, t + 2)));
+        let mut r = joiner(&sid, 9);
+        r.ingest_remote(&[founding.clone(), cp.clone()]);
+        assert!(!r.is_member(&id(2)), "precondition on the base");
+        r.ingest_remote(std::slice::from_ref(&spare));
+        assert!(!r.is_member(&id(2)), "a checkpoint base let the spare re-admit J");
+        owner.ingest_remote(std::slice::from_ref(&spare));
+        assert!(!owner.is_member(&id(2)), "owner re-admitted on the spare");
+    }
+
+    /// HOL-SEC-207: a second leave in the same millisecond as the rejoin's admission (a
+    /// later counter) still closes the span the spare would reopen.
+    #[test]
+    fn a_spare_reask_folds_out_after_a_leave_in_the_admissions_millisecond() {
+        let (_owner, founding) = founded(1);
+        let sid = founding.server_id.clone();
+        let t = founding.hlc.physical_ms;
+        let ask = |at: u64, leave: &CrdtOp, made: u64| {
+            crate::crdt::operations::JoinAsk::sign_rejoin(&sid, at as i64, None, Some(&leave.hlc), made as i64, &keys(2).0).unwrap()
+        };
+        let admit = |ask| P::MemberAdded { peer_id: id(2), display_name: "m".into(), follow: None, ask: Some(ask) };
+        let first_leave = op_at(2, &sid, t + 100, P::MemberRemoved { peer_id: id(2), seen: None });
+        let mut second_leave = op_at(2, &sid, t + 102, P::MemberRemoved { peer_id: id(2), seen: None });
+        second_leave.hlc.counter = 5;
+        second_leave.auth = None;
+        second_leave.sign(&keys(2).0, &keys(2).2);
+        let history = vec![
+            founding.clone(),
+            op_at(1, &sid, t + 1, add(&sid, 2)),
+            op_at(1, &sid, t + 2, add(&sid, 3)),
+            first_leave.clone(),
+            op_at(3, &sid, t + 102, admit(ask(t + 101, &first_leave, t + 1))),
+            second_leave.clone(),
+        ];
+        let mut r = joiner(&sid, 9);
+        r.ingest_remote(&history);
+        assert!(!r.is_member(&id(2)), "precondition: J left twice");
+        let spare = op_at(3, &sid, t + 105, admit(ask(t + 104, &first_leave, t + 2)));
+        assert!(!r.op_allowed(&spare), "same-ms second leave: the spare re-admitted J");
+    }
+
+    /// A signed `follows` binds: a member cannot move a rejoin's ask onto another leave,
+    /// another signing time, or strip it to the older shape.
+    #[test]
+    fn a_rejoin_ask_binds_the_leave_it_follows() {
+        let sid = "ab".repeat(20);
+        let (kp, me, _) = keys(2);
+        let leave = HlcTimestamp { physical_ms: 100, counter: 2, actor: me.clone() };
+        let ask = crate::crdt::operations::JoinAsk::sign_rejoin(&sid, 101, None, Some(&leave), 50, &kp).unwrap();
+        assert!(ask.verifies(&sid, &me));
+        let mut moved = ask.clone();
+        moved.follows.as_mut().unwrap().leave.counter = 3;
+        assert!(!moved.verifies(&sid, &me), "moved to another leave");
+        let mut later = ask.clone();
+        later.follows.as_mut().unwrap().made = 500;
+        assert!(!later.verifies(&sid, &me), "signed later than it was");
+        let stripped = crate::crdt::operations::JoinAsk { follows: None, ..ask.clone() };
+        assert!(!stripped.verifies(&sid, &me), "the leave stripped");
+        let mut junk = ask.clone();
+        junk.follows.as_mut().unwrap().leave.actor = format!("{me}\0x");
+        assert!(!junk.verifies(&sid, &me), "an actor carrying a separator");
+        let plain = crate::crdt::operations::JoinAsk::sign_rejoin(&sid, 101, None, None, 50, &kp).unwrap();
+        assert_eq!(plain, crate::crdt::operations::JoinAsk::sign(&sid, 101, &kp), "no leave named = the ask as it always was");
+    }
+
     /// The rev 2 probe (H2): a late admission of a current member, inside the gap a kick
     /// left, on the ask that admitted it before.
     #[test]

@@ -1285,6 +1285,8 @@ async fn run_event_loop(
                         continue;
                     }
                     let refused = (row.state == "rejected").then(|| row.reason.clone());
+                    // The leave a rejoin follows is the book's, as the first ask named it.
+                    let follows_leave = leave_book.ask_floor(&row.server_id).follows;
                     pending_server_joins.insert(row.server_id.clone(), PendingJoin {
                         twitch_proof_json: row.twitch_proof_json,
                         nsfw_confirmed: row.nsfw_confirmed,
@@ -1298,12 +1300,15 @@ async fn run_event_loop(
                         key_package: row.key_package,
                         owner_pin: row.owner_pin,
                         ask: row.join_key.as_deref().and_then(|key| {
-                            crate::crdt::operations::JoinAsk::sign_for_invite(&row.server_id, row.requested_at, key, &master_keypair)
+                            crate::crdt::operations::JoinAsk::sign_rejoin(
+                                &row.server_id, row.requested_at, Some(key), follows_leave.as_ref(), super::types::now_ms(), &master_keypair,
+                            )
                         }),
                         join_key: row.join_key,
                         reply_secret: row.reply_secret.as_deref().and_then(super::join_lane::ReplySecret::from_stored),
                         refused,
                         card: card.clone(),
+                        follows_leave,
                         ..Default::default()
                     });
                     restored += 1;

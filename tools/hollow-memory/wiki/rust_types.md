@@ -373,7 +373,7 @@ The plaintext wire protocol enum. Serialized as JSON with `#[serde(tag = "type")
 - **`SharedServers { ask, servers, part, pad }`** (`"shared_servers"`, Olm only, DEVICE_PROOF_DESIGN 8.7): which servers a friend shares with our identity, asked by a fresh install after a phrase recovery and answered in four frames of one size by a friend device that counts the asker.
 - **`VoiceChannelFwdWant`** (`"vc_fwd_want"`, targeted, Olm): a leg's ask for forwarded voices (gossip forwarding ships OFF).
 - **`MlsKeyPackage` / its forward / `MlsKeyPackageAck`** now ride Olm only (Lane::Carried), sent only via `crypto_handler::carry_key_package`.
-- **`MemberAdded.ask`** carries the joiner's `JoinAsk` (`hollow-join-ask2` names the invite key); **`MemberRemoved.seen`** the kicker's seen grants; **`CrdtOp.dev`** the device proof (wiki `rust_crdt`).
+- **`MemberAdded.ask`** carries the joiner's `JoinAsk` (`hollow-join-ask2` names the invite key, `hollow-join-ask3` also the leave a rejoin follows, only when its stamp leads the joiner's wall clock); **`MemberRemoved.seen`** the kicker's seen grants; **`CrdtOp.dev`** the device proof (wiki `rust_crdt`).
 - NetworkEvents: `AgeGateChanged { allowed }`, `ServerUnavailable { server_id }` / `ServerAvailable { server_id }` (relay refusal and lift), `RelayDenied { kind }` (`account_denied` / `network_denied`).
 - NodeCommands: `ResetInviteLink`, `AgeGateChanged`, `RevokeDevice { device_peer_id, mode: RemoveMode, with_dependents }` (retire vs lost or stolen), `RetryRelayDenials`, `RetryRelayDenial { room }`, `ChooseRestore`, `RefoldReviews`, `AnswerRefold`.
 

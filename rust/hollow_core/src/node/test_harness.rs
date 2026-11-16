@@ -70491,3 +70491,168 @@ async fn t18_a_cut_channel_push_is_asked_again_only_on_screen() {
     relay.release_streams(&o.device_id, &b.device_id, true);
     drop(b);
 }
+
+// t15-verify-probe
+
+/// HOL-SEC-207 (w2-d follow-up): J leaves inside a clock lead, rejoins, and leaves again
+/// inside the same lead. A member holding a spare ask from J's rejoin (signed before the
+/// second leave, stamped past it) authors J's admission on it: the owner's fold refuses
+/// it, though the ask's stamp sits past the second leave. The same member's admission on
+/// an ask J signed after that leave lands, so the path itself carries an admission.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn t15_a_member_readmits_no_leaver_on_a_spare_ask() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o, m, mut j, server_id) = owner_member_and_joiner(&relay, 136, 137, 138).await;
+    drain_events(&mut j);
+    j.cmd_tx.send(join_cmd(&server_id)).await.unwrap();
+    assert!(
+        wait_event(&mut j, std::time::Duration::from_secs(20), |e| matches!(e, NetworkEvent::ServerJoined { server_id: s, .. } if *s == server_id)).await,
+        "precondition: J joins",
+    );
+    let ahead = 120_000u64;
+    let renamed = forge_crdt_op(
+        &server_id, &o.master_id, crate::crdt::operations::CrdtPayload::ServerRenamed { new_name: "From ahead".into() },
+        ahead, Some(&o.master_kp),
+    );
+    send_as(&relay, &server_id, &o, &j, sync_response(&server_id, &[renamed])).await;
+    assert!(
+        wait_until(10, async || j.live_server_state(&server_id).await.is_some_and(|s| s.name() == "From ahead")).await,
+        "precondition: J's clock witnessed the op from ahead",
+    );
+    let floor = crate::crdt::hlc::wall_clock_ms() + ahead / 2;
+    let jm = j.master_id.clone();
+    let left_by = async || o.live_server_state(&server_id).await.and_then(|s| s.left_by(&jm).cloned());
+
+    j.cmd_tx.send(NodeCommand::LeaveServer { server_id: server_id.clone() }).await.unwrap();
+    assert!(
+        wait_until(15, async || left_by().await.is_some_and(|l| l.physical_ms > floor)).await,
+        "precondition: the owner holds J's leave, stamped ahead of the wall clock",
+    );
+    let first_leave = left_by().await.unwrap();
+    drain_events(&mut j);
+    j.cmd_tx.send(join_cmd(&server_id)).await.unwrap();
+    assert!(wait_until(20, async || o.live_server_state(&server_id).await.is_some_and(|s| s.is_member(&jm))).await, "precondition: J rejoins");
+    let rejoin_named = o.live_server_state(&server_id).await.and_then(|s| {
+        s.op_log.iter().rev().find_map(|op| match &op.payload {
+            crate::crdt::operations::CrdtPayload::MemberAdded { peer_id, ask: Some(ask), .. } if *peer_id == jm => {
+                Some(ask.follows.as_ref().map(|f| f.leave.clone()))
+            }
+            _ => None,
+        })
+    });
+    assert_eq!(rejoin_named, Some(Some(first_leave.clone())), "J's rejoin ask signs the leave it follows");
+    // J's re-ask of that rejoin, as `PendingJoin::ask_again` would sign it now: past the
+    // first ask, naming the first leave, signed before the second leave.
+    let key = invite_key(&server_id);
+    let spare_at = (first_leave.physical_ms + ahead / 4) as i64;
+    let spare = crate::crdt::operations::JoinAsk::sign_rejoin(
+        &server_id, spare_at, key.as_deref(), Some(&first_leave), super::types::now_ms(), &j.master_kp,
+    )
+    .unwrap();
+
+    j.cmd_tx.send(NodeCommand::LeaveServer { server_id: server_id.clone() }).await.unwrap();
+    assert!(
+        wait_until(15, async || left_by().await.is_some_and(|l| l != first_leave)).await,
+        "precondition: the owner holds J's second leave",
+    );
+    let second_leave = left_by().await.unwrap();
+    assert!(spare_at > second_leave.physical_ms as i64, "precondition: the spare is stamped past the second leave");
+
+    let admit = |ask| crate::crdt::operations::CrdtPayload::MemberAdded {
+        peer_id: jm.clone(), display_name: "j".into(), follow: None, ask: Some(ask),
+    };
+    let past = second_leave.physical_ms - crate::crdt::hlc::wall_clock_ms() + 1_000;
+    let readmit = forge_crdt_op(&server_id, &m.master_id, admit(spare), past, Some(&m.master_kp));
+    send_as(&relay, &server_id, &m, &o, sync_response(&server_id, &[readmit])).await;
+    // The control follows on the same path, so once it lands the spare was judged first:
+    // had the spare re-admitted J, the control would only repeat that span.
+    let signed_after = crate::crdt::operations::JoinAsk::sign_rejoin(
+        &server_id, spare_at + 1, key.as_deref(), Some(&first_leave), second_leave.physical_ms as i64 + 1, &j.master_kp,
+    )
+    .unwrap();
+    let control = forge_crdt_op(&server_id, &m.master_id, admit(signed_after), past + 1_000, Some(&m.master_kp));
+    send_as(&relay, &server_id, &m, &o, sync_response(&server_id, &[control])).await;
+    assert!(
+        wait_until(10, async || o.live_server_state(&server_id).await.is_some_and(|s| s.is_member(&jm))).await,
+        "control: an ask signed after the second leave is admitted on the same path",
+    );
+    let opened_by = o.live_server_state(&server_id).await
+        .and_then(|s| s.member_record.get(&jm).and_then(|spans| spans.last()).map(|span| span.asked_at));
+    assert_eq!(opened_by, Some(spare_at + 1), "a member re-admitted J on a spare ask made before its second leave");
+}
+
+/// HOL-SEC-207: a re-ask stamped past the wall clock signs the leave its join follows, as
+/// the first ask did; one stamped behind it signs the 0.14.0 ask.
+#[test]
+fn t15_asking_again_signs_the_leave_the_join_follows() {
+    let master = NativeKeypair::from_secret_bytes(&seed_bytes(126));
+    let sid = "ab".repeat(20);
+    let ahead = super::types::now_ms() + 60_000;
+    let leave = crate::crdt::hlc::HlcTimestamp { physical_ms: ahead as u64, counter: 3, actor: master.peer_id() };
+    let mut join = super::types::PendingJoin { requested_at: ahead + 1, follows_leave: Some(leave.clone()), ..Default::default() };
+    join.ask_again(&sid, ahead, &master);
+    let ask = join.ask.expect("a re-ask signs an ask");
+    assert_eq!(ask.follows.map(|f| f.leave), Some(leave.clone()), "the re-ask names the leave");
+
+    let behind = crate::crdt::hlc::HlcTimestamp { physical_ms: 1_700_000_000_000, ..leave };
+    let mut join = super::types::PendingJoin { requested_at: 1_700_000_000_001, follows_leave: Some(behind), ..Default::default() };
+    join.ask_again(&sid, 1_700_000_000_000, &master);
+    let ask = join.ask.expect("a re-ask signs an ask");
+    assert_eq!(ask, crate::crdt::operations::JoinAsk::sign(&sid, 1_700_000_000_002, &master), "the 0.14.0 ask, naming no leave");
+}
+
+/// HOL-SEC-207 compatibility: J leaves and rejoins with no clock lead. Its ask is the
+/// exact one 0.14.0 signed (no `follows`, read whole by a 0.14.0 `JoinAsk`), so a 0.14.0
+/// replica counts the admission; here the owner admits J and commits its device's leaf.
+/// The harness runs one build, so the 0.14.0 replica is modelled by the ask's bytes
+/// (`JoinAsk::reads_as_0140`), not by a node.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn t15_a_rejoin_without_a_clock_lead_signs_the_0140_ask() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (o, m, mut j, server_id) = owner_member_and_joiner(&relay, 139, 140, 141).await;
+    drain_events(&mut j);
+    j.cmd_tx.send(join_cmd(&server_id)).await.unwrap();
+    assert!(
+        wait_event(&mut j, std::time::Duration::from_secs(20), |e| matches!(e, NetworkEvent::ServerJoined { server_id: s, .. } if *s == server_id)).await,
+        "precondition: J joins",
+    );
+    let jm = j.master_id.clone();
+    let jd = j.device_id.clone();
+    assert!(wait_until(15, async || o.mls_members(&server_id).await.contains(&jd)).await, "precondition: J's leaf is in");
+
+    j.cmd_tx.send(NodeCommand::LeaveServer { server_id: server_id.clone() }).await.unwrap();
+    assert!(
+        wait_until(15, async || o.live_server_state(&server_id).await.is_some_and(|s| !s.is_member(&jm) && s.left_by(&jm).is_some())).await,
+        "precondition: the owner holds J's leave",
+    );
+    assert!(
+        wait_until(15, async || o.mls_members_checked(&server_id).await.is_some_and(|v| !v.contains(&jd))).await,
+        "precondition: J's leaf is committed out",
+    );
+    let leave = o.live_server_state(&server_id).await.and_then(|s| s.left_by(&jm).cloned()).unwrap();
+    assert!(leave.physical_ms <= crate::crdt::hlc::wall_clock_ms(), "precondition: no clock lead");
+
+    drain_events(&mut j);
+    j.cmd_tx.send(join_cmd(&server_id)).await.unwrap();
+    assert!(wait_until(20, async || o.live_server_state(&server_id).await.is_some_and(|s| s.is_member(&jm))).await, "J rejoins");
+    let ask = o.live_server_state(&server_id).await.and_then(|s| {
+        s.op_log.iter().rev().find_map(|op| match &op.payload {
+            crate::crdt::operations::CrdtPayload::MemberAdded { peer_id, ask: Some(ask), .. } if *peer_id == jm => Some(ask.clone()),
+            _ => None,
+        })
+    });
+    let ask = ask.expect("the rejoin's admission carries J's ask");
+    assert!(ask.follows.is_none(), "a rejoin with no clock lead named its leave (ask3)");
+    assert!(ask.reads_as_0140(&server_id, &jm), "a 0.14.0 replica cannot read the rejoin's ask");
+    assert!(wait_until(15, async || m.live_server_state(&server_id).await.is_some_and(|s| s.is_member(&jm))).await, "M counts J again");
+    assert!(wait_until(20, async || o.mls_members(&server_id).await.contains(&jd)).await, "J's leaf is committed again");
+    assert!(wait_until(15, async || m.mls_members(&server_id).await.contains(&jd)).await, "M holds J's leaf");
+}

@@ -170,8 +170,17 @@ Binary name: `hollow-relay`
   `fwd:` room keeps no ring. The VPS forwarder's room holds viewers of every server, so
   before this anyone joining it saw who watched forwarded shares and when. Unit test
   `test_fwd_room.cpp`; MockRelay mirrors it (`RelayInner::paired/shares`).
-- Live probe: `~/relay-next/door_probe.py [url] [domain]` (24 checks; mind the 10 new
-  connections per minute per address when chaining probes).
+- Live probe: `relay-uws/test/probes/door_probe.py <url> <domain> [connect host:port]`
+  (versioned since t15; the box's `~/relay-next/door_probe.py` is a copy kept in sync).
+  28 checks on a 0.14 relay: the owner's device shows its roster on `inbox:{master}`,
+  a master-only (0.13) first lock and a link from a device the fold does not count are
+  refused, the counted device's links are taken, then the D1 door checks and a lock
+  move (a move without a device proof refused). A refusal counts only as the relay's
+  actual `lock_chain` reply with `put: false` (it always answers); silence or a dropped
+  socket fails the check. It WRITES a lock and a roster that a
+  restart keeps (memfd snapshot), so it runs against the deploy canary or hollowsrv,
+  never the production process. Mind the 10 new connections per minute per address
+  when chaining probes.
 
 ## Resumable sessions (2026-10-06, RESUMABLE_SESSIONS_PLAN.md section 9)
 
