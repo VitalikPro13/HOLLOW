@@ -216,6 +216,13 @@ the signal whitelist's four touches, the stream overlay consent detail, share ba
 - Screen capture: native (WGC/SCK); desktop share audio = the out-of-process
   `screen_audio_capturer` over `0x03`; SCK audio-only needs an ignored `.screen` output.
   `project_screen_capture`.
+- A voice channel share runs ONE audio capture (`_shareAudioCapture`), every platform; each
+  packet goes from the SHARER over its own data channel to `shareAudioTargets` (current watchers
+  it serves, direct or forwarder-routed), read per packet; a forwarder carries video only and is
+  never a watcher. Never key audio to a video leg or a viewer. Stop paths take the capture before
+  their first await, `_shareEnding` refuses watches and empties the audience, a token mutes any
+  capture its share no longer owns. Never dial a general data channel to the relay's forwarder
+  (Rust's J1 refuses it). #135, `test/vc_forwarder_share_audio_test.dart`.
 - Wayland share = PORTAL-FIRST: NEVER enumerate desktop sources there; shares ride the
   `wayland-portal:<gen>` sentinel, same gen = silent re-share.
   `feedback_wayland_window_capture_sigsegv`.

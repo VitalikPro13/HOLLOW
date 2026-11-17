@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
+import 'package:hollow/src/core/providers/forwarder_info_provider.dart';
 import 'package:hollow/src/core/providers/ice_config_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/relay_domain_provider.dart';
@@ -108,7 +109,13 @@ class WebRtcNotifier extends Notifier<WebRtcState> {
   }
 
   /// Proactively establish the GENERAL WebRTC connection to a peer.
+  ///
+  /// Never to the relay's media forwarder: our Olm session with it (the
+  /// forwarder lane) is no friendship or shared server, so Rust refuses the
+  /// dial, and it carries share video only, never share audio (#135).
   Future<void> ensureConnection(String peerId) async {
+    final forwarder = ref.read(forwarderInfoProvider).peerId;
+    if (forwarder.isNotEmpty && peerId == forwarder) return;
     final s = service;
     if (s.hasPeerChannel(peerId)) return;
     final peers = Map<String, WebRtcPeerStatus>.from(state.peers);

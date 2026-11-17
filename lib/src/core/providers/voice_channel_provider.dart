@@ -32,7 +32,9 @@ import 'package:hollow/src/core/services/desktop_capture_support.dart';
 import 'package:hollow/src/core/services/frame_cryptor_service.dart';
 import 'package:hollow/src/core/services/ice_route_probe.dart';
 import 'package:hollow/src/core/services/macos_version.dart';
+import 'package:hollow/src/core/services/mac_sck_screen_audio_capturer.dart';
 import 'package:hollow/src/core/services/mobile_screen_audio_capturer.dart';
+import 'package:hollow/src/core/services/screen_audio_capturer.dart';
 import 'package:hollow/src/core/services/screen_audio_receiver.dart';
 import 'package:hollow/src/core/services/share_audio_level.dart';
 import 'package:hollow/src/core/services/sound_service.dart';
@@ -301,6 +303,29 @@ class VoiceChannelState {
   }
 }
 
+/// A running share-audio capture: the desktop capturer process, or a phone's
+/// native capture feeding the Rust encoder.
+abstract interface class ShareAudioCapture {
+  bool get isActive;
+  Future<void> stop();
+}
+
+/// Starts the platform's share-audio capture; null when it could not start.
+typedef ShareAudioCaptureStarter = Future<ShareAudioCapture?> Function(
+    void Function(Uint8List packet) onPacket);
+
+class _ShareAudioAdapter implements ShareAudioCapture {
+  _ShareAudioAdapter(this._isActive, this._stop);
+  final bool Function() _isActive;
+  final Future<void> Function() _stop;
+
+  @override
+  bool get isActive => _isActive();
+
+  @override
+  Future<void> stop() => _stop();
+}
+
 /// Sharer-side state for ONE forwarder serving our share: the VPS forwarder
 /// or a promoted viewer-peer forwarder, each with its own single ingest leg.
 class _FwdBranch {
@@ -487,9 +512,30 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   ScreenContentProfile _screenShareProfile = ScreenContentProfile.motion;
   ScreenAudioReceiver? _screenAudioRenderer;
 
-  /// MOBILE share-audio capture: ONE instance for the whole channel, because the
-  /// Rust Opus encoder is a process-global singleton. Fans out at send time.
-  MobileScreenAudioCapturer? _mobileShareAudioCapturer;
+  /// The share's ONE audio capture, fanned out per packet over
+  /// [shareAudioTargets]: one `[seq][opus]` stream serves every viewer, and on
+  /// a phone the Rust Opus encoder is a process singleton anyway.
+  ShareAudioCapture? _shareAudioCapture;
+
+  /// Names the current capture; a packet from any other one is dropped.
+  Object? _shareAudioToken;
+
+  /// Restarts of a capture that died while its share is live.
+  int _shareAudioRestarts = 0;
+  static const int _maxShareAudioRestarts = 3;
+  Timer? _shareAudioWatchdog;
+
+  /// Test seam: replaces the platform capture.
+  @visibleForTesting
+  ShareAudioCaptureStarter? debugShareAudioStarter;
+
+  /// Test seam: builds the direct per-viewer share leg.
+  @visibleForTesting
+  ScreenShareService Function()? debugDirectLegFactory;
+
+  @visibleForTesting
+  ScreenShareService? debugDirectLeg(String viewer) =>
+      _outgoingScreenShares[viewer];
 
   /// Entire-screen anti-echo (Windows): the voice-render child pid to EXCLUDE
   /// from screen-audio capture so the VC voices it plays aren't re-captured,
@@ -563,22 +609,42 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   VoiceChannelService? get service => _service;
 
   /// Adopts a call's media without the native bring-up: the mesh, incoming
-  /// shares, forwarder ingest legs (by forwarder id), the camera self-view and
-  /// our own share's capture.
+  /// shares, forwarder ingest legs (by forwarder id; [peerForwarders] names the
+  /// promoted viewers among them), peers whose audio PC is up, the camera
+  /// self-view and our own share's capture.
   @visibleForTesting
   void debugAdoptCall(
     VoiceChannelService mesh, {
     Map<String, ScreenShareService> incomingShares = const {},
     Map<String, ScreenShareService> forwarderIngests = const {},
+    Set<String> peerForwarders = const {},
+    Set<String> audioConnected = const {},
     RTCVideoRenderer? cameraRenderer,
     MediaStream? captureStream,
   }) {
     _service = mesh;
     _incomingScreenShares.addAll(incomingShares);
     forwarderIngests.forEach((forwarder, ingest) => _fwdBranches[forwarder] =
-        _FwdBranch(forwarder, isPeer: false)..ingest = ingest);
+        _FwdBranch(forwarder, isPeer: peerForwarders.contains(forwarder))
+          ..ingest = ingest);
+    _audioConnectedPeers.addAll(audioConnected);
     _localCameraRenderer = cameraRenderer;
     _screenCaptureStream = captureStream;
+  }
+
+  /// Adopts our own running share without the capture bring-up: its origin,
+  /// whether it carries audio, and direct legs already offered (by viewer).
+  @visibleForTesting
+  void debugAdoptShare({
+    required String originPeer,
+    bool shareAudio = false,
+    Map<String, ScreenShareService> outgoingShares = const {},
+  }) {
+    if (!state.isScreenSharing) state = state.copyWith(isScreenSharing: true);
+    _shareSessionId ??= 'debug-share';
+    _shareOriginPeer = originPeer;
+    _screenShareAudio = shareAudio;
+    _outgoingScreenShares.addAll(outgoingShares);
   }
 
   RTCVideoRenderer? getScreenShareRenderer(String peerId) =>
@@ -1301,6 +1367,9 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     _resetSframeHeal();
     // Whatever join is mid-flight no longer owns this call.
     _joinGen++;
+    // Before any other await: no system audio leaves once the call ends.
+    _screenShareAudio = false;
+    await _teardownPhase('share audio capture', _stopShareAudio);
     await _teardownPhase('camera', _disposeCameraRenderers);
     _audioConnectedPeers.clear();
     await _teardownPhase(
@@ -1806,26 +1875,10 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     // Opt-in watching (issue #38): no fan-out here. Peers learn from the
     // screen_state broadcast and request the share with screen_watch.
 
-    // MOBILE: one central audio capture for the whole channel; fanning over
-    // _outgoingScreenShares.keys picks up late joiners automatically.
-    if (shareAudio && (Platform.isAndroid || Platform.isIOS)) {
-      final webrtc = ref.read(webRtcProvider.notifier).service;
-      final capturer = _mobileShareAudioCapturer = MobileScreenAudioCapturer();
-      final ok = await capturer.start(onPacket: (packet) {
-        for (final sharePeerId in _outgoingScreenShares.keys) {
-          webrtc.sendScreenAudio(sharePeerId, packet);
-        }
-      });
-      if (!ok) {
-        debugPrint('[HOLLOW-AU-SCREEN] VC mobile audio capture unavailable');
-        _mobileShareAudioCapturer = null;
-      }
-      if (_shareSuperseded(session)) {
-        if (identical(_mobileShareAudioCapturer, capturer)) {
-          await _stopMobileShareAudio();
-        }
-        return;
-      }
+    // ONE audio capture per share, after the redirect armed (its excludePid).
+    if (shareAudio) {
+      await _startShareAudio(session);
+      if (_shareSuperseded(session)) return;
     }
 
     _broadcastScreenState(true);
@@ -1834,21 +1887,154 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   }
 
   @visibleForTesting
-  Future<void> debugFinishShareStart({required bool armRedirect}) {
+  Future<void> debugFinishShareStart(
+      {required bool armRedirect, bool shareAudio = false}) {
     _shareSessionId = 'debug-share';
+    if (shareAudio) _screenShareAudio = true;
     return _finishShareStart(
-        session: 'debug-share', shareAudio: false, armRedirect: armRedirect);
+        session: 'debug-share', shareAudio: shareAudio, armRedirect: armRedirect);
   }
 
-  /// Stop the central mobile share-audio capture (no-op on desktop / when
-  /// not running). Nulls the field FIRST so a re-entrant stop can't double-stop.
-  Future<void> _stopMobileShareAudio() async {
-    final capturer = _mobileShareAudioCapturer;
-    _mobileShareAudioCapturer = null;
-    if (capturer != null) {
+  /// Starts the adopted share's audio capture as a live share start does.
+  @visibleForTesting
+  Future<void> debugStartShareAudio() => _startShareAudio(_shareSessionId!);
+
+  /// Whether our share or the whole call is being taken down: no watch is
+  /// served and no audio leaves meanwhile.
+  bool get _shareEnding =>
+      _stoppingScreenShare || _leaving || _teardownInFlight != null;
+
+  /// The viewers our share's audio goes to: every CURRENT watcher whose video
+  /// we serve, on a direct leg or through a forwarder branch (a peer branch's
+  /// own head included). Audio always rides our data channel to the viewer; a
+  /// forwarder carries video only and, never a watcher, never hears it (#135).
+  /// Read per packet, so an unwatch, leave or kick is silent at the next one.
+  @visibleForTesting
+  Set<String> get shareAudioTargets {
+    if (!_screenShareAudio || _screenCaptureStream == null || _shareEnding) {
+      return const {};
+    }
+    final served = <String>{..._outgoingScreenShares.keys};
+    for (final branch in _fwdBranches.values) {
+      served.addAll(branch.viewers);
+      if (branch.isPeer) served.add(branch.forwarderId);
+    }
+    return served.intersection(_watchers);
+  }
+
+  /// Starts [session]'s audio capture; one that lands after its share ended
+  /// is stopped on the spot, never kept for a later share.
+  Future<void> _startShareAudio(String session) async {
+    final token = Object();
+    _shareAudioToken = token;
+    final capture = await _openShareAudio((packet) {
+      if (!identical(_shareAudioToken, token)) return;
+      _fanOutShareAudio(packet);
+    });
+    if (!identical(_shareAudioToken, token) || _shareSuperseded(session)) {
+      if (identical(_shareAudioToken, token)) _shareAudioToken = null;
+      await capture?.stop();
+      return;
+    }
+    if (capture == null) {
+      _vcLog('[HOLLOW-AU-SCREEN] share audio capture unavailable');
+      _shareAudioToken = null;
+      return;
+    }
+    _shareAudioCapture = capture;
+    _armShareAudioWatchdog(session);
+  }
+
+  /// A capture whose process died while the share is live is started again,
+  /// at most [_maxShareAudioRestarts] times, waiting longer each time.
+  void _armShareAudioWatchdog(String session) {
+    _shareAudioWatchdog?.cancel();
+    final delay = Duration(seconds: 2 << _shareAudioRestarts);
+    _shareAudioWatchdog = Timer(delay, () async {
+      _shareAudioWatchdog = null;
+      final capture = _shareAudioCapture;
+      if (capture == null || _shareSuperseded(session)) return;
+      if (capture.isActive) {
+        _armShareAudioWatchdog(session);
+        return;
+      }
+      if (_shareAudioRestarts >= _maxShareAudioRestarts) {
+        _vcLog('[HOLLOW-AU-SCREEN] share audio capture died; out of restarts');
+        return;
+      }
+      _shareAudioRestarts++;
+      _vcLog('[HOLLOW-AU-SCREEN] share audio capture died; restart '
+          '$_shareAudioRestarts/$_maxShareAudioRestarts');
+      _shareAudioCapture = null;
+      _shareAudioToken = null;
       try {
-        await capturer.stop();
+        await capture.stop();
       } catch (_) {}
+      if (_shareSuperseded(session)) return;
+      await _startShareAudio(session);
+    });
+  }
+
+  /// Takes the capture away before the first await, so nothing that runs
+  /// while it stops can send through it or restart it.
+  Future<void> _stopShareAudio() async {
+    _shareAudioWatchdog?.cancel();
+    _shareAudioWatchdog = null;
+    _shareAudioToken = null;
+    _shareAudioRestarts = 0;
+    final capture = _shareAudioCapture;
+    _shareAudioCapture = null;
+    if (capture == null) return;
+    try {
+      await capture.stop();
+    } catch (e) {
+      debugPrint('[HOLLOW-AU-SCREEN] share audio stop failed: $e');
+    }
+  }
+
+  Future<ShareAudioCapture?> _openShareAudio(
+      void Function(Uint8List packet) onPacket) async {
+    final starter = debugShareAudioStarter;
+    if (starter != null) return starter(onPacket);
+    try {
+      if (Platform.isWindows || Platform.isLinux) {
+        final capturer = ScreenAudioCapturer();
+        final ok = await capturer.start(
+          pid: _screenSharePid,
+          windowHwnd: _screenShareHwnd,
+          excludePid: _screenShareExcludePid,
+          onPacket: onPacket,
+        );
+        return ok
+            ? _ShareAudioAdapter(() => capturer.isActive, capturer.stop)
+            : null;
+      }
+      if (Platform.isMacOS && MacOsScreenAudioSupport.hasSckAudio) {
+        final capturer = MacSckScreenAudioCapturer();
+        final ok = await capturer.start(onPacket: onPacket);
+        return ok
+            ? _ShareAudioAdapter(() => capturer.isActive, capturer.stop)
+            : null;
+      }
+      if (Platform.isAndroid || Platform.isIOS) {
+        final capturer = MobileScreenAudioCapturer();
+        final ok = await capturer.start(onPacket: onPacket);
+        return ok
+            ? _ShareAudioAdapter(() => capturer.isActive, capturer.stop)
+            : null;
+      }
+    } catch (e) {
+      debugPrint('[HOLLOW-AU-SCREEN] share audio capture failed: $e');
+    }
+    return null;
+  }
+
+  void _fanOutShareAudio(Uint8List packet) {
+    final targets = shareAudioTargets;
+    if (targets.isEmpty) return;
+    final webrtc = ref.read(webRtcProvider.notifier).service;
+    for (final viewer in targets) {
+      webrtc.sendScreenAudio(viewer, packet);
     }
   }
 
@@ -1872,10 +2058,11 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       _screenTrackPoller?.cancel();
       _screenTrackPoller = null;
 
-      // Stop the central mobile capture first (no per-peer service owns it),
-      // then the outgoing PCs, BEFORE disarming the redirect: otherwise the
-      // window where VC voices play in-process is re-captured.
-      await _stopMobileShareAudio();
+      // Share audio first, taken before any await, then the outgoing PCs,
+      // BEFORE disarming the redirect: otherwise the window where VC voices
+      // play in-process is re-captured.
+      _screenShareAudio = false;
+      await _stopShareAudio();
       _watchers.clear();
       _syncWatchers();
       _watcherDisplays.clear();
@@ -2040,10 +2227,11 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     final iceConfig = ref.read(iceConfigProvider);
     final localPeerId = ref.read(identityProvider).peerId ?? '';
 
-    final service = ScreenShareService(
-      localPeerId: localPeerId,
-      iceServers: iceConfig,
-    );
+    final service = debugDirectLegFactory?.call() ??
+        ScreenShareService(
+          localPeerId: localPeerId,
+          iceServers: iceConfig,
+        );
 
     service.onIceCandidate = (candidate) {
       if (!state.isInVoiceChannel) return;
@@ -2126,26 +2314,6 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
         }),
       );
 
-      // Desktop share audio runs one capturer exe per peer (Windows WASAPI,
-      // Linux PulseAudio monitor, macOS 13+ ScreenCaptureKit). MOBILE is
-      // deliberately absent: it runs ONE central capture in startScreenShare.
-      final dcAudio = Platform.isWindows ||
-          Platform.isLinux ||
-          (Platform.isMacOS && MacOsScreenAudioSupport.hasSckAudio);
-      if (_screenShareAudio && dcAudio && _screenCaptureStream != null) {
-        final webrtc = ref.read(webRtcProvider.notifier).service;
-        debugPrint('[HOLLOW-AU-SCREEN] Starting screen audio for peer $peerId '
-            '(hasDC=${webrtc.hasPeerChannel(peerId)})');
-        await service.startScreenAudioCapture(
-          _screenCaptureStream!.id,
-          pid: _screenSharePid,
-          windowHwnd: _screenShareHwnd,
-          excludePid: _screenShareExcludePid,
-          onPacket: (packet) {
-            webrtc.sendScreenAudio(peerId, packet);
-          },
-        );
-      }
     } catch (e) {
       // A half-built service left in the map leaks its thread-set.
       debugPrint('[HOLLOW-VC] _sendScreenShareToPeer($peerId) failed: $e');
@@ -2462,8 +2630,10 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
         'fwd_simulcast=$fwdSimulcast fwd_feed=$fwdFeed');
 
     if (want) {
-      // Raced our stop; the peer's badge clears via screen_state{disabled}.
+      // Raced our stop or leave; the peer's badge clears via
+      // screen_state{disabled}.
       if (!state.isScreenSharing || _screenCaptureStream == null) return;
+      if (_shareEnding) return;
       _watchers.add(peerId);
       _syncWatchers();
       _watcherDisplays[peerId] =
@@ -4260,7 +4430,6 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       _maybeLeaveFwdRoom(fwd);
     }
 
-    await _stopMobileShareAudio();
     final allSharePeers = <String>{
       ..._outgoingScreenShares.keys,
       ..._incomingScreenShares.keys,
