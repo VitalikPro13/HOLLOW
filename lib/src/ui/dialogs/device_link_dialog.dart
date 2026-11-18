@@ -381,7 +381,7 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent>
         _submitCode();
       }
     });
-    final phone = WelcomeFrame.isPhone(context);
+    final phone = WelcomeFrame.fullScreen(context);
     final complete = _codeController.text.length == kLinkCodeLength;
     return WelcomeFrame(
       title: 'Link a device',
@@ -471,7 +471,7 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent>
     required String sub,
     required bool cancel,
   }) {
-    final phone = WelcomeFrame.isPhone(context);
+    final phone = WelcomeFrame.fullScreen(context);
     return WelcomeFrame(
       title: 'Linking this device',
       body: Column(
@@ -507,7 +507,7 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent>
   }
 
   Widget _receiving(HollowTheme hollow, DeviceLinkState state) {
-    final phone = WelcomeFrame.isPhone(context);
+    final phone = WelcomeFrame.fullScreen(context);
     final counted = state.totalBytes > 0;
     return WelcomeFrame(
       title: 'Linking this device',
@@ -583,7 +583,7 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent>
         setState(() => _restartIn--);
       });
     }
-    final phone = WelcomeFrame.isPhone(context);
+    final phone = WelcomeFrame.fullScreen(context);
     return WelcomeFrame(
       title: 'Linked',
       body: Text(
@@ -616,7 +616,7 @@ class _DeviceLinkContentState extends ConsumerState<_DeviceLinkContent>
   // re-renders the enter-code view in place. "Back" still goes to Welcome,
   // where the shell discards the throwaway identity and relaunches.
   Widget _receiveFailed(HollowTheme hollow, DeviceLinkState state) {
-    final phone = WelcomeFrame.isPhone(context);
+    final phone = WelcomeFrame.fullScreen(context);
     return WelcomeFrame(
       title: 'Link failed',
       body: Row(
@@ -899,7 +899,7 @@ class _LinkCodeFieldState extends State<LinkCodeField> {
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
     final text = widget.controller.text;
-    final height = WelcomeFrame.isPhone(context) ? 56.0 : 48.0;
+    final height = WelcomeFrame.fullScreen(context) ? 56.0 : 48.0;
     final caretAt = _focus.hasFocus && text.length < LinkCodeField.length
         ? text.length
         : -1;

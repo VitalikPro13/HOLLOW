@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -8,7 +9,8 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// The one surface Welcome and the first-run link steps share, so moving
 /// between them reads as one flow: a fixed-width dialog on desktop, the whole
-/// screen on a phone with [bottom] in reach of a thumb.
+/// screen on a phone or tablet. At phone width [bottom] sits in reach of a
+/// thumb; wider, the steps stand as one centred column.
 class WelcomeFrame extends StatelessWidget {
   /// Null for a step with no header (the first run's own hero).
   final String? title;
@@ -35,12 +37,29 @@ class WelcomeFrame extends StatelessWidget {
 
   static const double width = 440;
 
-  static bool isPhone(BuildContext context) =>
-      HollowDialogSurface.isCompact(context);
+  /// The whole screen and touch-size controls: every phone and tablet at any
+  /// width or orientation (they keep the phone shell after it too), and a
+  /// desktop window narrowed to phone width.
+  static bool fullScreen(BuildContext context) =>
+      _touchPlatform || HollowDialogSurface.isCompact(context);
+
+  /// The device in hand is a phone, for copy that names it. Read from the
+  /// display, not the window: the interface scale shrinks [MediaQuery]'s
+  /// size, and a tablet's split-screen or freeform window can be phone-sized.
+  static bool onPhone(BuildContext context) {
+    if (!_touchPlatform) return false;
+    final display = View.of(context).display;
+    return (display.size / display.devicePixelRatio).shortestSide <
+        HollowDialogSurface.compactBreakpoint;
+  }
+
+  static bool get _touchPlatform =>
+      defaultTargetPlatform == TargetPlatform.iOS ||
+      defaultTargetPlatform == TargetPlatform.android;
 
   @override
   Widget build(BuildContext context) {
-    final phone = isPhone(context);
+    final phone = fullScreen(context);
     final header = title == null
         ? null
         : _Header(title: title!, onBack: onBack, backEnabled: backEnabled);
@@ -73,28 +92,92 @@ class WelcomeFrame extends StatelessWidget {
     final surface = hollow.background;
     return Material(color: surface, // design-ignore: full-screen first run
       child: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(
-            HollowSpacing.xl,
-            HollowSpacing.lg,
-            HollowSpacing.xl,
-            HollowSpacing.xl,
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              if (header != null) ...[
-                header,
-                const SizedBox(height: HollowSpacing.lg),
-              ],
-              Expanded(child: SingleChildScrollView(child: body)),
-              if (bottom != null) ...[
-                const SizedBox(height: HollowSpacing.lg),
-                bottom!,
-              ],
-            ],
+        child: HollowDialogSurface.isCompact(context)
+            ? _thumbColumn(header)
+            : _centredColumn(header),
+      ),
+    );
+  }
+
+  /// A tablet, or a phone on its side: one column at the dialog's width,
+  /// centred, scrolling whole when the screen is short.
+  Widget _centredColumn(Widget? header) {
+    return LayoutBuilder(
+      builder: (context, box) => SingleChildScrollView(
+        child: ConstrainedBox(
+          constraints: BoxConstraints(minHeight: box.maxHeight),
+          child: Center(
+            child: Padding(
+              padding: const EdgeInsets.all(HollowSpacing.xl),
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: width),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    if (header != null) ...[
+                      header,
+                      const SizedBox(height: HollowSpacing.lg),
+                    ],
+                    body,
+                    if (bottom != null) ...[
+                      const SizedBox(height: HollowSpacing.xl),
+                      bottom!,
+                    ],
+                  ],
+                ),
+              ),
+            ),
           ),
         ),
+      ),
+    );
+  }
+
+  Widget _thumbColumn(Widget? header) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(
+        HollowSpacing.xl,
+        HollowSpacing.lg,
+        HollowSpacing.xl,
+        HollowSpacing.xl,
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (header != null) ...[
+            header,
+            const SizedBox(height: HollowSpacing.lg),
+          ],
+          // [bottom] sits at the foot while everything fits and scrolls with
+          // the body when it does not (large text, the relay field open).
+          // Built whole, never lazily, so every control can be found.
+          Expanded(
+            child: LayoutBuilder(
+              builder: (context, box) => SingleChildScrollView(
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(minHeight: box.maxHeight),
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      body,
+                      if (bottom != null)
+                        Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const SizedBox(height: HollowSpacing.lg),
+                            bottom!,
+                          ],
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -112,7 +195,7 @@ class WelcomeActions extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    if (WelcomeFrame.isPhone(context)) {
+    if (WelcomeFrame.fullScreen(context)) {
       return Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         mainAxisSize: MainAxisSize.min,
@@ -150,7 +233,7 @@ class _Header extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
-    final phone = WelcomeFrame.isPhone(context);
+    final phone = WelcomeFrame.fullScreen(context);
     return Row(
       children: [
         if (onBack != null) ...[

@@ -235,18 +235,22 @@ class _WelcomeContentState extends State<_WelcomeContent> {
 
   Widget _firstRun(BuildContext context) {
     final hollow = HollowTheme.of(context);
-    final phone = WelcomeFrame.isPhone(context);
-    final align = phone ? TextAlign.start : TextAlign.center;
+    // Touch sizing and the full screen; the arrangement follows the width, so
+    // a tablet centres the steps as the desktop card does.
+    final phone = WelcomeFrame.fullScreen(context);
+    final narrow = HollowDialogSurface.isCompact(context);
+    final align = narrow ? TextAlign.start : TextAlign.center;
+    final thisDevice = WelcomeFrame.onPhone(context) ? 'phone' : 'device';
     final prose = HollowTypography.body.copyWith(color: hollow.textSecondary);
     final folder = widget.relinkedFolder;
     final relinked = widget.relinkedTo ?? (folder == null ? null : '');
 
     final hero = Column(
-      crossAxisAlignment: phone
+      crossAxisAlignment: narrow
           ? CrossAxisAlignment.start
           : CrossAxisAlignment.center,
       children: [
-        if (phone) const SizedBox(height: HollowSpacing.xxxl),
+        if (narrow) const SizedBox(height: HollowSpacing.xxxl),
         ClipRRect(
           borderRadius: BorderRadius.circular(hollow.radiusLg),
           child: Image.asset(
@@ -269,7 +273,7 @@ class _WelcomeContentState extends State<_WelcomeContent> {
                 ? 'Your old data is in this folder. Link this device to bring '
                       'your messages back.'
                 : relinked.isEmpty
-                    ? 'Link this phone to bring your messages back.'
+                    ? 'Link this $thisDevice to bring your messages back.'
                     : 'Your old data is in the $relinked profile. Link this '
                           'device to bring your messages back.',
             textAlign: align,
@@ -286,11 +290,8 @@ class _WelcomeContentState extends State<_WelcomeContent> {
           ],
         ] else ...[
         Text(
-          phone
-              ? 'Your identity is made on this phone and stays with you. '
-                    'There is no account and nobody to sign in to.'
-              : 'Your identity is made on this device and stays with you. '
-                    'There is no account and nobody to sign in to.',
+          'Your identity is made on this $thisDevice and stays with you. '
+          'There is no account and nobody to sign in to.',
           textAlign: align,
           style: prose,
         ),
@@ -313,7 +314,7 @@ class _WelcomeContentState extends State<_WelcomeContent> {
         color: hollow.textSecondary,
       ),
       title: 'Link a device',
-      subtitle: phone
+      subtitle: narrow
           ? 'Enter a code from your other device'
           : 'Enter the 10-character code from your other device',
       trailing: Icon(
@@ -338,7 +339,7 @@ class _WelcomeContentState extends State<_WelcomeContent> {
       mainAxisSize: MainAxisSize.min,
       children: [
         TermsSummary(touch: phone, align: align),
-        SizedBox(height: phone ? HollowSpacing.xl : HollowSpacing.xxl),
+        SizedBox(height: narrow ? HollowSpacing.xl : HollowSpacing.xxl),
         HollowButton.filled(
           expand: true,
           touch: phone,
@@ -376,7 +377,7 @@ class _WelcomeContentState extends State<_WelcomeContent> {
             onPressed: () => _finish('create_new'),
             child: const Text('Create an identity'),
           ),
-        SizedBox(height: phone ? HollowSpacing.xl : HollowSpacing.xxl),
+        SizedBox(height: narrow ? HollowSpacing.xl : HollowSpacing.xxl),
         Text(
           'Already use Hollow?',
           style: HollowTypography.bodySmall.copyWith(
@@ -539,7 +540,7 @@ class _WelcomeContentState extends State<_WelcomeContent> {
 
   Widget _restoreStep(BuildContext context) {
     final hollow = HollowTheme.of(context);
-    final phone = WelcomeFrame.isPhone(context);
+    final phone = WelcomeFrame.fullScreen(context);
     final backup = _backup!;
 
     final file = DecoratedBox(

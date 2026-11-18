@@ -8,7 +8,8 @@ device, device targeting, channel push fan-out, the NSE) stay in CLAUDE.md; wiki
 
 ## Mobile UI and lifecycle
 
-- Mobile UI lives in `lib/src/ui/mobile/`; `MobileShell` (4 tabs) below 600px; floating
+- Mobile UI lives in `lib/src/ui/mobile/`; `MobileShell` (4 tabs) below 600px on a desktop and
+  at every width on Android and iOS (tablets included, `hollow_shell.dart`); floating
   pills in the MobileShell + MobileChatRoute stacks, NEVER the `app.dart` builder;
   selection providers are cleared in `.then()`, NOT `dispose()`. `feedback_mobile_ui_patterns`.
 - The ONE thing meant to sit over every phone route is the connection indicator

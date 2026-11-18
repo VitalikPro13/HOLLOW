@@ -240,6 +240,10 @@ void main() {
       tester.view.physicalSize = size;
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.reset);
+      // The phone's screen is the window: Welcome names the device by it.
+      tester.view.display.size = size;
+      tester.view.display.devicePixelRatio = 1;
+      addTearDown(tester.view.display.reset);
       late BuildContext host;
       await tester.pumpWidget(MaterialApp(
         theme: HollowThemeData.dark(),

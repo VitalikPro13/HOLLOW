@@ -187,6 +187,16 @@ class _HollowShellState extends ConsumerState<HollowShell>
   // shows a spinner rather than looking frozen. Only set under App Lock.
   bool _unlocking = false;
 
+  // False until an identity is on disk: a fresh install meets Welcome on a bare
+  // canvas, with no shell greeting nobody or failing to read a database that
+  // does not exist yet.
+  bool _shellOpen = false;
+
+  // While the shell is not open: true while launch work runs (a pending link
+  // import, a restore, the identity load), false while Welcome or the
+  // first-run link holds the screen, so no spinner waits behind them.
+  bool _preparing = true;
+
   // Desktop app lock. The timer polls rather than watching input, so a mouse
   // move costs a field write and nothing else.
   Timer? _idleTimer;
@@ -1076,6 +1086,24 @@ class _HollowShellState extends ConsumerState<HollowShell>
 
   Future<void> _finishPendingWipe() => finishBootWipe();
 
+  void _setPreparing(bool value) {
+    if (_preparing == value || !mounted) return;
+    setState(() => _preparing = value);
+  }
+
+  /// Builds the shell from here on; after Welcome it fades in as at launch.
+  void _openShell() {
+    if (_shellOpen || !mounted) return;
+    setState(() => _shellOpen = true);
+    if (!_shellFade.isCompleted) return;
+    if (HollowDurations.animationsDisabled ||
+        ReduceMotionController.instance.isReduced) {
+      return;
+    }
+    _shellFade.value = 0;
+    _shellFade.animateTo(1.0, duration: HollowDurations.normal);
+  }
+
   Future<void> _bootstrap() async {
     if (_initialized) return;
     _initialized = true;
@@ -1116,16 +1144,29 @@ class _HollowShellState extends ConsumerState<HollowShell>
       await _finishPendingWipe();
     }
 
-    final hasExisting = await storage_api.hasIdentity();
-    if (!hasExisting) unawaited(clearTracesOfAGoneIdentity());
+    final bool hasExisting;
+    try {
+      hasExisting = await storage_api.hasIdentity();
+    } catch (_) {
+      // Unknown is not "none": no Welcome, and the shell shows what it can.
+      _openShell();
+      rethrow;
+    }
+    if (hasExisting) {
+      _openShell();
+    } else {
+      unawaited(clearTracesOfAGoneIdentity());
+    }
 
     WelcomeResult? welcomeResult;
     if (!hasExisting && mounted) {
       final relinked = await keptOldDataForWelcome();
       if (!mounted) return;
+      _setPreparing(false);
       welcomeResult = await showWelcomeDialog(context,
           relinkedTo: relinked?.profile, relinkedFolder: relinked?.folder);
       if (!mounted) return;
+      _setPreparing(true);
       unawaited(recovery_api.clearRelinkWelcome().catchError((_) {}));
 
       // 'restored_mnemonic' and 'restored_backup' leave an identity on disk;
@@ -1154,6 +1195,13 @@ class _HollowShellState extends ConsumerState<HollowShell>
     if (welcomeResult?.action == 'link_device') {
       await storage_api.markLinkThrowaway().catchError((_) {});
     }
+    // The throwaway is never the person's: every way out of the first-run
+    // link relaunches, so no shell is built for it.
+    if (welcomeResult?.action == 'link_device') {
+      _setPreparing(false);
+    } else {
+      _openShell();
+    }
 
     if (ref.read(identityProvider).error != null) {
       if (_unlocking && mounted) setState(() => _unlocking = false);
@@ -1168,6 +1216,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
   Future<void> _afterRepair(String relay) async {
     await ref.read(identityProvider.notifier).load();
     if (ref.read(identityProvider).error != null || !mounted) return;
+    _openShell();
     if (relay != kDefaultRelayDomain) {
       await ref.read(relayDomainProvider.notifier).setDomain(relay);
       await ref.read(savedRelayListProvider.notifier).addRelay(relay);
@@ -1989,6 +2038,14 @@ class _HollowShellState extends ConsumerState<HollowShell>
         .select((s) => s.isLoaded ? null : s.error));
     if (identityError != null) {
       return DataTroubleScreen(error: identityError, onRepaired: _afterRepair);
+    }
+    if (!_shellOpen) {
+      return ColoredBox(
+        color: hollow.background,
+        child: _preparing
+            ? const Center(child: HollowSpinner.large(delayed: true))
+            : null,
+      );
     }
 
     final nodeState = ref.watch(nodeProvider);

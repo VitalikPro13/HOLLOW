@@ -75,6 +75,19 @@ guard catches the breakage, this page says why. Mobile-only UI rules are in
   Settings = `openSettings()`, pages ONLY via `settings_kit.dart`; server settings ONLY
   via `openServerSettings(read, id)`, never the bare flag.
   `feedback_shell_centre_tabs_exclusive`, `feedback_settings_sections_dividers_explanations`.
+- First run: `HollowShell` builds NO shell until a real identity is on disk (`_shellOpen`: opened
+  when `hasIdentity` says yes, or once Welcome's identity has loaded; NEVER for the first-run
+  "Link a device" throwaway, whose every exit relaunches), so a fresh install meets Welcome on a
+  bare canvas, never over a greeting for nobody or "Message store is not open" (the 0.14 iPad
+  showed both). The bare canvas shows a delayed large spinner while launch work runs, none while
+  Welcome or the link steps hold the screen. Welcome and the first-run link steps draw in
+  `WelcomeFrame`: the whole screen on EVERY phone and tablet at any width or orientation
+  (`WelcomeFrame.fullScreen` keys on the platform, never on width alone; at tablet width the steps
+  stand as one centred 440 column; at phone width the actions sit at the foot and scroll with the
+  body when they do not fit), the 440 card only on a desktop window wider than 600. Copy that
+  names the device ("this phone") asks `WelcomeFrame.onPhone`, which reads the DISPLAY (interface
+  zoom shrinks `MediaQuery`, a split-screen window can be phone-sized).
+  `test/widget/tablet_first_run_test.dart`.
 - Window chrome: `window_manager` + `setAsFrameless()`; `DesktopWindowFrame` ABOVE the
   Navigator: a 32px `WindowTitleBar`, or the Dock's header IS it (`WindowControls` float
   UNSCALED; macOS: `hollow/traffic_lights`). Fullscreen ONLY via `fullscreenProvider`
