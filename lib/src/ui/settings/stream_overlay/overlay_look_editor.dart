@@ -30,6 +30,7 @@ import 'package:hollow/src/ui/settings/stream_overlay/overlay_live_input.dart';
 import 'package:hollow/src/ui/settings/stream_overlay/overlay_look_draft.dart';
 import 'package:hollow/src/ui/settings/stream_overlay/overlay_preview_engine.dart';
 import 'package:hollow/src/ui/settings/stream_overlay/overlay_stage.dart';
+import 'package:hollow/src/core/providers/name_color_provider.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// An overlay image's bytes by hash, for thumbnails and the preview.
@@ -219,9 +220,11 @@ class _OverlayLookEditorState extends ConsumerState<OverlayLookEditor> {
     // The colour OBS gets: the publisher reads the DARK theme at our accent,
     // whatever theme this window shows.
     final obsTheme = HollowTheme.darkWithHue(ref.watch(accentHueProvider));
+    final field = ref.watch(shownNameColorProvider(widget.master));
     final colour = _local
-        ? nameColorFor(widget.master, obsTheme)
-        : obsTheme.accentText;
+        ? namePaintFor(widget.master, obsTheme, field: field).color
+        : chosenNamePaint(obsTheme, field, self: true)?.color ??
+            obsTheme.accentText;
     final hasAvatar = ref.watch(avatarProvider
             .select((a) => a[widget.master]?.isNotEmpty ?? false)) ||
         isProfileAnimHash(profile?.avatarAnim ?? '');

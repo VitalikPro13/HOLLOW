@@ -1180,6 +1180,11 @@ class UserProfile {
   /// lights a mark next to art whose hash is in an entry's `parts` and is worn.
   final String supportCreds;
 
+  /// The person's own name colour: `""` = the hashed colour, else `1:` and one to three
+  /// lowercase `rrggbb` stops, already through the receive gate. Renderers parse it
+  /// leniently and fall back on anything else.
+  final String nameColor;
+
   const UserProfile({
     required this.peerId,
     required this.displayName,
@@ -1194,6 +1199,7 @@ class UserProfile {
     required this.avatarAnim,
     required this.bannerAnim,
     required this.supportCreds,
+    required this.nameColor,
   });
 
   @override
@@ -1210,7 +1216,8 @@ class UserProfile {
       avatarFrame.hashCode ^
       avatarAnim.hashCode ^
       bannerAnim.hashCode ^
-      supportCreds.hashCode;
+      supportCreds.hashCode ^
+      nameColor.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -1229,5 +1236,6 @@ class UserProfile {
           avatarFrame == other.avatarFrame &&
           avatarAnim == other.avatarAnim &&
           bannerAnim == other.bannerAnim &&
-          supportCreds == other.supportCreds;
+          supportCreds == other.supportCreds &&
+          nameColor == other.nameColor;
 }

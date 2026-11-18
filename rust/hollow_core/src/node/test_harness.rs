@@ -13880,6 +13880,7 @@ async fn showcase_board_replicates_preserves_and_clears() {
         avatar_anim: None,
         banner_anim: None,
         support_creds: None,
+        name_color: None,
     };
 
     // 1. A composes an ENRICHED game-block board plus a two-asset bundle (cover and
@@ -18695,6 +18696,7 @@ async fn avatar_frame_id_replicates_and_art_pulls_on_demand() {
         avatar_anim: None,
         banner_anim: None,
         support_creds: None,
+        name_color: None,
     };
 
     // --- 1. A built-in frame is just a short string: it rides the announce
@@ -18870,6 +18872,7 @@ async fn animated_profile_media_hash_replicates_and_bytes_pull_on_demand() {
         avatar_anim: anim,
         banner_anim: None,
         support_creds: None,
+        name_color: None,
     };
 
     a.cmd_tx
@@ -23178,6 +23181,7 @@ async fn friend_request_carries_a_sealed_card() {
             avatar_anim: None,
             banner_anim: None,
             support_creds: None,
+            name_color: None,
         })
         .await
         .unwrap();
@@ -23306,6 +23310,7 @@ async fn a_pending_request_shows_each_side_a_thumb_until_the_full_avatar() {
                 avatar_anim: None,
                 banner_anim: None,
                 support_creds: None,
+                name_color: None,
             })
             .await
             .unwrap();
@@ -27274,6 +27279,7 @@ async fn channel_typing_and_profile_update_reach_a_member_without_a_leaf() {
             avatar_anim: None,
             banner_anim: None,
             support_creds: None,
+            name_color: None,
         })
         .await
         .unwrap();
@@ -28276,6 +28282,7 @@ async fn twitch_owner_credential_replicates_and_stale_period_is_dropped() {
             avatar_anim: None,
             banner_anim: None,
             support_creds: Some(announced),
+            name_color: None,
         })
         .await
         .unwrap();
@@ -28545,6 +28552,7 @@ async fn replayed_device_list_from_an_unlisted_device_does_not_bind() {
         avatar_anim: None,
         banner_anim: None,
         support_creds: None,
+        name_color: None,
     };
 
     v.cmd_tx.send(profile("Victim", "the real one")).await.unwrap();
@@ -28650,6 +28658,7 @@ async fn friend_request_from_an_unlisted_device_does_not_bind() {
         avatar_anim: None,
         banner_anim: None,
         support_creds: None,
+        name_color: None,
     };
 
     assert!(
@@ -28740,6 +28749,8 @@ fn crafted_announce(
         banner_anim: Some(String::new()),
         support_creds,
         support_creds_sig,
+        name_color: None,
+        name_color_sig: None,
         profile_sig,
         profile_pk,
         card: None,
@@ -28795,6 +28806,7 @@ async fn stripped_support_creds_never_clears_a_pinned_mark() {
         avatar_anim: None,
         banner_anim: None,
         support_creds: creds,
+        name_color: None,
     };
     let status_at = |node: &TestNode, master: &str| {
         node.store().load_profile(master).ok().flatten().map(|p| p.status).unwrap_or_default()
@@ -28935,6 +28947,7 @@ async fn support_credential_replicates_and_transplant_is_dropped() {
         avatar_anim: None,
         banner_anim: None,
         support_creds: creds,
+        name_color: None,
     };
 
     a.cmd_tx.send(send("hi", Some(announced))).await.unwrap();
@@ -33240,6 +33253,7 @@ async fn join_lock_the_card_rides_inside_the_request() {
             avatar_anim: None,
             banner_anim: None,
             support_creds: None,
+            name_color: None,
         })
         .await
         .unwrap();
@@ -33804,7 +33818,7 @@ async fn authz_a_guest_shows_an_author_only_by_its_own_card() {
         .send(NodeCommand::UpdateProfile {
             display_name: "Owen".into(), status: String::new(), about_me: String::new(), avatar_bytes: None,
             banner_bytes: None, twitch_username: String::new(), showcase_board: None, showcase_assets: None,
-            avatar_frame: None, avatar_anim: None, banner_anim: None, support_creds: None,
+            avatar_frame: None, avatar_anim: None, banner_anim: None, support_creds: None, name_color: None,
         })
         .await
         .unwrap();
@@ -35226,6 +35240,7 @@ async fn authz_a_full_profile_goes_only_to_someone_we_know() {
             avatar_anim: None,
             banner_anim: None,
             support_creds: None,
+            name_color: None,
         })
         .await
         .unwrap();
@@ -35286,6 +35301,7 @@ fn profile_named(name: &str, status: &str) -> NodeCommand {
         avatar_anim: None,
         banner_anim: None,
         support_creds: None,
+        name_color: None,
     }
 }
 
@@ -35360,6 +35376,8 @@ async fn authz_a_card_or_a_relayed_profile_speaks_only_for_its_owner() {
             banner_anim: String::new(),
             profile_sig,
             profile_pk,
+            name_color: None,
+            name_color_sig: None,
         }
     };
     let x = NativeKeypair::from_secret_bytes(&seed_bytes(225));
@@ -40208,6 +40226,7 @@ async fn an_owner_back_from_a_join_it_missed_learns_the_joiners_devices() {
             avatar_anim: None,
             banner_anim: None,
             support_creds: None,
+            name_color: None,
         }
     };
 
@@ -40999,6 +41018,7 @@ async fn a_restored_device_matures_at_a_contact_after_seven_quiet_days() {
             avatar_anim: None,
             banner_anim: None,
             support_creds: None,
+            name_color: None,
         })
         .await
         .unwrap();
@@ -46578,6 +46598,7 @@ async fn md_recovery_a_repaired_device_gets_friends_dms_and_profile_back_from_it
             avatar_anim: None,
             banner_anim: None,
             support_creds: None,
+            name_color: None,
         })
         .await
         .unwrap();
@@ -46981,6 +47002,7 @@ fn md_profile(name: &str, avatar: Option<Vec<u8>>) -> NodeCommand {
         avatar_anim: None,
         banner_anim: None,
         support_creds: None,
+        name_color: None,
     }
 }
 
@@ -56098,6 +56120,7 @@ async fn g13w3_no_event_loop_opens_the_store_itself() {
             avatar_anim: None,
             banner_anim: None,
             support_creds: None,
+            name_color: None,
         })
         .await
         .unwrap();
@@ -68676,6 +68699,7 @@ async fn w4rc_a_first_sight_profile_lands_with_its_roster_without_a_second_fetch
         avatar_anim: None,
         banner_anim: None,
         support_creds: None,
+        name_color: None,
     };
     x.cmd_tx.send(update("held with its roster")).await.unwrap();
     assert!(
@@ -69912,4 +69936,181 @@ async fn t16_a_staggered_split_of_upgrades_with_the_owner_away_settles_when_ever
         );
     }
     drop(nodes);
+}
+
+// t17-140-name-colours
+
+/// `node`'s own announce as a modified client or a rewriting relay could send it: every
+/// profile field genuinely signed, the name colour and its signature picked by the test.
+fn crafted_color_announce(
+    node: &TestNode,
+    updated_at: i64,
+    status: &str,
+    name_color: Option<String>,
+    name_color_sig: Option<String>,
+) -> super::types::HavenMessage {
+    let mut msg = crafted_announce(node, updated_at, status, None, None);
+    if let super::types::HavenMessage::ProfileUpdate { name_color: c, name_color_sig: s, .. } = &mut msg {
+        *c = name_color;
+        *s = name_color_sig;
+    }
+    msg
+}
+
+/// #140: a name colour set before a friend connects reaches it on the re-announce (the
+/// stored stamp, re-signed), a change reaches it live, and a field that is unsigned,
+/// signed by another key or stripped to a clear in flight changes nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn t17_name_color_reaches_a_friend_and_a_forged_field_is_refused() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+
+    const A_MASTER: u8 = 211;
+    const A_DEV: u8 = 212;
+    const B_MASTER: u8 = 213;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+
+    let profile = |status: &str, color: Option<&str>| NodeCommand::UpdateProfile {
+        display_name: "Anon".to_string(),
+        status: status.to_string(),
+        about_me: String::new(),
+        avatar_bytes: None,
+        banner_bytes: None,
+        twitch_username: String::new(),
+        showcase_board: None,
+        showcase_assets: None,
+        avatar_frame: None,
+        avatar_anim: None,
+        banner_anim: None,
+        support_creds: None,
+        name_color: color.map(str::to_string),
+    };
+    let color_at = |node: &TestNode, master: &str| {
+        node.store().load_profile_light(master).ok().flatten().map(|p| p.name_color)
+    };
+    let status_at = |node: &TestNode, master: &str| {
+        node.store().load_profile_light(master).ok().flatten().map(|p| p.status).unwrap_or_default()
+    };
+
+    // --- 1. Set while nobody is around: only our own row holds it. ---
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_DEV, &[&b_master]).await;
+    a.cmd_tx.send(profile("first", Some("1:ff8800,00aaff"))).await.unwrap();
+    assert!(
+        wait_until(10, || async { color_at(&a, &a_master).as_deref() == Some("1:ff8800,00aaff") }).await,
+        "A keeps its own colour on its row"
+    );
+
+    // --- 2. B arrives and learns it from A's re-announce. ---
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[&a_master]).await;
+    expect_dm_pair_ready(&relay, &a, &b, 20).await;
+    drain_events(&mut a);
+    drain_events(&mut b);
+    assert!(
+        wait_until(15, || async { color_at(&b, &a_master).as_deref() == Some("1:ff8800,00aaff") }).await,
+        "B must learn A's colour after they meet, got {:?}", color_at(&b, &a_master)
+    );
+
+    // --- 3. A changes it: B sees the change live; a profile edit that does not
+    //        touch the colour keeps it. ---
+    a.cmd_tx.send(profile("second", Some("1:22cc55"))).await.unwrap();
+    assert!(
+        wait_until(10, || async { color_at(&b, &a_master).as_deref() == Some("1:22cc55") }).await,
+        "B must see A's new colour live"
+    );
+    a.cmd_tx.send(profile("third", None)).await.unwrap();
+    assert!(wait_until(10, || async { status_at(&b, &a_master) == "third" }).await, "B hears the edit");
+    assert_eq!(color_at(&b, &a_master).as_deref(), Some("1:22cc55"), "an edit that leaves the colour alone keeps it");
+
+    // --- 4. Unsigned: the signed rest of the profile lands, the colour does not. ---
+    carry_as(&a, &b, crafted_color_announce(&a, super::frame_auth::now_ms(), "unsigned", Some("1:000000".into()), None)).await;
+    assert!(wait_until(10, || async { status_at(&b, &a_master) == "unsigned" }).await, "the signed half lands");
+    assert_eq!(color_at(&b, &a_master).as_deref(), Some("1:22cc55"), "an unsigned colour changes nothing");
+
+    // --- 5. Signed by a key that is not A's master. ---
+    let at = super::frame_auth::now_ms() + 1;
+    let impostor = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER));
+    let mut frame = crafted_color_announce(&a, at, "forged", Some("1:000000".into()), None);
+    if let super::types::HavenMessage::ProfileUpdate { profile_sig, name_color_sig, .. } = &mut frame {
+        *name_color_sig = super::name_color::sign(&impostor, &a_master, at, profile_sig.as_deref(), Some("1:000000"));
+    }
+    carry_as(&a, &b, frame).await;
+    assert!(wait_until(10, || async { status_at(&b, &a_master) == "forged" }).await, "the signed half lands");
+    assert_eq!(color_at(&b, &a_master).as_deref(), Some("1:22cc55"), "another key's signature changes nothing");
+
+    // --- 6. Stripped to a clear in flight. ---
+    carry_as(&a, &b, crafted_color_announce(&a, super::frame_auth::now_ms() + 2, "stripped", Some(String::new()), None)).await;
+    assert!(wait_until(10, || async { status_at(&b, &a_master) == "stripped" }).await, "the signed half lands");
+    assert_eq!(color_at(&b, &a_master).as_deref(), Some("1:22cc55"), "an unsigned clear is a strip, not the owner");
+
+    // --- 7. The owner's own clear lands. ---
+    a.cmd_tx.send(profile("plain", Some(""))).await.unwrap();
+    assert!(
+        wait_until(10, || async { color_at(&b, &a_master).as_deref() == Some("") }).await,
+        "A's signed clear reaches B"
+    );
+}
+
+/// #140: a colour reaches a member through a `ProfileRelay` (ProfileRequestFor while
+/// its owner is offline) under the owner's colour signature; a relayer's strip or swap
+/// preserves, the owner's relayed clear clears.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
+async fn t17_name_color_rides_a_profile_relay() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (b, c) = friend_pair(&relay, 217, 218).await;
+    let x = NativeKeypair::from_secret_bytes(&seed_bytes(219));
+    let x_id = x.peer_id();
+    let relayed = |status: &str, at: i64, color: Option<&str>, color_sig: Option<String>| {
+        let fields = super::crypto_handler::ProfileFields { display_name: "Xavier", status, ..Default::default() };
+        let (profile_sig, profile_pk) = super::crypto_handler::sign_profile(&x, &x_id, at, &fields);
+        super::types::HavenMessage::ProfileRelay {
+            source_peer_id: x_id.clone(),
+            display_name: "Xavier".to_string(),
+            status: status.to_string(),
+            about_me: String::new(),
+            updated_at: at,
+            avatar_b64: String::new(),
+            twitch_username: String::new(),
+            avatar_hash: String::new(),
+            banner_hash: String::new(),
+            showcase_board: String::new(),
+            showcase_assets_hash: String::new(),
+            avatar_frame: String::new(),
+            avatar_anim: String::new(),
+            banner_anim: String::new(),
+            profile_sig,
+            profile_pk,
+            name_color: color.map(str::to_string),
+            name_color_sig: color_sig,
+        }
+    };
+    let sig = |status: &str, at: i64, v: &str| {
+        let fields = super::crypto_handler::ProfileFields { display_name: "Xavier", status, ..Default::default() };
+        let psig = super::crypto_handler::sign_profile(&x, &x_id, at, &fields).0;
+        super::name_color::sign(&x, &x_id, at, psig.as_deref(), Some(v))
+    };
+    let row = || b.store().load_profile_light(&x_id).ok().flatten().map(|p| (p.status, p.name_color));
+    let t = super::frame_auth::now_ms();
+
+    carry_as(&c, &b, relayed("red", t, Some("1:ff2200"), sig("red", t, "1:ff2200"))).await;
+    assert!(
+        wait_until(10, async || row() == Some(("red".into(), "1:ff2200".into()))).await,
+        "a relayed colour its owner signed lands, got {:?}", row()
+    );
+    carry_as(&c, &b, relayed("stripped", t + 1, Some(""), None)).await;
+    carry_as(&c, &b, relayed("swapped", t + 2, Some("1:000000"), sig("swapped", t + 2, "1:ffffff"))).await;
+    assert!(wait_until(10, async || row().is_some_and(|r| r.0 == "swapped")).await, "the signed profiles land");
+    assert_eq!(row().unwrap().1, "1:ff2200", "a relayer's strip or swap preserves");
+    carry_as(&c, &b, relayed("cleared", t + 3, Some(""), sig("cleared", t + 3, ""))).await;
+    assert!(
+        wait_until(10, async || row() == Some(("cleared".into(), String::new()))).await,
+        "the owner's clear rides the relay, got {:?}", row()
+    );
 }

@@ -35,6 +35,7 @@ import 'package:hollow/src/ui/mobile/mobile_chat_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_screen_share_sheet.dart';
 import 'package:hollow/src/ui/mobile/mobile_voice_channel_route.dart';
+import 'package:hollow/src/core/providers/name_color_provider.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 
@@ -526,7 +527,10 @@ class MobileCallFace extends ConsumerWidget {
     final hollow = HollowTheme.of(context);
     final speaking = ref.watch(person.speaking) && !person.muted;
     final ringColor =
-        callRingColor(hollow, isSelf: person.isSelf, master: person.master);
+        callRingColor(hollow,
+            isSelf: person.isSelf,
+            master: person.master,
+            field: ref.watch(shownNameColorProvider(person.master)));
     final avatar = HollowAvatar(peerId: person.master, size: size, frameId: '');
     final ring = largeRing
         ? SpeakingRing.large(
@@ -571,7 +575,10 @@ class MobileCallFace extends ConsumerWidget {
                         style: (nameStyle ?? HollowTypography.bodySmall)
                             .copyWith(
                           color: callNameColor(hollow,
-                              isSelf: person.isSelf, master: person.master),
+                              isSelf: person.isSelf,
+                              master: person.master,
+                              field: ref.watch(
+                                  shownNameColorProvider(person.master))),
                         ),
                       ),
                     ),
@@ -631,7 +638,7 @@ class MobileRoomGrid extends StatelessWidget {
 
 /// Someone's share nothing streams from until Watch (issue #38): a full-width
 /// card in a room, a one-line strip under the name in a DM.
-class MobileShareOffer extends StatelessWidget {
+class MobileShareOffer extends ConsumerWidget {
   final CallShare share;
   final VoidCallback? onWatch;
 
@@ -646,7 +653,7 @@ class MobileShareOffer extends StatelessWidget {
   });
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
     final watch = HollowButton.outline(
       compact: true,
@@ -706,7 +713,10 @@ class MobileShareOffer extends StatelessWidget {
                         text: share.name,
                         style: TextStyle(
                             color: callNameColor(hollow,
-                                isSelf: false, master: share.master)),
+                                isSelf: false,
+                                master: share.master,
+                                field: ref.watch(
+                                    shownNameColorProvider(share.master)))),
                       ),
                       const TextSpan(text: ' is sharing'),
                     ]),

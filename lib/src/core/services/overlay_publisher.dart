@@ -20,6 +20,7 @@ import 'package:hollow/src/core/providers/voice_level_provider.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/overlay_server.dart' as server_api;
 import 'package:hollow/src/theme/hollow_theme.dart';
+import 'package:hollow/src/core/providers/name_color_provider.dart';
 
 /// Feeds the OBS overlay server (#97, plan 7 and 16.4): a snapshot of who is
 /// shown and how, whenever that changes, and the live speaking states while a
@@ -490,13 +491,18 @@ class OverlayPublisher {
     return buildOverlaySnapshot(
       me: me,
       selfName: displayNameFor(profiles, me),
-      selfColour: overlayHexColour(theme.accentText),
+      selfColour: overlayHexColour(
+          chosenNamePaint(theme, _c.read(shownNameColorProvider(me)), self: true)
+                  ?.color ??
+              theme.accentText),
       ownLook: own?.look ?? OverlayLook(effects: OverlayEffects.defaults),
       room: _c.read(overlayRoomProvider),
       added: _c.read(overlayPeopleProvider).valueOrNull ?? const [],
       fieldOf: (m) => _c.read(overlayFieldProvider(m)),
       nameOf: (m) => displayNameFor(profiles, m),
-      colourOf: (m) => overlayHexColour(nameColorFor(m, theme)),
+      colourOf: (m) => overlayHexColour(
+          namePaintFor(m, theme, field: _c.read(shownNameColorProvider(m)))
+              .color),
       layout: _c.read(overlayLayoutProvider),
       slots: _slots,
     );

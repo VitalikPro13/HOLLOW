@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:hollow/src/core/color_utils.dart';
 import 'package:hollow/src/core/providers/app_lock_provider.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
@@ -18,6 +17,7 @@ import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/mobile/mobile_call_chrome.dart';
 import 'package:hollow/src/ui/shell/conference_actions.dart'
     show askMeetingHostBeforeDmCall;
+import 'package:hollow/src/core/providers/name_color_provider.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// The phone's incoming call: the whole screen, the caller large in their
@@ -200,7 +200,7 @@ class _MobileIncomingCallOverlayState
                                   overflow: TextOverflow.ellipsis,
                                   textAlign: TextAlign.center,
                                   style: HollowTypography.display.copyWith(
-                                      color: nameColorFor(_master, hollow)),
+                                      color: ref.namePaint(_master, hollow).color),
                                 ),
                                 const SizedBox(height: HollowSpacing.xs),
                                 Text(

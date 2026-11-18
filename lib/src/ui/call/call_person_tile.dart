@@ -14,6 +14,7 @@ import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_badge.dart';
 import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
+import 'package:hollow/src/core/providers/name_color_provider.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Below this a tile's weak-link mark drops its words.
@@ -57,6 +58,7 @@ class CallPersonTile extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
     final speaking = ref.watch(person.speaking) && !person.muted;
+    final nameField = ref.watch(shownNameColorProvider(person.master));
     final linkSource = person.link;
     final link = linkSource == null ? null : ref.watch(linkSource);
     final weak = link != null && link.health != LinkHealth.healthy;
@@ -65,13 +67,13 @@ class CallPersonTile extends ConsumerWidget {
         size == CallTileSize.compact ? hollow.radiusMd : hollow.radiusLg;
     final face = switch (size) {
       CallTileSize.compact => _compact(hollow),
-      _ => _framed(context, hollow, weak ? link : null, radius),
+      _ => _framed(context, hollow, weak ? link : null, radius, nameField),
     };
 
     Widget tile = SpeakingRing(
       speaking: speaking,
       color: callRingColor(hollow,
-          isSelf: person.isSelf, master: person.master),
+          isSelf: person.isSelf, master: person.master, field: nameField),
       radius: radius,
       child: face,
     );
@@ -150,7 +152,7 @@ class CallPersonTile extends ConsumerWidget {
   }
 
   Widget _framed(BuildContext context, HollowTheme hollow,
-      LinkHealthSnapshot? weakLink, double radius) {
+      LinkHealthSnapshot? weakLink, double radius, String nameField) {
     final camera = person.cameraOn ? person.camera : null;
     final large = size == CallTileSize.large;
     return ClipRRect(
@@ -176,7 +178,7 @@ class CallPersonTile extends ConsumerWidget {
               right: HollowSpacing.sm,
               child: Align(
                 alignment: Alignment.bottomLeft,
-                child: _mediaName(hollow, large),
+                child: _mediaName(hollow, large, nameField),
               ),
             ));
           } else if (large) {
@@ -193,7 +195,7 @@ class CallPersonTile extends ConsumerWidget {
                   HollowAvatar(
                       peerId: person.master, size: avatar, frameId: ''),
                   const SizedBox(height: HollowSpacing.sm),
-                  _nameRow(HollowTypography.label, hollow),
+                  _nameRow(HollowTypography.label, hollow, nameField),
                 ],
               ),
             ));
@@ -212,7 +214,8 @@ class CallPersonTile extends ConsumerWidget {
               child: _nameRow(
                   HollowTypography.caption
                       .copyWith(fontWeight: FontWeight.w500),
-                  hollow),
+                  hollow,
+                  nameField),
             ));
           }
           if (weakLink != null) {
@@ -231,9 +234,12 @@ class CallPersonTile extends ConsumerWidget {
   }
 
   /// Name plus the mute and deafen marks, in the person's colour.
-  Widget _nameRow(TextStyle style, HollowTheme palette) {
+  Widget _nameRow(TextStyle style, HollowTheme palette, String field) {
     final color =
-        callNameColor(palette, isSelf: person.isSelf, master: person.master);
+        callNameColor(palette,
+            isSelf: person.isSelf,
+            master: person.master,
+            field: field);
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -257,7 +263,7 @@ class CallPersonTile extends ConsumerWidget {
     );
   }
 
-  Widget _mediaName(HollowTheme hollow, bool large) {
+  Widget _mediaName(HollowTheme hollow, bool large, String field) {
     final media = callMediaTheme(hollow);
     return CallMediaLabel(
       padding: EdgeInsets.symmetric(
@@ -268,6 +274,7 @@ class CallPersonTile extends ConsumerWidget {
         (large ? HollowTypography.label : HollowTypography.caption)
             .copyWith(fontWeight: FontWeight.w500),
         media,
+        field,
       ),
     );
   }

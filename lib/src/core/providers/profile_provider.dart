@@ -46,6 +46,7 @@ class ProfileNotifier extends Notifier<Map<String, storage_api.UserProfile>> {
   /// `still` as avatarBytes/bannerBytes; pass `''` for a STILL pick or the
   /// previous animation keeps playing over the new still. supportCreds is
   /// normally null: Rust rebuilds the field from its own table on redeem.
+  /// nameColor is `''` (the hashed colour) or a `nameColorField` value.
   Future<void> updateMyProfile({
     required String displayName,
     String status = '',
@@ -59,6 +60,7 @@ class ProfileNotifier extends Notifier<Map<String, storage_api.UserProfile>> {
     String? avatarAnim,
     String? bannerAnim,
     String? supportCreds,
+    String? nameColor,
   }) async {
     // `updateProfile` resolves once the command is QUEUED on the node's channel:
     // the surfaced failures are a dead node, oversized showcase assets and a
@@ -77,6 +79,7 @@ class ProfileNotifier extends Notifier<Map<String, storage_api.UserProfile>> {
         avatarAnim: avatarAnim,
         bannerAnim: bannerAnim,
         supportCreds: supportCreds,
+        nameColor: nameColor,
       );
     } catch (e) {
       // Rethrow so save UIs show a REAL failure instead of a false success toast.
@@ -119,6 +122,7 @@ class ProfileNotifier extends Notifier<Map<String, storage_api.UserProfile>> {
           avatarAnim: current.avatarAnim,
           bannerAnim: current.bannerAnim,
           supportCreds: current.supportCreds,
+          nameColor: current.nameColor,
         ),
       };
     }
@@ -156,6 +160,7 @@ class ProfileNotifier extends Notifier<Map<String, storage_api.UserProfile>> {
         avatarAnim: avatarAnim ?? current.avatarAnim,
         bannerAnim: bannerAnim ?? current.bannerAnim,
         supportCreds: current.supportCreds,
+        nameColor: current.nameColor,
       ),
     };
   }

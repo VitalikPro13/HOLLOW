@@ -61,6 +61,7 @@ class _Profiles extends ProfileNotifier {
       avatarAnim: '',
       bannerAnim: '',
       supportCreds: '',
+      nameColor: '',
     ),
   };
 

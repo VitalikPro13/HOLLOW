@@ -62,6 +62,7 @@ import 'package:hollow/src/ui/shell/voice_channel_panel.dart';
 import 'package:hollow/src/ui/sidebar/peer_card.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:hollow/src/core/providers/relay_domain_provider.dart';
+import 'package:hollow/src/core/providers/name_color_provider.dart';
 
 /// Full height of the server banner header (issue #25) when the sidebar has
 /// room for it; under pressure it yields, see [bannerHeaderHeight].
@@ -1559,7 +1560,10 @@ class _VoiceParticipantRow extends ConsumerWidget {
             // out of view, and paints outside it so the row never re-lays out.
             SpeakingRing.dense(
               speaking: speaking && !isMuted,
-              color: callRingColor(hollow, isSelf: isSelf, master: master),
+              color: callRingColor(hollow,
+                  isSelf: isSelf,
+                  master: master,
+                  field: ref.watch(shownNameColorProvider(master))),
               radius: hollow.radiusMd,
               child: HollowAvatar(
                   peerId: master, size: kVoiceParticipantAvatarSize),

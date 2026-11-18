@@ -8,7 +8,6 @@ import 'package:hollow/src/ui/components/conversation_row.dart';
 import 'package:hollow/src/ui/components/hollow_icon_button.dart';
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:flutter/services.dart';
-import 'package:hollow/src/core/color_utils.dart';
 import 'package:hollow/src/core/album_grouping.dart';
 import 'package:hollow/src/ui/chat/album_bubble.dart';
 import 'package:hollow/src/ui/chat/chat_drop_zone.dart';
@@ -84,6 +83,7 @@ import 'package:hollow/src/ui/chat/chat_pane_shared.dart';
 import 'package:hollow/src/ui/chat/dm_profile_panel.dart';
 import 'package:hollow/src/ui/chat/expression_picker.dart';
 import 'package:hollow/src/core/services/attachment_export.dart';
+import 'package:hollow/src/core/providers/name_color_provider.dart';
 
 // The twins' shared building blocks live in chat_pane_shared.dart, re-exported
 // here for the existing consumers (mobile routes, archive viewers).
@@ -1076,7 +1076,13 @@ class _ChatPaneState extends ConsumerState<ChatPane>
       name: mine
           ? 'You'
           : displayNameFor(ref.watch(profileProvider), widget.peerId),
-      nameColor: mine ? hollow.accentText : nameColorFor(widget.peerId, hollow),
+      namePaint: mine
+          ? ref.personNamePaint(
+              ref.watch(deviceLinkProvider)
+                  .identityOf(ref.watch(identityProvider).peerId ?? ''),
+              hollow,
+              isSelf: true)
+          : ref.namePaint(widget.peerId, hollow),
       time: DateTime.fromMillisecondsSinceEpoch(msg.timestamp.toInt()),
       text: messagePreviewText(msg.text),
       onTap: () => _jumpToSearchResult(msg),

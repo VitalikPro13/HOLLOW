@@ -36,6 +36,8 @@ import 'package:hollow/src/ui/dialogs/profile_dialog.dart';
 import 'package:hollow/src/ui/dialogs/report_user_dialog.dart';
 import 'package:hollow/src/ui/dialogs/verify_contact_dialog.dart';
 import 'package:hollow/src/ui/dialogs/confirm_remove_friend.dart';
+import 'package:hollow/src/ui/components/name_text.dart';
+import 'package:hollow/src/core/providers/name_color_provider.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -97,6 +99,7 @@ class _Panel extends ConsumerWidget {
     final localNick = ref.watch(localNicknameProvider)[peerId];
     final savedId = ref.watch(savedMessagesPeerIdProvider);
     final isSaved = savedId != null && master == savedId;
+    final isBlocked = !isSaved && ref.watch(peerBlockedProvider(master));
     final verifiedTwitch = ref.watch(twitchLoginProvider(peerId));
 
     final profileName = displayNameForPeer(profile, peerId);
@@ -181,12 +184,14 @@ class _Panel extends ConsumerWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
+                NameText(
                   hasNick ? localNick : profileName,
+                  // A blocked person's choice stays off their card here too.
+                  paint: (isBlocked ? null : ref.chosenNamePaintOf(master, hollow)) ??
+                      NamePaint([hollow.textPrimary]),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: HollowTypography.heading
-                      .copyWith(color: hollow.textPrimary),
+                  style: HollowTypography.heading,
                 ),
                 if (hasNick)
                   Text(

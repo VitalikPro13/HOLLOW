@@ -16047,6 +16047,7 @@ fn wire__crate__api__network__update_profile_impl(
             let api_avatar_anim = <Option<String>>::sse_decode(&mut deserializer);
             let api_banner_anim = <Option<String>>::sse_decode(&mut deserializer);
             let api_support_creds = <Option<String>>::sse_decode(&mut deserializer);
+            let api_name_color = <Option<String>>::sse_decode(&mut deserializer);
             deserializer.end();
             move |context| {
                 transform_result_sse::<_, String>((move || {
@@ -16063,6 +16064,7 @@ fn wire__crate__api__network__update_profile_impl(
                         api_avatar_anim,
                         api_banner_anim,
                         api_support_creds,
+                        api_name_color,
                     )?;
                     Ok(output_ok)
                 })())
@@ -22307,6 +22309,7 @@ impl SseDecode for crate::api::storage::UserProfile {
         let mut var_avatarAnim = <String>::sse_decode(deserializer);
         let mut var_bannerAnim = <String>::sse_decode(deserializer);
         let mut var_supportCreds = <String>::sse_decode(deserializer);
+        let mut var_nameColor = <String>::sse_decode(deserializer);
         return crate::api::storage::UserProfile {
             peer_id: var_peerId,
             display_name: var_displayName,
@@ -22321,6 +22324,7 @@ impl SseDecode for crate::api::storage::UserProfile {
             avatar_anim: var_avatarAnim,
             banner_anim: var_bannerAnim,
             support_creds: var_supportCreds,
+            name_color: var_nameColor,
         };
     }
 }
@@ -28070,6 +28074,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::storage::UserProfile {
             self.avatar_anim.into_into_dart().into_dart(),
             self.banner_anim.into_into_dart().into_dart(),
             self.support_creds.into_into_dart().into_dart(),
+            self.name_color.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -32018,6 +32023,7 @@ impl SseEncode for crate::api::storage::UserProfile {
         <String>::sse_encode(self.avatar_anim, serializer);
         <String>::sse_encode(self.banner_anim, serializer);
         <String>::sse_encode(self.support_creds, serializer);
+        <String>::sse_encode(self.name_color, serializer);
     }
 }
 

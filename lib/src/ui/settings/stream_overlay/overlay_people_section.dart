@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:hollow/src/core/color_utils.dart';
 import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/models/overlay_look.dart';
 import 'package:hollow/src/core/providers/overlay_settings_provider.dart';
@@ -22,6 +21,7 @@ import 'package:hollow/src/ui/mobile/tabs/mobile_settings_tab.dart';
 import 'package:hollow/src/ui/settings/settings_kit.dart';
 import 'package:hollow/src/ui/settings/stream_overlay/overlay_look_draft.dart';
 import 'package:hollow/src/ui/settings/stream_overlay/overlay_look_editor.dart';
+import 'package:hollow/src/core/providers/name_color_provider.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// What a person's source badge says.
@@ -193,7 +193,7 @@ class _PersonRow extends ConsumerWidget {
     return SettingsRow(
       leading: HollowAvatar(peerId: person.master, size: 32),
       title: name,
-      titleColor: nameColorFor(person.master, hollow),
+      titleColor: ref.namePaint(person.master, hollow).color,
       titleTrailing: HollowBadge(overlaySourceLabel(person.source)),
       subtitle: _note(),
       wideTrailing: true,

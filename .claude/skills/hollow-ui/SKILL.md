@@ -246,8 +246,8 @@ conversation row) · `HollowTextLink` (a link inside prose, on the text's edge) 
 `HollowProgressBar` (a determinate transfer, 4 px, never animates on its own) · `PlaceHeader` (`shell/place_header.dart`: a place's title strip, fixed 52 px, title, tab chips beside it, actions on the trailing edge; Archive, Share, Conferences) · `HollowListRow(touch: true)` on a phone · `ServerAvatar` · `HollowIconButton` (every icon-only control: `label` is
 tooltip and screen-reader name, `size` 32 desktop / 44 touch, `selected` is a
 grey fill never the accent, siblings `xs` apart). A person's name in a chat is
-`nameColorFor(master, hollow)`, yours `accentText`; panels and people lists
-stay neutral. Chat surfaces reuse `MessageRow`, `ChatHeaderBar`,
+`ref.personNamePaint(master, hollow, isSelf:)` drawn by `NameText` (the person's chosen colour or gradient, turned out of the accent band unless it is yours, else the hashed `nameColorFor`), yours your chosen colour else `accentText`; panels and people lists
+stay neutral, except a CHOSEN colour on the member list (online rows) and the profile name. Chat surfaces reuse `MessageRow`, `ChatHeaderBar`,
 `ChatComposerRow`, `showExpressionPicker` (design language 4.5), never a copy.
 List times go through `conversationTimeLabel()`, never `M/D`,
 in the interface face (a written date in mono reads as a typewriter).

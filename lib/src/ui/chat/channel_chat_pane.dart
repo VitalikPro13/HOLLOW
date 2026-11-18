@@ -12,7 +12,6 @@ import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:hollow/src/core/color_utils.dart';
 import 'package:hollow/src/core/message_preview.dart';
 import 'package:hollow/src/core/models/channel_chat_message.dart';
 import 'package:hollow/src/core/moderation_format.dart';
@@ -85,6 +84,7 @@ import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:hollow/src/core/services/attachment_export.dart';
 import 'package:hollow/src/ui/chat/server_recovery_notices.dart';
+import 'package:hollow/src/core/providers/name_color_provider.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 
@@ -1678,8 +1678,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane>
         searchMaster,
         nickname: senderNickname ?? '',
       ),
-      nameColor:
-          isMe ? hollow.accentText : nameColorFor(searchMaster, hollow),
+      namePaint: ref.personNamePaint(searchMaster, hollow, isSelf: isMe),
       time: DateTime.fromMillisecondsSinceEpoch(msg.timestamp),
       text: msg.text,
       onTap: () => _jumpToSearchResult(msg),

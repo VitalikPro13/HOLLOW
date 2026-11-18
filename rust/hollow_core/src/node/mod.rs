@@ -53,6 +53,7 @@ pub(crate) mod olm_lane;
 pub(crate) mod overlay_server;
 pub(crate) mod mls_authority;
 pub(crate) mod mls_turns;
+pub(crate) mod name_color;
 pub(crate) mod overlay;
 pub(crate) mod overlay_look;
 pub(crate) mod presence_audit;

@@ -468,6 +468,7 @@ storage_api.UserProfile _profile(String peer, String name) =>
       avatarAnim: '',
       bannerAnim: '',
       supportCreds: '',
+      nameColor: '',
     );
 
 List<Override> _base() => [

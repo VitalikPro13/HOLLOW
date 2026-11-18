@@ -11,7 +11,12 @@ guard catches the breakage, this page says why. Mobile-only UI rules are in
 - All UI = Hollow widgets (`src/ui/components/`; icons Lucide, `brand_icons.dart`,
   `atlas_icons`), no Material: HollowPressable/Button/IconButton/TextField/Dialog
   (`showHollowDialog()`)/Tooltip/Toast/Toggle/Checkbox. Chat = ONE MessageRow/ChatHeaderBar/
-  ChatComposerRow; names `nameColorFor(MASTER)`. Moved from CLAUDE.md (0.14 docs pass).
+  ChatComposerRow; names via `namePaintFor(MASTER, hollow, field:)` (or `ref.namePaint` /
+  `ref.personNamePaint`, `name_color_provider.dart`) drawn by `NameText` (a gradient = the
+  text's own foreground shader, no `ShaderMask`), never a raw `nameColorFor` at a new site:
+  that skips the person's chosen colour (#140), the accent-band turn for everyone but you
+  (`self:`) and the viewer's "Show custom name colours" switch. Moved from CLAUDE.md
+  (0.14 docs pass).
 - `HollowCheckbox` (0.14, Vitalik 11-14: our own component, Material `Checkbox` stays
   guarded) is ONLY for an agreement that gates one action (the shop's right-to-cancel box
   before Buy); the whole sentence is the target, `footer` holds the explaining links. A

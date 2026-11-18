@@ -1569,6 +1569,7 @@ pub(crate) async fn handle_update_profile(
     avatar_anim: Option<String>,
     banner_anim: Option<String>,
     support_creds: Option<String>,
+    name_color: Option<String>,
     db_path: &str,
     db_passphrase: &str,
 ) {
@@ -1609,11 +1610,11 @@ pub(crate) async fn handle_update_profile(
     // converge even when this update didn't touch the board.
     let (
         avatar_hash, banner_hash, stored_showcase, stored_assets_hash, stored_frame,
-        stored_avatar_anim, stored_banner_anim, stored_support_creds,
+        stored_avatar_anim, stored_banner_anim, stored_support_creds, stored_name_color,
     ) = {
         let mut stored = (
             String::new(), String::new(), String::new(), String::new(), String::new(),
-            String::new(), String::new(), String::new(),
+            String::new(), String::new(), String::new(), String::new(),
         );
         if let Ok(db) = crate::storage::MessageStore::lease(db_path, db_passphrase) {
             if let Err(e) = db.save_profile(
@@ -1626,6 +1627,14 @@ pub(crate) async fn handle_update_profile(
             ) {
                 hollow_log!("[HOLLOW-SWARM] Failed to save own profile: {e}");
             }
+            // Onto the row just stamped `now`; `None` keeps what the row holds.
+            if let Some(color) = name_color.as_deref() {
+                if super::name_color::valid_own(color) {
+                    let _ = db.set_name_color(local_peer_str, color, None, now);
+                } else {
+                    hollow_log!("[HOLLOW-PROFILE] Ignored a malformed name colour from our own UI");
+                }
+            }
             if let Ok(Some(p)) = db.load_profile(local_peer_str) {
                 stored = (
                     profile_blob_hash(p.avatar_bytes.as_deref()),
@@ -1636,6 +1645,7 @@ pub(crate) async fn handle_update_profile(
                     p.avatar_anim,
                     p.banner_anim,
                     p.support_creds,
+                    p.name_color,
                 );
             }
         }
@@ -1670,6 +1680,10 @@ pub(crate) async fn handle_update_profile(
     let support_creds_sig = super::crypto_handler::sign_support_creds(
         master_keypair, local_peer_str, now, Some(&stored_support_creds),
     );
+    // The name colour too, under its own signature for exactly this profile.
+    let name_color_sig = super::name_color::sign(
+        master_keypair, local_peer_str, now, profile_sig.as_deref(), Some(&stored_name_color),
+    );
 
     // Our card rides along, so a co-member can show a guest who wrote our public posts.
     let card = super::profile_card::own_card(master_keypair, db_path, db_passphrase);
@@ -1697,6 +1711,8 @@ pub(crate) async fn handle_update_profile(
         banner_anim: Some(stored_banner_anim.clone()),
         support_creds: Some(stored_support_creds.clone()),
         support_creds_sig: support_creds_sig.clone(),
+        name_color: Some(stored_name_color.clone()),
+        name_color_sig: name_color_sig.clone(),
         profile_sig: profile_sig.clone(),
         profile_pk: profile_pk.clone(),
         card: card.clone().map(Box::new),
@@ -1744,6 +1760,8 @@ pub(crate) async fn handle_update_profile(
         banner_anim: Some(stored_banner_anim),
         support_creds: Some(stored_support_creds),
         support_creds_sig,
+        name_color: Some(stored_name_color),
+        name_color_sig,
         profile_sig,
         profile_pk,
         card: card.clone().map(Box::new),
@@ -1873,6 +1891,8 @@ pub(crate) fn save_incoming_profile(
     support_creds: Option<&str>,
     // The MASTER's signature over that raw field. See [`gated_support_creds`].
     support_creds_sig: Option<&str>,
+    // The RAW name colour and its master signature; see [`super::name_color::gated`].
+    (name_color, name_color_sig): (Option<&str>, Option<&str>),
     // The stream overlay field, signed on its own; see [`super::overlay::ingest_field`].
     stream_overlay: Option<&super::types::OverlayField>,
     // The frame's [`super::frame_auth::stamp_ceiling`].
@@ -1916,6 +1936,8 @@ pub(crate) fn save_incoming_profile(
     let support_creds = gated_support_creds(
         &db, &master, updated_at, support_creds, support_creds_sig, Some(proof.pk),
     );
+    // The ONE gate for the name colour: its own master signature for THIS profile.
+    let name_color = super::name_color::gated(&master, updated_at, proof.sig, name_color, name_color_sig, Some(proof.pk));
     // PROFILE-1: the stills are the one part of an incoming profile that is
     // raw remote BYTES rather than a bounded string or a hash. A refused blob
     // preserves whatever we already stored.
@@ -1939,6 +1961,13 @@ pub(crate) fn save_incoming_profile(
         // A profile older than the stored one is not saved, and nothing downstream
         // (the member display names) may act on it as if it were (N2).
         Ok(written) => {
+            // Only onto a row holding this very profile (`set_name_color` checks the
+            // stamp and the profile signature), so an older or a sibling profile's
+            // colour never lands.
+            if let (Some(color), Some(sig)) = (name_color.as_ref(), name_color_sig) {
+                let signed = crate::storage::SignedNameColor { sig, value: color.signed.as_deref(), profile_sig: proof.sig };
+                let _ = db.set_name_color(&master, &color.shown, Some(signed), updated_at);
+            }
             // A first profile made the row the field lives on.
             if written && !field_kept {
                 super::overlay::ingest_field(&db, &master, stream_overlay, ceiling, Some(sender_peer_id));
@@ -2475,6 +2504,8 @@ pub(crate) fn own_profile_update(
     let support_creds_sig = super::crypto_handler::sign_support_creds(
         master_keypair, local_master, p.updated_at, Some(&p.support_creds),
     );
+    let name_color_sig =
+        super::name_color::sign(master_keypair, local_master, p.updated_at, profile_sig.as_deref(), Some(&p.name_color));
     Some(HavenMessage::ProfileUpdate {
         avatar_b64: b64(&p.avatar_bytes),
         banner_b64: b64(&p.banner_bytes),
@@ -2495,6 +2526,8 @@ pub(crate) fn own_profile_update(
         banner_anim: Some(p.banner_anim),
         support_creds: Some(p.support_creds),
         support_creds_sig,
+        name_color: Some(p.name_color),
+        name_color_sig,
         profile_sig,
         profile_pk,
         card: super::profile_card::own_card(master_keypair, db_path, db_passphrase).map(Box::new),
@@ -2629,6 +2662,8 @@ pub(crate) async fn handle_envelope_profile_update(
     banner_anim: Option<String>,
     support_creds: Option<String>,
     support_creds_sig: Option<String>,
+    name_color: Option<String>,
+    name_color_sig: Option<String>,
     profile_sig: Option<String>,
     profile_pk: Option<String>,
     stream_overlay: Option<Box<super::types::OverlayField>>,
@@ -2656,6 +2691,7 @@ pub(crate) async fn handle_envelope_profile_update(
         showcase_assets_b64: showcase_assets_b64.clone(), showcase_assets_hash: showcase_assets_hash.clone(),
         avatar_frame: avatar_frame.clone(), avatar_anim: avatar_anim.clone(), banner_anim: banner_anim.clone(),
         support_creds: support_creds.clone(), support_creds_sig: support_creds_sig.clone(),
+        name_color: name_color.clone(), name_color_sig: name_color_sig.clone(),
         profile_sig: profile_sig.clone(), profile_pk: profile_pk.clone(), card: card.cloned().map(Box::new),
         stream_overlay: stream_overlay.clone(),
     };
@@ -2736,6 +2772,7 @@ pub(crate) async fn handle_envelope_profile_update(
         sanitize_incoming_anim(banner_anim.as_deref()),
         support_creds.as_deref(),
         support_creds_sig.as_deref(),
+        (name_color.as_deref(), name_color_sig.as_deref()),
         stream_overlay.as_deref(),
         ceiling,
         db_path, db_passphrase,
@@ -2777,46 +2814,80 @@ pub(crate) fn handle_profile_request_for(
 
     if let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) {
         if let Ok(Some(profile)) = store.load_profile(target_peer_id) {
-            // Only a profile its owner signed whole can be relayed: the receiver
-            // refuses anything less, so sending it would only mask the reason.
-            let (Some(sig), Some(pk), Some(avatar_hash), Some(banner_hash), Some(showcase_assets_hash)) = (
-                profile.profile_sig, profile.profile_pk, profile.profile_avatar_hash,
-                profile.profile_banner_hash, profile.profile_assets_hash,
-            ) else {
+            let Some(msg) = profile_relay_frame(target_peer_id, profile) else {
                 hollow_log!("[HOLLOW-PROFILE] Not relaying {target_peer_id} to {requester_peer} — no owner signature stored");
                 return;
-            };
-            // Only ship the blob when it IS the one the signature covers; a
-            // stale cached avatar would just be dropped by the receiver, who
-            // then pulls the current one from the owner.
-            let avatar_b64 = profile.avatar_bytes
-                .as_ref()
-                .filter(|b| profile_blob_hash(Some(b)) == avatar_hash)
-                .map(|b| base64::engine::general_purpose::STANDARD.encode(b))
-                .unwrap_or_default();
-            let msg = HavenMessage::ProfileRelay {
-                source_peer_id: target_peer_id.to_string(),
-                display_name: profile.display_name,
-                status: profile.status,
-                about_me: profile.about_me,
-                updated_at: profile.updated_at,
-                avatar_b64,
-                twitch_username: profile.twitch_username,
-                avatar_hash,
-                banner_hash,
-                showcase_board: profile.showcase_board,
-                showcase_assets_hash,
-                avatar_frame: profile.avatar_frame,
-                avatar_anim: profile.avatar_anim,
-                banner_anim: profile.banner_anim,
-                profile_sig: Some(sig),
-                profile_pk: Some(pk),
             };
             super::olm_lane::carry(ws_cmd_tx, requester_peer, None, &msg, super::olm_lane::NoSession::Drop);
             hollow_log!("[HOLLOW-PROFILE] Relayed profile for {target_peer_id} to {requester_peer}");
         } else {
             hollow_log!("[HOLLOW-PROFILE] No cached profile for {target_peer_id}, cannot relay");
         }
+    }
+}
+
+/// The `ProfileRelay` for a stored profile, or `None` when its owner did not sign it
+/// whole: the receiver refuses anything less, so sending it would only mask the reason.
+fn profile_relay_frame(target_peer_id: &str, profile: crate::storage::messages::StoredProfile) -> Option<HavenMessage> {
+    let (Some(sig), Some(pk), Some(avatar_hash), Some(banner_hash), Some(showcase_assets_hash)) = (
+        profile.profile_sig, profile.profile_pk, profile.profile_avatar_hash,
+        profile.profile_banner_hash, profile.profile_assets_hash,
+    ) else {
+        return None;
+    };
+    // Only ship the blob when it IS the one the signature covers; a stale cached
+    // avatar would just be dropped by the receiver, who then pulls the current one
+    // from the owner.
+    let avatar_b64 = profile.avatar_bytes
+        .as_ref()
+        .filter(|b| profile_blob_hash(Some(b)) == avatar_hash)
+        .map(|b| base64::engine::general_purpose::STANDARD.encode(b))
+        .unwrap_or_default();
+    let (name_color, name_color_sig) = relayable_name_color(
+        target_peer_id, profile.updated_at, &sig, profile.name_color_signed, profile.name_color_sig, &pk,
+    );
+    Some(HavenMessage::ProfileRelay {
+        source_peer_id: target_peer_id.to_string(),
+        display_name: profile.display_name,
+        status: profile.status,
+        about_me: profile.about_me,
+        updated_at: profile.updated_at,
+        avatar_b64,
+        twitch_username: profile.twitch_username,
+        avatar_hash,
+        banner_hash,
+        showcase_board: profile.showcase_board,
+        showcase_assets_hash,
+        avatar_frame: profile.avatar_frame,
+        avatar_anim: profile.avatar_anim,
+        banner_anim: profile.banner_anim,
+        name_color,
+        name_color_sig,
+        profile_sig: Some(sig),
+        profile_pk: Some(pk),
+    })
+}
+
+/// The colour a `ProfileRelay` may carry: the exact value its owner signed for the
+/// relayed profile (stamp AND profile signature), a later version's raw value
+/// included, so a relay-only receiver clears as a direct one does. A colour held over
+/// from an older profile, or a signed value past `name_color::RELAY_MAX`, is left out,
+/// which receivers read as absent.
+fn relayable_name_color(
+    master: &str,
+    updated_at: i64,
+    profile_sig: &str,
+    signed: Option<String>,
+    sig: Option<String>,
+    pk: &str,
+) -> (Option<String>, Option<String>) {
+    match (signed, sig) {
+        (Some(value), Some(sig))
+            if super::name_color::verify(master, updated_at, profile_sig, &value, Some(&sig), Some(pk)) =>
+        {
+            (Some(value), Some(sig))
+        }
+        _ => (None, None),
     }
 }
 
@@ -2836,6 +2907,9 @@ pub(crate) struct RelayedProfile {
     pub avatar_frame: String,
     pub avatar_anim: String,
     pub banner_anim: String,
+    /// The owner's name colour and its signature for this profile (`name_color::gated`).
+    pub name_color: Option<String>,
+    pub name_color_sig: Option<String>,
     pub profile_sig: Option<String>,
     pub profile_pk: Option<String>,
 }
@@ -2918,9 +2992,29 @@ pub(crate) async fn handle_profile_relay(
         return;
     };
     let limit = crate::storage::messages::stored_profile_stamp_limit();
+    let held = store.profile_stamp_sig(source);
+    // The colour rides only under its own signature for the relayed profile.
+    let name_color = super::name_color::gated(
+        source, relayed.updated_at, sig, relayed.name_color.as_deref(), relayed.name_color_sig.as_deref(), Some(pk),
+    );
+    let set_color = |store: &crate::storage::MessageStore| {
+        let (Some(color), Some(color_sig)) = (name_color.as_ref(), relayed.name_color_sig.as_deref()) else {
+            return false;
+        };
+        let signed = crate::storage::SignedNameColor { sig: color_sig, value: color.signed.as_deref(), profile_sig: sig };
+        store.set_name_color(source, &color.shown, Some(signed), relayed.updated_at).unwrap_or(false)
+    };
+    // The very profile we hold: only its colour can still settle (the higher colour
+    // signature stays, as for a direct announce).
+    if held.as_ref().is_some_and(|(at, h)| *at == relayed.updated_at && h.as_deref() == Some(sig)) {
+        if set_color(&store) {
+            let _ = event_tx.send(NetworkEvent::ProfileUpdated { peer_id: relayed.source_peer_id }).await;
+        }
+        return;
+    }
     // At one stamp only a higher signature replaces what we hold, as `save_profile`
     // decides, so the copy we already have is never re-saved.
-    if store.profile_stamp_sig(source).is_some_and(|(at, held_sig)| {
+    if held.is_some_and(|(at, held_sig)| {
         at <= limit && (at > relayed.updated_at || (at == relayed.updated_at && held_sig.is_some_and(|h| h.as_str() >= sig)))
     }) {
         hollow_log!("[HOLLOW-PROFILE] Skipped relayed profile for {source} (already have newer)");
@@ -2938,7 +3032,7 @@ pub(crate) async fn handle_profile_relay(
         banner_hash: &relayed.banner_hash,
         assets_hash: &relayed.showcase_assets_hash,
     };
-    let _ = store.save_profile(
+    let written = store.save_profile(
         source, &relayed.display_name, &relayed.status, &relayed.about_me, relayed.updated_at,
         avatar_bytes, None, &relayed.twitch_username,
         sanitize_incoming_showcase(Some(&relayed.showcase_board)), None,
@@ -2948,6 +3042,10 @@ pub(crate) async fn handle_profile_relay(
         sanitize_incoming_anim(Some(&relayed.banner_anim)),
         None,
     );
+    // Only onto the row this relayed profile just wrote, like a direct announce.
+    if written == Ok(true) {
+        set_color(&store);
+    }
     hollow_log!("[HOLLOW-PROFILE] Saved relayed profile for {source}");
 
     // Update display_name in server member lists (master-keyed).
@@ -3404,7 +3502,7 @@ mod tests {
         let save = |updated_at: i64, avatar: Option<&[u8]>| {
             save_incoming_profile(
                 &master, "Anon", "", "", updated_at, avatar, None, "", None, None, Some(proof),
-                None, None, None, None, None, None, i64::MAX, &db, &pass,
+                None, None, None, None, None, (None, None), None, i64::MAX, &db, &pass,
             )
             .1
         };
@@ -3418,7 +3516,7 @@ mod tests {
         // Every blob is signed by hash, the banner included (N1 since 0.12).
         assert!(save_incoming_profile(
             &master, "Anon", "", "", 9 * 86_400_000, None, Some(&forged), "", None, None, Some(proof),
-            None, None, None, None, None, None, i64::MAX, &db, &pass,
+            None, None, None, None, None, (None, None), None, i64::MAX, &db, &pass,
         ).1);
         assert_eq!(stored_banner(), None, "a banner that misses its signed hash was stored");
 
@@ -3508,7 +3606,7 @@ mod tests {
             let (_, saved) = save_incoming_profile(
                 &self.master_id, "Anon", "", "", updated_at,
                 None, None, "", None, None, Some(proof), None, None, None,
-                creds, creds_sig, None, i64::MAX, &self.db, &self.pass,
+                creds, creds_sig, (None, None), None, i64::MAX, &self.db, &self.pass,
             );
             saved
         }
@@ -3594,6 +3692,660 @@ mod tests {
         assert!(f.announce(2_000, Some(""), None));
         assert_eq!(f.stored_creds(), f.field, "an unsigned clear is a relay, not the holder");
 
+        crate::node::resolver::clear_all();
+    }
+
+    // -- #140: the name colour field at the ingest --------------------------
+
+    struct ColorFixture {
+        _tmp: crate::test_tmp::TestDir,
+        db: String,
+        pass: String,
+        master: NativeKeypair,
+        master_id: String,
+    }
+
+    impl ColorFixture {
+        fn new(seed: u8) -> Self {
+            let tmp = crate::test_tmp::tempdir().unwrap();
+            let db = tmp.path().join("color.db").to_str().unwrap().to_string();
+            let pass = "ef".repeat(32);
+            crate::storage::MessageStore::migrate_auto_vacuum_once(&db, &pass).unwrap();
+            let master = NativeKeypair::from_secret_bytes(&[seed; 32]);
+            let master_id = master.peer_id();
+            Self { _tmp: tmp, db, pass, master, master_id }
+        }
+
+        /// One announce with a genuine profile signature and whatever the caller picks
+        /// for the colour field and ITS signature. Returns whether the profile saved.
+        fn announce(&self, updated_at: i64, color: Option<&str>, color_sig: Option<&str>) -> bool {
+            self.announce_as(updated_at, "", color, color_sig)
+        }
+
+        fn announce_as(&self, updated_at: i64, status: &str, color: Option<&str>, color_sig: Option<&str>) -> bool {
+            let fields = crate::node::crypto_handler::ProfileFields { display_name: "Anon", status, ..Default::default() };
+            let (sig, pk) = crate::node::crypto_handler::sign_profile(&self.master, &self.master_id, updated_at, &fields);
+            let (sig, pk) = (sig.unwrap(), pk.unwrap());
+            let proof = crate::storage::ProfileProof { sig: &sig, pk: &pk, avatar_hash: "", banner_hash: "", assets_hash: "" };
+            save_incoming_profile(
+                &self.master_id, "Anon", status, "", updated_at, None, None, "", None, None, Some(proof),
+                None, None, None, None, None, (color, color_sig), None, i64::MAX, &self.db, &self.pass,
+            )
+            .1
+        }
+
+        /// The colour signature for the profile `announce` sends (status "").
+        fn sig(&self, updated_at: i64, value: &str) -> String {
+            self.sig_for(updated_at, "", value)
+        }
+
+        /// The colour signature for the profile `announce_as(updated_at, status)` sends.
+        fn sig_for(&self, updated_at: i64, status: &str, value: &str) -> String {
+            let psig = self.psig(updated_at, status);
+            crate::node::name_color::sign(&self.master, &self.master_id, updated_at, Some(&psig), Some(value)).unwrap()
+        }
+
+        fn psig(&self, updated_at: i64, status: &str) -> String {
+            let fields = crate::node::crypto_handler::ProfileFields { display_name: "Anon", status, ..Default::default() };
+            crate::node::crypto_handler::sign_profile(&self.master, &self.master_id, updated_at, &fields).0.unwrap()
+        }
+
+        fn stored(&self) -> String {
+            crate::storage::MessageStore::open(&self.db, &self.pass)
+                .unwrap()
+                .load_profile_light(&self.master_id)
+                .unwrap()
+                .unwrap()
+                .name_color
+        }
+    }
+
+    /// Two announces at ONE stamp: the profile row keeps one of them, and the colour
+    /// must be the kept one's. Both orders, so one of them meets a refused write.
+    #[test]
+    fn name_color_follows_the_profile_kept_at_an_equal_stamp() {
+        let _lock = crate::node::resolver::test_lock();
+        for first_red in [true, false] {
+            crate::node::resolver::clear_all();
+            // One key for both orders: which of the two signatures sorts higher is fixed.
+            let f = ColorFixture::new(0x84);
+            let (red, green) = ("1:ff2200", "1:22cc55");
+            let sends = [("red", red), ("green", green)];
+            let order: Vec<_> = if first_red { sends.to_vec() } else { sends.iter().rev().copied().collect() };
+            for (status, color) in order {
+                f.announce_as(20_000, status, Some(color), Some(&f.sig_for(20_000, status, color)));
+            }
+            let row = crate::storage::MessageStore::open(&f.db, &f.pass).unwrap().load_profile_light(&f.master_id).unwrap().unwrap();
+            let want = if row.status == "red" { red } else { green };
+            assert_eq!(row.name_color, want, "the colour of the profile the row kept (first_red={first_red})");
+        }
+        crate::node::resolver::clear_all();
+    }
+
+    #[test]
+    fn name_color_lands_only_under_its_own_signature_and_absent_preserves() {
+        let _lock = crate::node::resolver::test_lock();
+        crate::node::resolver::clear_all();
+        let f = ColorFixture::new(0x81);
+        let blue = "1:3366ff,9933ff";
+
+        assert!(f.announce(1_000, Some(blue), Some(&f.sig(1_000, blue))));
+        assert_eq!(f.stored(), blue, "a signed colour lands");
+
+        // A profile from a client that predates the field: absent preserves.
+        assert!(f.announce(2_000, None, None));
+        assert_eq!(f.stored(), blue, "an absent field keeps the colour");
+
+        // Rewritten in flight, with no signature or another value's signature.
+        assert!(f.announce(3_000, Some("1:ff0000"), None), "the signed rest of the profile still saves");
+        assert_eq!(f.stored(), blue, "an unsigned colour changes nothing");
+        assert!(f.announce(4_000, Some("1:ff0000"), Some(&f.sig(4_000, blue))));
+        assert_eq!(f.stored(), blue, "a signature over another value is not a signature");
+        assert!(f.announce(5_000, Some("1:ff0000"), Some(&f.sig(4_000, "1:ff0000"))));
+        assert_eq!(f.stored(), blue, "a signature over another stamp is not a signature");
+
+        // Stripped to a clear without a signature: the relay's favourite forgery.
+        assert!(f.announce(6_000, Some(""), None));
+        assert_eq!(f.stored(), blue, "an unsigned clear is a strip");
+
+        // Signed but outside the grammar: the owner's own word, the hashed colour.
+        assert!(f.announce(7_000, Some("1:FF0000"), Some(&f.sig(7_000, "1:FF0000"))));
+        assert_eq!(f.stored(), "", "a signed field outside version 1 is a clear");
+
+        crate::node::resolver::clear_all();
+    }
+
+    #[test]
+    fn name_color_signed_clear_clears_and_an_older_announce_never_lands() {
+        let _lock = crate::node::resolver::test_lock();
+        crate::node::resolver::clear_all();
+        let f = ColorFixture::new(0x82);
+        let red = "1:ff3344";
+
+        assert!(f.announce(10_000, Some(red), Some(&f.sig(10_000, red))));
+        assert_eq!(f.stored(), red);
+
+        // A genuinely signed OLDER announce: the profile row refuses it, so its colour
+        // must not land either.
+        let green = "1:22cc55";
+        assert!(!f.announce(9_000, Some(green), Some(&f.sig(9_000, green))), "an older profile does not save");
+        assert_eq!(f.stored(), red, "an older announce never lands its colour");
+
+        // The owner's own signed clear.
+        assert!(f.announce(11_000, Some(""), Some(&f.sig(11_000, ""))));
+        assert_eq!(f.stored(), "", "a signed empty field is the owner clearing it");
+
+        // A later version the owner signed reads as the hashed colour, not a stale one.
+        assert!(f.announce(12_000, Some(red), Some(&f.sig(12_000, red))));
+        assert!(f.announce(13_000, Some("2:anim"), Some(&f.sig(13_000, "2:anim"))));
+        assert_eq!(f.stored(), "", "a newer version than this build draws is stored as a clear");
+
+        crate::node::resolver::clear_all();
+    }
+
+    /// Compatibility with 0.14.0 (#140). Neither build denies unknown fields, so a
+    /// 0.14.0 profile (no colour fields) parses and saves here, and our announce WITH
+    /// the field still verifies on the unchanged `hollow-profile2` path a 0.14.0
+    /// receiver runs.
+    #[test]
+    fn name_color_profiles_cross_0_14_0_both_ways() {
+        use crate::node::types::HavenMessage;
+        let _lock = crate::node::resolver::test_lock();
+        crate::node::resolver::clear_all();
+        let f = ColorFixture::new(0x83);
+        let fields = crate::node::crypto_handler::ProfileFields { display_name: "Anon", ..Default::default() };
+        let (sig, pk) = crate::node::crypto_handler::sign_profile(&f.master, &f.master_id, 1_000, &fields);
+        let new = HavenMessage::ProfileUpdate {
+            display_name: "Anon".into(), status: String::new(), about_me: String::new(), updated_at: 1_000,
+            avatar_b64: String::new(), banner_b64: String::new(), is_invisible: false, twitch_username: String::new(),
+            device_list: None, avatar_hash: String::new(), banner_hash: String::new(), showcase_board: Some(String::new()),
+            showcase_assets_b64: String::new(), showcase_assets_hash: String::new(), avatar_frame: Some(String::new()),
+            avatar_anim: Some(String::new()), banner_anim: Some(String::new()), support_creds: None, support_creds_sig: None,
+            name_color: Some("1:ff8800".into()), name_color_sig: Some(f.sig(1_000, "1:ff8800")),
+            profile_sig: sig, profile_pk: pk, card: None, stream_overlay: None,
+        };
+        let json = serde_json::to_value(&new).unwrap();
+        assert_eq!(json["name_color"], "1:ff8800");
+
+        // New -> 0.14.0: the profile signature a 0.14.0 receiver checks covers none of
+        // the new fields, and an unknown key is ignored by the same derive 0.14.0 has.
+        let mut with_unknown = json.clone();
+        with_unknown["zz_a_field_from_the_future"] = serde_json::json!({"x": 1});
+        let HavenMessage::ProfileUpdate { profile_sig, profile_pk, updated_at, .. } =
+            serde_json::from_value::<HavenMessage>(with_unknown).expect("unknown keys are ignored")
+        else {
+            panic!("not a profile")
+        };
+        assert!(crate::node::crypto_handler::verify_profile_signature(
+            &f.master_id, updated_at, &fields, profile_sig.as_deref(), profile_pk.as_deref(),
+        ));
+        assert_eq!(
+            crate::node::crypto_handler::profile_signing_payload(&f.master_id, 1_000, &fields),
+            crate::node::crypto_handler::profile_signing_payload(&f.master_id, 1_000, &fields),
+        );
+
+        // 0.14.0 -> new: the same frame with both colour keys gone parses as absent and
+        // saves, keeping the colour we hold.
+        assert!(f.announce(500, Some("1:3366ff"), Some(&f.sig(500, "1:3366ff"))));
+        let mut old = json;
+        let obj = old.as_object_mut().unwrap();
+        obj.remove("name_color");
+        obj.remove("name_color_sig");
+        let HavenMessage::ProfileUpdate { name_color, name_color_sig, .. } =
+            serde_json::from_value::<HavenMessage>(old).expect("a 0.14.0 profile parses")
+        else {
+            panic!("not a profile")
+        };
+        assert_eq!((name_color.as_deref(), name_color_sig.as_deref()), (None, None));
+        assert!(f.announce(1_000, name_color.as_deref(), name_color_sig.as_deref()), "a 0.14.0 profile saves");
+        assert_eq!(f.stored(), "1:3366ff", "and preserves the colour we hold");
+
+        crate::node::resolver::clear_all();
+    }
+
+    impl ColorFixture {
+        /// The owner's profile stamped `at` as a co-member relays it, with whatever
+        /// colour field and colour signature the relayer forwards.
+        fn relayed(&self, at: i64, status: &str, color: Option<&str>, color_sig: Option<String>) -> super::RelayedProfile {
+            let fields = crate::node::crypto_handler::ProfileFields { display_name: "Anon", status, ..Default::default() };
+            let (profile_sig, profile_pk) = crate::node::crypto_handler::sign_profile(&self.master, &self.master_id, at, &fields);
+            super::RelayedProfile {
+                source_peer_id: self.master_id.clone(),
+                display_name: "Anon".into(),
+                status: status.into(),
+                about_me: String::new(),
+                updated_at: at,
+                avatar_b64: String::new(),
+                twitch_username: String::new(),
+                avatar_hash: String::new(),
+                banner_hash: String::new(),
+                showcase_board: String::new(),
+                showcase_assets_hash: String::new(),
+                avatar_frame: String::new(),
+                avatar_anim: String::new(),
+                banner_anim: String::new(),
+                name_color: color.map(str::to_string),
+                name_color_sig: color_sig,
+                profile_sig,
+                profile_pk,
+            }
+        }
+
+        async fn take_relay(&self, relayed: super::RelayedProfile) {
+            let (tx, _rx) = tokio::sync::mpsc::channel(16);
+            let mut states = std::collections::HashMap::new();
+            let us = NativeKeypair::from_secret_bytes(&[0x7e; 32]).peer_id();
+            super::handle_profile_relay(&tx, &mut states, relayed, &us, i64::MAX, &self.db, &self.pass).await;
+        }
+
+        fn row(&self) -> crate::storage::messages::StoredProfile {
+            crate::storage::MessageStore::open(&self.db, &self.pass).unwrap().load_profile(&self.master_id).unwrap().unwrap()
+        }
+    }
+
+    /// Decision (1) of #140: whatever its owner signed that is not a version 1 colour
+    /// (a later version, a space, past 64 bytes, a malformed v1) shows the hashed
+    /// colour; it never leaves the old colour showing.
+    #[test]
+    fn name_color_a_signed_later_version_never_leaves_the_old_colour_showing() {
+        let _lock = crate::node::resolver::test_lock();
+        crate::node::resolver::clear_all();
+        let f = ColorFixture::new(0x85);
+        let red = "1:ff2200";
+        let long = format!("2:{}", "ab".repeat(40));
+        for (i, later) in ["2:wave 1.5s ff2200,00aaff", long.as_str(), "1:FF2200", "2:é"].into_iter().enumerate() {
+            let at = 1_000 + 2 * i as i64;
+            assert!(f.announce(at, Some(red), Some(&f.sig(at, red))));
+            assert_eq!(f.stored(), red);
+            assert!(f.announce(at + 1, Some(later), Some(&f.sig(at + 1, later))));
+            assert_eq!(f.stored(), "", "{later:?} kept the stale colour");
+        }
+        crate::node::resolver::clear_all();
+    }
+
+    /// A colour signed for a NEWER profile lands whatever its signature sorts against
+    /// the one held: the equal-stamp tie-break never outlives its stamp.
+    #[test]
+    fn name_color_a_newer_profiles_colour_lands_whatever_its_signature_sorts() {
+        let _lock = crate::node::resolver::test_lock();
+        crate::node::resolver::clear_all();
+        let f = ColorFixture::new(0x89);
+        let colors = ["1:ff2200", "1:22cc55", "1:3366ff", "", "1:9933ff", "1:ffcc00"];
+        for i in 0..24 {
+            let (at, c) = (1_000 + i as i64, colors[i % colors.len()]);
+            assert!(f.announce_as(at, &format!("s{i}"), Some(c), Some(&f.sig_for(at, &format!("s{i}"), c))));
+            assert_eq!(f.stored(), c, "the colour of the profile stamped {at}");
+        }
+        crate::node::resolver::clear_all();
+    }
+
+    /// Two announces at ONE stamp with the same profile (so one deterministic profile
+    /// signature) but different colours: every replica keeps the same colour,
+    /// whichever arrives first, directly or relayed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::await_holding_lock)]
+    async fn name_color_equal_stamp_equal_profile_converges() {
+        let _lock = crate::node::resolver::test_lock();
+        let (red, green) = ("1:ff2200", "1:22cc55");
+        let mut kept = Vec::new();
+        for (first, second) in [(red, green), (green, red)] {
+            crate::node::resolver::clear_all();
+            let f = ColorFixture::new(0x86);
+            for c in [first, second] {
+                assert!(f.announce_as(5_000, "same", Some(c), Some(&f.sig_for(5_000, "same", c))));
+            }
+            kept.push(f.stored());
+            // The same race when the second copy arrives relayed.
+            let g = ColorFixture::new(0x86);
+            assert!(g.announce_as(5_000, "same", Some(first), Some(&g.sig_for(5_000, "same", first))));
+            g.take_relay(g.relayed(5_000, "same", Some(second), Some(g.sig_for(5_000, "same", second)))).await;
+            kept.push(g.stored());
+        }
+        crate::node::resolver::clear_all();
+        assert!(kept.iter().all(|c| *c == kept[0]), "replicas kept different colours for one profile: {kept:?}");
+    }
+
+    /// A `ProfileRelay` (ProfileRequestFor, the owner offline) carries the colour under
+    /// its own signature: a colour the owner cleared clears, and nothing the relayer
+    /// could change or strip lands.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::await_holding_lock)]
+    async fn name_color_rides_a_relayed_profile_and_a_cleared_colour_clears() {
+        let _lock = crate::node::resolver::test_lock();
+        crate::node::resolver::clear_all();
+        let f = ColorFixture::new(0x87);
+        let red = "1:ff2200";
+        assert!(f.announce_as(1_000, "red", Some(red), Some(&f.sig_for(1_000, "red", red))));
+
+        // A relayer that predates the field (or forwards nothing): preserve.
+        f.take_relay(f.relayed(2_000, "old relayer", None, None)).await;
+        assert_eq!((f.row().updated_at, f.stored().as_str()), (2_000, red), "an absent colour preserves");
+        // Rewritten or stripped by the relayer: refused, preserves.
+        f.take_relay(f.relayed(3_000, "unsigned", Some(""), None)).await;
+        assert_eq!((f.row().updated_at, f.stored().as_str()), (3_000, red), "an unsigned strip");
+        f.take_relay(f.relayed(4_000, "stale sig", Some("1:00ff00"), Some(f.sig_for(3_000, "stale sig", "1:00ff00")))).await;
+        assert_eq!((f.row().updated_at, f.stored().as_str()), (4_000, red), "a signature for another stamp");
+        let other = NativeKeypair::from_secret_bytes(&[0x7f; 32]);
+        let forged =
+            crate::node::name_color::sign(&other, &f.master_id, 5_000, Some(&f.psig(5_000, "forged")), Some("1:00ff00"));
+        f.take_relay(f.relayed(5_000, "forged", Some("1:00ff00"), forged)).await;
+        assert_eq!((f.row().updated_at, f.stored().as_str()), (5_000, red), "somebody else's signature");
+
+        // The owner cleared it at 6_000; that profile reaches us only relayed.
+        f.take_relay(f.relayed(6_000, "cleared", Some(""), Some(f.sig_for(6_000, "cleared", "")))).await;
+        assert_eq!((f.row().updated_at, f.stored().as_str()), (6_000, ""), "the owner's clear rides the relay");
+        // A new colour the same way, then an OLDER relayed colour never lands.
+        let blue = "1:3366ff";
+        f.take_relay(f.relayed(7_000, "blue", Some(blue), Some(f.sig_for(7_000, "blue", blue)))).await;
+        assert_eq!(f.stored(), blue);
+        f.take_relay(f.relayed(6_500, "older", Some(red), Some(f.sig_for(6_500, "older", red)))).await;
+        assert_eq!((f.row().updated_at, f.stored().as_str()), (7_000, blue), "an older relayed colour");
+        crate::node::resolver::clear_all();
+    }
+
+    /// What a relayer forwards: the stored colour only while its signature still
+    /// covers the row's stamp, so a relayed copy never carries a stale or converted
+    /// colour; and the frame round-trips through the wire.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::await_holding_lock)]
+    async fn name_color_a_relayer_forwards_only_a_colour_signed_for_the_row() {
+        let _lock = crate::node::resolver::test_lock();
+        crate::node::resolver::clear_all();
+        let f = ColorFixture::new(0x88);
+        let relayable = |p: crate::storage::messages::StoredProfile| {
+            super::relayable_name_color(
+                &f.master_id, p.updated_at, p.profile_sig.as_deref().unwrap(), p.name_color_signed, p.name_color_sig,
+                p.profile_pk.as_deref().unwrap(),
+            )
+        };
+        let red = "1:ff2200";
+        assert!(f.announce(1_000, Some(red), Some(&f.sig(1_000, red))));
+        let (color, sig) = relayable(f.row());
+        assert_eq!(color.as_deref(), Some(red));
+
+        // The frame a 0.14.1 relayer sends lands on another replica whole.
+        let g = ColorFixture::new(0x88);
+        let mut frame = g.relayed(1_000, "", None, None);
+        (frame.name_color, frame.name_color_sig) = (color, sig);
+        g.take_relay(frame).await;
+        assert_eq!(g.stored(), red, "the relayed colour lands");
+
+        // A profile from a client without the field moves the stamp: the colour stays
+        // shown here but its signature no longer covers the row, so it is not relayed.
+        assert!(f.announce(2_000, None, None));
+        assert_eq!(f.stored(), red);
+        assert_eq!(relayable(f.row()), (None, None), "a colour held over from an older stamp");
+        // A later version shown as a clear travels as the owner signed it, while small.
+        assert!(f.announce(3_000, Some("2:anim"), Some(&f.sig(3_000, "2:anim"))));
+        assert_eq!(f.stored(), "");
+        assert_eq!(relayable(f.row()).0.as_deref(), Some("2:anim"), "a later version rides on");
+        let long = format!("2:{}", "a".repeat(crate::node::name_color::RELAY_MAX));
+        assert!(f.announce(3_500, Some(&long), Some(&f.sig(3_500, &long))));
+        assert_eq!((f.stored().as_str(), relayable(f.row())), ("", (None, None)), "past RELAY_MAX: shown clear, never relayed");
+        // A new profile at the same stamp with a different profile signature drops it too.
+        assert!(f.announce(4_000, Some(red), Some(&f.sig(4_000, red))));
+        assert!(relayable(f.row()).0.is_some());
+
+        // The wire: a 0.14.1 ProfileRelay carries both keys; one without them parses.
+        let (color, sig) = relayable(f.row());
+        let msg = crate::node::types::HavenMessage::ProfileRelay {
+            source_peer_id: f.master_id.clone(), display_name: "Anon".into(), status: String::new(), about_me: String::new(),
+            updated_at: 4_000, avatar_b64: String::new(), twitch_username: String::new(), avatar_hash: String::new(),
+            banner_hash: String::new(), showcase_board: String::new(), showcase_assets_hash: String::new(),
+            avatar_frame: String::new(), avatar_anim: String::new(), banner_anim: String::new(),
+            profile_sig: None, profile_pk: None, name_color: color, name_color_sig: sig,
+        };
+        let mut json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["name_color"], red);
+        json.as_object_mut().unwrap().remove("name_color_sig");
+        json.as_object_mut().unwrap().remove("name_color");
+        let crate::node::types::HavenMessage::ProfileRelay { name_color, name_color_sig, .. } =
+            serde_json::from_value(json).expect("a 0.14.0 relay parses")
+        else {
+            panic!("not a relay")
+        };
+        assert_eq!((name_color, name_color_sig), (None, None));
+        crate::node::resolver::clear_all();
+    }
+
+    /// The three profile frames as 0.14.0 declares them (copied from `v0.14.0-beta`
+    /// `node/types.rs`, nested types as raw JSON): 0.14.0 parses ours with the colour
+    /// keys, and ours parses 0.14.0's without them as absent.
+    mod old014 {
+        use serde::{Deserialize, Serialize};
+        use serde_json::Value;
+
+        #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+        pub struct Profile {
+            pub display_name: String,
+            pub status: String,
+            pub about_me: String,
+            pub updated_at: i64,
+            #[serde(default)] pub avatar_b64: String,
+            #[serde(default)] pub banner_b64: String,
+            #[serde(default)] pub is_invisible: bool,
+            #[serde(default)] pub twitch_username: String,
+            #[serde(default)] pub device_list: Option<Value>,
+            #[serde(default)] pub avatar_hash: String,
+            #[serde(default)] pub banner_hash: String,
+            #[serde(default)] pub showcase_board: Option<String>,
+            #[serde(default)] pub showcase_assets_b64: String,
+            #[serde(default)] pub showcase_assets_hash: String,
+            #[serde(default)] pub avatar_frame: Option<String>,
+            #[serde(default)] pub avatar_anim: Option<String>,
+            #[serde(default)] pub banner_anim: Option<String>,
+            #[serde(default)] pub support_creds: Option<String>,
+            #[serde(default, skip_serializing_if = "Option::is_none")] pub support_creds_sig: Option<String>,
+            #[serde(default, skip_serializing_if = "Option::is_none")] pub profile_sig: Option<String>,
+            #[serde(default, skip_serializing_if = "Option::is_none")] pub profile_pk: Option<String>,
+            #[serde(default, skip_serializing_if = "Option::is_none")] pub card: Option<Value>,
+            #[serde(default, skip_serializing_if = "Option::is_none")] pub stream_overlay: Option<Value>,
+        }
+
+        #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+        pub struct Relay {
+            #[serde(default)] pub source_peer_id: String,
+            #[serde(default)] pub display_name: String,
+            #[serde(default)] pub status: String,
+            #[serde(default)] pub about_me: String,
+            #[serde(default)] pub updated_at: i64,
+            #[serde(default)] pub avatar_b64: String,
+            #[serde(default)] pub twitch_username: String,
+            #[serde(default)] pub avatar_hash: String,
+            #[serde(default)] pub banner_hash: String,
+            #[serde(default)] pub showcase_board: String,
+            #[serde(default)] pub showcase_assets_hash: String,
+            #[serde(default)] pub avatar_frame: String,
+            #[serde(default)] pub avatar_anim: String,
+            #[serde(default)] pub banner_anim: String,
+            #[serde(default, skip_serializing_if = "Option::is_none")] pub profile_sig: Option<String>,
+            #[serde(default, skip_serializing_if = "Option::is_none")] pub profile_pk: Option<String>,
+        }
+
+        #[derive(Serialize, Deserialize, Debug, PartialEq)]
+        #[serde(tag = "type")]
+        pub enum Haven {
+            #[serde(rename = "profile_update")]
+            ProfileUpdate(Profile),
+            #[serde(rename = "profile_relay")]
+            ProfileRelay(Relay),
+        }
+
+        #[derive(Serialize, Deserialize, Debug, PartialEq)]
+        #[serde(tag = "t")]
+        pub enum Envelope {
+            #[serde(rename = "srv_profile")]
+            ProfileUpdate(Profile),
+        }
+    }
+
+    #[test]
+    fn name_color_frames_parse_on_a_0_14_0_shaped_copy_both_ways() {
+        use crate::node::types::{HavenMessage, MessageEnvelope};
+        let f = ColorFixture::new(0x8d);
+        let (psig, ppk) = (f.psig(1_000, ""), "cGs=".to_string());
+        let (color, color_sig) = (Some("1:ff8800".to_string()), Some(f.sig(1_000, "1:ff8800")));
+        let update = HavenMessage::ProfileUpdate {
+            display_name: "Anon".into(), status: String::new(), about_me: String::new(), updated_at: 1_000,
+            avatar_b64: String::new(), banner_b64: String::new(), is_invisible: false, twitch_username: String::new(),
+            device_list: None, avatar_hash: "ah".into(), banner_hash: String::new(), showcase_board: Some(String::new()),
+            showcase_assets_b64: String::new(), showcase_assets_hash: String::new(), avatar_frame: Some(String::new()),
+            avatar_anim: Some(String::new()), banner_anim: Some(String::new()), support_creds: None, support_creds_sig: None,
+            name_color: color.clone(), name_color_sig: color_sig.clone(),
+            profile_sig: Some(psig.clone()), profile_pk: Some(ppk.clone()), card: None, stream_overlay: None,
+        };
+        let envelope = MessageEnvelope::ProfileUpdate {
+            display_name: "Anon".into(), status: String::new(), about_me: String::new(), updated_at: 1_000,
+            avatar_b64: String::new(), banner_b64: String::new(), is_invisible: false, twitch_username: String::new(),
+            device_list: None, avatar_hash: "ah".into(), banner_hash: String::new(), showcase_board: Some(String::new()),
+            showcase_assets_b64: String::new(), showcase_assets_hash: String::new(), avatar_frame: Some(String::new()),
+            avatar_anim: Some(String::new()), banner_anim: Some(String::new()), support_creds: None, support_creds_sig: None,
+            name_color: color.clone(), name_color_sig: color_sig.clone(),
+            profile_sig: Some(psig.clone()), profile_pk: Some(ppk.clone()), card: None, stream_overlay: None,
+        };
+        let relay = HavenMessage::ProfileRelay {
+            source_peer_id: f.master_id.clone(), display_name: "Anon".into(), status: String::new(), about_me: String::new(),
+            updated_at: 1_000, avatar_b64: String::new(), twitch_username: String::new(), avatar_hash: "ah".into(),
+            banner_hash: String::new(), showcase_board: String::new(), showcase_assets_hash: String::new(),
+            avatar_frame: String::new(), avatar_anim: String::new(), banner_anim: String::new(),
+            profile_sig: Some(psig.clone()), profile_pk: Some(ppk.clone()), name_color: color.clone(), name_color_sig: color_sig,
+        };
+
+        // New -> 0.14.0: every frame parses, keys and all, and the signed parts survive.
+        for json in [serde_json::to_value(&update).unwrap(), serde_json::to_value(&relay).unwrap()] {
+            assert_eq!(json["name_color"], "1:ff8800");
+            let old: old014::Haven = serde_json::from_value(json.clone()).expect("0.14.0 parses a 0.14.1 frame");
+            let (sig, at) = match &old {
+                old014::Haven::ProfileUpdate(p) => (p.profile_sig.clone(), p.updated_at),
+                old014::Haven::ProfileRelay(r) => (r.profile_sig.clone(), r.updated_at),
+            };
+            assert_eq!((sig.as_deref(), at), (Some(psig.as_str()), 1_000));
+        }
+        let json = serde_json::to_value(&envelope).unwrap();
+        assert_eq!(json["name_color"], "1:ff8800");
+        let old: old014::Envelope = serde_json::from_value(json).expect("0.14.0 parses a 0.14.1 server profile");
+        let old014::Envelope::ProfileUpdate(p) = old;
+        assert_eq!(p.profile_sig.as_deref(), Some(psig.as_str()));
+
+        // 0.14.0 -> new: its frames carry no colour keys and read as absent.
+        let old: old014::Haven = serde_json::from_value(serde_json::to_value(&update).unwrap()).unwrap();
+        let HavenMessage::ProfileUpdate { name_color, name_color_sig, profile_sig, .. } =
+            serde_json::from_value::<HavenMessage>(serde_json::to_value(&old).unwrap()).expect("a 0.14.0 profile parses")
+        else {
+            panic!("not a profile")
+        };
+        assert_eq!((name_color, name_color_sig, profile_sig.as_deref()), (None, None, Some(psig.as_str())));
+        let old: old014::Haven = serde_json::from_value(serde_json::to_value(&relay).unwrap()).unwrap();
+        let HavenMessage::ProfileRelay { name_color, name_color_sig, .. } =
+            serde_json::from_value::<HavenMessage>(serde_json::to_value(&old).unwrap()).expect("a 0.14.0 relay parses")
+        else {
+            panic!("not a relay")
+        };
+        assert_eq!((name_color, name_color_sig), (None, None));
+        let old: old014::Envelope = serde_json::from_value(serde_json::to_value(&envelope).unwrap()).unwrap();
+        let MessageEnvelope::ProfileUpdate { name_color, name_color_sig, .. } =
+            serde_json::from_value::<MessageEnvelope>(serde_json::to_value(&old).unwrap()).expect("a 0.14.0 server profile parses")
+        else {
+            panic!("not a server profile")
+        };
+        assert_eq!((name_color, name_color_sig), (None, None));
+    }
+
+    /// Decision (1) holds for a receiver that hears the owner only through a relayer:
+    /// the relayer forwards the later version exactly as signed, so both clear.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::await_holding_lock)]
+    async fn name_color_a_later_version_clears_a_relay_only_receiver() {
+        let _lock = crate::node::resolver::test_lock();
+        crate::node::resolver::clear_all();
+        let (a, b, c) = (ColorFixture::new(0x8a), ColorFixture::new(0x8a), ColorFixture::new(0x8a));
+        let red = "1:ff2200";
+        for f in [&a, &b, &c] {
+            assert!(f.announce_as(1_000, "s", Some(red), Some(&f.sig_for(1_000, "s", red))));
+        }
+        // A hears the later version directly; B only through A; C only through B.
+        assert!(a.announce_as(2_000, "t", Some("2:anim"), Some(&a.sig_for(2_000, "t", "2:anim"))));
+        assert_eq!(a.stored(), "");
+        // The frame `handle_profile_request_for` sends, as the next replica takes it.
+        let forward = |from: &ColorFixture, to: &ColorFixture| {
+            let Some(crate::node::types::HavenMessage::ProfileRelay { updated_at, name_color, name_color_sig, .. }) =
+                super::profile_relay_frame(&from.master_id, from.row())
+            else {
+                panic!("no relay frame")
+            };
+            assert_eq!(name_color.as_deref(), Some("2:anim"), "the later version rides on as signed");
+            to.relayed(updated_at, "t", name_color.as_deref(), name_color_sig)
+        };
+        b.take_relay(forward(&a, &b)).await;
+        assert_eq!((b.row().updated_at, b.stored().as_str()), (2_000, ""), "the relay-only receiver kept the stale colour");
+        c.take_relay(forward(&b, &c)).await;
+        assert_eq!((c.row().updated_at, c.stored().as_str()), (2_000, ""), "and so does the next hop");
+        crate::node::resolver::clear_all();
+    }
+
+    /// A colour signature stored for another profile (a 0.14.0 build's upsert moves the
+    /// row's stamp and profile signature but never touches the colour columns) counts
+    /// as none: the owner's colour for the profile the row now holds lands whatever its
+    /// signature sorts, and the stale one is never relayed.
+    #[test]
+    fn name_color_a_signature_left_from_another_profile_never_wins_the_tie() {
+        let _lock = crate::node::resolver::test_lock();
+        crate::node::resolver::clear_all();
+        let red = "1:ff2200";
+        let mut below = 0;
+        for i in 0..16u32 {
+            let f = ColorFixture::new(0x8b);
+            assert!(f.announce_as(1_000, "s", Some(red), Some(&f.sig_for(1_000, "s", red))));
+            let stale = f.row().name_color_sig.unwrap();
+            let blue = format!("1:{:06x}", 0x3366ff ^ i);
+            below += usize::from(f.sig_for(2_000, "t", &blue) < stale);
+            // 0.14.0's upsert of the owner's stamp-2_000 profile, colour columns untouched.
+            let ms = crate::storage::MessageStore::open(&f.db, &f.pass).unwrap();
+            ms.conn_for_test()
+                .execute(
+                    "UPDATE user_profiles SET updated_at = 2000, status = 't', profile_sig = ?2 WHERE peer_id = ?1",
+                    rusqlite::params![f.master_id, f.psig(2_000, "t")],
+                )
+                .unwrap();
+            let p = f.row();
+            let relayed = super::relayable_name_color(
+                &f.master_id, p.updated_at, p.profile_sig.as_deref().unwrap(), p.name_color_signed, p.name_color_sig,
+                p.profile_pk.as_deref().unwrap(),
+            );
+            assert_eq!(relayed, (None, None), "a signature for another profile is never relayed");
+            // Back on 0.14.1, the owner's own announce of that profile with its colour.
+            assert!(f.announce_as(2_000, "t", Some(&blue), Some(&f.sig_for(2_000, "t", &blue))));
+            assert_eq!(f.stored(), blue, "a signature left from another profile refused the owner's colour");
+        }
+        assert!(below > 0, "no case where the stale signature sorted higher");
+        crate::node::resolver::clear_all();
+    }
+
+    /// A colour belongs to exactly one profile: at one stamp with two owner-signed
+    /// profiles, the other profile's colour never lands on the kept one, directly or
+    /// through a relayer's copy of the very profile we hold.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::await_holding_lock)]
+    async fn name_color_belongs_to_one_profile_of_its_stamp() {
+        let _lock = crate::node::resolver::test_lock();
+        crate::node::resolver::clear_all();
+        let f = ColorFixture::new(0x8c);
+        let at = 5_000;
+        let (keep, lose) = if f.psig(at, "a") >= f.psig(at, "b") { ("a", "b") } else { ("b", "a") };
+        let keep_c = "1:ff2200";
+        // A colour for the losing profile whose signature sorts above the kept one's.
+        let lose_c = (0u32..256)
+            .map(|i| format!("1:{:06x}", 0x22cc55 ^ i))
+            .find(|c| f.sig_for(at, lose, c) > f.sig_for(at, keep, keep_c))
+            .unwrap();
+        assert!(f.announce_as(at, lose, Some(&lose_c), Some(&f.sig_for(at, lose, &lose_c))));
+        assert!(f.announce_as(at, keep, Some(keep_c), Some(&f.sig_for(at, keep, keep_c))));
+        assert_eq!((f.row().status, f.stored()), (keep.to_string(), keep_c.to_string()));
+        // The kept profile carrying the other profile's (genuinely signed) colour.
+        f.take_relay(f.relayed(at, keep, Some(&lose_c), Some(f.sig_for(at, lose, &lose_c)))).await;
+        assert_eq!(f.stored(), keep_c, "relayed: the other profile's colour pinned onto the kept one");
+        assert!(f.announce_as(at, keep, Some(&lose_c), Some(&f.sig_for(at, lose, &lose_c))));
+        assert_eq!(f.stored(), keep_c, "direct: the other profile's colour pinned onto the kept one");
         crate::node::resolver::clear_all();
     }
 
@@ -3883,6 +4635,8 @@ mod tests {
             avatar_frame: String::new(),
             avatar_anim: String::new(),
             banner_anim: String::new(),
+            name_color: None,
+            name_color_sig: None,
             profile_sig,
             profile_pk,
         }
@@ -3939,7 +4693,7 @@ mod tests {
             let proof = crate::storage::ProfileProof { sig: &sig, pk: &pk, avatar_hash: "", banner_hash: "", assets_hash: "" };
             save_incoming_profile(
                 &id, "Anon", "", "", updated_at, None, None, "", None, None, Some(proof),
-                None, None, None, None, None, None, ceiling, &db, &pass,
+                None, None, None, None, None, (None, None), None, ceiling, &db, &pass,
             )
             .1
         };

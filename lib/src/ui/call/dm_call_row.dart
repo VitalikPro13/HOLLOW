@@ -19,6 +19,7 @@ import 'package:hollow/src/ui/components/drop_when_tight.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_divider.dart';
+import 'package:hollow/src/core/providers/name_color_provider.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Height of the call row under the DM header.
@@ -213,14 +214,14 @@ class DmCallRow extends ConsumerWidget {
 
 /// "Mira is sharing their screen" with Watch, inline in the call row. Nothing
 /// streams until Watch (issue #38).
-class _InlineShareOffer extends StatelessWidget {
+class _InlineShareOffer extends ConsumerWidget {
   final CallShare share;
   final VoidCallback onWatch;
 
   const _InlineShareOffer({required this.share, required this.onWatch});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
     return Container(
       padding: const EdgeInsets.only(
@@ -244,7 +245,9 @@ class _InlineShareOffer extends StatelessWidget {
                 text: share.name,
                 style: TextStyle(
                   color: callNameColor(hollow,
-                      isSelf: false, master: share.master),
+                      isSelf: false,
+                      master: share.master,
+                      field: ref.watch(shownNameColorProvider(share.master))),
                   fontWeight: FontWeight.w500,
                 ),
               ),

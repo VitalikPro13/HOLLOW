@@ -43,6 +43,7 @@ import 'package:hollow/src/ui/settings/settings_kit.dart' show SettingsSwitchRow
 import 'package:hollow/src/ui/settings/settings_shared.dart';
 import 'package:hollow/src/ui/shell/conference_actions.dart';
 import 'package:hollow/src/ui/shell/place_header.dart';
+import 'package:hollow/src/core/providers/name_color_provider.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Human-readable joiner-side denial message.
@@ -1113,7 +1114,10 @@ class _ParticipantRow extends ConsumerWidget {
         children: [
           SpeakingRing(
             speaking: speaking,
-            color: callRingColor(hollow, isSelf: isSelf, master: master),
+            color: callRingColor(hollow,
+                isSelf: isSelf,
+                master: master,
+                field: ref.watch(shownNameColorProvider(master))),
             radius: hollow.radiusMd,
             child: HollowAvatar(
               peerId: master,

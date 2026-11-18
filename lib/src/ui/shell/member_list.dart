@@ -29,6 +29,7 @@ import 'package:hollow/src/ui/components/profile_card_popup.dart';
 import 'package:hollow/src/ui/components/support_glyph.dart';
 import 'package:hollow/src/ui/mobile/mobile_profile_sheet.dart';
 import 'package:hollow/src/ui/shell/user_context_menu.dart';
+import 'package:hollow/src/core/providers/name_color_provider.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// One line of a server's member list: a group's header or a person.
@@ -273,6 +274,7 @@ class _MemberRow extends ConsumerWidget {
       name: name,
       online: online,
       touch: touch,
+      namePaint: ref.chosenNamePaintOf(peerId, HollowTheme.of(context)),
       nameTrailing: [
         SupportNameGlyph(peerId: peerId, size: touch ? 16 : 14),
         TwitchNameGlyph(peerId: peerId),

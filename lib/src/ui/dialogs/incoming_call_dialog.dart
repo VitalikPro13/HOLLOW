@@ -3,7 +3,6 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:hollow/src/core/color_utils.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/dm_navigation.dart';
@@ -24,6 +23,7 @@ import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/peer_id_text.dart';
 import 'package:hollow/src/ui/shell/conference_actions.dart'
     show askMeetingHostBeforeDmCall;
+import 'package:hollow/src/core/providers/name_color_provider.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// The incoming call (5.4): one card under the header, ghost Decline and one
@@ -214,7 +214,9 @@ class _IncomingCallOverlayState extends ConsumerState<IncomingCallOverlay>
                                   name: _cachedDisplayName,
                                   peerId: _cachedMaster,
                                   style: HollowTypography.subheading.copyWith(
-                                    color: nameColorFor(_cachedMaster, hollow),
+                                    color: ref
+                                        .namePaint(_cachedMaster, hollow)
+                                        .color,
                                   ),
                                 ),
                                 Text(

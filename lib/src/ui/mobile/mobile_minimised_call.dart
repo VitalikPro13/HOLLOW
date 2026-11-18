@@ -24,6 +24,7 @@ import 'package:hollow/src/ui/mobile/mobile_call_chrome.dart';
 import 'package:hollow/src/ui/shell/conference_actions.dart'
     show inActiveConferenceCall;
 import 'package:hollow/src/ui/shell/voice_quick_controls.dart';
+import 'package:hollow/src/core/providers/name_color_provider.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// The mobile nav bar's height plus its top hairline.
@@ -189,7 +190,10 @@ class _DmCallBar extends ConsumerWidget {
     return _CallBarRow(
       leading: SpeakingRing(
         speaking: speaking,
-        color: callRingColor(hollow, isSelf: false, master: master),
+        color: callRingColor(hollow,
+            isSelf: false,
+            master: master,
+            field: ref.watch(shownNameColorProvider(master))),
         radius: hollow.radiusMd,
         child: HollowAvatar(
             peerId: master, size: MobileCallMetrics.barAvatar, frameId: ''),

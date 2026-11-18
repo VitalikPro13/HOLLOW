@@ -3322,6 +3322,8 @@ pub fn request_channel_sync(server_id: String, channel_id: String) -> Result<(),
 /// `banner_anim` name hashes whose bytes ride the asset rail, and their `still` must
 /// be passed as the matching `avatar_bytes` / `banner_bytes`. A still-only pick must
 /// pass `Some("")` so a previous animation is dropped.
+/// `name_color` is `""` (the hashed colour) or a version 1 field, `1:` and one to
+/// three lowercase `rrggbb` stops (`node::name_color`).
 #[frb]
 #[allow(clippy::too_many_arguments)]
 pub fn update_profile(
@@ -3337,10 +3339,14 @@ pub fn update_profile(
     avatar_anim: Option<String>,
     banner_anim: Option<String>,
     support_creds: Option<String>,
+    name_color: Option<String>,
 ) -> Result<(), String> {
     // Every receiver refuses a profile over these whole, so it would go nowhere.
     if node::social::profile_text_oversized(&display_name, &status, &about_me, &twitch_username) {
         return Err("Your name, status or About me is too long".to_string());
+    }
+    if name_color.as_deref().is_some_and(|c| !node::name_color::valid_own(c)) {
+        return Err("That name colour can't be used".into());
     }
     let node = get_node();
     let guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
@@ -3412,6 +3418,7 @@ pub fn update_profile(
             avatar_anim,
             banner_anim,
             support_creds,
+            name_color,
         }),
     )
     .map_err(|e| format!("Failed to send command: {e}"))?;
@@ -3773,6 +3780,7 @@ pub fn migrate_profile_media_once() -> Result<bool, String> {
         None,
         migrated_avatar.map(|(hash, _)| hash),
         migrated_banner.map(|(hash, _)| hash),
+        None,
         None,
     )?;
     mark();
@@ -4606,5 +4614,27 @@ mod tests_w4_iospush {
         assert!(meta("adult", Platform::Android).is_none());
         assert!(meta("adult", Platform::Desktop).is_some_and(|m| m.age_restricted));
         assert!(meta("plain", Platform::Ios).is_some_and(|m| !m.age_restricted), "a normal push is never dropped");
+    }
+}
+
+#[cfg(test)]
+mod tests_t17_name_color {
+    /// #140: our own UI can publish only a clear or a canonical version 1 field; the
+    /// refusal comes before any node is needed.
+    #[test]
+    fn name_color_our_own_update_refuses_a_malformed_colour() {
+        for bad in ["1:FF0000", "2:later", "red", "1:ff0000,", "1:ff0000,00ff00,0000ff,ffffff"] {
+            let refused = super::update_profile(
+                "Ada".into(), String::new(), String::new(), None, None, String::new(),
+                None, None, None, None, None, None, Some(bad.into()),
+            );
+            assert_eq!(refused, Err("That name colour can't be used".to_string()), "{bad}");
+        }
+        // A valid one passes this gate and stops only at the missing node.
+        let ok = super::update_profile(
+            "Ada".into(), String::new(), String::new(), None, None, String::new(),
+            None, None, None, None, None, None, Some("1:ff0000,00ff00".into()),
+        );
+        assert_ne!(ok, Err("That name colour can't be used".to_string()));
     }
 }

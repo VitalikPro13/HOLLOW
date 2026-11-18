@@ -482,6 +482,7 @@ storage_api.UserProfile _profile(
   avatarAnim: '',
   bannerAnim: '',
   supportCreds: '',
+  nameColor: '',
 );
 
 const _miraStatus = 'Painting frames tonight';

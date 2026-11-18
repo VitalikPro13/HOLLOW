@@ -36,6 +36,10 @@ class ProfileDraftState {
   final String? frameId;
   final bool frameChanged;
 
+  /// Pending name colour field (#140): `''` returns to the hashed colour.
+  final String? nameColor;
+  final bool nameColorChanged;
+
   const ProfileDraftState({
     this.dirty = false,
     this.saving = false,
@@ -47,6 +51,8 @@ class ProfileDraftState {
     this.bannerBusy = false,
     this.frameId,
     this.frameChanged = false,
+    this.nameColor,
+    this.nameColorChanged = false,
   });
 
   ProfileDraftState copyWith({
@@ -60,6 +66,8 @@ class ProfileDraftState {
     bool? bannerBusy,
     Object? frameId = _keep,
     bool? frameChanged,
+    Object? nameColor = _keep,
+    bool? nameColorChanged,
   }) =>
       ProfileDraftState(
         dirty: dirty ?? this.dirty,
@@ -76,10 +84,18 @@ class ProfileDraftState {
         bannerBusy: bannerBusy ?? this.bannerBusy,
         frameId: identical(frameId, _keep) ? this.frameId : frameId as String?,
         frameChanged: frameChanged ?? this.frameChanged,
+        nameColor: identical(nameColor, _keep)
+            ? this.nameColor
+            : nameColor as String?,
+        nameColorChanged: nameColorChanged ?? this.nameColorChanged,
       );
 
   /// The pending frame as the renderers take it, or null when unchanged.
   String? get effectiveFrame => frameChanged ? (frameId ?? '') : null;
+
+  /// The pending name colour field, or null when unchanged.
+  String? get effectiveNameColor =>
+      nameColorChanged ? (nameColor ?? '') : null;
 
   ProfileDraftState _withSlot(
     bool avatar, {
@@ -281,6 +297,12 @@ class ProfileDraftNotifier extends Notifier<ProfileDraftState> {
     state = state.copyWith(frameId: id, frameChanged: true, dirty: true);
   }
 
+  /// A name colour field from the picker; `''` returns to the hashed colour.
+  void setNameColor(String field) {
+    state =
+        state.copyWith(nameColor: field, nameColorChanged: true, dirty: true);
+  }
+
   /// Commits the draft. Rethrows on failure with the edits intact.
   Future<void> save() async {
     if (state.saving) return;
@@ -320,6 +342,7 @@ class ProfileDraftNotifier extends Notifier<ProfileDraftState> {
             avatarFrame: s.effectiveFrame,
             avatarAnim: s.avatarChanged ? (_anim[true] ?? '') : null,
             bannerAnim: s.bannerChanged ? (_anim[false] ?? '') : null,
+            nameColor: s.effectiveNameColor,
           );
 
       _baseline = sent;
@@ -327,11 +350,16 @@ class ProfileDraftNotifier extends Notifier<ProfileDraftState> {
       final avatarLater = _gen[true] != gens[true];
       final bannerLater = _gen[false] != gens[false];
       final frameLater = state.frameId != s.frameId;
+      final colorLater = state.nameColor != s.nameColor;
       if (!avatarLater) _dropSlot(true);
       if (!bannerLater) _dropSlot(false);
       final now = state;
       state = ProfileDraftState(
-        dirty: _texts() != sent || avatarLater || bannerLater || frameLater,
+        dirty: _texts() != sent ||
+            avatarLater ||
+            bannerLater ||
+            frameLater ||
+            colorLater,
         avatarBytes: avatarLater ? now.avatarBytes : null,
         avatarChanged: avatarLater && now.avatarChanged,
         avatarBusy: avatarLater && now.avatarBusy,
@@ -340,6 +368,8 @@ class ProfileDraftNotifier extends Notifier<ProfileDraftState> {
         bannerBusy: bannerLater && now.bannerBusy,
         frameId: frameLater ? now.frameId : null,
         frameChanged: frameLater && now.frameChanged,
+        nameColor: colorLater ? now.nameColor : null,
+        nameColorChanged: colorLater && now.nameColorChanged,
       );
     } catch (e) {
       state = state.copyWith(saving: false);

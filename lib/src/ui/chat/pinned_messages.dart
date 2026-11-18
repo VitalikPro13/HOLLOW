@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:hollow/src/core/color_utils.dart';
 import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/models/channel_chat_message.dart';
 import 'package:hollow/src/core/providers/blocked_users_provider.dart';
@@ -24,6 +23,8 @@ import 'package:hollow/src/ui/components/hollow_list_row.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_sheet.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
+import 'package:hollow/src/core/providers/name_color_provider.dart';
+import 'package:hollow/src/ui/components/name_text.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// The pinned messages of one channel that are loaded in [messages], newest
@@ -299,15 +300,13 @@ class _PinnedMessageRowState extends ConsumerState<PinnedMessageRow> {
         Row(
           children: [
             Flexible(
-              child: Text(
+              child: NameText(
                 name,
+                paint: ref.personNamePaint(master, hollow,
+                    isSelf: message.isMe),
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: HollowTypography.label.copyWith(
-                  color: message.isMe
-                      ? hollow.accentText
-                      : nameColorFor(master, hollow),
-                ),
+                style: HollowTypography.label,
               ),
             ),
             const SizedBox(width: HollowSpacing.sm),

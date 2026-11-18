@@ -96,6 +96,18 @@ pub(crate) struct StoredProfile {
     /// `support_creds_own` for us. Not covered by the profile signature: each entry
     /// binds the master peer id itself.
     pub support_creds: String,
+    /// The person's own name colour (`node::name_color`, #140), `""` for none. Written
+    /// ONLY through `name_color::gated` for a peer and by our own update for us.
+    pub name_color: String,
+    /// The owner's signature over [`Self::name_color_signed`], kept so a
+    /// `ProfileRelay` can carry the colour on; `None` for our own row. It may belong to
+    /// an older profile than the row holds (no writer clears it): a relayer verifies it
+    /// against the row first. Full loads only.
+    pub name_color_sig: Option<String>,
+    /// The exact value `name_color_sig` covers, when small enough to relay
+    /// (`name_color::RELAY_MAX`); it differs from `name_color` for a later version this
+    /// build shows as `""`. Full loads only.
+    pub name_color_signed: Option<String>,
     /// The SUBJECT's own signature over every field of this profile, persisted so we
     /// can forward it in a `ProfileRelay`. A relayed profile with no owner signature is
     /// refused, so one stored without it (a card, say) simply never gets relayed.
@@ -109,6 +121,17 @@ pub(crate) struct StoredProfile {
     /// The banner and showcase-asset hashes the signature covers, for the same reason.
     pub profile_banner_hash: Option<String>,
     pub profile_assets_hash: Option<String>,
+}
+
+/// A peer's name colour as its owner signed it (`node::name_color::Gated`).
+#[derive(Clone, Copy)]
+pub(crate) struct SignedNameColor<'a> {
+    /// The owner's colour signature.
+    pub sig: &'a str,
+    /// The exact signed value, `None` when too long to relay.
+    pub value: Option<&'a str>,
+    /// The `hollow-profile2` signature of the profile it was signed for.
+    pub profile_sig: &'a str,
 }
 
 /// The subject's proof for a profile, moved as one unit because its parts are only
@@ -963,6 +986,9 @@ fn profile_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredProfile> 
         support_creds: row.get::<_, String>(16).unwrap_or_default(),
         profile_banner_hash: row.get(17).unwrap_or(None),
         profile_assets_hash: row.get(18).unwrap_or(None),
+        name_color: row.get::<_, String>(19).unwrap_or_default(),
+        name_color_sig: row.get(20).unwrap_or(None),
+        name_color_signed: row.get(21).unwrap_or(None),
     })
 }
 
@@ -992,6 +1018,10 @@ fn profile_light_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredPro
         banner_anim: row.get::<_, String>(9).unwrap_or_default(),
         // Small capped text: renderers need it to light a support mark.
         support_creds: row.get::<_, String>(10).unwrap_or_default(),
+        // A few bytes every name renders with.
+        name_color: row.get::<_, String>(11).unwrap_or_default(),
+        name_color_sig: None,
+        name_color_signed: None,
     })
 }
 
@@ -1698,6 +1728,13 @@ impl MessageStore {
         // absent) and its own stamp, outside the profile signature.
         migrate(conn, "ALTER TABLE user_profiles ADD COLUMN stream_overlay TEXT NOT NULL DEFAULT '';");
         migrate(conn, "ALTER TABLE user_profiles ADD COLUMN stream_overlay_at INTEGER NOT NULL DEFAULT 0;");
+        // -- Name colour (#140): the signed `name_color` field, "" = the hashed colour.
+        migrate(conn, "ALTER TABLE user_profiles ADD COLUMN name_color TEXT NOT NULL DEFAULT '';");
+        migrate(conn, "ALTER TABLE user_profiles ADD COLUMN name_color_sig TEXT;");
+        // What that signature covers, and the profile signature it was made for: a
+        // stored colour signature counts in a tie only while the row holds that profile.
+        migrate(conn, "ALTER TABLE user_profiles ADD COLUMN name_color_signed TEXT;");
+        migrate(conn, "ALTER TABLE user_profiles ADD COLUMN name_color_for TEXT;");
         // The people this device shows on its stream overlay. LOCAL to this device and
         // profile: no sync reads it. `slot` is the stable number OBS links use.
         ddl(conn, "overlay_people table",
@@ -6080,7 +6117,7 @@ impl MessageStore {
                     updated_at = excluded.updated_at,
                     avatar = CASE WHEN ?5 = '' THEN NULL ELSE COALESCE(excluded.avatar, user_profiles.avatar) END,
                     profile_sig = NULL, profile_pk = NULL, profile_avatar_hash = NULL,
-                    profile_banner_hash = NULL, profile_assets_hash = NULL
+                    profile_banner_hash = NULL, profile_assets_hash = NULL, name_color_sig = NULL
                  WHERE excluded.updated_at > user_profiles.updated_at
                     OR (?7 AND excluded.updated_at = user_profiles.updated_at AND user_profiles.profile_sig IS NULL)
                     OR user_profiles.updated_at > ?6",
@@ -6141,6 +6178,40 @@ impl MessageStore {
             .execute(sql, params![master, field_json, at])
             .map(|n| n > 0)
             .map_err(|e| format!("Failed to save stream overlay field: {e}"))
+    }
+
+    /// Write `peer_id`'s name colour onto its row, only while the row still holds the
+    /// profile stamped `updated_at` and, for a peer's colour, signed `signed.profile_sig`:
+    /// the colour is signed for exactly that profile, so it never lands on a newer, an
+    /// older or a sibling profile. `shown` must already be through `name_color::gated`
+    /// (a peer's, with `signed`) or `name_color::valid_own` (ours, `signed` None).
+    ///
+    /// Of two signed colours for one profile the higher signature stays, so every
+    /// replica keeps the same one whatever order they arrive in. A stored signature
+    /// made for another profile (`name_color_for`) counts as none, so no profile write
+    /// has to clear it.
+    pub fn set_name_color(
+        &self,
+        peer_id: &str,
+        shown: &str,
+        signed: Option<SignedNameColor<'_>>,
+        updated_at: i64,
+    ) -> Result<bool, String> {
+        let (sig, raw, profile_sig) = match signed {
+            Some(s) => (Some(s.sig), s.value, Some(s.profile_sig)),
+            None => (None, None, None),
+        };
+        self.conn
+            .execute(
+                "UPDATE user_profiles
+                    SET name_color = ?2, name_color_sig = ?4, name_color_signed = ?5, name_color_for = ?6
+                 WHERE peer_id = ?1 AND updated_at = ?3
+                   AND (?6 IS NULL OR profile_sig IS ?6)
+                   AND (?4 IS NULL OR name_color_sig IS NULL OR name_color_for IS NOT ?6 OR ?4 >= name_color_sig)",
+                params![peer_id, shown, updated_at, sig, raw, profile_sig],
+            )
+            .map(|n| n > 0)
+            .map_err(|e| format!("Failed to save name colour: {e}"))
     }
 
     fn overlay_person_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OverlayPersonRow> {
@@ -6239,7 +6310,7 @@ impl MessageStore {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT peer_id, display_name, status, about_me, updated_at, avatar, banner, twitch_username, showcase_board, showcase_assets, profile_sig, profile_pk, profile_avatar_hash, avatar_frame, avatar_anim, banner_anim, support_creds, profile_banner_hash, profile_assets_hash
+                "SELECT peer_id, display_name, status, about_me, updated_at, avatar, banner, twitch_username, showcase_board, showcase_assets, profile_sig, profile_pk, profile_avatar_hash, avatar_frame, avatar_anim, banner_anim, support_creds, profile_banner_hash, profile_assets_hash, name_color, name_color_sig, name_color_signed
                  FROM user_profiles WHERE peer_id = ?1",
             )
             .map_err(|e| format!("Failed to prepare profile query: {e}"))?;
@@ -6258,7 +6329,7 @@ impl MessageStore {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT peer_id, display_name, status, about_me, updated_at, avatar, banner, twitch_username, showcase_board, showcase_assets, profile_sig, profile_pk, profile_avatar_hash, avatar_frame, avatar_anim, banner_anim, support_creds, profile_banner_hash, profile_assets_hash
+                "SELECT peer_id, display_name, status, about_me, updated_at, avatar, banner, twitch_username, showcase_board, showcase_assets, profile_sig, profile_pk, profile_avatar_hash, avatar_frame, avatar_anim, banner_anim, support_creds, profile_banner_hash, profile_assets_hash, name_color, name_color_sig, name_color_signed
                  FROM user_profiles",
             )
             .map_err(|e| format!("Failed to prepare all profiles query: {e}"))?;
@@ -6273,7 +6344,7 @@ impl MessageStore {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT peer_id, display_name, status, about_me, updated_at, twitch_username, showcase_board, avatar_frame, avatar_anim, banner_anim, support_creds
+                "SELECT peer_id, display_name, status, about_me, updated_at, twitch_username, showcase_board, avatar_frame, avatar_anim, banner_anim, support_creds, name_color
                  FROM user_profiles",
             )
             .map_err(|e| format!("Failed to prepare light profiles query: {e}"))?;
@@ -6288,7 +6359,7 @@ impl MessageStore {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT peer_id, display_name, status, about_me, updated_at, twitch_username, showcase_board, avatar_frame, avatar_anim, banner_anim, support_creds
+                "SELECT peer_id, display_name, status, about_me, updated_at, twitch_username, showcase_board, avatar_frame, avatar_anim, banner_anim, support_creds, name_color
                  FROM user_profiles WHERE peer_id = ?1",
             )
             .map_err(|e| format!("Failed to prepare light profile query: {e}"))?;
@@ -13496,5 +13567,64 @@ mod w3_ar39 {
         assert_eq!((counted("srv"), counted("srv2") > 0), (0, true), "a server's counts outlived it");
         a.scrub_device_secrets().unwrap();
         assert_eq!(counted("srv2"), 0, "a copy kept what this device cleared");
+    }
+}
+
+#[cfg(test)]
+mod tests_t17_name_color {
+    /// #140: a name colour lands only on the row still holding the profile stamp it was
+    /// signed with.
+    #[test]
+    fn name_color_lands_only_on_the_row_of_its_own_stamp() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let db = tmp.path().join("nc.db").to_str().unwrap().to_string();
+        let pass = "ef".repeat(32);
+        let ms = super::MessageStore::open(&db, &pass).unwrap();
+        assert!(!ms.set_name_color("p", "1:ff0000", None, 5).unwrap(), "no row, nothing written");
+        ms.save_profile("p", "P", "", "", 10, None, None, "", None, None, None, None, None, None, None).unwrap();
+        assert!(!ms.set_name_color("p", "1:ff0000", None, 9).unwrap(), "an older stamp never lands");
+        assert!(!ms.set_name_color("p", "1:ff0000", None, 11).unwrap(), "nor a newer one");
+        assert_eq!(ms.load_profile_light("p").unwrap().unwrap().name_color, "");
+        assert!(ms.set_name_color("p", "1:ff0000", None, 10).unwrap());
+        assert_eq!(ms.load_profile("p").unwrap().unwrap().name_color, "1:ff0000");
+        assert_eq!(ms.load_all_profiles_light().unwrap()[0].name_color, "1:ff0000");
+    }
+
+    fn proof(sig: &str) -> super::ProfileProof<'_> {
+        super::ProfileProof { sig, pk: "pk", avatar_hash: "", banner_hash: "", assets_hash: "" }
+    }
+
+    fn signed<'a>(sig: &'a str, profile_sig: &'a str) -> Option<super::SignedNameColor<'a>> {
+        Some(super::SignedNameColor { sig, value: Some("1:00ff00"), profile_sig })
+    }
+
+    /// #140: a peer's colour lands only on the row holding the very profile it was
+    /// signed for, and a colour signature stored for another profile never wins a tie,
+    /// although no profile write clears it.
+    #[test]
+    fn name_color_binds_to_its_profile_and_a_stale_signature_counts_as_none() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let db = tmp.path().join("nc2.db").to_str().unwrap().to_string();
+        let pass = "ef".repeat(32);
+        let ms = super::MessageStore::open(&db, &pass).unwrap();
+        let save = |at: i64, psig: &str| {
+            ms.save_profile("p", "P", "", "", at, None, None, "", None, None, Some(proof(psig)), None, None, None, None)
+                .unwrap()
+        };
+        let color = || ms.load_profile("p").unwrap().unwrap().name_color;
+        assert!(save(10, "P1"));
+        assert!(!ms.set_name_color("p", "1:111111", signed("m", "P0"), 10).unwrap(), "another profile of the stamp");
+        assert!(ms.set_name_color("p", "1:222222", signed("m", "P1"), 10).unwrap());
+        assert_eq!(ms.load_profile("p").unwrap().unwrap().name_color_signed.as_deref(), Some("1:00ff00"));
+        // One profile, two colours: the higher signature stays.
+        assert!(!ms.set_name_color("p", "1:333333", signed("a", "P1"), 10).unwrap(), "a lower signature");
+        assert!(ms.set_name_color("p", "1:444444", signed("z", "P1"), 10).unwrap(), "a higher signature");
+        assert_eq!(color(), "1:444444");
+        // A newer profile; nothing clears the old colour signature "z".
+        assert!(save(11, "P2"));
+        assert_eq!(ms.load_profile("p").unwrap().unwrap().name_color_sig.as_deref(), Some("z"));
+        assert!(ms.set_name_color("p", "1:555555", signed("b", "P2"), 11).unwrap(), "a stale signature won the tie");
+        assert_eq!(color(), "1:555555");
+        assert!(!ms.set_name_color("p", "1:666666", signed("a", "P2"), 11).unwrap(), "the tie still holds for this profile");
     }
 }

@@ -5,6 +5,8 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/components/conversation_row.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/core/color_utils.dart';
+import 'package:hollow/src/ui/components/name_text.dart';
 
 /// One person in a people list: their avatar with its presence dot, their
 /// name, and the small marks they have earned after it.
@@ -25,6 +27,10 @@ class PersonRow extends StatelessWidget {
 
   final VoidCallback onTap;
 
+  /// The colour the person chose for their name, painted while they are
+  /// online; null keeps the neutral name every people list uses.
+  final NamePaint? namePaint;
+
   /// Phone metrics (design language 5.4): a larger avatar, type one step up,
   /// full bleed and at least 48 tall.
   final bool touch;
@@ -38,6 +44,7 @@ class PersonRow extends StatelessWidget {
     this.nameTrailing = const [],
     this.subtitle,
     this.touch = false,
+    this.namePaint,
   });
 
   @override
@@ -79,16 +86,14 @@ class PersonRow extends StatelessWidget {
                 Row(
                   children: [
                     Flexible(
-                      child: Text(
+                      child: NameText(
                         name,
+                        paint: online
+                            ? namePaint ?? NamePaint([hollow.textPrimary])
+                            : NamePaint([hollow.textTertiary]),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
-                        style: style.copyWith(
-                          color: online
-                              ? hollow.textPrimary
-                              : hollow.textTertiary,
-                          fontWeight: FontWeight.w500,
-                        ),
+                        style: style.copyWith(fontWeight: FontWeight.w500),
                       ),
                     ),
                     ...nameTrailing,

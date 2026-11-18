@@ -21,6 +21,7 @@ import 'package:hollow/src/ui/components/hollow_icon_button.dart';
 import 'package:hollow/src/ui/components/overlay_hosts.dart';
 import 'package:hollow/src/ui/components/ime_keys.dart';
 import 'package:hollow/src/ui/media/fullscreen_media_chrome.dart';
+import 'package:hollow/src/core/providers/name_color_provider.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Turns one kind of call into what the stage draws. Watched from whichever
@@ -584,7 +585,9 @@ class _SpeakingLine extends ConsumerWidget {
           text: first.name,
           style: TextStyle(
               color: callNameColor(hollow,
-                  isSelf: first.isSelf, master: first.master)),
+                  isSelf: first.isSelf,
+                  master: first.master,
+                  field: ref.watch(shownNameColorProvider(first.master)))),
         ),
         TextSpan(text: verb),
       ]),

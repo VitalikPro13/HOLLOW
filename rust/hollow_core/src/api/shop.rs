@@ -1550,6 +1550,7 @@ pub(crate) fn announce_support_creds(master: &str, json: String) -> Result<(), S
             avatar_anim: None,
             banner_anim: None,
             support_creds: Some(json),
+            name_color: None,
         },
     ));
     if sent.is_err() {

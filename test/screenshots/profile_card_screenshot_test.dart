@@ -313,6 +313,7 @@ class _MockProfileNotifier extends ProfileNotifier {
           avatarAnim: '',
           bannerAnim: '',
           supportCreds: '',
+          nameColor: '',
         ),
       };
 }
@@ -336,6 +337,7 @@ class _TwoCredsProfileNotifier extends ProfileNotifier {
           supportCreds:
               '[{"t":1,"item":"${'a' * 64}","parts":["${'b' * 64}"],"badge":true},'
               '{"t":1,"item":"${'c' * 64}","parts":["${'d' * 64}","${'e' * 64}"],"badge":true}]',
+          nameColor: '',
         ),
       };
 }

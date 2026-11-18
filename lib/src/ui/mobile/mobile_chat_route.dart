@@ -17,7 +17,6 @@ import 'package:hollow/src/core/services/channel_topic_service.dart';
 import 'package:hollow/src/core/time_labels.dart';
 import 'package:hollow/src/core/providers/background_provider.dart';
 import 'package:hollow/src/core/album_grouping.dart';
-import 'package:hollow/src/core/color_utils.dart';
 import 'package:hollow/src/core/providers/app_lifecycle_provider.dart';
 import 'package:hollow/src/core/models/channel_chat_message.dart';
 import 'package:hollow/src/core/models/channel_info.dart';
@@ -115,6 +114,7 @@ import 'package:hollow/src/core/services/attachment_export.dart';
 import 'package:hollow/src/ui/components/hollow_sheet.dart';
 import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:hollow/src/ui/chat/server_recovery_notices.dart';
+import 'package:hollow/src/core/providers/name_color_provider.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 
@@ -2896,7 +2896,13 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute>
           final mine = msg.isMine || isSaved;
           return ChatSearchResultRow(
             name: mine ? 'You' : name,
-            nameColor: mine ? hollow.accentText : nameColorFor(peer, hollow),
+            namePaint: mine
+                ? ref.personNamePaint(
+                    ref.watch(deviceLinkProvider)
+                        .identityOf(ref.watch(identityProvider).peerId ?? ''),
+                    hollow,
+                    isSelf: true)
+                : ref.namePaint(peer, hollow),
             time: DateTime.fromMillisecondsSinceEpoch(msg.timestamp.toInt()),
             text: messagePreviewText(msg.text),
             onTap: () => _jumpToSearchHit(msg.messageId),
@@ -2921,8 +2927,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute>
           return ChatSearchResultRow(
             name: serverDisplayNameForPeer(profiles[master], master,
                 nickname: nicknames[master] ?? ''),
-            nameColor:
-                master == me ? hollow.accentText : nameColorFor(master, hollow),
+            namePaint:
+                ref.personNamePaint(master, hollow, isSelf: master == me),
             time: DateTime.fromMillisecondsSinceEpoch(msg.timestamp.toInt()),
             text: messagePreviewText(msg.text),
             onTap: () => _jumpToSearchHit(msg.messageId),

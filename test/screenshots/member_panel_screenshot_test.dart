@@ -214,6 +214,7 @@ storage_api.UserProfile _profile(String peer, String name,
       avatarAnim: '',
       bannerAnim: '',
       supportCreds: '',
+      nameColor: '',
     );
 
 class _Identity extends IdentityNotifier {

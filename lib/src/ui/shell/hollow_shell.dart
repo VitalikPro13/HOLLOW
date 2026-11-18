@@ -55,6 +55,7 @@ import 'package:hollow/src/rust/api/recovery.dart' as recovery_api;
 import 'package:hollow/src/ui/shell/data_recovery.dart';
 import 'package:hollow/src/ui/shell/first_run_link.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
+import 'package:hollow/src/core/providers/name_color_provider.dart';
 import 'package:hollow/src/core/providers/recent_files_sweep.dart';
 import 'package:hollow/src/core/providers/recording_provider.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
@@ -1373,6 +1374,8 @@ class _HollowShellState extends ConsumerState<HollowShell>
       debugPrint('[HOLLOW] Failed to load unread state: $e');
     }
 
+    // Before the profiles, so names never flash a colour the switch hides.
+    await ref.read(showNameColorsProvider.notifier).load();
     // The DM list's source, and a pure local read, so it precedes the network.
     await ref.read(profileProvider.notifier).loadAll();
     await ref.read(friendsProvider.notifier).loadAll();

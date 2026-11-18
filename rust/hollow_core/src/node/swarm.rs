@@ -2681,7 +2681,7 @@ async fn run_event_loop(
                             &db_path, &db_passphrase,
                         ).await { continue; }
                     }
-                    NodeCommand::UpdateProfile { display_name, status, about_me, avatar_bytes, banner_bytes, twitch_username, showcase_board, showcase_assets, avatar_frame, avatar_anim, banner_anim, support_creds } => {
+                    NodeCommand::UpdateProfile { display_name, status, about_me, avatar_bytes, banner_bytes, twitch_username, showcase_board, showcase_assets, avatar_frame, avatar_anim, banner_anim, support_creds, name_color } => {
                         social::handle_update_profile(
                             &event_tx, &ws_cmd_tx, &ws_room_peers,
                             &mut mls, &server_states,
@@ -2689,7 +2689,7 @@ async fn run_event_loop(
                             display_name, status, about_me,
                             avatar_bytes, banner_bytes, is_invisible, twitch_username,
                             showcase_board, showcase_assets, avatar_frame,
-                            avatar_anim, banner_anim, support_creds,
+                            avatar_anim, banner_anim, support_creds, name_color,
                             &db_path, &db_passphrase,
                         ).await;
                     }
@@ -13680,7 +13680,7 @@ async fn handle_incoming_request_inner(
                                 }
                             }
 
-                            MessageEnvelope::ProfileUpdate { display_name, status, about_me, updated_at, avatar_b64, banner_b64, is_invisible: peer_invisible, twitch_username, device_list, avatar_hash, banner_hash, showcase_board, showcase_assets_b64, showcase_assets_hash, avatar_frame, avatar_anim, banner_anim, support_creds, support_creds_sig, profile_sig, profile_pk, card, stream_overlay } => {
+                            MessageEnvelope::ProfileUpdate { display_name, status, about_me, updated_at, avatar_b64, banner_b64, is_invisible: peer_invisible, twitch_username, device_list, avatar_hash, banner_hash, showcase_board, showcase_assets_b64, showcase_assets_hash, avatar_frame, avatar_anim, banner_anim, support_creds, support_creds_sig, name_color, name_color_sig, profile_sig, profile_pk, card, stream_overlay } => {
                                 if super::conference::refuses_profile_update(&server_id, &sender_peer_id) {
                                     return;
                                 }
@@ -13698,7 +13698,7 @@ async fn handle_incoming_request_inner(
                                     device_list, avatar_hash, banner_hash, showcase_board,
                                     showcase_assets_b64, showcase_assets_hash, avatar_frame,
                                     avatar_anim, banner_anim, support_creds,
-                                    support_creds_sig, profile_sig, profile_pk, stream_overlay,
+                                    support_creds_sig, name_color, name_color_sig, profile_sig, profile_pk, stream_overlay,
                                     super::frame_auth::stamp_ceiling(frame_ts_ms), (card.as_deref(), frame_ts_ms),
                                     db_path, db_passphrase,
                                 ).await else {
@@ -15945,7 +15945,7 @@ async fn handle_incoming_request_inner(
             peer_auto_dl.insert(peer_str.to_string(), mb);
         }
 
-        HavenMessage::ProfileUpdate { display_name, status, about_me, updated_at, avatar_b64, banner_b64, is_invisible: peer_invisible, twitch_username, device_list, avatar_hash, banner_hash, showcase_board, showcase_assets_b64, showcase_assets_hash, avatar_frame, avatar_anim, banner_anim, support_creds, support_creds_sig, profile_sig, profile_pk, card, stream_overlay } => {
+        HavenMessage::ProfileUpdate { display_name, status, about_me, updated_at, avatar_b64, banner_b64, is_invisible: peer_invisible, twitch_username, device_list, avatar_hash, banner_hash, showcase_board, showcase_assets_b64, showcase_assets_hash, avatar_frame, avatar_anim, banner_anim, support_creds, support_creds_sig, name_color, name_color_sig, profile_sig, profile_pk, card, stream_overlay } => {
             // If the profile carries an invisible flag, emit PeerStatusChanged so the
             // UI treats this peer as offline from the very first event.
             if peer_invisible {
@@ -15972,6 +15972,7 @@ async fn handle_incoming_request_inner(
                 showcase_assets_b64: showcase_assets_b64.clone(), showcase_assets_hash: showcase_assets_hash.clone(),
                 avatar_frame: avatar_frame.clone(), avatar_anim: avatar_anim.clone(), banner_anim: banner_anim.clone(),
                 support_creds: support_creds.clone(), support_creds_sig: support_creds_sig.clone(),
+                name_color: name_color.clone(), name_color_sig: name_color_sig.clone(),
                 profile_sig: profile_sig.clone(), profile_pk: profile_pk.clone(), card: card.clone(),
                 stream_overlay: stream_overlay.clone(),
             };
@@ -16151,6 +16152,7 @@ async fn handle_incoming_request_inner(
                 social::sanitize_incoming_anim(banner_anim.as_deref()),
                 support_creds.as_deref(),
                 support_creds_sig.as_deref(),
+                (name_color.as_deref(), name_color_sig.as_deref()),
                 stream_overlay.as_deref(),
                 super::frame_auth::stamp_ceiling(frame_ts_ms),
                 db_path, db_passphrase,
@@ -16840,7 +16842,7 @@ async fn handle_incoming_request_inner(
         HavenMessage::ProfileRelay {
             source_peer_id, display_name, status, about_me, updated_at, avatar_b64, twitch_username,
             avatar_hash, banner_hash, showcase_board, showcase_assets_hash, avatar_frame, avatar_anim,
-            banner_anim, profile_sig, profile_pk,
+            banner_anim, profile_sig, profile_pk, name_color, name_color_sig,
         } => {
             hollow_log!("[HOLLOW-PROFILE] ProfileRelay for {source_peer_id} from {peer_str}");
             social::handle_profile_relay(
@@ -16848,7 +16850,7 @@ async fn handle_incoming_request_inner(
                 social::RelayedProfile {
                     source_peer_id, display_name, status, about_me, updated_at, avatar_b64, twitch_username,
                     avatar_hash, banner_hash, showcase_board, showcase_assets_hash, avatar_frame, avatar_anim,
-                    banner_anim, profile_sig, profile_pk,
+                    banner_anim, name_color, name_color_sig, profile_sig, profile_pk,
                 },
                 local_peer_str, super::frame_auth::stamp_ceiling(frame_ts_ms),
                 db_path, db_passphrase,

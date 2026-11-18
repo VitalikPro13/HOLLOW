@@ -327,6 +327,7 @@ storage_api.UserProfile _profile(String id, String name, String status) =>
       avatarAnim: '',
       bannerAnim: '',
       supportCreds: '',
+      nameColor: '',
     );
 
 class _Profiles extends ProfileNotifier {

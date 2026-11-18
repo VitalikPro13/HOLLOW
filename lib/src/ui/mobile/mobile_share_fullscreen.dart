@@ -17,6 +17,7 @@ import 'package:hollow/src/ui/media/media_zoom_view.dart';
 import 'package:hollow/src/ui/mobile/mobile_call_chrome.dart';
 import 'package:hollow/src/ui/mobile/mobile_connection_indicator.dart';
 import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
+import 'package:hollow/src/core/providers/name_color_provider.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// A watched share full screen on the phone: turned to landscape, pinch to
@@ -172,7 +173,10 @@ class _MobileShareFullscreenState extends ConsumerState<MobileShareFullscreen>
                               overflow: TextOverflow.ellipsis,
                               style: HollowTypography.label.copyWith(
                                 color: callNameColor(media,
-                                    isSelf: false, master: share.master),
+                                    isSelf: false,
+                                    master: share.master,
+                                    field: ref.watch(
+                                        shownNameColorProvider(share.master))),
                               ),
                             ),
                           ),

@@ -14,17 +14,23 @@ HollowTheme callMediaTheme(HollowTheme hollow) =>
     _mediaThemes[hollow.accent.toARGB32()] ??= HollowTheme.dark()
         .copyWithAccent(hollow.accent, hollow.accentHover, hollow.accentMuted);
 
-/// A person's colour in a call, for names: yours is always the accent.
+/// A person's colour in a call, for names. [field] is their shown name colour
+/// (`shownNameColorProvider`); a call surface draws one colour, so a gradient
+/// shows its first stop. Yours is the accent unless you chose a colour.
 Color callNameColor(HollowTheme hollow,
-        {required bool isSelf, required String master}) =>
-    isSelf ? hollow.accentText : nameColorFor(master, hollow);
+        {required bool isSelf, required String master, String field = ''}) =>
+    isSelf
+        ? chosenNamePaint(hollow, field, self: true)?.color ?? hollow.accentText
+        : namePaintFor(master, hollow, field: field).color;
 
-/// The speaking ring's colour: the accent fill for you, the person's own name
-/// colour for everyone else. [master] must be the MASTER id, or one person's
-/// devices ring in different colours.
+/// The speaking ring's colour: the person's name colour, and for you the accent
+/// fill unless you chose a colour. [master] must be the MASTER id, or one
+/// person's devices ring in different colours.
 Color callRingColor(HollowTheme hollow,
-        {required bool isSelf, required String master}) =>
-    isSelf ? hollow.accent : nameColorFor(master, hollow);
+        {required bool isSelf, required String master, String field = ''}) =>
+    isSelf
+        ? chosenNamePaint(hollow, field, self: true)?.color ?? hollow.accent
+        : namePaintFor(master, hollow, field: field).color;
 
 /// Stage metrics shared by the tiles and the layout.
 abstract final class CallMetrics {

@@ -643,6 +643,8 @@ Future<void> requestChannelSync({
 /// `banner_anim` name hashes whose bytes ride the asset rail, and their `still` must
 /// be passed as the matching `avatar_bytes` / `banner_bytes`. A still-only pick must
 /// pass `Some("")` so a previous animation is dropped.
+/// `name_color` is `""` (the hashed colour) or a version 1 field, `1:` and one to
+/// three lowercase `rrggbb` stops (`node::name_color`).
 Future<void> updateProfile({
   required String displayName,
   required String status,
@@ -656,6 +658,7 @@ Future<void> updateProfile({
   String? avatarAnim,
   String? bannerAnim,
   String? supportCreds,
+  String? nameColor,
 }) => RustLib.instance.api.crateApiNetworkUpdateProfile(
   displayName: displayName,
   status: status,
@@ -669,6 +672,7 @@ Future<void> updateProfile({
   avatarAnim: avatarAnim,
   bannerAnim: bannerAnim,
   supportCreds: supportCreds,
+  nameColor: nameColor,
 );
 
 /// Process a raw image into a person's avatar (512x512 WebP — see

@@ -30,6 +30,7 @@ import 'package:hollow/src/ui/settings/profile_section.dart';
 import 'package:hollow/src/ui/settings/settings_kit.dart';
 import 'package:hollow/src/ui/settings/settings_shared.dart';
 import 'package:hollow/src/ui/shop/owned_art_panel.dart';
+import 'package:hollow/src/ui/settings/name_color_editor.dart';
 
 /// Below this the preview goes above the rows rather than beside them.
 const double _kSideBySideMinWidth = 560;
@@ -134,7 +135,7 @@ class _ProfileEditor extends ConsumerWidget {
         _AvatarRow(peerId: peerId),
         _BannerRow(peerId: peerId),
         _FrameRow(peerId: peerId),
-        const SizedBox(height: HollowSpacing.md),
+        NameColorEditor(peerId: peerId),
         const SettingsFieldLabel(label: 'Display name'),
         const SizedBox(height: HollowSpacing.xs),
         HollowTextField(

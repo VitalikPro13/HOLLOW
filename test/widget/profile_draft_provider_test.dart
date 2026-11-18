@@ -38,6 +38,7 @@ typedef _Saved = ({
 /// Holds my saved row and records every save instead of reaching Rust.
 class _RecordingProfiles extends ProfileNotifier {
   final saves = <_Saved>[];
+  final nameColors = <String?>[];
   bool fail = false;
 
   @override
@@ -54,6 +55,7 @@ class _RecordingProfiles extends ProfileNotifier {
           avatarAnim: '',
           bannerAnim: '',
           supportCreds: '',
+          nameColor: '',
         ),
       };
 
@@ -71,8 +73,10 @@ class _RecordingProfiles extends ProfileNotifier {
     String? avatarAnim,
     String? bannerAnim,
     String? supportCreds,
+    String? nameColor,
   }) async {
     if (fail) throw Exception('node is down');
+    nameColors.add(nameColor);
     saves.add((
       displayName: displayName,
       status: status,

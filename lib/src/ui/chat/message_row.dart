@@ -10,6 +10,7 @@ import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/layout_provider.dart';
 import 'package:hollow/src/core/providers/link_preview_settings_provider.dart';
+import 'package:hollow/src/core/providers/name_color_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
@@ -30,6 +31,7 @@ import 'package:hollow/src/ui/components/attachment_image.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 import 'package:hollow/src/ui/components/hover_scope.dart';
+import 'package:hollow/src/ui/components/name_text.dart';
 import 'package:hollow/src/ui/components/support_glyph.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -152,7 +154,7 @@ class MessageRow extends ConsumerWidget {
         ref.watch(deletedMessagesProvider.select((d) => d.contains(replyMid)));
     final reply = replyDeleted
         ? _deletedReply(hollow)
-        : _buildReply(hollow, links.identityOf(localPeerId), links);
+        : _buildReply(ref, hollow, links.identityOf(localPeerId), links);
 
     // A file placeholder carries no text of its own. An album shows its
     // caption whichever item carries it.
@@ -218,12 +220,10 @@ class MessageRow extends ConsumerWidget {
           serverId: serverId,
           child: child,
         );
+    final namePaint = ref.personNamePaint(sender, hollow, isSelf: isMe);
     final nameStyle =
         (isTouchForm ? HollowTypography.bodyTouch : HollowTypography.body)
-            .copyWith(
-      color: isMe ? hollow.accentText : nameColorFor(sender, hollow),
-      fontWeight: FontWeight.w600,
-    );
+            .copyWith(fontWeight: FontWeight.w600);
 
     if (ref.watch(messageDisplayProvider) == MessageDisplay.compact) {
       // Every row carries its own time and name, so a grouped run reads the
@@ -244,8 +244,9 @@ class MessageRow extends ConsumerWidget {
             const SizedBox(width: HollowSpacing.sm),
             ConstrainedBox(
               constraints: const BoxConstraints(maxWidth: _kCompactNameWidth),
-              child: toProfile(Text(
+              child: toProfile(NameText(
                 senderName,
+                paint: namePaint,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: nameStyle,
@@ -323,8 +324,9 @@ class MessageRow extends ConsumerWidget {
                   textBaseline: TextBaseline.alphabetic,
                   children: [
                     Flexible(
-                      child: toProfile(Text(
+                      child: toProfile(NameText(
                         senderName,
+                        paint: namePaint,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: nameStyle,
@@ -366,26 +368,26 @@ class MessageRow extends ConsumerWidget {
       );
 
   /// One line above the message: who it answers and what they said.
-  Widget? _buildReply(HollowTheme hollow, String me, DeviceLinkState links) {
+  Widget? _buildReply(
+      WidgetRef ref, HollowTheme hollow, String me, DeviceLinkState links) {
     final replyText = replyToText;
     if (replyToMid == null || replyText == null) return null;
     final replySender =
         replyToSenderId == null ? null : links.identityOf(replyToSenderId!);
-    final nameColor = replySender == null
-        ? hollow.textSecondary
-        : replySender == me
-            ? hollow.accentText
-            : nameColorFor(replySender, hollow);
+    final namePaint = replySender == null
+        ? NamePaint([hollow.textSecondary])
+        : ref.personNamePaint(replySender, hollow, isSelf: replySender == me);
     final image = replyToImagePath;
     final line = Row(
       children: [
         Icon(LucideIcons.reply, size: 14, color: hollow.textTertiary),
         const SizedBox(width: HollowSpacing.xs),
         if (replyToSenderName != null) ...[
-          Text(
+          NameText(
             replyToSenderName!,
+            paint: namePaint,
             style: HollowTypography.bodySmall
-                .copyWith(color: nameColor, fontWeight: FontWeight.w600),
+                .copyWith(fontWeight: FontWeight.w600),
           ),
           const SizedBox(width: HollowSpacing.xs),
         ],

@@ -1,0 +1,427 @@
+{
+  "_": [
+    "#140 name colours on two desktop peers: b sees a's hashed name, a picks a",
+    "three-stop gradient in Settings > Profile and saves, b sees it live in the DM",
+    "on dark and light, then turns 'Show custom name colours' off and sees the hash again.",
+    "Friend steps copied from friend_dm.json. ${RUN} keeps messages unique per run.",
+    "run (Mac mini): FLEET_BACKEND=macos pwsh scripts/fleet.ps1 -Scenario name_colors_desktop -Peers a,b"
+  ],
+  "peers": [
+    "a",
+    "b"
+  ],
+  "steps": [
+    {
+      "peer": "all",
+      "op": "wait_for",
+      "provider": "connection",
+      "equals": "connected",
+      "timeout_ms": 120000
+    },
+    {
+      "peer": "a",
+      "op": "capture",
+      "from": "provider",
+      "key": "peerId",
+      "as": "PEER_A"
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "semantics:Add friend",
+      "index": 0
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "type:_FriendsManager > text:Add friend",
+      "index": 0
+    },
+    {
+      "peer": "b",
+      "op": "enter_text",
+      "target": "hint:Paste an ID, or type a nickname",
+      "value": "${PEER_A}"
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "text:Send request",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "semantics:Add friend",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "text:Requests",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "semantics:Accept friend request",
+      "timeout_ms": 60000
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "semantics:Accept friend request",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "log",
+      "message": "the accepted friend must reach the UI on BOTH sides, not just the friends table"
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "text:probe-b",
+      "timeout_ms": 60000
+    },
+    {
+      "peer": "b",
+      "op": "wait_for",
+      "target": "text:probe-a",
+      "timeout_ms": 60000
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "type:_FriendsManager > semantics:Close",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "gone": "type:_FriendsManager",
+      "timeout_ms": 10000
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "semantics:probe-b"
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 1500
+    },
+    {
+      "peer": "a",
+      "op": "enter_text",
+      "target": "field",
+      "value": "dm from a ${RUN}"
+    },
+    {
+      "peer": "a",
+      "op": "key",
+      "value": "enter"
+    },
+    {
+      "peer": "b",
+      "op": "wait_for",
+      "target": "text:dm from a ${RUN}",
+      "timeout_ms": 60000
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "type:_FriendsManager > semantics:Close",
+      "index": 0
+    },
+    {
+      "peer": "b",
+      "op": "wait_for",
+      "gone": "type:_FriendsManager",
+      "timeout_ms": 10000
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "semantics:probe-a"
+    },
+    {
+      "peer": "b",
+      "op": "wait",
+      "ms": 1500
+    },
+    {
+      "peer": "b",
+      "op": "enter_text",
+      "target": "field",
+      "value": "dm from b ${RUN}"
+    },
+    {
+      "peer": "b",
+      "op": "key",
+      "value": "enter"
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "text:dm from b ${RUN}",
+      "timeout_ms": 60000
+    },
+    {
+      "peer": "a",
+      "op": "log",
+      "message": "one row per message: the optimistic write and the one that arrives must reconcile"
+    },
+    {
+      "peer": "a",
+      "op": "expect_count",
+      "target": "text:dm from a ${RUN}",
+      "value": 1
+    },
+    {
+      "peer": "b",
+      "op": "expect_count",
+      "target": "text:dm from b ${RUN}",
+      "value": 1
+    },
+    {
+      "peer": "b",
+      "op": "wait",
+      "ms": 1000
+    },
+    {
+      "peer": "b",
+      "op": "shot",
+      "name": "nc-01-b-dm-hashed-dark"
+    },
+    {
+      "peer": "a",
+      "op": "log",
+      "message": "a picks a three-stop gradient in Settings > Profile and saves"
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "semantics:Settings",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 800
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "text:Profile",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 800
+    },
+    {
+      "peer": "a",
+      "op": "reveal",
+      "target": "text:Name colour"
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "semantics:Use this colour",
+      "index": 7
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "semantics:Add a colour",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "semantics:Add a colour",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 500
+    },
+    {
+      "peer": "a",
+      "op": "reveal",
+      "target": "text:Name colour"
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "nc-02-a-picker-dark"
+    },
+    {
+      "peer": "a",
+      "op": "theme",
+      "value": "light"
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 800
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "nc-03-a-picker-light"
+    },
+    {
+      "peer": "a",
+      "op": "theme",
+      "value": "dark"
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "text:Save",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 1500
+    },
+    {
+      "peer": "a",
+      "op": "key",
+      "value": "escape"
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 800
+    },
+    {
+      "peer": "a",
+      "op": "enter_text",
+      "target": "field",
+      "value": "gradient from a ${RUN}"
+    },
+    {
+      "peer": "a",
+      "op": "key",
+      "value": "enter"
+    },
+    {
+      "peer": "b",
+      "op": "wait_for",
+      "target": "text:gradient from a ${RUN}",
+      "timeout_ms": 60000
+    },
+    {
+      "peer": "b",
+      "op": "wait",
+      "ms": 1500
+    },
+    {
+      "peer": "b",
+      "op": "shot",
+      "name": "nc-04-b-dm-gradient-dark"
+    },
+    {
+      "peer": "b",
+      "op": "theme",
+      "value": "light"
+    },
+    {
+      "peer": "b",
+      "op": "wait",
+      "ms": 800
+    },
+    {
+      "peer": "b",
+      "op": "shot",
+      "name": "nc-05-b-dm-gradient-light"
+    },
+    {
+      "peer": "b",
+      "op": "theme",
+      "value": "dark"
+    },
+    {
+      "peer": "b",
+      "op": "log",
+      "message": "b turns custom name colours off: a's name goes back to the hashed colour"
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "semantics:Settings",
+      "index": 0
+    },
+    {
+      "peer": "b",
+      "op": "wait",
+      "ms": 800
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "text:Appearance",
+      "index": 0
+    },
+    {
+      "peer": "b",
+      "op": "wait",
+      "ms": 800
+    },
+    {
+      "peer": "b",
+      "op": "reveal",
+      "target": "text:Show custom name colours"
+    },
+    {
+      "peer": "b",
+      "op": "shot",
+      "name": "nc-06-b-appearance-toggle"
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "semantics:Show custom name colours",
+      "index": 0
+    },
+    {
+      "peer": "b",
+      "op": "wait",
+      "ms": 500
+    },
+    {
+      "peer": "b",
+      "op": "key",
+      "value": "escape"
+    },
+    {
+      "peer": "b",
+      "op": "wait",
+      "ms": 1000
+    },
+    {
+      "peer": "b",
+      "op": "shot",
+      "name": "nc-07-b-dm-colours-off"
+    },
+    {
+      "peer": "all",
+      "op": "dump",
+      "name": "converged"
+    }
+  ],
+  "cleanup": [
+    {
+      "peer": "all",
+      "op": "log",
+      "message": "fixture data directories are restored per run; nothing to undo"
+    }
+  ]
+}

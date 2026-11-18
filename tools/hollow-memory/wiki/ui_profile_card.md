@@ -22,7 +22,9 @@ compact, clear of the close control and the phone sheet's handle: a picture-size
 empty band read as a failed load, 0.14.1) → avatar (96 full / 64 compact / 80
 touch, overlapping the banner, zero-layout-cost frame per #54) with the badge
 row at its right (`SupportMarksChip`, then the Twitch chip) → name (local
-nickname > server nickname > display name) → "Online · Friend" / "Verified"
+nickname > server nickname > display name; in the person's CHOSEN name colour
+or gradient when they set one and the viewer shows them (#140), else textPrimary; never
+for a blocked person) → "Online · Friend" / "Verified"
 line → custom status → role + label `LabelBadge`s → hairline → "About me" →
 actions. Compact adds a ghost "View showcase" when the person has a board.
 

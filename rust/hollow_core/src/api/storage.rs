@@ -358,6 +358,10 @@ pub struct UserProfile {
     /// Support credentials: the verified JSON array as stored, `""` for none. A renderer
     /// lights a mark next to art whose hash is in an entry's `parts` and is worn.
     pub support_creds: String,
+    /// The person's own name colour: `""` = the hashed colour, else `1:` and one to three
+    /// lowercase `rrggbb` stops, already through the receive gate. Renderers parse it
+    /// leniently and fall back on anything else.
+    pub name_color: String,
 }
 
 /// Get a profile for a specific peer (or ourselves). Returns None if no profile stored.
@@ -384,6 +388,7 @@ pub fn get_profile(peer_id: String) -> Result<Option<UserProfile>, String> {
             avatar_anim: p.avatar_anim,
             banner_anim: p.banner_anim,
             support_creds: p.support_creds,
+            name_color: p.name_color,
         })),
         None => Ok(None),
     }
@@ -414,6 +419,7 @@ pub fn get_all_profiles() -> Result<Vec<UserProfile>, String> {
             avatar_anim: p.avatar_anim,
             banner_anim: p.banner_anim,
             support_creds: p.support_creds,
+            name_color: p.name_color,
         })
         .collect())
 }
@@ -442,6 +448,7 @@ pub fn get_all_profiles_light() -> Result<Vec<UserProfile>, String> {
             avatar_anim: p.avatar_anim,
             banner_anim: p.banner_anim,
             support_creds: p.support_creds,
+            name_color: p.name_color,
         })
         .collect())
 }
@@ -468,6 +475,7 @@ pub fn get_profile_light(peer_id: String) -> Result<Option<UserProfile>, String>
             avatar_anim: p.avatar_anim,
             banner_anim: p.banner_anim,
             support_creds: p.support_creds,
+            name_color: p.name_color,
         })),
         None => Ok(None),
     }

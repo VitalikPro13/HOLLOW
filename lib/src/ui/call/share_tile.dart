@@ -20,6 +20,7 @@ import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:hollow/src/ui/components/share_quality_chip.dart';
+import 'package:hollow/src/core/providers/name_color_provider.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// A screen share on the stage, in its three states (issue #38): an OFFER
@@ -60,7 +61,7 @@ class ShareTile extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
     final body = share.isOffer
-        ? _offer(hollow)
+        ? _offer(hollow, ref.watch(shownNameColorProvider(share.master)))
         : _live(context, ref, hollow);
     Widget tile = ClipRRect(
       borderRadius: BorderRadius.circular(hollow.radiusLg),
@@ -87,9 +88,12 @@ class ShareTile extends ConsumerWidget {
     );
   }
 
-  Widget _offer(HollowTheme hollow) {
+  Widget _offer(HollowTheme hollow, String field) {
     final color =
-        callNameColor(hollow, isSelf: false, master: share.master);
+        callNameColor(hollow,
+            isSelf: false,
+            master: share.master,
+            field: field);
     final who = Text.rich(
       TextSpan(children: [
         TextSpan(text: share.name, style: TextStyle(color: color)),
@@ -162,7 +166,10 @@ class ShareTile extends ConsumerWidget {
     final renderer = share.renderer;
     final title = share.isMine ? 'Your screen' : "${share.name}'s screen";
     final titleColor =
-        callNameColor(media, isSelf: share.isMine, master: share.master);
+        callNameColor(media,
+            isSelf: share.isMine,
+            master: share.master,
+            field: ref.watch(shownNameColorProvider(share.master)));
     final children = <Widget>[
       if (renderer != null)
         RepaintBoundary(

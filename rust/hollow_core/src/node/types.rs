@@ -1153,7 +1153,7 @@ pub(crate) enum NodeCommand {
     SetTwitchUsername { server_id: String, peer_id: String, twitch_username: String },
     NotifyShutdown,
     // -- Profile commands --
-    UpdateProfile { display_name: String, status: String, about_me: String, avatar_bytes: Option<Vec<u8>>, banner_bytes: Option<Vec<u8>>, twitch_username: String, showcase_board: Option<String>, showcase_assets: Option<Vec<u8>>, avatar_frame: Option<String>, avatar_anim: Option<String>, banner_anim: Option<String>, support_creds: Option<String> },
+    UpdateProfile { display_name: String, status: String, about_me: String, avatar_bytes: Option<Vec<u8>>, banner_bytes: Option<Vec<u8>>, twitch_username: String, showcase_board: Option<String>, showcase_assets: Option<Vec<u8>>, avatar_frame: Option<String>, avatar_anim: Option<String>, banner_anim: Option<String>, support_creds: Option<String>, name_color: Option<String> },
     // -- Message editing --
     EditChannelMessage { server_id: String, channel_id: String, message_id: String, new_text: String },
     EditDmMessage { peer_id: String, message_id: String, new_text: String },
@@ -2454,6 +2454,18 @@ pub(crate) enum HavenMessage {
         /// without it; this is what stops a relay DENYING them.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         support_creds_sig: Option<String>,
+        /// The sender's name colour (#140, `node::name_color`): `1:` and one to three
+        /// lowercase hex RGB stops. `None` from clients that predate it and receivers
+        /// PRESERVE it; `Some("")` = the hashed colour. Outside `hollow-profile2` so every
+        /// shipped profile signature still verifies, and applied ONLY under
+        /// `name_color_sig`; a refused field preserves.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name_color: Option<String>,
+        /// The MASTER's Ed25519 signature (base64) over `(master, updated_at,
+        /// profile_sig, name_color)` (`name_color::sig_payload`), sent whenever
+        /// `name_color` is `Some`, including `Some("")`. REQUIRED on ingest.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name_color_sig: Option<String>,
         /// Owner's signature over the relayable subset of this profile
         /// (`crypto_handler::profile_signing_payload`). REQUIRED on ingest; receivers
         /// store it so they can forward it in a `ProfileRelay`, which is what stops a
@@ -3267,6 +3279,15 @@ pub(crate) enum HavenMessage {
         profile_sig: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         profile_pk: Option<String>,
+        /// The owner's name colour (#140) exactly as signed for this profile (a later
+        /// version up to `name_color::RELAY_MAX` bytes too) and its master signature,
+        /// forwarded verbatim; only one that verifies for this profile is sent, and
+        /// receivers run `name_color::gated` on it. Absent from relayers that predate it
+        /// (receivers preserve).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name_color: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name_color_sig: Option<String>,
     },
 
     /// Our name and avatar for someone we are not close to (A28): a pending friend
@@ -4032,6 +4053,12 @@ pub(crate) enum MessageEnvelope {
         /// `HavenMessage::ProfileUpdate`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         support_creds_sig: Option<String>,
+        /// The name colour and its REQUIRED master signature; see
+        /// `HavenMessage::ProfileUpdate`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name_color: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name_color_sig: Option<String>,
         /// Owner's profile signature — see HavenMessage::ProfileUpdate.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         profile_sig: Option<String>,

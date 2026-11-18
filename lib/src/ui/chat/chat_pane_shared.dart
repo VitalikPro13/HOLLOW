@@ -45,6 +45,8 @@ import 'package:hollow/src/ui/components/hollow_tooltip.dart';
 import 'package:hollow/src/ui/components/ui_scale.dart';
 import 'package:hollow/src/ui/components/attachment_image.dart';
 import 'package:hollow/src/ui/chat/chat_input_shortcuts.dart';
+import 'package:hollow/src/core/color_utils.dart';
+import 'package:hollow/src/ui/components/name_text.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 
@@ -1480,7 +1482,7 @@ class ChatHeaderBar extends StatelessWidget {
 /// One search hit under a chat's search field: who, when, and the text.
 class ChatSearchResultRow extends StatelessWidget {
   final String name;
-  final Color nameColor;
+  final NamePaint namePaint;
   final DateTime time;
   final String text;
   final VoidCallback onTap;
@@ -1488,7 +1490,7 @@ class ChatSearchResultRow extends StatelessWidget {
   const ChatSearchResultRow({
     super.key,
     required this.name,
-    required this.nameColor,
+    required this.namePaint,
     required this.time,
     required this.text,
     required this.onTap,
@@ -1516,11 +1518,12 @@ class ChatSearchResultRow extends StatelessWidget {
               textBaseline: TextBaseline.alphabetic,
               children: [
                 Flexible(
-                  child: Text(
+                  child: NameText(
                     name,
+                    paint: namePaint,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: HollowTypography.label.copyWith(color: nameColor),
+                    style: HollowTypography.label,
                   ),
                 ),
                 const SizedBox(width: HollowSpacing.sm),

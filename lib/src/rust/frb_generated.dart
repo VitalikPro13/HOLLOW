@@ -1796,6 +1796,7 @@ abstract class RustLibApi extends BaseApi {
     String? avatarAnim,
     String? bannerAnim,
     String? supportCreds,
+    String? nameColor,
   });
 
   Future<void> crateApiCrdtUpdateServerSetting({
@@ -16835,6 +16836,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     String? avatarAnim,
     String? bannerAnim,
     String? supportCreds,
+    String? nameColor,
   }) {
     return handler.executeNormal(
       NormalTask(
@@ -16852,6 +16854,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           sse_encode_opt_String(avatarAnim, serializer);
           sse_encode_opt_String(bannerAnim, serializer);
           sse_encode_opt_String(supportCreds, serializer);
+          sse_encode_opt_String(nameColor, serializer);
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
@@ -16877,6 +16880,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           avatarAnim,
           bannerAnim,
           supportCreds,
+          nameColor,
         ],
         apiImpl: this,
       ),
@@ -16899,6 +16903,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           "avatarAnim",
           "bannerAnim",
           "supportCreds",
+          "nameColor",
         ],
       );
 
@@ -21504,8 +21509,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   UserProfile dco_decode_user_profile(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 13)
-      throw Exception('unexpected arr length: expect 13 but see ${arr.length}');
+    if (arr.length != 14)
+      throw Exception('unexpected arr length: expect 14 but see ${arr.length}');
     return UserProfile(
       peerId: dco_decode_String(arr[0]),
       displayName: dco_decode_String(arr[1]),
@@ -21520,6 +21525,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       avatarAnim: dco_decode_String(arr[10]),
       bannerAnim: dco_decode_String(arr[11]),
       supportCreds: dco_decode_String(arr[12]),
+      nameColor: dco_decode_String(arr[13]),
     );
   }
 
@@ -26478,6 +26484,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_avatarAnim = sse_decode_String(deserializer);
     var var_bannerAnim = sse_decode_String(deserializer);
     var var_supportCreds = sse_decode_String(deserializer);
+    var var_nameColor = sse_decode_String(deserializer);
     return UserProfile(
       peerId: var_peerId,
       displayName: var_displayName,
@@ -26492,6 +26499,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       avatarAnim: var_avatarAnim,
       bannerAnim: var_bannerAnim,
       supportCreds: var_supportCreds,
+      nameColor: var_nameColor,
     );
   }
 
@@ -30736,6 +30744,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_String(self.avatarAnim, serializer);
     sse_encode_String(self.bannerAnim, serializer);
     sse_encode_String(self.supportCreds, serializer);
+    sse_encode_String(self.nameColor, serializer);
   }
 
   @protected

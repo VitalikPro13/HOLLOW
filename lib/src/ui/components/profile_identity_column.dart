@@ -45,6 +45,9 @@ import 'package:hollow/src/ui/dialogs/verify_contact_dialog.dart';
 import 'package:hollow/src/ui/settings/manage_member_dialog.dart';
 import 'package:hollow/src/ui/settings/stream_overlay/overlay_tick.dart';
 import 'package:hollow/src/core/peer_id_label.dart';
+import 'package:hollow/src/core/color_utils.dart';
+import 'package:hollow/src/core/providers/name_color_provider.dart';
+import 'package:hollow/src/ui/components/name_text.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -250,13 +253,13 @@ class _ProfileIdentityColumnState extends ConsumerState<ProfileIdentityColumn> {
             crossAxisAlignment: CrossAxisAlignment.start,
             mainAxisSize: MainAxisSize.min,
             children: [
-              Text(
+              NameText(
                 primaryName,
-                style:
-                    (_compact
-                            ? HollowTypography.subheading
-                            : HollowTypography.heading)
-                        .copyWith(color: hollow.textPrimary),
+                paint: (isBlocked ? null : ref.chosenNamePaintOf(master, hollow)) ??
+                    NamePaint([hollow.textPrimary]),
+                style: _compact
+                    ? HollowTypography.subheading
+                    : HollowTypography.heading,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
               ),

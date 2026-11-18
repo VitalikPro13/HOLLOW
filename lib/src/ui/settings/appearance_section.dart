@@ -24,6 +24,7 @@ import 'package:hollow/src/ui/dialogs/image_crop_dialog.dart';
 import 'package:hollow/src/ui/mobile/mobile_image_crop_route.dart';
 import 'package:hollow/src/ui/settings/settings_kit.dart';
 import 'package:hollow/src/ui/settings/settings_shared.dart';
+import 'package:hollow/src/core/providers/name_color_provider.dart';
 import 'package:hollow/src/ui/shell/sidebar_places.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -58,6 +59,13 @@ class AppearanceSettingsView extends ConsumerWidget {
             const _BackgroundImageRow(),
             if (hasBackground) const _DarkenRow(),
             const AmbientBackgroundToggle(),
+            SettingsSwitchRow(
+              title: 'Show custom name colours',
+              subtitle: 'Off shows everyone in their usual colour',
+              value: ref.watch(showNameColorsProvider),
+              onChanged: (v) =>
+                  ref.read(showNameColorsProvider.notifier).setEnabled(v),
+            ),
           ],
         ),
         SettingsSection(
