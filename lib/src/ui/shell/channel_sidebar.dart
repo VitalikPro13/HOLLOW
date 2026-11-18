@@ -550,6 +550,9 @@ class _ServerContentState extends State<_ServerContent> {
     final w = widget;
     final items = _buildLayoutItems();
     final hasCategories = items.any((i) => i is _CategoryHeader);
+    // The header names what is under it: a voice room is not a text channel.
+    final hasVoice =
+        w.channels.values.any((c) => c.channelType == ChannelType.voice);
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -564,7 +567,7 @@ class _ServerContentState extends State<_ServerContent> {
               right: HollowSpacing.sm,
             ),
             child: HollowSectionHeader(
-              'Text channels',
+              hasVoice ? 'Channels' : 'Text channels',
               dense: true,
               action: w.canManageChannels
                   ? HollowPressable(

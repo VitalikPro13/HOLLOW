@@ -139,7 +139,10 @@ abstract final class HollowThemeData {
         behavior: SnackBarBehavior.floating,
       ),
 
+      // Hover only: no long-press tooltips on touch, a control explains
+      // itself (Material ones still ride in the date and time pickers).
       tooltipTheme: TooltipThemeData(
+        triggerMode: TooltipTriggerMode.manual,
         decoration: BoxDecoration(
           color: hollow.overlay,
           borderRadius: BorderRadius.circular(HollowRadius.md),
@@ -304,7 +307,10 @@ abstract final class HollowThemeData {
         behavior: SnackBarBehavior.floating,
       ),
 
+      // Hover only: no long-press tooltips on touch, a control explains
+      // itself (Material ones still ride in the date and time pickers).
       tooltipTheme: TooltipThemeData(
+        triggerMode: TooltipTriggerMode.manual,
         decoration: BoxDecoration(
           color: hollow.overlay,
           borderRadius: BorderRadius.circular(HollowRadius.md),

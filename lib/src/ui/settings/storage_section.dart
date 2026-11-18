@@ -4,6 +4,8 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import 'package:hollow/src/core/age_gate.dart';
 import 'package:hollow/src/core/friendly_error.dart';
+import 'package:hollow/src/core/providers/channel_provider.dart'
+    show serverChannelsProvider;
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
@@ -501,9 +503,16 @@ class _ContextRow extends ConsumerWidget {
       final server = ref.watch(keptServersProvider.select((m) => m[serverId]));
       final serverName = server?.name ??
           (serverId.length > 8 ? '${serverId.substring(0, 8)}…' : serverId);
-      final channelShort = parts.length > 1 && parts[1].length > 6
-          ? parts[1].substring(0, 6)
-          : (parts.length > 1 ? parts[1] : '');
+      final channelId = parts.length > 1 ? parts[1] : '';
+      // The channel's name while its server is still held; only a channel
+      // nothing here can name falls back to the start of its id.
+      final channelName = channelId.isEmpty
+          ? null
+          : ref.watch(serverChannelsProvider(serverId)
+              .select((c) => c.valueOrNull?[channelId]?.name));
+      final channelShort = channelName != null && channelName.isNotEmpty
+          ? channelName
+          : (channelId.length > 6 ? channelId.substring(0, 6) : channelId);
       label = channelShort.isEmpty ? serverName : '$serverName • #$channelShort';
       leading = ServerAvatar(serverId: serverId, name: serverName, size: 32);
       title = ServerNameText(label, isNsfw: server?.isNsfw ?? false);

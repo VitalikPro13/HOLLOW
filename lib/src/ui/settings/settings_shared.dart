@@ -195,7 +195,10 @@ class _InterfaceScaleControlState extends ConsumerState<InterfaceScaleControl> {
       value: _dragValue ?? saved,
       min: uiScaleMin,
       max: uiScaleMax,
-      isDefault: (saved - kUiScaleDefault).abs() < 0.001,
+      // On a tablet the default follows the screen (autoUiScaleFor).
+      isDefault: (saved - ref.read(uiScaleProvider.notifier).defaultScale)
+              .abs() <
+          0.001,
       onReset: () => ref.read(uiScaleProvider.notifier).reset(),
       onChangeStart: (v) => setState(() => _dragValue = v),
       onChanged: (v) {

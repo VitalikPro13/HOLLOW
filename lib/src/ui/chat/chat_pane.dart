@@ -61,6 +61,8 @@ import 'package:hollow/src/ui/chat/voice_recorder_bar.dart';
 import 'package:hollow/src/core/services/voice_message_recorder.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/saved_messages_avatar.dart';
+import 'package:hollow/src/ui/components/verified_mark.dart';
+import 'package:hollow/src/core/providers/verified_peers_provider.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/media/media_item.dart';
 import 'package:hollow/src/ui/media/media_viewer_scope.dart';
@@ -953,7 +955,17 @@ class _ChatPaneState extends ConsumerState<ChatPane>
       subtitle: isSavedMessages
           ? null
           : (hasNick ? realName : (blocked ? null : status)),
-      badges: [if (stageShown) const _InCallMark()],
+      badges: [
+        // The open profile panel already says "Verified"; the header says it
+        // only while the panel is closed.
+        if (!isSavedMessages &&
+            !(stageShown
+                ? _stagePanel == _StagePanel.profile
+                : showProfilePanel) &&
+            ref.watch(isPeerVerifiedProvider(widget.peerId)))
+          const VerifiedMark(),
+        if (stageShown) const _InCallMark(),
+      ],
       // Our own link, or a dead link reads as the friend being offline.
       status: ownLinkOfflineStatus(ref),
       actions: [

@@ -217,7 +217,9 @@ class _VerifyContactBodyState extends ConsumerState<VerifyContactBody> {
             controller: _compareController,
             hintText: 'Paste the number they sent you',
             onChanged: _onCompareChanged,
-            maxLines: 2,
+            // A pasted number wraps to three lines on a phone: room for all of
+            // it, so its first line never scrolls out of view.
+            maxLines: 4,
             minLines: 1,
             showCounter: false,
           ),

@@ -32,6 +32,8 @@ import 'package:hollow/src/ui/server_settings/server_settings_place.dart';
 import 'package:hollow/src/ui/settings/settings_place_frame.dart';
 import 'package:hollow/src/ui/shell/user_bar.dart';
 
+import 'package:hollow/src/ui/components/label_visuals.dart';
+
 import '../helpers/test_app.dart';
 import '../helpers/test_data.dart';
 
@@ -349,6 +351,26 @@ void main() {
   });
 
   group('members', () {
+    testWidgets('Members shows each label in its colour', (tester) async {
+      const patreon = crdt_api.LabelFfi(
+          labelId: 'l1', name: 'Patreon', color: '#D4A017', access: false);
+      await _pumpPlace(tester,
+          perms: _owner,
+          role: 'owner',
+          page: ServerSettingsPage.members,
+          members: [
+            ..._members,
+            _m('p_lab', 'Labelled', 'member', labels: const [patreon]),
+          ]);
+      await tester.pump();
+      expect(
+          find.ancestor(
+              of: find.text('Patreon'), matching: find.byType(LabelBadge)),
+          findsOneWidget,
+          reason: 'a label wears its colour, never a plain list');
+      expect(find.textContaining('· Patreon'), findsNothing);
+    });
+
     testWidgets('moderation comes first, and the filter narrows the list',
         (tester) async {
       await _pumpPlace(tester,

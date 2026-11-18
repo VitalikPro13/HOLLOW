@@ -1,7 +1,10 @@
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hollow/src/core/models/showcase_board.dart';
+import 'package:hollow/src/core/providers/banner_provider.dart';
 import 'package:hollow/src/core/providers/friends_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
@@ -54,13 +57,16 @@ class _Friends extends FriendsNotifier {
   };
 }
 
-Future<void> _pump(WidgetTester tester, Widget child) async {
+Future<void> _pump(WidgetTester tester, Widget child,
+    {Uint8List? banner}) async {
   await tester.pumpWidget(
     ProviderScope(
       overrides: hollowTestOverrides(
         extra: [
           profileProvider.overrideWith(_Profiles.new),
           friendsProvider.overrideWith(_Friends.new),
+          if (banner != null)
+            bannerProvider(_peer).overrideWith((ref) async => banner),
         ],
       ),
       child: MaterialApp(
@@ -140,36 +146,45 @@ void main() {
       expect(find.text('Friend'), findsOneWidget);
     });
 
-    testWidgets('the banner is 2.5:1 at every density', (tester) async {
-      for (final (density, width) in [
-        (ProfileCardDensity.full, kProfileColumnWidth),
-        (ProfileCardDensity.compact, kProfileCompactWidth),
-      ]) {
-        // The host gives the column its width, as the dialog and card do.
-        await _pump(
-          tester,
-          Align(
-            alignment: Alignment.topLeft,
-            child: SizedBox(
-              width: width,
-              child: ProfileIdentityColumn(
-                peerId: _peer,
-                density: density,
+    for (final hasBanner in [true, false]) {
+      testWidgets(
+          hasBanner
+              ? 'a banner is 2.5:1 at every density'
+              : 'no banner leaves only a short band above the avatar',
+          (tester) async {
+        for (final (density, width, flat) in [
+          (ProfileCardDensity.full, kProfileColumnWidth, 72.0),
+          (ProfileCardDensity.compact, kProfileCompactWidth, 48.0),
+        ]) {
+          // The host gives the column its width, as the dialog and card do.
+          await _pump(
+            tester,
+            Align(
+              alignment: Alignment.topLeft,
+              child: SizedBox(
                 width: width,
-                dismissHost: () {},
-                showActions: false,
+                child: ProfileIdentityColumn(
+                  peerId: _peer,
+                  density: density,
+                  width: width,
+                  dismissHost: () {},
+                  showActions: false,
+                ),
               ),
             ),
-          ),
-        );
-        final stack = find
-            .descendant(
-              of: find.byType(ProfileIdentityColumn),
-              matching: find.byType(Stack),
-            )
-            .first;
-        expect(tester.getSize(stack), Size(width, width / 2.5));
-      }
-    });
+            banner: hasBanner ? Uint8List.fromList([1, 2, 3]) : null,
+          );
+          await tester.pump();
+          final stack = find
+              .descendant(
+                of: find.byType(ProfileIdentityColumn),
+                matching: find.byType(Stack),
+              )
+              .first;
+          expect(tester.getSize(stack),
+              Size(width, hasBanner ? width / 2.5 : flat));
+        }
+      });
+    }
   });
 }

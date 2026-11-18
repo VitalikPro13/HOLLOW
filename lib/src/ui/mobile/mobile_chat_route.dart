@@ -76,6 +76,8 @@ import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/conversation_row.dart';
 import 'package:hollow/src/ui/components/long_press_message.dart';
 import 'package:hollow/src/ui/components/saved_messages_avatar.dart';
+import 'package:hollow/src/ui/components/verified_mark.dart';
+import 'package:hollow/src/core/providers/verified_peers_provider.dart';
 import 'package:hollow/src/ui/chat/voice_recorder_bar.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/media/media_item.dart';
@@ -3069,7 +3071,9 @@ class _MobileChatHeader extends ConsumerWidget {
     final blocked = isDm && !isSaved && ref.watch(peerBlockedProvider(peerId!));
 
     return Container(
-      height: 56,
+      // A floor, not a height: at large text sizes the name and status grow
+      // the header instead of overflowing it.
+      constraints: const BoxConstraints(minHeight: 56),
       decoration: BoxDecoration(
         color: hollow.surface,
         border: Border(bottom: BorderSide(color: hollow.border)),
@@ -3139,8 +3143,8 @@ class _MobileChatHeader extends ConsumerWidget {
           : null,
       semanticLabel: isDm && !isSaved ? 'Profile of $title' : null,
       borderRadius: BorderRadius.circular(hollow.radiusMd),
-      child: SizedBox(
-        height: 44,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: 44),
         child: Row(
           children: [
             leading,
@@ -3151,11 +3155,21 @@ class _MobileChatHeader extends ConsumerWidget {
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
                   if (isDm && !isSaved)
-                    PeerNameText(
-                      name: title,
-                      peerId: peerId!,
-                      style: HollowTypography.subheading
-                          .copyWith(color: hollow.textPrimary),
+                    Row(
+                      children: [
+                        Flexible(
+                          child: PeerNameText(
+                            name: title,
+                            peerId: peerId!,
+                            style: HollowTypography.subheading
+                                .copyWith(color: hollow.textPrimary),
+                          ),
+                        ),
+                        if (ref.watch(isPeerVerifiedProvider(peerId!))) ...[
+                          const SizedBox(width: HollowSpacing.xs),
+                          const VerifiedMark(),
+                        ],
+                      ],
                     )
                   else
                     Text(

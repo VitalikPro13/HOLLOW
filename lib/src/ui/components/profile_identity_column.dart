@@ -134,6 +134,10 @@ class _ProfileIdentityColumnState extends ConsumerState<ProfileIdentityColumn> {
 
   double get _ring => _compact ? 3 : 4;
 
+  /// The band above the avatar when there is no banner: clear of the close
+  /// control (and the sheet handle on a phone), never a picture's height.
+  double get _flatBannerHeight => _compact ? 48 : 72;
+
   double get _hPad => widget.density == ProfileCardDensity.full
       ? HollowSpacing.xl
       : HollowSpacing.lg;
@@ -165,9 +169,11 @@ class _ProfileIdentityColumnState extends ConsumerState<ProfileIdentityColumn> {
     final status = isBlocked ? '' : profile?.status ?? '';
     final aboutMe = profile?.aboutMe ?? '';
 
-    final bannerHeight = widget.width / 2.5;
     // Over a flat surface a control needs no scrim: it would read as a hole.
     final onArt = _bannerBytes(ref, peerId) != null;
+    // Without art the band only holds the top controls and the avatar's
+    // overlap; a picture-sized empty band reads as something failed to load.
+    final bannerHeight = onArt ? widget.width / 2.5 : _flatBannerHeight;
     Widget overBanner(IconData icon, String label, double size,
             VoidCallback onPressed) =>
         onArt

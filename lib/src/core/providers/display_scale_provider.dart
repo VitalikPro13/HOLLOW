@@ -1,4 +1,5 @@
 import 'dart:io' show Platform;
+import 'dart:ui' show PlatformDispatcher;
 
 import 'package:flutter/foundation.dart' show debugPrint, kIsWeb;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -49,20 +50,91 @@ double snapScale(double value) =>
 /// Display form of a scale factor: 1.25 -> "125%".
 String scalePercentLabel(double scale) => '${(scale * 100).round()}%';
 
-/// Interface scale ("zoom") — persisted under `ui_scale`. Default 1.0.
+/// A tablet's default interface scale lays it out as if its shortest side were
+/// about this many logical pixels, so a 13" iPad does not read as a giant phone.
+const double kTabletScaleReference = 690;
+
+/// The most a screen alone may scale the interface; the slider can go no
+/// higher on a phone or tablet either ([uiScaleMax]).
+const double kTabletScaleMax = 1.5;
+
+/// The interface scale a screen gets while the user has never chosen one.
+///
+/// Phones land under the reference and stay at 1.0; desktop never auto-scales
+/// (the OS display scaling already covers it).
+double autoUiScaleFor(double shortestSide, {required bool mobileForm}) {
+  if (!mobileForm || shortestSide <= 0) return kUiScaleDefault;
+  return (shortestSide / kTabletScaleReference)
+      .clamp(kUiScaleDefault, kTabletScaleMax)
+      .toDouble();
+}
+
+/// The shortest side of the screen this app runs on, in logical pixels. The
+/// display, not the window, so an iPad split view keeps the full-screen
+/// default; the first view stands in where a platform reports no display.
+double _screenShortestSide() {
+  final dispatcher = PlatformDispatcher.instance;
+  for (final display in dispatcher.displays) {
+    if (display.size.isEmpty || display.devicePixelRatio <= 0) continue;
+    return (display.size / display.devicePixelRatio).shortestSide;
+  }
+  final views = dispatcher.views;
+  if (views.isEmpty) return 0;
+  final view = views.first;
+  if (view.devicePixelRatio <= 0) return 0;
+  return (view.physicalSize / view.devicePixelRatio).shortestSide;
+}
+
+/// Interface scale ("zoom"), persisted under `ui_scale`. Until the user moves
+/// the slider it follows the screen ([autoUiScaleFor]); an empty saved value
+/// means "never chosen".
 final uiScaleProvider =
     NotifierProvider<UiScaleNotifier, double>(UiScaleNotifier.new);
 
 class UiScaleNotifier extends Notifier<double> {
+  UiScaleNotifier({
+    double Function()? screenShortestSide,
+    bool? mobileForm,
+    Future<String?> Function(String key)? readSetting,
+    Future<void> Function(String key, String value)? writeSetting,
+  })  : _shortestSide = screenShortestSide ?? _screenShortestSide,
+        _mobileForm = mobileForm,
+        _read = readSetting ?? ((k) => storage_api.loadSetting(key: k)),
+        _write = writeSetting ??
+            ((k, v) => storage_api.saveSetting(key: k, value: v));
+
+  final double Function() _shortestSide;
+  final bool? _mobileForm;
+  final Future<String?> Function(String key) _read;
+  final Future<void> Function(String key, String value) _write;
+
+  bool _chosen = false;
+
+  /// True once the user picked a scale; false while it follows the screen.
+  bool get isChosen => _chosen;
+
+  /// The scale this screen gets while nothing is chosen, and what Reset
+  /// returns to.
+  double get defaultScale => _clamp(autoUiScaleFor(
+        _shortestSide(),
+        mobileForm: _mobileForm ?? _isMobileForm,
+      ));
+
   @override
-  double build() => kUiScaleDefault;
+  double build() => defaultScale;
 
   /// Called from `_bootstrap` once the store is open.
   Future<void> load() async {
     try {
-      final val = await storage_api.loadSetting(key: 'ui_scale');
-      if (val == null || val.isEmpty) return;
-      state = _clamp(double.tryParse(val) ?? kUiScaleDefault);
+      final val = await _read('ui_scale');
+      final parsed = val == null ? null : double.tryParse(val);
+      if (parsed == null) {
+        _chosen = false;
+        state = defaultScale;
+        return;
+      }
+      _chosen = true;
+      state = _clamp(parsed);
     } catch (e) {
       debugPrint('[HOLLOW] uiScale.load() failed: $e');
     }
@@ -70,26 +142,36 @@ class UiScaleNotifier extends Notifier<double> {
 
   /// Applies [scale] immediately, then persists. The state moves first so a
   /// keyboard zoom lands on the next frame instead of after a DB round trip; a
-  /// failed write only costs the setting on next launch, so it is logged.
+  /// failed write only costs the setting on next launch, so it is logged. A
+  /// choice equal to the screen default still persists, so it stops following
+  /// the screen.
   Future<void> setScale(double scale) async {
     final clamped = _clamp(scale);
-    if (state == clamped) return;
+    if (_chosen && state == clamped) return;
+    _chosen = true;
     state = clamped;
-    try {
-      await storage_api.saveSetting(
-        key: 'ui_scale',
-        value: clamped.toStringAsFixed(2),
-      );
-    } catch (e) {
-      debugPrint('[HOLLOW] uiScale save failed: $e');
-    }
+    await _persist(clamped.toStringAsFixed(2));
   }
 
   /// Ctrl + / Ctrl −: move [steps] stops along the 5% grid.
   Future<void> nudge(int steps) =>
       setScale(snapScale(state) + steps * kUiScaleStep);
 
-  Future<void> reset() => setScale(kUiScaleDefault);
+  /// Back to following the screen.
+  Future<void> reset() async {
+    final wasChosen = _chosen;
+    _chosen = false;
+    state = defaultScale;
+    if (wasChosen) await _persist('');
+  }
+
+  Future<void> _persist(String value) async {
+    try {
+      await _write('ui_scale', value);
+    } catch (e) {
+      debugPrint('[HOLLOW] uiScale save failed: $e');
+    }
+  }
 
   double _clamp(double v) => v.clamp(uiScaleMin, uiScaleMax).toDouble();
 }

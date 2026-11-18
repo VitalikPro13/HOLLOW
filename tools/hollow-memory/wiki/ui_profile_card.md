@@ -17,7 +17,9 @@ Accept request, ghost Request sent, busy + error toast), `profileRoleColor` and
 `_ProfileChip` and the gradient no-banner fallback are gone.
 
 Sections in order: banner at a TRUE 2.5:1 of the column width (edge to edge; a
-missing banner is a flat `elevated` block) → avatar (96 full / 64 compact / 80
+missing banner is a flat `elevated` band only `_flatBannerHeight` tall, 72 px or 48
+compact, clear of the close control and the phone sheet's handle: a picture-sized
+empty band read as a failed load, 0.14.1) → avatar (96 full / 64 compact / 80
 touch, overlapping the banner, zero-layout-cost frame per #54) with the badge
 row at its right (`SupportMarksChip`, then the Twitch chip) → name (local
 nickname > server nickname > display name) → "Online · Friend" / "Verified"

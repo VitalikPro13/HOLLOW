@@ -380,10 +380,8 @@ class _MobileControlButton extends StatelessWidget {
           ),
           const SizedBox(height: HollowSpacing.xs),
           ExcludeSemantics(
-            child: Text(
+            child: _FittedLabel(
               control.label,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
               style: HollowTypography.caption
                   .copyWith(color: hollow.textSecondary),
             ),
@@ -391,6 +389,38 @@ class _MobileControlButton extends StatelessWidget {
         ],
       ),
     );
+  }
+}
+
+/// A control's word, shrunk to fit a narrow slot but never under the 10 px
+/// type floor; past that it ellipsizes at full size.
+class _FittedLabel extends StatelessWidget {
+  const _FittedLabel(this.text, {required this.style});
+
+  final String text;
+  final TextStyle style;
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(builder: (context, box) {
+      final painter = TextPainter(
+        text: TextSpan(text: text, style: style),
+        textScaler: MediaQuery.textScalerOf(context),
+        textDirection: Directionality.of(context),
+        maxLines: 1,
+      )..layout();
+      final width = painter.width;
+      painter.dispose();
+      final floor = HollowTypography.micro.fontSize! / style.fontSize!;
+      final fits = box.maxWidth >= width * floor;
+      return fits
+          ? FittedBox(
+              fit: BoxFit.scaleDown,
+              child: Text(text, maxLines: 1, style: style),
+            )
+          : Text(text,
+              maxLines: 1, overflow: TextOverflow.ellipsis, style: style);
+    });
   }
 }
 

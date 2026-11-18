@@ -60,6 +60,7 @@ guard catches the breakage, this page says why. Mobile-only UI rules are in
 - Never construct `TextSelectionControls` in `build()` (identity churn = an app-wide
   selection-overlay crash); a raw-OverlayEntry teardown needs a `removed` guard.
   `feedback_textfield_overlay_selectioncontrols`.
+- No long-press tooltips on touch: a control must be understandable from its icon/label; tooltips are hover-only (Vitalik 11-18; `HollowTooltip` is hover-only, the theme's Material `TooltipThemeData` is `triggerMode: manual`; `ui_polish_0141_test` "no long-press tooltips on touch").
 - Per-item opacity: `AnimatedOpacity` (GPU-composited), never the `Opacity` widget.
 - A card that returns `SizedBox.shrink()` once `!controller.isAnimating` must rebuild when its
   exit ends (a `dismissed` status listener): nothing else rebuilds it, so the faded card keeps
@@ -87,7 +88,9 @@ guard catches the breakage, this page says why. Mobile-only UI rules are in
 - Interface scale = ONE root scaled viewport (`UiScale`, `app.dart`): window coords are
   NOT overlay coords, so anchor via `overlayAnchorOf`/`overlayPositionOf`, never a bare
   `localToGlobal`; `MediaQuery.size` is the SLOT; zoom SHRINKS the viewport. Chat text =
-  `ChatTextScale`. `project_display_scaling`.
+  `ChatTextScale`. A tablet's DEFAULT scale comes from its screen (computed once, from the first
+  display) until the slider is moved (`autoUiScaleFor`, 0.14.1): compare against `uiScaleProvider.notifier.defaultScale`,
+  never the literal 1.0, for "is this the default". `project_display_scaling`.
 - Theme: 5 surfaces: `surface` = chrome BELOW the canvas, NEVER a card; `background`
   canvas, `elevated` cards/inputs, `overlay` floating + opaque, `hover`. `accentText` =
   accent TEXT (`accent` fills), `textTertiary` faded; 4.5:1 everywhere (CI).

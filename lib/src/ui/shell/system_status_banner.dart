@@ -12,7 +12,8 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/components/hollow_focus_ring.dart';
 import 'package:hollow/src/ui/components/hollow_icon_button.dart';
-import 'package:hollow/src/ui/components/hollow_text_link.dart';
+import 'package:hollow/src/ui/components/hollow_toast.dart';
+import 'package:hollow/src/ui/components/hollow_button.dart';
 
 /// Visual mapping for a [StatusLevel], shared by the global banner and the Home
 /// status line so the two cannot drift.
@@ -43,6 +44,22 @@ bool _hasOpenableLink(SystemStatus status) => canOpenUntrustedUrl(status.link);
 void _openStatusLink(String url) {
   openUntrustedUrl(url).catchError((_) => false);
 }
+
+/// The countdown text for [d] left: "5d 10h" from 48 hours on, "2h 14m" above
+/// an hour, "14:23" under an hour, "45s" in the last minute.
+String formatStatusCountdown(Duration d) {
+  if (d.inHours >= 48) return '${d.inDays}d ${d.inHours % 24}h';
+  if (d.inHours >= 1) return '${d.inHours}h ${d.inMinutes % 60}m';
+  if (d.inMinutes >= 1) {
+    return '${d.inMinutes}:${(d.inSeconds % 60).toString().padLeft(2, '0')}';
+  }
+  return '${d.inSeconds}s';
+}
+
+/// Whether [formatStatusCountdown] changes every second at [d]. Only then are
+/// tabular figures worth it: Onest's tabular "1" is a full digit wide, which
+/// reads as a gap in a static "1 30h".
+bool countdownTicksEachSecond(Duration d) => d.inHours < 1;
 
 /// A live, self-ticking countdown to an absolute UTC instant.
 ///
@@ -106,21 +123,6 @@ class _StatusCountdownState extends State<StatusCountdown> {
     super.dispose();
   }
 
-  /// "2h 14m" above an hour, "14:23" under an hour, "45s" in the last minute.
-  String _fmt(Duration d) {
-    if (d.inHours >= 1) {
-      final h = d.inHours;
-      final m = d.inMinutes % 60;
-      return '${h}h ${m}m';
-    }
-    if (d.inMinutes >= 1) {
-      final m = d.inMinutes;
-      final s = d.inSeconds % 60;
-      return '$m:${s.toString().padLeft(2, '0')}';
-    }
-    return '${d.inSeconds}s';
-  }
-
   @override
   Widget build(BuildContext context) {
     final now = DateTime.now().toUtc();
@@ -132,7 +134,7 @@ class _StatusCountdownState extends State<StatusCountdown> {
       text = 'In progress now';
     } else {
       final label = widget.label.isNotEmpty ? widget.label : 'In';
-      text = '$label ${_fmt(remaining)}';
+      text = '$label ${formatStatusCountdown(remaining)}';
     }
 
     return Row(
@@ -141,13 +143,18 @@ class _StatusCountdownState extends State<StatusCountdown> {
         Icon(LucideIcons.clock,
             size: StatusCountdown._iconSize, color: widget.color),
         const SizedBox(width: HollowSpacing.xs),
-        Text(
-          text,
-          style: HollowTypography.caption.copyWith(
-            color: widget.color,
-            fontWeight: FontWeight.w600,
-            // Tabular figures stop the countdown jittering as digits change.
-            fontFeatures: const [FontFeature.tabularFigures()],
+        Flexible(
+          child: Text(
+            text,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: HollowTypography.caption.copyWith(
+              color: widget.color,
+              fontWeight: FontWeight.w600,
+              fontFeatures: !expired && countdownTicksEachSecond(remaining)
+                  ? const [FontFeature.tabularFigures()]
+                  : null,
+            ),
           ),
         ),
       ],
@@ -164,9 +171,10 @@ enum StatusBannerAnchor { top, bottom }
 /// several live notices it shows the most severe one not yet dismissed.
 ///
 /// Starts collapsed, because the notice appears unprompted and should announce
-/// itself quietly; tapping expands to the full untruncated text, which on a
-/// narrow phone is the difference between a notice and an ellipsis. The X
-/// dismisses without toggling expansion, and a new notice id resets it.
+/// itself quietly: one line on desktop (title, a preview of the message, the
+/// countdown and the link), the title over the countdown on a phone. Expanding
+/// only ADDS the message below, at a readable line length; nothing already on
+/// screen moves. The X dismisses without toggling, and a new notice id resets.
 class SystemStatusBanner extends ConsumerStatefulWidget {
   /// Which edge carries the divider line.
   final StatusBannerAnchor anchor;
@@ -197,141 +205,16 @@ class _SystemStatusBannerState extends ConsumerState<SystemStatusBanner> {
     }
 
     final headline = status.title.isNotEmpty ? status.title : status.message;
-    // Only worth a tap when there is truncatable detail to show.
+    // A message is the detail: under a title it is the body, alone it is the
+    // headline, truncated until expanded.
     final hasDetail = status.message.isNotEmpty;
+    final hasBody = status.title.isNotEmpty && status.message.isNotEmpty;
+    final open = _expanded && hasDetail;
 
     final divider = BorderSide(color: hollow.border);
     void toggle() => setState(() => _expanded = !_expanded);
 
-    final dismissBtn = status.dismissible
-        ? HollowIconButton(
-            icon: LucideIcons.x,
-            label: 'Dismiss status notice',
-            size: _kControl,
-            onPressed: () =>
-                ref.read(statusProvider.notifier).dismiss(status.id),
-          )
-        : null;
-
-    final chevron = hasDetail
-        ? HollowIconButton(
-            icon: _expanded ? LucideIcons.chevronUp : LucideIcons.chevronDown,
-            label: _expanded ? 'Show less' : 'Show the whole notice',
-            size: _kControl,
-            onPressed: toggle,
-          )
-        : null;
-
-    final detailsLink = _hasOpenableLink(status)
-        ? HollowTextLink(
-            status.linkLabel.isNotEmpty ? status.linkLabel : 'Details',
-            onTap: () => _openStatusLink(status.link),
-          )
-        : null;
-
-    final countdown = status.until != null
-        ? StatusCountdown(
-            until: status.until!,
-            label: status.untilLabel,
-            color: color,
-          )
-        : null;
-
-    final headlineStyle = HollowTypography.label.copyWith(color: color);
-    final messageStyle =
-        HollowTypography.bodySmall.copyWith(color: hollow.textSecondary);
-
-    Widget collapsed = Row(
-      children: [
-        Icon(vis.icon, size: _kIcon, color: color),
-        const SizedBox(width: HollowSpacing.sm),
-        Expanded(
-          child: Row(
-            children: [
-              Flexible(
-                child: Text(
-                  headline,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: headlineStyle,
-                ),
-              ),
-              if (status.title.isNotEmpty && status.message.isNotEmpty) ...[
-                const SizedBox(width: HollowSpacing.sm),
-                Flexible(
-                  child: Text(
-                    status.message,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: messageStyle,
-                  ),
-                ),
-              ],
-            ],
-          ),
-        ),
-        if (countdown != null) ...[
-          const SizedBox(width: HollowSpacing.md),
-          countdown,
-        ],
-        if (chevron != null) ...[
-          const SizedBox(width: HollowSpacing.sm),
-          chevron,
-        ],
-        if (dismissBtn != null) ...[
-          const SizedBox(width: HollowSpacing.xs),
-          dismissBtn,
-        ],
-      ],
-    );
-
-    // Under the headline, past the icon and its gap.
-    const indent = EdgeInsets.only(left: _kIcon + HollowSpacing.sm);
-
-    Widget expanded = Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          children: [
-            Icon(vis.icon, size: _kIcon, color: color),
-            const SizedBox(width: HollowSpacing.sm),
-            Expanded(child: Text(headline, style: headlineStyle)),
-            if (chevron != null) ...[
-              const SizedBox(width: HollowSpacing.sm),
-              chevron,
-            ],
-            if (dismissBtn != null) ...[
-              const SizedBox(width: HollowSpacing.xs),
-              dismissBtn,
-            ],
-          ],
-        ),
-        // Full message, no truncation: the whole point of expanding.
-        if (status.title.isNotEmpty && status.message.isNotEmpty) ...[
-          const SizedBox(height: HollowSpacing.xs),
-          Padding(
-            padding: indent,
-            child: Text(status.message, style: messageStyle),
-          ),
-        ],
-        if (countdown != null || detailsLink != null) ...[
-          const SizedBox(height: HollowSpacing.sm),
-          Padding(
-            padding: indent,
-            child: Row(
-              children: [
-                ?countdown,
-                if (countdown != null && detailsLink != null)
-                  const SizedBox(width: HollowSpacing.md),
-                ?detailsLink,
-              ],
-            ),
-          ),
-        ],
-      ],
-    );
-
-    return Semantics(
+    final banner = Semantics(
       container: true,
       liveRegion: true,
       label: 'System status: $headline',
@@ -342,42 +225,340 @@ class _SystemStatusBannerState extends ConsumerState<SystemStatusBanner> {
         child: MouseRegion(
           cursor: hasDetail ? SystemMouseCursors.click : MouseCursor.defer,
           child: AnimatedSize(
-          duration: HollowDurations.fast,
-          curve: HollowCurves.subtle,
-          alignment: Alignment.topCenter,
-          child: Container(
-            width: double.infinity,
-            padding: const EdgeInsets.symmetric(
-              horizontal: HollowSpacing.lg,
-              vertical: HollowSpacing.xs,
-            ),
-            decoration: BoxDecoration(
-              // Tinted CHROME, not a translucent wash: over a wallpaper a
-              // translucent fill lets the image straight through and the bar
-              // stops looking like part of the app (issue #54).
-              color: hollow.noticeSurface(color),
-              border: Border(
-                top: widget.anchor == StatusBannerAnchor.bottom
-                    ? divider
-                    : BorderSide.none,
-                bottom: widget.anchor == StatusBannerAnchor.top
-                    ? divider
-                    : BorderSide.none,
+            duration: HollowDurations.fast,
+            curve: HollowCurves.subtle,
+            alignment: Alignment.topCenter,
+            child: DecoratedBox(
+              decoration: BoxDecoration(
+                // Tinted CHROME, not a translucent wash: over a wallpaper a
+                // translucent fill lets the image straight through and the bar
+                // stops looking like part of the app (issue #54).
+                color: hollow.noticeSurface(color),
+                border: Border(
+                  top: widget.anchor == StatusBannerAnchor.bottom
+                      ? divider
+                      : BorderSide.none,
+                  bottom: widget.anchor == StatusBannerAnchor.top
+                      ? divider
+                      : BorderSide.none,
+                ),
+              ),
+              child: SizedBox(
+                width: double.infinity,
+                child: LayoutBuilder(builder: (context, constraints) {
+                  final parts = _BannerParts(
+                    status: status,
+                    hollow: hollow,
+                    color: color,
+                    icon: vis.icon,
+                    headline: headline,
+                    hasDetail: hasDetail,
+                    hasBody: hasBody,
+                    open: open,
+                    touch: constraints.maxWidth < _kPhoneBelow,
+                    onToggle: toggle,
+                    onDismiss: () =>
+                        ref.read(statusProvider.notifier).dismiss(status.id),
+                  );
+                  return parts.touch ? parts.phone() : parts.desktop();
+                }),
               ),
             ),
-            child: _expanded && hasDetail ? expanded : collapsed,
           ),
         ),
-        ),
+      ),
+    );
+    // A toast rises above the strip rather than hiding the notice (the phone
+    // carries it at the bottom, where toasts land).
+    return ToastKeepClear(child: banner);
+  }
+}
+
+/// Below this width the banner takes its phone layout and touch-sized controls
+/// (the mobile shell, phone or narrow window).
+const double _kPhoneBelow = 600;
+
+/// The longest line the message runs to on a wide window: a paragraph across
+/// 2500 px is unreadable.
+const double _kProseMaxWidth = 640;
+
+const double _kIcon = 16;
+
+/// The pieces both banner layouts share.
+class _BannerParts {
+  _BannerParts({
+    required this.status,
+    required this.hollow,
+    required this.color,
+    required this.icon,
+    required this.headline,
+    required this.hasDetail,
+    required this.hasBody,
+    required this.open,
+    required this.touch,
+    required this.onToggle,
+    required this.onDismiss,
+  });
+
+  final SystemStatus status;
+  final HollowTheme hollow;
+  final Color color;
+  final IconData icon;
+  final String headline;
+  final bool hasDetail;
+  final bool hasBody;
+  final bool open;
+  final bool touch;
+  final VoidCallback onToggle;
+  final VoidCallback onDismiss;
+
+  double get _control => touch ? 44 : 32;
+
+  /// Under the headline, past the icon and its gap.
+  static const _indent = _kIcon + HollowSpacing.sm;
+
+  TextStyle get _titleStyle => HollowTypography.label
+      .copyWith(color: hollow.textPrimary, fontWeight: FontWeight.w600);
+
+  Widget get _icon => Icon(icon, size: _kIcon, color: color);
+
+  /// The height of the strip's first line: the controls and the link button
+  /// centre on it, and so does the first line of text beside them.
+  double get _line => touch ? 44 : 34;
+
+  bool get _hasTitle => status.title.isNotEmpty;
+
+  /// Top and bottom inset that centres one line of [style] on [_line].
+  EdgeInsetsDirectional _lineInset(TextStyle style) {
+    final inset = (_line - style.fontSize! * (style.height ?? 1)) / 2;
+    return EdgeInsetsDirectional.only(top: inset, bottom: inset);
+  }
+
+  /// The title. Collapsed it is clipped to [maxLines] only when expanding
+  /// shows the rest; with nothing to expand it wraps in full.
+  Widget _title({int? maxLines}) {
+    final clip = !open && hasDetail;
+    return Text(
+      headline,
+      maxLines: clip ? maxLines : null,
+      overflow: clip ? TextOverflow.ellipsis : null,
+      style: _titleStyle,
+    );
+  }
+
+  /// The message in the primary text tier: the notice is the one thing the
+  /// strip says, so its body is not faded into the amber.
+  TextStyle get _bodyStyle => HollowTypography.bodySmall
+      .copyWith(color: hollow.textPrimary, height: 1.45);
+
+  Widget get _body => ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: _kProseMaxWidth),
+        child: Text(status.message, style: _bodyStyle),
+      );
+
+  Widget? get _countdown => status.until == null
+      ? null
+      : StatusCountdown(
+          until: status.until!,
+          label: status.untilLabel,
+          color: color,
+        );
+
+  /// The notice's one action. A signed feed's link is still someone else's
+  /// string, so it shows only when the untrusted link helper would open it.
+  Widget? get _link => _hasOpenableLink(status)
+      ? HollowButton.outline(
+          compact: !touch,
+          touch: touch,
+          onPressed: () => _openStatusLink(status.link),
+          child: Text(
+            status.linkLabel.isNotEmpty ? status.linkLabel : 'Details',
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+        )
+      : null;
+
+  List<Widget> get _controls => [
+        if (hasDetail)
+          HollowIconButton(
+            icon: open ? LucideIcons.chevronUp : LucideIcons.chevronDown,
+            label: open ? 'Show less' : 'Show the whole notice',
+            size: _control,
+            onPressed: onToggle,
+          ),
+        if (hasDetail && status.dismissible)
+          const SizedBox(width: HollowSpacing.xs),
+        if (status.dismissible)
+          HollowIconButton(
+            icon: LucideIcons.x,
+            label: 'Dismiss status notice',
+            size: _control,
+            onPressed: onDismiss,
+          ),
+      ];
+
+  /// The first line's text: the title, or the message itself when the notice
+  /// has no title, which reads as a body once open.
+  Widget _headText({required int collapsedLines}) {
+    if (!_hasTitle && open) {
+      return Padding(padding: _lineInset(_bodyStyle), child: _body);
+    }
+    return Padding(
+      padding: _lineInset(_titleStyle),
+      child: _title(maxLines: collapsedLines),
+    );
+  }
+
+  /// One line: icon, title, a preview of the message, then the countdown, the
+  /// link and the controls on the trailing edge. Open, the message follows
+  /// below at a readable width; the first line only grows when its text wraps.
+  Widget desktop() {
+    final countdown = _countdown;
+    final link = _link;
+    // Collapsed, the message trails the title on the same line and gives way
+    // first: one span, so the title keeps its whole width before any preview.
+    final Widget head = hasBody && !open
+        ? Padding(
+            padding: _lineInset(_titleStyle),
+            child: Text.rich(
+              TextSpan(children: [
+                TextSpan(text: headline, style: _titleStyle),
+                const WidgetSpan(child: SizedBox(width: HollowSpacing.md)),
+                TextSpan(
+                  text: status.message,
+                  style: HollowTypography.bodySmall
+                      .copyWith(color: hollow.textSecondary),
+                ),
+              ]),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          )
+        : _headText(collapsedLines: 1);
+    final trailing = [
+      if (countdown != null) ...[
+        const SizedBox(width: HollowSpacing.md),
+        countdown,
+      ],
+      if (link != null) ...[
+        const SizedBox(width: HollowSpacing.md),
+        link,
+      ],
+      if (_controls.isNotEmpty) ...[
+        const SizedBox(width: HollowSpacing.sm),
+        ..._controls,
+      ],
+    ];
+    return Padding(
+      padding: const EdgeInsetsDirectional.fromSTEB(
+        HollowSpacing.lg,
+        HollowSpacing.sm,
+        HollowSpacing.sm,
+        HollowSpacing.sm,
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              SizedBox(height: _line, child: Center(child: _icon)),
+              const SizedBox(width: HollowSpacing.sm),
+              // Loose, so the message's 640 px cap holds inside the row.
+              Expanded(
+                child: Align(
+                  alignment: AlignmentDirectional.topStart,
+                  child: head,
+                ),
+              ),
+              SizedBox(
+                height: _line,
+                child: Row(mainAxisSize: MainAxisSize.min, children: trailing),
+              ),
+            ],
+          ),
+          // Under the whole first line, not beside the trailing controls, so
+          // a narrow window still gives the message its full measure.
+          if (open && hasBody)
+            Padding(
+              padding: const EdgeInsetsDirectional.only(start: _indent),
+              child: _body,
+            ),
+        ],
+      ),
+    );
+  }
+
+  /// The title (two lines at most while there is more to show) over the
+  /// countdown, the controls beside them. Open adds the message below, at the
+  /// title's edge; the link shows once open, or at once when there is nothing
+  /// to expand.
+  Widget phone() {
+    final countdown = _countdown;
+    final link = open || !hasDetail ? _link : null;
+    final below = open && hasBody;
+    return Padding(
+      // The 44 px controls carry their own inset, so the X's glyph sits as
+      // far from the end edge as the level icon from the start.
+      padding: EdgeInsetsDirectional.fromSTEB(
+        HollowSpacing.lg,
+        HollowSpacing.xs,
+        HollowSpacing.xs,
+        below || link != null ? HollowSpacing.md : HollowSpacing.xs,
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          ConstrainedBox(
+            constraints: BoxConstraints(minHeight: _line),
+            child: Row(
+              children: [
+                _icon,
+                const SizedBox(width: HollowSpacing.sm),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (!_hasTitle && open) _body else _title(maxLines: 2),
+                      if (countdown != null) ...[
+                        const SizedBox(height: HollowSpacing.xxs),
+                        countdown,
+                      ],
+                    ],
+                  ),
+                ),
+                const SizedBox(width: HollowSpacing.xs),
+                ..._controls,
+              ],
+            ),
+          ),
+          if (below || link != null)
+            Padding(
+              padding: const EdgeInsetsDirectional.only(
+                top: HollowSpacing.xs,
+                start: _indent,
+                end: HollowSpacing.md,
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (below) _body,
+                  if (below && link != null)
+                    const SizedBox(height: HollowSpacing.md),
+                  ?link,
+                ],
+              ),
+            ),
+        ],
       ),
     );
   }
 }
-
-/// The banner's small controls, a size that keeps the strip one line tall.
-const double _kControl = 24;
-
-const double _kIcon = 16;
 
 /// The calm Home-dashboard status line.
 ///
@@ -454,7 +635,7 @@ class _HomeStatusCardState extends ConsumerState<HomeStatusCard> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  'System Status',
+                  'System status',
                   style: HollowTypography.bodySmall.copyWith(
                     color: hollow.textPrimary,
                     fontWeight: FontWeight.w500,

@@ -13,6 +13,7 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
+import 'package:hollow/src/ui/components/label_visuals.dart';
 import 'package:hollow/src/ui/components/hollow_badge.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_chip.dart';
@@ -389,14 +390,28 @@ class _MemberRow extends ConsumerWidget {
             .valueOrNull
             ?.any((m) => m.peerId == member.peerId) ??
         false;
-    final labels = member.labels.map((l) => l.name).join(', ');
-    final subtitle = muted
-        ? 'Muted'
-        : '${roleDisplayName(member.role)}${labels.isEmpty ? '' : ' · $labels'}';
+    final hollow = HollowTheme.of(context);
+    // Labels wear their colour here as everywhere else, never a plain list.
+    final labelled = !muted && member.labels.isNotEmpty;
 
     final row = SettingsRow(
       title: name,
-      subtitle: subtitle,
+      subtitle: muted ? 'Muted' : roleDisplayName(member.role),
+      subtitleWidget: labelled
+          ? Wrap(
+              spacing: HollowSpacing.sm,
+              runSpacing: HollowSpacing.xs,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                Text(
+                  roleDisplayName(member.role),
+                  style: HollowTypography.bodySmall
+                      .copyWith(color: hollow.textSecondary),
+                ),
+                for (final label in member.labels) LabelBadge(label: label),
+              ],
+            )
+          : null,
       titleTrailing: isMe ? const HollowBadge('You') : null,
       leading: HollowAvatar(peerId: member.peerId, size: 32),
       trailing: canAct
