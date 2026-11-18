@@ -69270,3 +69270,646 @@ async fn t14_a_wrong_proof_answer_is_refused_and_the_pull_goes_on() {
     cut.relay.set_online(&cut.d1.device_id, true);
     expect_file_lands(&mut cut.j, &fid, &plaintext).await;
 }
+
+// t16-silent-fork
+
+/// Issue 135's silent fork: owner and member hold 0.12.2 leaves, then each upgrades while
+/// the other is away and refreshes its own leaf at one epoch. Each tree shows its own leaf
+/// declaring the tally and the other's not, so each election admits only itself and the
+/// fork sat unprobed forever, restarts included. After both restart, the member's VC join
+/// and its failed decrypts probe the owner, whose fork stays, and the member is repaired
+/// onto it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn t16_a_silent_fork_from_two_upgrades_heals_at_vc_join() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let mut knobs = G13w3Knobs::default();
+    let [o_tag, v_tag] = g13w3_by_id([201, 202]);
+    let (mut nodes, sid) = g13w3_server(&relay, &mut knobs, &[o_tag, v_tag], "Silent fork", 2, &[0, 1], &[]).await;
+    let (v, o) = (nodes.pop().unwrap(), nodes.pop().unwrap());
+    let voice = new_voice_channel(&o, &[&v], &sid).await;
+    let (start, _) = quiet_agreed_group(&[&o, &v], &sid, 30).await.expect("one group of 0.12.2 leaves");
+
+    // The owner upgrades alone and refreshes its own leaf; the member misses the commit.
+    relay.set_online(&v.device_id, false);
+    assert!(wait_until(15, async || !o.sees_peer(&v.device_id).await).await, "the owner saw the member leave");
+    knobs.clear(G13w3Knob::OldLeaf, &o.device_id);
+    assert!(wait_until(20, async || o.mls_epoch(&sid).await == Some(start + 1)).await, "the owner refreshed its leaf alone");
+
+    // The member upgrades with the owner away and, standing alone, refreshes its own.
+    relay.set_online(&o.device_id, false);
+    relay.set_online(&v.device_id, true);
+    knobs.clear(G13w3Knob::OldLeaf, &v.device_id);
+    assert!(wait_until(30, async || v.mls_epoch(&sid).await == Some(start + 1)).await, "the member refreshed its leaf alone");
+
+    // Both apps restart into the fork they hold on disk.
+    let o = restart_node(&relay, o, o_tag, o_tag).await;
+    let v = restart_node(&relay, v, v_tag, v_tag).await;
+    assert!(
+        wait_until(30, async || o.sees_peer(&v.device_id).await && v.sees_peer(&o.device_id).await).await,
+        "both back online",
+    );
+    let owners_fork = o.mls_epoch_state(&sid).await;
+    assert!(owners_fork.as_ref().is_some_and(|(e, _)| *e == start + 1), "precondition: owner at {start}+1");
+    assert_ne!(owners_fork, v.mls_epoch_state(&sid).await, "precondition: two forks at one epoch");
+    assert_eq!(o.mls_undeclared(&sid).await, Some(vec![v.device_id.clone()]), "precondition: the owner's tree shows only the member's leaf old");
+    assert_eq!(v.mls_undeclared(&sid).await, Some(vec![o.device_id.clone()]), "precondition: the member's tree shows only the owner's leaf old");
+
+    relay.start_wiretap();
+    for n in [&o, &v] {
+        n.cmd_tx.send(NodeCommand::VoiceChannelJoin { server_id: sid.clone(), channel_id: voice.clone() }).await.unwrap();
+    }
+    let mut healed = None;
+    for k in 0..8 {
+        g13s3_post(&o, &sid, &format!("t16-o-{k}")).await;
+        g13s3_post(&v, &sid, &format!("t16-v-{k}")).await;
+        healed = quiet_agreed_group(&[&o, &v], &sid, 6).await;
+        if healed.is_some() {
+            break;
+        }
+    }
+    assert!(
+        healed.is_some(),
+        "one group again: o={:?} v={:?}, probes v->o {} o->v {}",
+        o.mls_epoch_state(&sid).await,
+        v.mls_epoch_state(&sid).await,
+        g13w3_sent(&relay, &v.device_id, &o.device_id, "mls_epoch_probe"),
+        g13w3_sent(&relay, &o.device_id, &v.device_id, "mls_epoch_probe"),
+    );
+    assert!(g13w3_required_probes(&relay, &v.device_id, &o.device_id) >= 1, "the member probed the owner");
+    assert_eq!(
+        relay.wiretap().frames.iter().filter(|f| f.kind() == "mls_welcome" && f.to.as_deref() == Some(o.device_id.as_str())).count(),
+        0,
+        "the owner's fork stays: nobody repairs the owner",
+    );
+    drop((o, v));
+}
+
+/// Welcomes and commits on the wire since the wiretap started.
+fn t16_mls_traffic(relay: &MockRelay) -> (usize, usize) {
+    let tap = relay.wiretap();
+    let count = |kind: &str| tap.frames.iter().filter(|f| f.kind() == kind).count();
+    (count("mls_welcome"), count("mls_commit"))
+}
+
+fn t16_welcomes_to(relay: &MockRelay, device: &str) -> usize {
+    relay.wiretap().frames.iter().filter(|f| f.kind() == "mls_welcome" && f.to.as_deref() == Some(device)).count()
+}
+
+/// Once healed, nothing moves for 10 s: no epoch, no Welcome, no commit.
+async fn t16_stays_put(relay: &MockRelay, nodes: &[&TestNode], group_key: &str, group: &(u64, String)) {
+    let before = t16_mls_traffic(relay);
+    let moved = wait_until(10, async || {
+        for n in nodes {
+            if n.mls_epoch_state(group_key).await.as_ref() != Some(group) {
+                return true;
+            }
+        }
+        t16_mls_traffic(relay) != before
+    })
+    .await;
+    assert!(
+        !moved,
+        "the group moved after the heal: (Welcomes, commits) {:?} -> {:?}",
+        before,
+        t16_mls_traffic(relay),
+    );
+}
+
+async fn t16_sorted_undeclared(n: &TestNode, group_key: &str) -> Vec<String> {
+    let mut v = n.mls_undeclared(group_key).await.unwrap_or_default();
+    v.sort();
+    v
+}
+
+/// Owner (`tags[0]`), then members, all on 0.12.2 leaves; A and B are the last two. All
+/// but A and B leave for good, then A upgrades alone and refreshes its own leaf, then B
+/// does with A away. Returns with A offline and B online, each tree showing only its own
+/// leaf declaring at one epoch, on two forks.
+async fn t16_member_upgrade_fork(
+    relay: &MockRelay,
+    knobs: &mut G13w3Knobs,
+    tags: &[u8],
+    name: &str,
+) -> (Vec<TestNode>, String, String) {
+    let old: Vec<usize> = (0..tags.len()).collect();
+    let (nodes, sid) = g13w3_server(relay, knobs, tags, name, tags.len(), &old, &[]).await;
+    let (a, b) = (&nodes[tags.len() - 2], &nodes[tags.len() - 1]);
+    let refs: Vec<&TestNode> = nodes.iter().collect();
+    let voice = new_voice_channel(refs[0], &refs[1..], &sid).await;
+    let (start, _) = quiet_agreed_group(&refs, &sid, 30).await.expect("one group of 0.12.2 leaves");
+
+    for n in refs.iter().filter(|n| n.device_id != a.device_id) {
+        relay.set_online(&n.device_id, false);
+    }
+    for n in refs.iter().filter(|n| n.device_id != a.device_id) {
+        assert!(wait_until(15, async || !a.sees_peer(&n.device_id).await).await, "A alone");
+    }
+    knobs.clear(G13w3Knob::OldLeaf, &a.device_id);
+    assert!(wait_until(30, async || a.mls_epoch(&sid).await == Some(start + 1)).await, "A refreshed its leaf alone");
+
+    relay.set_online(&a.device_id, false);
+    relay.set_online(&b.device_id, true);
+    knobs.clear(G13w3Knob::OldLeaf, &b.device_id);
+    assert!(wait_until(30, async || b.mls_epoch(&sid).await == Some(start + 1)).await, "B refreshed its leaf alone");
+    assert_ne!(a.mls_epoch_state(&sid).await, b.mls_epoch_state(&sid).await, "precondition: two forks at one epoch");
+    let others = |us: &TestNode| {
+        let mut v: Vec<String> = refs.iter().filter(|n| n.device_id != us.device_id).map(|n| n.device_id.clone()).collect();
+        v.sort();
+        v
+    };
+    assert_eq!(t16_sorted_undeclared(a, &sid).await, others(a), "precondition: A's tree shows only its own leaf declaring");
+    assert_eq!(t16_sorted_undeclared(b, &sid).await, others(b), "precondition: B's tree shows only its own leaf declaring");
+    drop(refs);
+    (nodes, sid, voice)
+}
+
+/// #135 with the owner gone: owner O and member X go offline for good, then members A
+/// and B, on 0.12.2 leaves, each upgrade while the other is away, so each tree shows only
+/// its own leaf declaring and each election admits only itself. Both name A, first by
+/// fold position (B's id sorts lower), as the heal leader: B probes A and is repaired
+/// onto A's fork, and nobody repairs A. Then the owner comes back upgraded, and all three
+/// settle on one group that stays put.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn t16_a_silent_fork_between_members_heals_without_the_owner_and_holds_when_it_returns() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let mut knobs = G13w3Knobs::default();
+    let [low, high] = g13w3_by_id([205, 206]);
+    let (nodes, sid, voice) =
+        t16_member_upgrade_fork(&relay, &mut knobs, &[203, 204, high, low], "Silent fork without the owner").await;
+    let (o, a, b) = (&nodes[0], &nodes[2], &nodes[3]);
+
+    relay.start_wiretap();
+    relay.set_online(&a.device_id, true);
+    assert!(wait_until(30, async || a.sees_peer(&b.device_id).await && b.sees_peer(&a.device_id).await).await, "A and B together");
+    for n in [a, b] {
+        n.cmd_tx.send(NodeCommand::VoiceChannelJoin { server_id: sid.clone(), channel_id: voice.clone() }).await.unwrap();
+    }
+    let mut healed = None;
+    for k in 0..8 {
+        g13s3_post(a, &sid, &format!("t16b-a-{k}")).await;
+        g13s3_post(b, &sid, &format!("t16b-b-{k}")).await;
+        healed = quiet_agreed_group(&[a, b], &sid, 6).await;
+        if healed.is_some() {
+            break;
+        }
+    }
+    assert!(
+        healed.is_some(),
+        "one group without the owner: a={:?} b={:?}, probes b->a {} a->b {}, kp_req a->b {} b->a {}",
+        a.mls_epoch_state(&sid).await,
+        b.mls_epoch_state(&sid).await,
+        g13w3_sent(&relay, &b.device_id, &a.device_id, "mls_epoch_probe"),
+        g13w3_sent(&relay, &a.device_id, &b.device_id, "mls_epoch_probe"),
+        g13w3_sent(&relay, &a.device_id, &b.device_id, "mls_kp_req"),
+        g13w3_sent(&relay, &b.device_id, &a.device_id, "mls_kp_req"),
+    );
+    assert!(g13w3_required_probes(&relay, &b.device_id, &a.device_id) >= 1, "B probed A");
+    assert_eq!(t16_welcomes_to(&relay, &a.device_id), 0, "A's fork stays: nobody repairs the heal leader");
+    assert!(t16_welcomes_to(&relay, &b.device_id) >= 1, "B was repaired onto A's fork");
+    t16_stays_put(&relay, &[a, b], &sid, healed.as_ref().unwrap()).await;
+
+    // The owner comes back, upgraded, at the epoch it left.
+    knobs.clear(G13w3Knob::OldLeaf, &o.device_id);
+    relay.set_online(&o.device_id, true);
+    assert!(
+        wait_until(30, async || o.sees_peer(&a.device_id).await && o.sees_peer(&b.device_id).await).await,
+        "the owner back",
+    );
+    let mut settled = None;
+    for k in 0..10 {
+        for n in [o, a, b] {
+            g13s3_post(n, &sid, &format!("t16c-{}-{k}", n.device_id)).await;
+        }
+        settled = quiet_agreed_group(&[o, a, b], &sid, 8).await;
+        if settled.is_some() {
+            break;
+        }
+    }
+    assert!(
+        settled.is_some(),
+        "one group with the owner back: o={:?} a={:?} b={:?}, (welcomes, commits) {:?}",
+        o.mls_epoch_state(&sid).await,
+        a.mls_epoch_state(&sid).await,
+        b.mls_epoch_state(&sid).await,
+        t16_mls_traffic(&relay),
+    );
+    t16_stays_put(&relay, &[o, a, b], &sid, settled.as_ref().unwrap()).await;
+    drop(nodes);
+}
+
+/// A fork among 0.14 members with the owner away for good: A and B commit at one epoch,
+/// C sees only B's. Every tree declares, so the tree election names A (first by fold
+/// position; its id sorts highest) on every side, and C and B are repaired onto A's
+/// fork. A convergence check: the widening is not what heals it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn t16_a_fork_among_three_members_heals_to_the_first_by_fold_position() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let mut knobs = G13w3Knobs::default();
+    let [low, mid, high] = g13w3_by_id([208, 209, 210]);
+    let (nodes, sid) = g13w3_server(&relay, &mut knobs, &[207, high, mid, low], "Member fork", 4, &[], &[]).await;
+    let (o, a, b, c) = (&nodes[0], &nodes[1], &nodes[2], &nodes[3]);
+    g13w3_owner_away(&relay, o, &[a, b, c]).await;
+    let (start, _) = quiet_agreed_group(&[a, b, c], &sid, 30).await.expect("one group before");
+
+    let holds = [(b, a), (a, b), (a, c), (b, o), (a, o)];
+    for (from, to) in holds {
+        relay.hold_broadcasts(&from.device_id, &to.device_id);
+    }
+    g13s3_force_self_update(b, &sid).await;
+    g13s3_force_self_update(a, &sid).await;
+    assert!(wait_until(10, async || c.mls_epoch(&sid).await == Some(start + 1)).await, "C took B's commit");
+    let b_side = b.mls_epoch_state(&sid).await;
+    assert_ne!(b_side, a.mls_epoch_state(&sid).await, "precondition: two forks at one epoch");
+    relay.start_wiretap();
+    for (from, to) in holds {
+        relay.release_broadcasts(&from.device_id, &to.device_id);
+    }
+    let mut healed = None;
+    for k in 0..15 {
+        g13s3_post(a, &sid, &format!("t16a-a-{k}")).await;
+        g13s3_post(b, &sid, &format!("t16a-b-{k}")).await;
+        healed = quiet_agreed_group(&[a, b, c], &sid, 8).await;
+        if healed.is_some() {
+            break;
+        }
+    }
+    assert!(
+        healed.is_some(),
+        "one group again: a={:?} b={:?} c={:?}",
+        a.mls_epoch_state(&sid).await,
+        b.mls_epoch_state(&sid).await,
+        c.mls_epoch_state(&sid).await,
+    );
+    assert_eq!(t16_welcomes_to(&relay, &a.device_id), 0, "A's side stays");
+    assert_ne!(healed, b_side, "the group did not settle on B's fork");
+    t16_stays_put(&relay, &[a, b, c], &sid, healed.as_ref().unwrap()).await;
+    drop(nodes);
+}
+
+/// Vitalik's staggered case: with the owner away, A commits (all reach e0+1), then B
+/// commits while C and D are away (A and B at e0+2), A posts, and A and B go away as C
+/// and D come back. C and D post and C commits, so C and D hold another e0+2. A and B come back and
+/// the four settle on one group, then the owner comes back from e0 and all five do, every
+/// post of the split on every node and nothing moving after.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn t16_a_staggered_split_with_the_owner_away_settles_when_everyone_returns() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let mut knobs = G13w3Knobs::default();
+    let (nodes, sid) = g13w3_server(&relay, &mut knobs, &[211, 212, 213, 214, 215], "Staggered", 5, &[], &[]).await;
+    let (o, a, b, c, d) = (&nodes[0], &nodes[1], &nodes[2], &nodes[3], &nodes[4]);
+    let general = general_channel_of(&sid);
+    let (e0, _) = quiet_agreed_group(&[o, a, b, c, d], &sid, 30).await.expect("one group at e0");
+
+    g13w3_owner_away(&relay, o, &[a, b, c, d]).await;
+    g13s3_force_self_update(a, &sid).await;
+    for n in [b, c, d] {
+        assert!(wait_until(10, async || n.mls_epoch(&sid).await == Some(e0 + 1)).await, "{} at e0+1", n.device_id);
+    }
+    // C and D are away for B's commit and A's post, and back only once A and B left.
+    for n in [c, d] {
+        relay.set_online(&n.device_id, false);
+    }
+    assert!(
+        wait_until(15, async || !a.sees_peer(&c.device_id).await && !a.sees_peer(&d.device_id).await).await,
+        "C and D away",
+    );
+    g13s3_force_self_update(b, &sid).await;
+    assert!(wait_until(10, async || a.mls_epoch(&sid).await == Some(e0 + 2)).await, "A at e0+2");
+    g13s3_post(a, &sid, "t16e-a").await;
+    assert!(
+        wait_until(15, async || b.channel_messages(&sid, &general).iter().any(|m| m.text == "t16e-a")).await,
+        "B read A's post",
+    );
+    for n in [a, b] {
+        relay.set_online(&n.device_id, false);
+    }
+    for n in [c, d] {
+        relay.set_online(&n.device_id, true);
+    }
+    assert!(
+        wait_until(30, async || {
+            c.sees_peer(&d.device_id).await
+                && d.sees_peer(&c.device_id).await
+                && !c.sees_peer(&a.device_id).await
+                && !c.sees_peer(&b.device_id).await
+        })
+        .await,
+        "C and D back, A and B away",
+    );
+    assert_eq!(c.mls_epoch(&sid).await, Some(e0 + 1), "precondition: C missed B's commit");
+    assert_eq!(d.mls_epoch(&sid).await, Some(e0 + 1), "precondition: D missed B's commit");
+    g13s3_post(c, &sid, "t16e-c").await;
+    g13s3_post(d, &sid, "t16e-d").await;
+    assert!(
+        wait_until(15, async || {
+            c.channel_messages(&sid, &general).iter().any(|m| m.text == "t16e-d")
+                && d.channel_messages(&sid, &general).iter().any(|m| m.text == "t16e-c")
+        })
+        .await,
+        "C and D read each other",
+    );
+    g13s3_force_self_update(c, &sid).await;
+    assert!(wait_until(10, async || d.mls_epoch(&sid).await == Some(e0 + 2)).await, "D took C's commit");
+    let cd_side = c.mls_epoch_state(&sid).await;
+    assert_ne!(cd_side, a.mls_epoch_state(&sid).await, "precondition: two forks at e0+2");
+
+    relay.start_wiretap();
+    for n in [a, b] {
+        relay.set_online(&n.device_id, true);
+    }
+    assert!(
+        wait_until(30, async || a.sees_peer(&c.device_id).await && c.sees_peer(&a.device_id).await && b.sees_peer(&d.device_id).await).await,
+        "A and B back",
+    );
+    let mut healed = None;
+    for k in 0..15 {
+        for n in [a, b, c, d] {
+            g13s3_post(n, &sid, &format!("t16e1-{}-{k}", n.device_id)).await;
+        }
+        healed = quiet_agreed_group(&[a, b, c, d], &sid, 8).await;
+        if healed.is_some() {
+            break;
+        }
+    }
+    assert!(
+        healed.is_some(),
+        "one group of four: a={:?} b={:?} c={:?} d={:?}, (welcomes, commits) {:?}",
+        a.mls_epoch_state(&sid).await,
+        b.mls_epoch_state(&sid).await,
+        c.mls_epoch_state(&sid).await,
+        d.mls_epoch_state(&sid).await,
+        t16_mls_traffic(&relay),
+    );
+    assert_eq!(t16_welcomes_to(&relay, &a.device_id) + t16_welcomes_to(&relay, &b.device_id), 0, "A's side stays");
+    assert_ne!(healed, cd_side, "the group did not settle on C's fork");
+
+    relay.set_online(&o.device_id, true);
+    let mut settled = None;
+    for k in 0..15 {
+        for n in [o, a, b, c, d] {
+            g13s3_post(n, &sid, &format!("t16e2-{}-{k}", n.device_id)).await;
+        }
+        settled = quiet_agreed_group(&[o, a, b, c, d], &sid, 8).await;
+        if settled.is_some() {
+            break;
+        }
+    }
+    assert!(
+        settled.is_some(),
+        "one group of five: o={:?} a={:?}, (welcomes, commits) {:?}",
+        o.mls_epoch_state(&sid).await,
+        a.mls_epoch_state(&sid).await,
+        t16_mls_traffic(&relay),
+    );
+    assert!(t16_mls_traffic(&relay).0 <= 4, "Welcomes bounded: {:?}", t16_mls_traffic(&relay));
+    t16_stays_put(&relay, &[o, a, b, c, d], &sid, settled.as_ref().unwrap()).await;
+    for n in [o, a, b, c, d] {
+        assert!(
+            wait_until(30, async || {
+                let texts: Vec<String> = n.channel_messages(&sid, &general).into_iter().map(|m| m.text).collect();
+                ["t16e-a", "t16e-c", "t16e-d"].iter().all(|t| texts.iter().any(|x| x == t))
+            })
+            .await,
+            "{} holds every post of the split",
+            n.device_id,
+        );
+    }
+    drop(nodes);
+}
+
+/// The half of #135's member fork that only the heal leader notices: A, first by fold
+/// position, alone joins the voice channel and fails to read B's posts, so only A
+/// probes, and it probes B. B, seeing A is the leader, asks A to repair it instead of
+/// asking for A's KeyPackage, and the group heals onto A's fork.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn t16_a_member_fork_only_the_heal_leader_notices_still_heals_onto_its_side() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let mut knobs = G13w3Knobs::default();
+    let [low, high] = g13w3_by_id([217, 218]);
+    let (nodes, sid, voice) = t16_member_upgrade_fork(&relay, &mut knobs, &[216, high, low], "Leader notices").await;
+    let (a, b) = (&nodes[1], &nodes[2]);
+    relay.start_wiretap();
+    relay.set_online(&a.device_id, true);
+    assert!(wait_until(30, async || a.sees_peer(&b.device_id).await && b.sees_peer(&a.device_id).await).await, "A and B together");
+    a.cmd_tx.send(NodeCommand::VoiceChannelJoin { server_id: sid.clone(), channel_id: voice.clone() }).await.unwrap();
+    // The leader's probe went to B, yet B's own KeyPackage request never moves the leader.
+    assert!(wait_until(15, async || g13w3_required_probes(&relay, &a.device_id, &b.device_id) >= 1).await, "the leader probed");
+    send_as(&relay, &sid, b, a, super::types::HavenMessage::MlsKeyPackageRequest { server_id: sid.clone(), channel_id: None }).await;
+    let mut healed = None;
+    for k in 0..8 {
+        g13s3_post(b, &sid, &format!("t16b2-b-{k}")).await;
+        healed = quiet_agreed_group(&[a, b], &sid, 6).await;
+        if healed.is_some() {
+            break;
+        }
+    }
+    assert!(
+        healed.is_some(),
+        "one group: a={:?} b={:?}, probes a->b {} b->a {}, kp_req a->b {} b->a {}",
+        a.mls_epoch_state(&sid).await,
+        b.mls_epoch_state(&sid).await,
+        g13w3_sent(&relay, &a.device_id, &b.device_id, "mls_epoch_probe"),
+        g13w3_sent(&relay, &b.device_id, &a.device_id, "mls_epoch_probe"),
+        g13w3_sent(&relay, &a.device_id, &b.device_id, "mls_kp_req"),
+        g13w3_sent(&relay, &b.device_id, &a.device_id, "mls_kp_req"),
+    );
+    assert!(g13w3_required_probes(&relay, &a.device_id, &b.device_id) >= 1, "the leader probed");
+    assert_eq!(g13w3_sent(&relay, &b.device_id, &a.device_id, "mls_kp_req"), 0, "B never asked the leader for its KeyPackage");
+    assert_eq!(t16_welcomes_to(&relay, &a.device_id), 0, "A's fork stays");
+
+    // Once healed, B is A's elected responder and may repair it as before, so only a
+    // package A handed B before its Welcome to B would be the leader taking B's repair.
+    let tap = relay.wiretap();
+    let welcomed = tap.frames.iter().position(|f| f.kind() == "mls_welcome" && f.to.as_deref() == Some(b.device_id.as_str()));
+    assert!(welcomed.is_some(), "A repaired B");
+    assert!(
+        !tap.frames[..welcomed.unwrap()]
+            .iter()
+            .any(|f| f.from == a.device_id && f.to.as_deref() == Some(b.device_id.as_str()) && f.label() == "mls_kp"),
+        "the heal leader took the repair of the member it leads",
+    );
+    drop(nodes);
+}
+
+/// Vitalik's staggered case on 0.12.2 leaves, so the two sides' trees disagree about who
+/// declares the tally: with the owner, C and D away, A and B upgrade (A refreshes its
+/// leaf, B is repaired), A posts and they leave; C and D come back and do the same. Each
+/// side's tree shows only its own two leaves declaring, so each election names its own
+/// side. A and B come back and the four settle on A's side, then the owner, upgraded, and
+/// all five do, every post of the split on every node.
+///
+/// A DEAD END today: each side's election names the other member of its own side (its leaf
+/// declares there, the far side's leaves do not), so every probe stays on its own side and
+/// the heal order, which stands in only for an empty election, is never read.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "dead end: each side's election names its own side, no probe crosses (t16 review round)"]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn t16_a_staggered_split_of_upgrades_with_the_owner_away_settles_when_everyone_returns() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let mut knobs = G13w3Knobs::default();
+    let (nodes, sid) = g13w3_server(&relay, &mut knobs, &[219, 220, 221, 222, 223], "Staggered upgrades", 5, &[0, 1, 2, 3, 4], &[]).await;
+    let (o, a, b, c, d) = (&nodes[0], &nodes[1], &nodes[2], &nodes[3], &nodes[4]);
+    let general = general_channel_of(&sid);
+    let all = [o, a, b, c, d];
+    quiet_agreed_group(&all, &sid, 30).await.expect("one group of 0.12.2 leaves");
+    let sorted = |ns: &[&TestNode]| {
+        let mut v: Vec<String> = ns.iter().map(|n| n.device_id.clone()).collect();
+        v.sort();
+        v
+    };
+
+    // A and B alone upgrade: A refreshes its own leaf, B's is repaired.
+    for n in [o, c, d] {
+        relay.set_online(&n.device_id, false);
+    }
+    assert!(
+        wait_until(15, async || !a.sees_peer(&o.device_id).await && !a.sees_peer(&c.device_id).await && !a.sees_peer(&d.device_id).await).await,
+        "A and B alone",
+    );
+    knobs.clear(G13w3Knob::OldLeaf, &a.device_id);
+    knobs.clear(G13w3Knob::OldLeaf, &b.device_id);
+    let ab_old = sorted(&[o, c, d]);
+    assert!(
+        wait_until(60, async || {
+            t16_sorted_undeclared(a, &sid).await == ab_old && t16_sorted_undeclared(b, &sid).await == ab_old
+        })
+        .await,
+        "A and B declare: a={:?} b={:?}",
+        t16_sorted_undeclared(a, &sid).await,
+        t16_sorted_undeclared(b, &sid).await,
+    );
+    assert!(quiet_agreed_group(&[a, b], &sid, 20).await.is_some(), "A and B agree");
+    g13s3_post(a, &sid, "t16u-a").await;
+    assert!(
+        wait_until(15, async || b.channel_messages(&sid, &general).iter().any(|m| m.text == "t16u-a")).await,
+        "B read A's post",
+    );
+
+    // C and D come back as A and B leave, and upgrade the same way.
+    for n in [a, b] {
+        relay.set_online(&n.device_id, false);
+    }
+    for n in [c, d] {
+        relay.set_online(&n.device_id, true);
+    }
+    assert!(
+        wait_until(30, async || c.sees_peer(&d.device_id).await && !c.sees_peer(&a.device_id).await && !c.sees_peer(&b.device_id).await).await,
+        "C and D alone",
+    );
+    g13s3_post(c, &sid, "t16u-c").await;
+    knobs.clear(G13w3Knob::OldLeaf, &c.device_id);
+    knobs.clear(G13w3Knob::OldLeaf, &d.device_id);
+    let cd_old = sorted(&[o, a, b]);
+    assert!(
+        wait_until(60, async || {
+            t16_sorted_undeclared(c, &sid).await == cd_old && t16_sorted_undeclared(d, &sid).await == cd_old
+        })
+        .await,
+        "C and D declare: c={:?} d={:?}",
+        t16_sorted_undeclared(c, &sid).await,
+        t16_sorted_undeclared(d, &sid).await,
+    );
+    let cd_side = quiet_agreed_group(&[c, d], &sid, 20).await.expect("C and D agree");
+    g13s3_post(d, &sid, "t16u-d").await;
+    assert_ne!(Some(cd_side.clone()), a.mls_epoch_state(&sid).await, "precondition: two forks");
+
+    relay.start_wiretap();
+    for n in [a, b] {
+        relay.set_online(&n.device_id, true);
+    }
+    assert!(
+        wait_until(30, async || a.sees_peer(&c.device_id).await && c.sees_peer(&a.device_id).await && b.sees_peer(&d.device_id).await).await,
+        "A and B back",
+    );
+    let mut healed = None;
+    for k in 0..15 {
+        for n in [a, b, c, d] {
+            g13s3_post(n, &sid, &format!("t16u1-{}-{k}", n.device_id)).await;
+        }
+        healed = quiet_agreed_group(&[a, b, c, d], &sid, 8).await;
+        if healed.is_some() {
+            break;
+        }
+    }
+    let pair = |x: &TestNode, y: &TestNode| {
+        format!(
+            "{}->{}: probes {} kp_req {}",
+            &x.device_id[x.device_id.len() - 4..],
+            &y.device_id[y.device_id.len() - 4..],
+            g13w3_sent(&relay, &x.device_id, &y.device_id, "mls_epoch_probe"),
+            g13w3_sent(&relay, &x.device_id, &y.device_id, "mls_kp_req"),
+        )
+    };
+    assert!(
+        healed.is_some(),
+        "one group of four: a={:?} b={:?} c={:?} d={:?}, (welcomes, commits) {:?}; {}; {}; {}; {}; {}; {}",
+        a.mls_epoch_state(&sid).await,
+        b.mls_epoch_state(&sid).await,
+        c.mls_epoch_state(&sid).await,
+        d.mls_epoch_state(&sid).await,
+        t16_mls_traffic(&relay),
+        pair(a, c),
+        pair(c, a),
+        pair(a, d),
+        pair(d, a),
+        pair(c, d),
+        pair(d, c),
+    );
+    assert_eq!(t16_welcomes_to(&relay, &a.device_id) + t16_welcomes_to(&relay, &b.device_id), 0, "A's side stays");
+
+    knobs.clear(G13w3Knob::OldLeaf, &o.device_id);
+    relay.set_online(&o.device_id, true);
+    let mut settled = None;
+    for k in 0..15 {
+        for n in all {
+            g13s3_post(n, &sid, &format!("t16u2-{}-{k}", n.device_id)).await;
+        }
+        settled = quiet_agreed_group(&all, &sid, 8).await;
+        if settled.is_some() {
+            break;
+        }
+    }
+    assert!(
+        settled.is_some(),
+        "one group of five: o={:?} a={:?}, (welcomes, commits) {:?}",
+        o.mls_epoch_state(&sid).await,
+        a.mls_epoch_state(&sid).await,
+        t16_mls_traffic(&relay),
+    );
+    t16_stays_put(&relay, &all, &sid, settled.as_ref().unwrap()).await;
+    for n in all {
+        assert!(
+            wait_until(30, async || {
+                let texts: Vec<String> = n.channel_messages(&sid, &general).into_iter().map(|m| m.text).collect();
+                ["t16u-a", "t16u-c", "t16u-d"].iter().all(|t| texts.iter().any(|x| x == t))
+            })
+            .await,
+            "{} holds every post of the split",
+            n.device_id,
+        );
+    }
+    drop(nodes);
+}

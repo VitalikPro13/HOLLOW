@@ -14459,9 +14459,11 @@ async fn handle_incoming_request_inner(
                 m.lead.heard(&group_key, &requester_master);
             }
             let lead = mls.as_ref().map(|m| crate::node::crypto_handler::responder_view(m, state, &server_id, kpr_channel_id.as_deref())).unwrap_or_default();
-            if holds_leaf && !crate::node::crypto_handler::may_repair_our_leaf(
-                state, kpr_channel_id.as_deref(), local_peer_str, ws_room_peers, &requester_master, &lead,
-            ) {
+            if holds_leaf
+                && !mls.as_ref().is_some_and(|m| crate::node::crypto_handler::may_repair_held_leaf(
+                    m, state, kpr_channel_id.as_deref(), local_peer_str, ws_room_peers, &requester_master, &lead,
+                ))
+            {
                 hollow_log!("[HOLLOW-SECURITY] REJECTED MlsKeyPackageRequest from {peer_str} for {group_key}: {requester_master} may not repair our leaf");
                 return;
             }

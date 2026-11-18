@@ -4102,11 +4102,22 @@ pub(crate) fn handle_epoch_hint(
                     echo(mls_mgr, epoch_hint_cooldown);
                     return;
                 }
-                // Of two forks the one the authority's acting device holds stays, or
-                // two sides would keep repairing each other onto their own.
+                // Of two forks the one the authority's acting device holds stays (the heal
+                // leader's where our tree names no other authority), or two sides would
+                // keep repairing each other onto their own.
+                let heal_leaders_copy = || {
+                    let theirs = heal_leader(mls_mgr, state, channel_id, local_peer_str, ws_room_peers, &lead)
+                        .and_then(|l| acting_device(&super::resolver::resolve(&l), ws_room_peers))
+                        .is_some_and(|d| d == from_peer);
+                    if theirs {
+                        mls_mgr.lead.note_heal_ask(&group_key, &from_master);
+                    }
+                    theirs
+                };
                 if forked
                     && lead.rule.on() == their_standing
-                    && is_authoritys_acting_device(state, channel_id, local_peer_str, ws_room_peers, from_peer, &lead.rule)
+                    && (is_authoritys_acting_device(state, channel_id, local_peer_str, ws_room_peers, from_peer, &lead.rule)
+                        || heal_leaders_copy())
                 {
                     hollow_log!(
                         "[HOLLOW-MLS] {from_peer} holds the fork of {group_key} that stays (epoch {their_epoch}); asking it to repair ours"
@@ -4199,8 +4210,10 @@ pub(crate) fn send_epoch_probe(
     // "we are the authority" says who COMMITS, never who holds the newest epoch,
     // and treating it as the latter left a returning owner with nobody to ask.
     let lead = responder_view(mls_mgr, state, server_id, channel_id);
-    let Some(authority) =
-        epoch_catchup_responder(state, channel_id, local_peer_str, ws_room_peers, local_peer_str, &lead)
+    let elected = epoch_catchup_responder(state, channel_id, local_peer_str, ws_room_peers, local_peer_str, &lead);
+    let Some(authority) = elected
+        .clone()
+        .or_else(|| heal_target(mls_mgr, state, &group_key, channel_id, local_peer_str, ws_room_peers, &lead.rule))
     else {
         return false; // no other online member — nobody to ask
     };
@@ -4221,9 +4234,137 @@ pub(crate) fn send_epoch_probe(
     if sent > 0 {
         // Under standing every leaf holder echoes a probe, so only there does silence count.
         mls_mgr.lead.note_probe(&group_key, &super::resolver::resolve(&authority), lead.rule.on());
-        hollow_log!("[HOLLOW-MLS] Sent epoch probe (epoch {own_epoch}) to authority {authority} for {group_key}");
+        if elected.is_none() {
+            mls_mgr.lead.note_heal_ask(&group_key, &super::resolver::resolve(&authority));
+        }
+        let beyond = if elected.is_some() { "" } else { " (beyond the election)" };
+        hollow_log!("[HOLLOW-MLS] Sent epoch probe (epoch {own_epoch}) to authority {authority}{beyond} for {group_key}");
     }
     sent > 0
+}
+
+/// The order a fork heals by under standing: by standing (role tier, fold position, id)
+/// among the server's unbanned members that may see the channel, are online with a device
+/// holding a bound leaf in our tree of the group (the anchored owner with any device),
+/// and that our tree does not show at their cap. We always count, cap or not.
+///
+/// Read from the CRDT and presence, never the tally a leaf declares: both sides of a fork
+/// share those, while each tree's view of who declares is what a missed commit leaves
+/// stale. Two upgrades made while each side was away fork the group with each tree
+/// showing only its own leaf declaring, so each tree's election admits only itself and
+/// the fork was never probed (#135). Declaring is free, so leaving it out drops no
+/// defence; the cap stays, or a flooder leading the heal would repair honest members
+/// onto its commits past the cap. Never counting ourselves out by our own cap keeps the
+/// sides agreeing: a commit only we hold is exactly what can put us at it.
+fn heal_order(
+    mls: &MlsManager,
+    state: &crate::crdt::server_state::ServerState,
+    group_key: &str,
+    channel_id: Option<&str>,
+    local_peer: &str,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+) -> Vec<String> {
+    let online = |device: &str| ws_room_peers.values().any(|p| p.contains(device));
+    let holders: std::collections::HashSet<String> = mls
+        .group_leaves(group_key)
+        .iter()
+        .filter_map(crate::crypto::LeafView::bound)
+        .filter(|l| !super::resolver::is_revoked(&l.device) && online(&l.device))
+        .map(|l| l.master.clone())
+        .collect();
+    let capped = unfit_committers(mls, state, group_key);
+    let owner = state.anchor_owner();
+    let candidates = state.members.keys().filter(|m| {
+        let us = super::resolver::same_identity(m, local_peer);
+        let present = us
+            || holders.contains(*m)
+            || (owner.as_deref() == Some(m.as_str()) && peer_is_reachable(ws_room_peers, m));
+        present
+            && (us || !capped.contains(*m))
+            && !state.is_banned(m)
+            && channel_id.is_none_or(|cid| state.can_see_channel(m, cid))
+    });
+    super::standing::rank_masters(state, candidates.cloned())
+}
+
+/// Whom we probe when our election names nobody but us: under standing, the first in
+/// [`heal_order`] other than us.
+fn heal_target(
+    mls: &MlsManager,
+    state: &crate::crdt::server_state::ServerState,
+    group_key: &str,
+    channel_id: Option<&str>,
+    local_peer: &str,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    rule: &Rule,
+) -> Option<String> {
+    if !rule.on() {
+        return None;
+    }
+    heal_order(mls, state, group_key, channel_id, local_peer, ws_room_peers)
+        .into_iter()
+        .find(|m| !super::resolver::same_identity(m, local_peer))
+}
+
+/// Who leads the heal of a fork when our tree names no other identity as the group's
+/// authority (by presence alone, as [`is_authoritys_acting_device`] reads it) and our
+/// election names no responder: under standing, the first in [`heal_order`], when that
+/// is not us. Its copy is the one that
+/// stays, it is the one member besides the authorities [`may_repair_our_leaf`] names that
+/// may repair our leaf, and it is who [`heal_target`] probes, so prober, responder and
+/// the side taking the repair all read this one answer.
+pub(crate) fn heal_leader(
+    mls: &MlsManager,
+    state: &crate::crdt::server_state::ServerState,
+    channel_id: Option<&str>,
+    local_peer: &str,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    lead: &Lead,
+) -> Option<String> {
+    if !lead.rule.on() {
+        return None;
+    }
+    let tree = group_authority(state, channel_id, local_peer, ws_room_peers, &Lead { rule: lead.rule.clone(), ..Default::default() });
+    if tree.is_some_and(|a| !super::resolver::same_identity(&a, local_peer)) {
+        return None;
+    }
+    // Only where our own election names nobody to ask: a member it names heals us, and a
+    // fork claim is never checkable, so a higher-ranked leaf the election keeps out must
+    // not turn one into the power to repair us.
+    if epoch_catchup_responder(state, channel_id, local_peer, ws_room_peers, local_peer, lead).is_some() {
+        return None;
+    }
+    let group_key = match channel_id {
+        Some(cid) => crate::crypto::subgroup_id(&state.server_id, cid),
+        None => state.server_id.clone(),
+    };
+    heal_order(mls, state, &group_key, channel_id, local_peer, ws_room_peers)
+        .into_iter()
+        .next()
+        .filter(|m| !super::resolver::same_identity(m, local_peer))
+}
+
+/// [`may_repair_our_leaf`], or the [`heal_leader`] while we lately asked it to lead the
+/// heal of a fork ([`LeadBook::note_heal_ask`](super::standing::LeadBook::note_heal_ask)):
+/// who may have the KeyPackage that replaces a leaf we hold. Unasked, a heal leader the
+/// election keeps out (a leaf without the tally) would repair a healthy group at will.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn may_repair_held_leaf(
+    mls: &MlsManager,
+    state: &crate::crdt::server_state::ServerState,
+    channel_id: Option<&str>,
+    local_peer: &str,
+    ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
+    requester: &str,
+    lead: &Lead,
+) -> bool {
+    let group_key = match channel_id {
+        Some(cid) => crate::crypto::subgroup_id(&state.server_id, cid),
+        None => state.server_id.clone(),
+    };
+    may_repair_our_leaf(state, channel_id, local_peer, ws_room_peers, requester, lead)
+        || heal_leader(mls, state, channel_id, local_peer, ws_room_peers, lead)
+            .is_some_and(|l| super::resolver::same_identity(&l, requester) && mls.lead.heal_asked(&group_key, &l))
 }
 
 /// Send pre-serialized bytes to EVERY online device of an identity, returning
@@ -6797,6 +6938,385 @@ mod tests {
         );
         mls.lead.note_walk_ask(sid, "h1zz", vec!["h1zz".into()], b"pkg".to_vec(), false, span);
         assert!(leafless_may_answer_request(&mls, &state, sid, None, "h1me", &rooms, "h1mem"), "control: at or above our target");
+    }
+
+    /// #135: in an anchored group whose tree shows our own leaf declaring the tally and
+    /// the owner's not, the election names nobody; the probe still asks the owner while
+    /// any device of it is online, and never us, a banned owner, or an owner offline.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::await_holding_lock)] // the resolver is process-global
+    async fn an_epoch_probe_asks_the_owner_the_election_leaves_out() {
+        use crate::crdt::admin_lww::AdminLwwReg;
+        use crate::crdt::server_state::{MemberInfo, ServerState};
+        use crate::identity::native_identity::NativeKeypair;
+        use super::super::standing::knobs::{self, Knob};
+        struct KnobsOff(Vec<(Knob, String)>);
+        impl Drop for KnobsOff {
+            fn drop(&mut self) {
+                for (k, d) in &self.0 {
+                    knobs::set(*k, d, false);
+                }
+            }
+        }
+        let _lock = super::super::resolver::test_lock();
+        super::super::resolver::clear_all();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let db = tmp.path().join("pb.db").to_str().unwrap().to_string();
+        let pass = "d1".repeat(32);
+        crate::storage::MessageStore::open(&db, &pass).unwrap();
+        let store = crate::crypto::CryptoStore::open(db, pass).unwrap();
+        let sid = "135135135135135135135135135135135135135a";
+        let kp = |b: u8| NativeKeypair::from_secret_bytes(&[b; 32]);
+        let (me_dev, me_master, o_dev, o_master) = (kp(171), kp(172), kp(173), kp(174));
+        let (my_dev, me, owners_dev, owner) = (me_dev.peer_id(), me_master.peer_id(), o_dev.peer_id(), o_master.peer_id());
+        let owners_other = kp(175).peer_id();
+        // A group founded before 0.14 that seated the owner's 0.12.2 leaf.
+        let _off = KnobsOff(vec![(Knob::NoRatchet, my_dev.clone()), (Knob::OldLeaf, owners_dev.clone())]);
+        knobs::set(Knob::NoRatchet, &my_dev, true);
+        knobs::set(Knob::OldLeaf, &owners_dev, true);
+        let mut mls = MlsManager::new(&me_dev, &me_master).unwrap();
+        mls.create_group(sid).unwrap();
+        let theirs = MlsManager::new(&o_dev, &o_master).unwrap();
+        mls.add_member(sid, &mint_key_package(&theirs, &store).unwrap()).unwrap();
+        mls.merge_pending_commit(sid).unwrap();
+        super::super::resolver::update_many(&owner, [owners_dev.as_str(), owners_other.as_str()]);
+        let mut state = ServerState::new(sid.into(), "s".into(), owner.clone());
+        for m in [&owner, &me] {
+            state.members.insert(m.clone(), MemberInfo { peer_id: m.clone(), display_name: m.clone() });
+        }
+        let rooms = |devices: &[&str]| make_room_peers(&[(sid, devices)]);
+        let online = rooms(&[&my_dev, &owners_dev]);
+        let lead = responder_view(&mls, &state, sid, None);
+        assert!(lead.rule.on(), "precondition: standing");
+        assert_eq!(mls.leaf_records(sid).iter().filter(|r| !r.declares).count(), 1, "precondition: only the owner's leaf is old");
+        assert_eq!(
+            epoch_catchup_responder(&state, None, &me, &online, &me, &lead),
+            None,
+            "precondition: the election names nobody",
+        );
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        // One cooldown throughout: a probe that goes nowhere must not hold back the next.
+        let mut cooldown = HashMap::new();
+        let mut probe = |state: &ServerState, rooms: &HashMap<String, HashSet<String>>| {
+            send_epoch_probe(&mls, &tx, rooms, state, sid, None, &me, &mut cooldown)
+        };
+        assert!(!probe(&state, &rooms(&[&my_dev])), "the owner offline");
+        let mut banned = state.clone();
+        let hlc = banned.hlc.as_mut().unwrap().now();
+        banned.banned_members.insert(owner.clone(), AdminLwwReg::new(true, hlc, 9));
+        assert!(!probe(&banned, &online), "a banned owner");
+        assert!(probe(&state, &online), "the owner was probed");
+        match rx.try_recv() {
+            Ok(super::super::ws_client::WsCommand::SendDirect { target_peer, data, .. }) => {
+                assert_eq!(target_peer, owners_dev);
+                assert!(matches!(
+                    serde_json::from_slice::<HavenMessage>(&data),
+                    Ok(HavenMessage::MlsEpochProbe { answer: false, epoch_auth: Some(_), .. })
+                ));
+            }
+            other => panic!("expected a probe to the owner's device, got {other:?}"),
+        }
+        let probe = |state: &ServerState, rooms: &HashMap<String, HashSet<String>>| {
+            send_epoch_probe(&mls, &tx, rooms, state, sid, None, &me, &mut HashMap::new())
+        };
+        assert!(probe(&state, &rooms(&[&my_dev, &owners_other])), "the owner online through a device without a leaf");
+        assert!(matches!(rx.try_recv(), Ok(super::super::ws_client::WsCommand::SendDirect { target_peer, .. }) if target_peer == owners_other));
+        assert_ne!(heal_target(&mls, &state, sid, None, &owner, &online, &lead.rule), Some(owner.clone()), "the owner never probes itself");
+        assert!(rx.try_recv().is_err());
+        super::super::resolver::clear_all();
+    }
+
+    /// #135 without the owner: two members whose trees each show only their own leaf
+    /// declaring the tally both name the first by standing (here the lower id) as the heal
+    /// leader. Only the follower probes it, defers to its copy and takes its repair; the
+    /// leader takes none from the follower, so they never repair each other.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::await_holding_lock)] // the resolver is process-global
+    async fn both_sides_of_a_fork_name_one_heal_leader() {
+        use crate::crdt::admin_lww::AdminLwwReg;
+        use crate::crdt::server_state::{MemberInfo, ServerState};
+        use crate::identity::native_identity::NativeKeypair;
+        use super::super::standing::{knobs::{self, Knob}, Holders};
+        struct KnobsOff(Vec<(Knob, String)>);
+        impl Drop for KnobsOff {
+            fn drop(&mut self) {
+                for (k, d) in &self.0 {
+                    knobs::set(*k, d, false);
+                }
+            }
+        }
+        let _lock = super::super::resolver::test_lock();
+        super::super::resolver::clear_all();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let db = tmp.path().join("hl.db").to_str().unwrap().to_string();
+        let pass = "d2".repeat(32);
+        crate::storage::MessageStore::open(&db, &pass).unwrap();
+        let store = crate::crypto::CryptoStore::open(db, pass).unwrap();
+        let sid = "135135135135135135135135135135135135135b";
+        let kp = |b: u8| NativeKeypair::from_secret_bytes(&[b; 32]);
+        // Leader = the lower master id: both are plain members with no record.
+        let mut pair = [(kp(181), kp(182)), (kp(183), kp(184))];
+        pair.sort_by_key(|(_, m)| m.peer_id());
+        let [(l_dev, l_master), (f_dev, f_master)] = pair;
+        let (ld, lm, fd, fm) = (l_dev.peer_id(), l_master.peer_id(), f_dev.peer_id(), f_master.peer_id());
+        let (owner, owners_dev) = (kp(186).peer_id(), kp(185).peer_id());
+        let _off = KnobsOff(vec![(Knob::NoRatchet, ld.clone()), (Knob::OldLeaf, fd.clone())]);
+        knobs::set(Knob::NoRatchet, &ld, true);
+        knobs::set(Knob::OldLeaf, &fd, true);
+        let mut mls = MlsManager::new(&l_dev, &l_master).unwrap();
+        mls.create_group(sid).unwrap();
+        mls.add_member(sid, &mint_key_package(&MlsManager::new(&f_dev, &f_master).unwrap(), &store).unwrap()).unwrap();
+        mls.merge_pending_commit(sid).unwrap();
+        super::super::resolver::update_many(&lm, [ld.as_str()]);
+        super::super::resolver::update_many(&fm, [fd.as_str()]);
+        super::super::resolver::update_many(&owner, [owners_dev.as_str()]);
+        let mut state = ServerState::new(sid.into(), "s".into(), owner.clone());
+        for m in [&owner, &lm, &fm] {
+            state.members.insert(m.clone(), MemberInfo { peer_id: m.clone(), display_name: m.clone() });
+        }
+        let rooms = |devices: &[&str]| make_room_peers(&[(sid, devices)]);
+        let online = rooms(&[&ld, &fd]);
+        // Each side's tree: its own leaf declares, the other's does not.
+        let view = |us: &str, declares: [bool; 2]| Lead {
+            rule: Rule::Standing(Some(Holders {
+                leaves: [(ld.clone(), (lm.clone(), declares[0])), (fd.clone(), (fm.clone(), declares[1]))].into(),
+                us: us.to_string(),
+            })),
+            ..Default::default()
+        };
+        let (at_leader, at_follower) = (view(&ld, [true, false]), view(&fd, [false, true]));
+
+        assert_eq!(heal_leader(&mls, &state, None, &lm, &online, &at_leader), None, "the leader defers to nobody");
+        assert_eq!(heal_leader(&mls, &state, None, &fm, &online, &at_follower), Some(lm.clone()), "the follower names the leader");
+        assert_eq!(heal_target(&mls, &state, sid, None, &fm, &online, &at_follower.rule), Some(lm.clone()), "the follower probes the leader");
+        assert_eq!(heal_target(&mls, &state, sid, None, &lm, &online, &at_leader.rule), Some(fm.clone()), "the leader asks the next one, for a catch-up");
+        assert!(!may_repair_our_leaf(&state, None, &fm, &online, &lm, &at_follower), "precondition: the tree's own election names nobody");
+        // Acceptance needs a fork we saw: the heal leader repairs only after we asked it.
+        assert!(!may_repair_held_leaf(&mls, &state, None, &fm, &online, &lm, &at_follower), "an unasked heal leader");
+        mls.lead.note_heal_ask_at(sid, &lm, std::time::Instant::now() - crate::node::mls_authority::ASKED_WINDOW - std::time::Duration::from_secs(1));
+        assert!(!may_repair_held_leaf(&mls, &state, None, &fm, &online, &lm, &at_follower), "an ask past its window");
+        // The leader probed the follower: still no repair from it, acceptance is one-way.
+        mls.lead.note_heal_ask(sid, &fm);
+        assert!(!may_repair_held_leaf(&mls, &state, None, &lm, &online, &fm, &at_leader), "the leader takes no repair from the follower");
+        mls.lead.note_heal_ask(sid, &lm);
+        assert!(may_repair_held_leaf(&mls, &state, None, &fm, &online, &lm, &at_follower), "the follower takes the asked leader's repair");
+
+        // Where the tree names another identity, that authority decides, as before.
+        let both = view(&fd, [true, true]);
+        assert_eq!(heal_leader(&mls, &state, None, &fm, &online, &both), None);
+        // Even once the election skips that authority as silent and names nobody.
+        let mut silent = view(&fd, [true, true]);
+        silent.skipped.insert(lm.clone());
+        assert_eq!(epoch_catchup_responder(&state, None, &fm, &online, &fm, &silent), None, "precondition: nobody to ask");
+        assert_eq!(heal_leader(&mls, &state, None, &fm, &online, &silent), None, "a silent authority our tree names");
+        // Never on a Legacy server's old rule.
+        assert_eq!(heal_leader(&mls, &state, None, &fm, &online, &Lead { rule: Rule::Old, ..Default::default() }), None);
+        assert_eq!(heal_target(&mls, &state, sid, None, &fm, &online, &Rule::Old), None);
+        // The owner online leads, with any device; offline or banned members never do.
+        assert_eq!(
+            heal_leader(&mls, &state, None, &fm, &rooms(&[&ld, &fd, &owners_dev]), &at_follower),
+            Some(owner.clone()),
+        );
+        assert_eq!(heal_leader(&mls, &state, None, &fm, &rooms(&[&fd]), &at_follower), None, "the leader offline");
+        let mut banned = state.clone();
+        let hlc = banned.hlc.as_mut().unwrap().now();
+        banned.banned_members.insert(lm.clone(), AdminLwwReg::new(true, hlc, 9));
+        assert_eq!(heal_leader(&mls, &banned, None, &fm, &online, &at_follower), None, "a banned leader");
+        let mut gone = state.clone();
+        gone.members.remove(&lm);
+        assert_eq!(heal_leader(&mls, &gone, None, &fm, &online, &at_follower), None, "a member no longer");
+        // A channel's subgroup heals only by a member that may see the channel.
+        let ch = state.channels.keys().next().unwrap().clone();
+        let sub = crate::crypto::subgroup_id(sid, &ch);
+        mls.create_group(&sub).unwrap();
+        mls.add_member(&sub, &mint_key_package(&MlsManager::new(&f_dev, &f_master).unwrap(), &store).unwrap()).unwrap();
+        mls.merge_pending_commit(&sub).unwrap();
+        assert_eq!(heal_leader(&mls, &state, Some(&ch), &fm, &online, &at_follower), Some(lm.clone()), "control: both see it");
+        let mut hidden = state.clone();
+        hidden.channels.get_mut(&ch).unwrap().visibility = crate::crdt::server_state::ChannelVisibility::AdminPlus;
+        assert_eq!(heal_leader(&mls, &hidden, Some(&ch), &fm, &online, &at_follower), None, "a leader that may not see it");
+
+        // The old rule never reads the heal order, even where it ranks another first: here
+        // the follower as an admin, while the leader's tree still names the leader.
+        let mut admin = state.clone();
+        let hlc = admin.hlc.as_mut().unwrap().now();
+        admin.roles.insert(fm.clone(), AdminLwwReg::new(crate::crdt::operations::MemberRole::Admin, hlc, 9));
+        assert_eq!(heal_leader(&mls, &admin, None, &lm, &online, &at_leader), Some(fm.clone()), "control: the admin ranks first");
+        assert_eq!(heal_leader(&mls, &admin, None, &lm, &online, &Lead { rule: Rule::Old, ..Default::default() }), None, "never on the old rule");
+
+        // The cap, read from the leader's real tree: a master it shows at its cap is never
+        // the probe target, and our own cap never counts us out of the order.
+        let real = responder_view(&mls, &state, sid, None).rule;
+        assert_eq!(heal_target(&mls, &state, sid, None, &fm, &online, &real), Some(lm.clone()), "control: under the cap");
+        for _ in 0..crate::crypto::mls_tally::CAP_COMMITS {
+            mls.self_update_commit(sid);
+        }
+        assert!(unfit_committers(&mls, &state, sid).contains(&lm), "precondition: the leader at its cap");
+        let real_lead = responder_view(&mls, &state, sid, None);
+        let real = real_lead.rule.clone();
+        assert_eq!(heal_target(&mls, &state, sid, None, &fm, &online, &real), None, "a capped master is never probed");
+        assert_eq!(heal_leader(&mls, &state, None, &lm, &online, &real_lead), None, "our own cap never counts us out");
+
+        // A revoked device holds no seat in the order.
+        assert_eq!(heal_target(&mls, &state, sid, None, &lm, &online, &real), Some(fm.clone()), "control: the follower");
+        super::super::resolver::mark_revoked(std::slice::from_ref(&fd));
+        assert_eq!(heal_target(&mls, &state, sid, None, &lm, &online, &real), None, "a revoked device");
+        super::super::resolver::clear_all();
+    }
+
+    /// The follower's own copy, where only its leaf declares: the ask that lets the heal
+    /// leader repair it is stamped by its probe past the election, and by deferring to the
+    /// leader's copy of a fork; before either, the leader's request is refused.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::await_holding_lock)] // the resolver is process-global
+    async fn the_heal_ask_is_stamped_by_a_probe_past_the_election_and_by_a_fork_stay() {
+        use crate::crdt::server_state::{MemberInfo, ServerState};
+        use crate::identity::native_identity::NativeKeypair;
+        use super::super::standing::knobs::{self, Knob};
+        struct KnobsOff(Vec<(Knob, String)>);
+        impl Drop for KnobsOff {
+            fn drop(&mut self) {
+                for (k, d) in &self.0 {
+                    knobs::set(*k, d, false);
+                }
+            }
+        }
+        let _lock = super::super::resolver::test_lock();
+        super::super::resolver::clear_all();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let db = tmp.path().join("ha.db").to_str().unwrap().to_string();
+        let pass = "e2".repeat(32);
+        crate::storage::MessageStore::open(&db, &pass).unwrap();
+        let store = crate::crypto::CryptoStore::open(db, pass).unwrap();
+        let sid = "135135135135135135135135135135135135135d";
+        let kp = |b: u8| NativeKeypair::from_secret_bytes(&[b; 32]);
+        let mut pair = [(kp(201), kp(202)), (kp(203), kp(204))];
+        pair.sort_by_key(|(_, m)| m.peer_id());
+        let [(l_dev, l_master), (f_dev, f_master)] = pair;
+        let (ld, lm, fd, fm) = (l_dev.peer_id(), l_master.peer_id(), f_dev.peer_id(), f_master.peer_id());
+        let owner = kp(205).peer_id();
+        // The follower's copy: its own leaf declares, the leader's (here old) does not.
+        let _off = KnobsOff(vec![(Knob::NoRatchet, fd.clone()), (Knob::OldLeaf, ld.clone())]);
+        knobs::set(Knob::NoRatchet, &fd, true);
+        knobs::set(Knob::OldLeaf, &ld, true);
+        let mut mls = MlsManager::new(&f_dev, &f_master).unwrap();
+        mls.create_group(sid).unwrap();
+        mls.add_member(sid, &mint_key_package(&MlsManager::new(&l_dev, &l_master).unwrap(), &store).unwrap()).unwrap();
+        mls.merge_pending_commit(sid).unwrap();
+        super::super::resolver::update_many(&lm, [ld.as_str()]);
+        super::super::resolver::update_many(&fm, [fd.as_str()]);
+        let mut state = ServerState::new(sid.into(), "s".into(), owner.clone());
+        for m in [&owner, &lm, &fm] {
+            state.members.insert(m.clone(), MemberInfo { peer_id: m.clone(), display_name: m.clone() });
+        }
+        let online = make_room_peers(&[(sid, &[&ld, &fd])]);
+        let lead = responder_view(&mls, &state, sid, None);
+        assert_eq!(epoch_catchup_responder(&state, None, &fm, &online, &fm, &lead), None, "precondition: the election names nobody");
+        assert_eq!(heal_leader(&mls, &state, None, &fm, &online, &lead), Some(lm.clone()), "precondition: the heal leader");
+        assert!(!may_repair_held_leaf(&mls, &state, None, &fm, &online, &lm, &lead), "unasked");
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        assert!(send_epoch_probe(&mls, &tx, &online, &state, sid, None, &fm, &mut HashMap::new()));
+        assert!(matches!(rx.try_recv(), Ok(super::super::ws_client::WsCommand::SendDirect { target_peer, .. }) if target_peer == ld));
+        assert!(may_repair_held_leaf(&mls, &state, None, &fm, &online, &lm, &lead), "asked by the probe past the election");
+
+        let expired = std::time::Instant::now() - crate::node::mls_authority::ASKED_WINDOW - std::time::Duration::from_secs(1);
+        mls.lead.note_heal_ask_at(sid, &lm, expired);
+        assert!(!may_repair_held_leaf(&mls, &state, None, &fm, &online, &lm, &lead), "precondition: the ask lapsed");
+        let epoch = mls.epoch(sid).unwrap();
+        let states = HashMap::from([(sid.to_string(), state.clone())]);
+        handle_epoch_hint(
+            &mut mls, &tx, &online, &states, &mut HashMap::new(), sid, None, epoch, Some("another fork"), &ld, &fm, true, true,
+        );
+        assert!(
+            matches!(rx.try_recv(), Ok(super::super::ws_client::WsCommand::SendDirect { target_peer, .. }) if target_peer == ld),
+            "deferred to the leader's copy",
+        );
+        assert!(may_repair_held_leaf(&mls, &state, None, &fm, &online, &lm, &lead), "asked by the fork-stay");
+        super::super::resolver::clear_all();
+    }
+
+    /// REVIEW t16 F1: in a healthy, unforked group (one tree, no probe sent, no fork
+    /// seen), the stand-in X (top declaring leaf, owner away) hands its KeyPackage to an
+    /// admin T whose leaf is genuinely tally-less, which the standing rule keeps from
+    /// leading while a declaring leaf is online. X's own probe goes to the runner-up D,
+    /// never T, so nothing ties T's power to a fork X has seen.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[allow(clippy::await_holding_lock)]
+    async fn review_a_tally_less_admin_never_repairs_the_stand_in_without_a_fork() {
+        use crate::crdt::admin_lww::AdminLwwReg;
+        use crate::crdt::server_state::{MemberInfo, ServerState};
+        use crate::identity::native_identity::NativeKeypair;
+        use super::super::standing::knobs::{self, Knob};
+        struct KnobsOff(Vec<(Knob, String)>);
+        impl Drop for KnobsOff {
+            fn drop(&mut self) {
+                for (k, d) in &self.0 {
+                    knobs::set(*k, d, false);
+                }
+            }
+        }
+        let _lock = super::super::resolver::test_lock();
+        super::super::resolver::clear_all();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let db = tmp.path().join("rv.db").to_str().unwrap().to_string();
+        let pass = "e1".repeat(32);
+        crate::storage::MessageStore::open(&db, &pass).unwrap();
+        let store = crate::crypto::CryptoStore::open(db, pass).unwrap();
+        let sid = "135135135135135135135135135135135135135c";
+        let kp = |b: u8| NativeKeypair::from_secret_bytes(&[b; 32]);
+        let (x_dev, x_master, t_dev, t_master, d_dev, d_master) = (kp(191), kp(192), kp(193), kp(194), kp(195), kp(196));
+        let (xd, xm, td, tm, dd, dm) = (x_dev.peer_id(), x_master.peer_id(), t_dev.peer_id(), t_master.peer_id(), d_dev.peer_id(), d_master.peer_id());
+        let owner = kp(197).peer_id();
+        let _off = KnobsOff(vec![(Knob::NoRatchet, xd.clone()), (Knob::OldLeaf, td.clone())]);
+        knobs::set(Knob::NoRatchet, &xd, true);
+        knobs::set(Knob::OldLeaf, &td, true);
+        let mut mls = MlsManager::new(&x_dev, &x_master).unwrap();
+        mls.create_group(sid).unwrap();
+        mls.add_member(sid, &mint_key_package(&MlsManager::new(&t_dev, &t_master).unwrap(), &store).unwrap()).unwrap();
+        mls.merge_pending_commit(sid).unwrap();
+        mls.add_member(sid, &mint_key_package(&MlsManager::new(&d_dev, &d_master).unwrap(), &store).unwrap()).unwrap();
+        mls.merge_pending_commit(sid).unwrap();
+        super::super::resolver::update_many(&xm, [xd.as_str()]);
+        super::super::resolver::update_many(&tm, [td.as_str()]);
+        super::super::resolver::update_many(&dm, [dd.as_str()]);
+        let mut state = ServerState::new(sid.into(), "s".into(), owner.clone());
+        for m in [&owner, &xm, &tm, &dm] {
+            state.members.insert(m.clone(), MemberInfo { peer_id: m.clone(), display_name: m.clone() });
+        }
+        // X outranks D (an earlier... here a Moderator), T outranks X (an Admin).
+        let hlc = state.hlc.as_mut().unwrap().now();
+        state.roles.insert(tm.clone(), AdminLwwReg::new(crate::crdt::operations::MemberRole::Admin, hlc, 9));
+        let hlc = state.hlc.as_mut().unwrap().now();
+        state.roles.insert(xm.clone(), AdminLwwReg::new(crate::crdt::operations::MemberRole::Moderator, hlc, 9));
+        let online = make_room_peers(&[(sid, &[&td, &dd])]);
+        let lead = responder_view(&mls, &state, sid, None);
+        assert!(lead.rule.on(), "precondition: standing");
+        assert_eq!(
+            mls.leaf_records(sid).iter().filter(|r| !r.declares).filter_map(|r| r.identity.as_ref().map(|i| i.device.clone())).collect::<Vec<_>>(),
+            vec![td.clone()],
+            "precondition: only T's leaf is tally-less, in the one tree there is",
+        );
+        assert_eq!(group_authority(&state, None, &xm, &online, &lead), Some(xm.clone()), "precondition: X is the stand-in");
+        assert!(!may_repair_our_leaf(&state, None, &xm, &online, &tm, &lead), "precondition: the standing rule keeps T from repairing X");
+        assert!(may_repair_our_leaf(&state, None, &xm, &online, &dm, &lead), "precondition: X's catch-up responder is D");
+        // X's probe never goes to T: its election names D.
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        assert!(send_epoch_probe(&mls, &tx, &online, &state, sid, None, &xm, &mut HashMap::new()));
+        assert!(matches!(rx.try_recv(), Ok(super::super::ws_client::WsCommand::SendDirect { target_peer, .. }) if target_peer == dd));
+        // ...yet T, unasked and with no fork anywhere, may take X's KeyPackage.
+        assert!(
+            !may_repair_held_leaf(&mls, &state, None, &xm, &online, &tm, &lead),
+            "a tally-less admin repairs the stand-in of a healthy group: heal leader = {:?}",
+            heal_leader(&mls, &state, None, &xm, &online, &lead),
+        );
+        // Nor once T has made X defer to it, as a forged fork digest in a probe can: the
+        // election names D, so the heal order stands in for nobody.
+        mls.lead.note_heal_ask(sid, &tm);
+        assert_eq!(heal_leader(&mls, &state, None, &xm, &online, &lead), None, "the election names D");
+        assert!(!may_repair_held_leaf(&mls, &state, None, &xm, &online, &tm, &lead), "asked or not");
+        super::super::resolver::clear_all();
     }
 }
 

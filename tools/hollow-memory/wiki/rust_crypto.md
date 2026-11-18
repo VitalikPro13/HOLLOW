@@ -225,6 +225,53 @@ repairing it; a digest-less hint (`SyncRequest.mls_epoch`) has its own cooldown 
 silences the digest probe. Tests `two_devices_of_the_owner_add_a_joiner_once`,
 `a_fork_between_the_owners_devices_heals_without_a_restart`.
 
+**A fork the election cannot see heals by the heal order (#135, 2026-11-17/18).** Under
+standing, `crypto_handler::heal_order` ranks (`standing::rank_masters`: role tier, fold position,
+id) the server's unbanned members that may see the channel and are online with a device holding a
+bound, unrevoked leaf in our tree (the anchored owner with ANY device online), never leaving
+us out. It reads the CRDT and presence, never which leaves DECLARE the
+tally: that view is what a missed commit leaves stale. Trap it closes: two 0.12.2 leaves that each
+upgraded while the other was away each refreshed their own leaf at one epoch, so each tree shows
+only its own leaf declaring; `Rule::admits` then admits only us on both sides, every election
+names nobody, and the fork sat silent forever (same epoch number, `AeadError` both ways, no probe,
+the VC SFrame key exported from two different secrets). A returning owner whose stale tree shows
+every member's leaf undeclared hits the same wall (`unfit_masters` counts a non-declaring master
+unfit as responder). Three readers, one answer: `heal_target` (whom `send_epoch_probe` asks when
+`epoch_catchup_responder` names nobody: the first in the order other than us), `heal_leader` (only
+when the presence-only tree authority, as `is_authoritys_acting_device` reads it, is us or nobody
+AND our responder election names nobody: the first in the order if not us) and `may_repair_held_leaf` (`may_repair_our_leaf` OR the
+requester is the heal leader AND we asked it to lead within 120 s, `LeadBook::heal_asked`; the
+swarm `MlsKeyPackageRequest` arm's gate). The ask is stamped only by a probe past our election
+(the `heal_target` branch of `send_epoch_probe`) or by `handle_epoch_hint`'s fork-stay deferring
+to the heal leader's acting device. Trap the stamp closes (review F1): in a HEALTHY group whose
+higher-ranked member keeps a tally-less leaf, the election keeps it out but the heal order does
+not, and unasked it could ask the stand-in for its KeyPackage at any time and move it onto its
+own chain (a Welcome is judged without the ratchet or rate cap). The stamp alone does not stop a
+hostile one (a forged digest in its probe earns the fork-stay deferral); the empty-election
+condition does: the heal order fills in only where the election has no answer, the same state
+#135 leaves each side in. Known dead end: when each side of a fork holds TWO members that both
+upgraded there, each side's election names its own other member, no probe crosses, and the heal
+order is never read (`t16_a_staggered_split_of_upgrades_with_the_owner_away_settles_when_everyone_returns`,
+ignored; healing it needs a verifiable claim, beyond this design). Symmetry is the point: the leader
+computes no heal leader, so it takes no repair and repairs the other; the follower names it,
+probes it, defers to its fork and takes its repair, so two sides never repair each other. The
+cap filter only steers the probe target (defence in depth): a capped master declares, so where it
+is online and ranks above us the tree election already names it and `heal_leader` is None first.
+Declaring is free, so ignoring it drops no defence. Our own cap never counts us out: a commit
+only we hold is exactly what puts us at it in our view alone, and the sides would then disagree.
+Legacy (old rule) servers are untouched. Traps: a leafless owner online heads the order, so a
+member-led heal waits until the owner holds a group again; the leader also probes the next in the
+order (only invites a repair ask). Harness `t16_a_silent_fork_from_two_upgrades_heals_at_vc_join`
+(owner and member), `t16_a_silent_fork_between_members_heals_without_the_owner_and_holds_when_it_returns`
+(two members, owner and a fourth gone, then the owner back: its stale tree's election names
+nobody, the probe reaches the leader, which serves the catch-up and repairs its stale leaf),
+`t16_a_member_fork_only_the_heal_leader_notices_still_heals_onto_its_side` (the fork-stay half;
+the leader refuses the led member's KeyPackage request),
+convergence checks that pass without it: `t16_a_fork_among_three_members_heals_to_the_first_by_fold_position`,
+`t16_a_staggered_split_with_the_owner_away_settles_when_everyone_returns`; units
+`both_sides_of_a_fork_name_one_heal_leader`, `review_a_tally_less_admin_never_repairs_the_stand_in_without_a_fork`, `the_heal_ask_is_stamped_by_a_probe_past_the_election_and_by_a_fork_stay`,
+`an_epoch_probe_asks_the_owner_the_election_leaves_out`.
+
 **No MLS turn while away or down (2026-10-07, plan decision 6).** The relay hides a phone the app
 left (`ws_client::backgrounded()`, the `relay_set_background` flag) from everyone, its own siblings
 included, while the phone's own view of presence stays frozen, so the phone could still count itself

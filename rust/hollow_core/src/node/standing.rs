@@ -300,6 +300,8 @@ struct Inner {
     /// group -> (the master whose repair request we answered, the master it forwarded
     /// our package to, when).
     delegates: HashMap<String, (String, String, Instant)>,
+    /// group -> (the master we last asked to lead the heal of its fork, when).
+    heal_asks: HashMap<String, (String, Instant)>,
 }
 
 /// RAM-only bookkeeping of the leaders a device talks to: leafless walks and silent
@@ -477,6 +479,29 @@ impl LeadBook {
             }
             i.delegates.insert(group_key.to_string(), (answered, via.to_string(), Instant::now()));
             true
+        })
+    }
+
+    /// We asked `master` to lead the heal of `group_key`'s fork: probed it past our
+    /// election, or deferred to its copy. Only then may it repair a leaf we hold, so a
+    /// heal leader is never a standing repairer of a healthy group.
+    pub(crate) fn note_heal_ask(&self, group_key: &str, master: &str) {
+        self.note_heal_ask_at(group_key, master, Instant::now());
+    }
+
+    pub(crate) fn note_heal_ask_at(&self, group_key: &str, master: &str, at: Instant) {
+        self.with(|i| {
+            i.heal_asks.insert(group_key.to_string(), (master.to_string(), at));
+        })
+    }
+
+    /// Whether we asked `master` to lead the heal of `group_key` within the window a
+    /// repair's Welcome gets (`mls_authority::ASKED_WINDOW`).
+    pub(crate) fn heal_asked(&self, group_key: &str, master: &str) -> bool {
+        self.with(|i| {
+            i.heal_asks.get(group_key).is_some_and(|(m, at)| {
+                at.elapsed() < super::mls_authority::ASKED_WINDOW && super::resolver::same_identity(m, master)
+            })
         })
     }
 
