@@ -1,3 +1,4 @@
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart';
 import 'package:flutter/services.dart';
@@ -146,6 +147,11 @@ class ContextMenuTarget extends StatelessWidget {
 
   final HitTestBehavior behavior;
 
+  /// A long press with a finger or pen opens the same menu, for a touch
+  /// screen with no right click. Off by default: a long press already drags
+  /// server and folder tiles. Never a mouse long press.
+  final bool longPressOnTouch;
+
   const ContextMenuTarget({
     super.key,
     required this.child,
@@ -153,7 +159,14 @@ class ContextMenuTarget extends StatelessWidget {
     this.semanticLabel = 'Show menu',
     this.enabled = true,
     this.behavior = HitTestBehavior.deferToChild,
+    this.longPressOnTouch = false,
   });
+
+  static const _touchKinds = {
+    PointerDeviceKind.touch,
+    PointerDeviceKind.stylus,
+    PointerDeviceKind.invertedStylus,
+  };
 
   /// Opens the menu hanging off the control itself, for the keyboard and
   /// assistive-tech routes, which have no pointer position.
@@ -193,7 +206,15 @@ class ContextMenuTarget extends StatelessWidget {
               behavior: behavior,
               onSecondaryTapUp: (details) =>
                   onOpen(overlayPositionOf(innerContext, details.globalPosition)),
-              child: child,
+              child: longPressOnTouch
+                  ? GestureDetector(
+                      behavior: behavior,
+                      supportedDevices: _touchKinds,
+                      onLongPressStart: (details) => onOpen(overlayPositionOf(
+                          innerContext, details.globalPosition)),
+                      child: child,
+                    )
+                  : child,
             ),
           ),
         ),

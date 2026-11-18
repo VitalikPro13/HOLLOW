@@ -9,8 +9,10 @@ import 'package:hollow/src/core/providers/background_provider.dart';
 import 'package:hollow/src/core/providers/layout_prefs_provider.dart';
 import 'package:hollow/src/core/providers/layout_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
+import 'package:hollow/src/core/providers/sidebar_items_provider.dart';
 import 'package:hollow/src/core/providers/split_view_provider.dart';
 import 'package:hollow/src/core/providers/theme_provider.dart';
+import 'package:hollow/src/core/shop_availability.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
@@ -22,6 +24,7 @@ import 'package:hollow/src/ui/dialogs/image_crop_dialog.dart';
 import 'package:hollow/src/ui/mobile/mobile_image_crop_route.dart';
 import 'package:hollow/src/ui/settings/settings_kit.dart';
 import 'package:hollow/src/ui/settings/settings_shared.dart';
+import 'package:hollow/src/ui/shell/sidebar_places.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Settings > Appearance. Everything saves on change.
@@ -84,6 +87,7 @@ class AppearanceSettingsView extends ConsumerWidget {
             const MessageDisplayPicker(),
           ],
         ),
+        if (isDesktop) const SidebarItemsSection(),
         if (isDesktop)
           SettingsSection(
             title: 'Window',
@@ -108,6 +112,32 @@ class AppearanceSettingsView extends ConsumerWidget {
                         : ProfileCardStyle.compact),
               ),
             ],
+          ),
+      ],
+    );
+  }
+}
+
+/// Which optional places the server rail (Classic) and the dock list (#141).
+/// Home has no switch: it is the way back to the rest.
+class SidebarItemsSection extends ConsumerWidget {
+  const SidebarItemsSection({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final hidden = ref.watch(hiddenSidebarItemsProvider);
+    final items = sidebarItemsAvailable(
+        shopAvailable: ref.watch(shopAvailableProvider));
+    return SettingsSection(
+      title: 'Places',
+      subtitle: 'Choose which places show beside your servers. Home always '
+          'shows, and a hidden place still opens from the Home menu.',
+      children: [
+        for (final item in items)
+          SettingsSwitchRow(
+            title: item.label,
+            value: !hidden.contains(item),
+            onChanged: (v) => saveSidebarItem(context, ref, item, shown: v),
           ),
       ],
     );

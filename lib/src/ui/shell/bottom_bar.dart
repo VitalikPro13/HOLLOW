@@ -27,6 +27,7 @@ import 'package:hollow/src/core/providers/shop_tab_provider.dart';
 import 'package:hollow/src/core/providers/split_view_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
+import 'package:hollow/src/core/providers/sidebar_items_provider.dart';
 import 'package:hollow/src/core/shop_availability.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
@@ -59,6 +60,7 @@ import 'package:hollow/src/ui/dialogs/create_server_dialog.dart';
 import 'package:hollow/src/ui/dialogs/relay_denied_dialog.dart';
 import 'package:hollow/src/ui/shell/new_server_entry.dart';
 import 'package:hollow/src/ui/shell/server_context_menus.dart';
+import 'package:hollow/src/ui/shell/sidebar_places.dart';
 import 'package:hollow/src/ui/shell/voice_quick_controls.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -114,13 +116,16 @@ class BottomBar extends ConsumerWidget {
                   child: _DockTile(
                     tooltip: 'Home',
                     fill: hollow.elevated,
+                    touchLongPressMenu: true,
                     hoverFill: hollow.hover,
                     onTap: () => _goHome(ref),
-                    // Right click is "mark all DMs as read" (#61).
+                    // Right click (a long press on touch) is the Home menu:
+                    // mark all DMs as read (#61), the hidden places (#141).
                     onContextMenu: (position) => showHomeMenu(
                       context: context,
                       ref: ref,
                       anchor: position,
+                      openPlace: (item) => _openPlace(ref, item.tab),
                     ),
                     child: HollowMark(size: 22, color: hollow.accentText),
                   ),
@@ -564,7 +569,7 @@ class _DockSlot extends StatelessWidget {
   final bool marked;
   final Widget child;
 
-  const _DockSlot({required this.marked, required this.child});
+  const _DockSlot({super.key, required this.marked, required this.child});
 
   @override
   Widget build(BuildContext context) {
@@ -602,6 +607,10 @@ class _DockTile extends StatelessWidget {
   /// The context menu's screen-reader name, when "<label> actions" is wrong.
   final String? menuLabel;
 
+  /// A touch long press opens the context menu too (Home only: on server
+  /// tiles a long press drags).
+  final bool touchLongPressMenu;
+
   final int unreadCount;
   final int mentionCount;
   final bool awaitingSetup;
@@ -616,6 +625,7 @@ class _DockTile extends StatelessWidget {
     this.tooltip,
     this.semanticLabel,
     this.menuLabel,
+    this.touchLongPressMenu = false,
     this.unreadCount = 0,
     this.mentionCount = 0,
     this.awaitingSetup = false,
@@ -643,6 +653,7 @@ class _DockTile extends StatelessWidget {
       tile = ContextMenuTarget(
         semanticLabel: menuLabel ?? '${label ?? 'Server'} actions',
         onOpen: onContextMenu,
+        longPressOnTouch: touchLongPressMenu,
         child: tile,
       );
     }
@@ -1078,15 +1089,18 @@ class _ReorderGap extends StatelessWidget {
 // Places and tools.
 // ---------------------------------------------------------------------------
 
-class _PlaceSpec {
-  final ShellTab tab;
-  final String label;
-  final IconData icon;
-  const _PlaceSpec(this.tab, this.label, this.icon);
-}
+/// The dock keeps its own order, Conferences first, as before #141.
+const _kDockPlaceOrder = [
+  SidebarItem.conferences,
+  SidebarItem.publicChannels,
+  SidebarItem.share,
+  SidebarItem.archive,
+  SidebarItem.shop,
+];
 
-/// The app's other places, which swap the centre pane. Five buttons, or one
-/// "Places" menu when the dock is too narrow for them beside the servers.
+/// The app's other places, which swap the centre pane. One button each, or
+/// one "Places" menu when the dock is too narrow for them beside the servers.
+/// A place hidden in Appearance settings is left out of both (#141).
 class _Places extends ConsumerWidget {
   final DockLocation location;
   final bool fold;
@@ -1095,16 +1109,17 @@ class _Places extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final hidden = ref.watch(hiddenSidebarItemsProvider);
+    final shown = sidebarItemsShown(
+      hidden,
+      shopAvailable: ref.watch(shopAvailableProvider),
+      open: ref.watch(openShellTabProvider),
+    );
     final places = [
-      const _PlaceSpec(ShellTab.conference, 'Conferences', LucideIcons.video),
-      const _PlaceSpec(ShellTab.guest, 'Public channels', LucideIcons.globe),
-      const _PlaceSpec(ShellTab.share, 'Share', LucideIcons.share2),
-      const _PlaceSpec(ShellTab.archive, 'Archive', LucideIcons.archive),
-      // Absent entirely, not disabled, on store builds: Apple 3.1.1 and Play
-      // policy want no shop surface at all.
-      if (ref.watch(shopAvailableProvider))
-        const _PlaceSpec(ShellTab.shop, 'Hollow Shop', LucideIcons.store),
+      for (final item in _kDockPlaceOrder)
+        if (shown.contains(item)) item,
     ];
+    if (places.isEmpty) return const SizedBox.shrink();
     // Settings is a place, but its mark sits on the dock's gear.
     final active = switch (location) {
       _AtPlace(:final tab) when tab != ShellTab.settings => tab,
@@ -1113,12 +1128,12 @@ class _Places extends ConsumerWidget {
 
     if (fold) {
       return _DockSlot(
-        marked: active != null,
+        marked: places.any((p) => p.tab == active),
         child: Builder(
           builder: (buttonContext) => HollowIconButton(
             icon: LucideIcons.layoutGrid,
             label: 'Places',
-            selected: active != null,
+            selected: places.any((p) => p.tab == active),
             onPressed: () {
               final box = buttonContext.findRenderObject() as RenderBox?;
               showHollowMenu(
@@ -1126,15 +1141,36 @@ class _Places extends ConsumerWidget {
                 anchor: overlayAnchorOf(buttonContext,
                     localOffset: Offset(box?.size.width ?? 0, 0)),
                 alignEnd: true,
-                builder: (_, _) => [
-                  for (final p in places)
-                    HollowMenuItem(
-                      icon: p.icon,
-                      label: p.label,
-                      isChecked: p.tab == active,
-                      onTap: () => _togglePlace(ref, p.tab),
-                    ),
-                ],
+                builder: (_, _) {
+                  // The right-click Hide of the unfolded dock, as one row.
+                  final hideable =
+                      places.where((p) => !hidden.contains(p)).toList();
+                  return [
+                    for (final p in places)
+                      HollowMenuItem(
+                        icon: p.icon,
+                        label: p.label,
+                        isChecked: p.tab == active,
+                        onTap: () => _togglePlace(ref, p.tab),
+                      ),
+                    if (hideable.isNotEmpty) ...[
+                      const HollowMenuDivider(),
+                      HollowMenuItem(
+                        icon: LucideIcons.eyeOff,
+                        label: 'Hide from dock',
+                        submenu: [
+                          for (final p in hideable)
+                            HollowMenuItem(
+                              icon: p.icon,
+                              label: p.label,
+                              onTap: () =>
+                                  hideSidebarItem(buttonContext, ref, p),
+                            ),
+                        ],
+                      ),
+                    ],
+                  ];
+                },
               );
             },
           ),
@@ -1148,12 +1184,25 @@ class _Places extends ConsumerWidget {
         for (var i = 0; i < places.length; i++) ...[
           if (i > 0) const SizedBox(width: HollowSpacing.xs),
           _DockSlot(
+            key: ValueKey(places[i]),
             marked: places[i].tab == active,
-            child: HollowIconButton(
-              icon: places[i].icon,
-              label: places[i].label,
-              selected: places[i].tab == active,
-              onPressed: () => _togglePlace(ref, places[i].tab),
+            child: Builder(
+              builder: (placeContext) => ContextMenuTarget(
+                semanticLabel: '${places[i].label} actions',
+                onOpen: (anchor) => showSidebarItemMenu(
+                  context: placeContext,
+                  ref: ref,
+                  anchor: anchor,
+                  item: places[i],
+                  host: PlacesHost.dock,
+                ),
+                child: HollowIconButton(
+                  icon: places[i].icon,
+                  label: places[i].label,
+                  selected: places[i].tab == active,
+                  onPressed: () => _togglePlace(ref, places[i].tab),
+                ),
+              ),
             ),
           ),
         ],

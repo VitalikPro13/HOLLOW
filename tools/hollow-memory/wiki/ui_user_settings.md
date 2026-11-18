@@ -80,7 +80,14 @@ One row for every page, desktop and phone:
 - **Devices**: device rows (`titleTrailing` "This device" badge; others in a More menu),
   Remove asks retired or lost or stolen first (0.14, wiki `ui_dialogs` "Removing a device"),
   Link another device (the page's filled), Advanced (sync check, reset the device list).
-- **Appearance**, **Accessibility**, **Notifications**, **Audio & video** (call quality
+- **Appearance** (desktop): Theme, Layout, then **Places** (#141, 0.14.1,
+  `SidebarItemsSection`): the subtitle says Home always shows (no switch), then one `SettingsSwitchRow` per available
+  place (no Shop row on store builds) writing `hiddenSidebarItemsProvider` (setting key
+  `sidebar_hidden_items`, newline-joined `SidebarItem.key`s, local to the device, loaded in
+  `loadLayoutPrefs`). The notifier never saves before it has read the stored value, runs reads and
+  writes on one chain so fast toggles land in order, keeps names a newer build saved, and `setShown`
+  throws on a failed save (`saveSidebarItem` toasts it). It governs the Classic rail and the dock alike; a phone has neither.
+- **Accessibility**, **Notifications**, **Audio & video** (call quality
   spells out the bitrate), **Shortcuts** (desktop only), **Network** (relay row with Change,
   Relay health expand, offline delivery, GIFs and previews, Advanced keys/proxies),
   **Files & storage** (usage, downloads, image quality, data folder + profiles, Advanced

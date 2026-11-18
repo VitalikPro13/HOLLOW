@@ -15,6 +15,9 @@ import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/notification_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/server_strip_layout_provider.dart';
+import 'package:hollow/src/core/providers/shell_tab.dart';
+import 'package:hollow/src/core/providers/sidebar_items_provider.dart';
+import 'package:hollow/src/core/shop_availability.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
 import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
@@ -22,6 +25,7 @@ import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/server_folder_popup.dart';
 import 'package:hollow/src/ui/dialogs/invite_dialog.dart';
+import 'package:hollow/src/ui/shell/sidebar_places.dart';
 import 'package:hollow/src/ui/server_settings/server_settings_catalog.dart'
     show confirmDeleteServer, confirmLeaveServer;
 import 'package:hollow/src/core/providers/relay_domain_provider.dart';
@@ -252,21 +256,27 @@ void showFolderIconMenu({
   );
 }
 
-/// The right-click menu for the Home button.
-///
-/// One row, and it earns its place: Home's unread badge comes from the DM
-/// counts, and an unreachable conversation leaves one behind with no tile to
-/// click.
+/// The Home button's menu (right click, the Menu key, or a long press on
+/// touch). "Mark all DMs as read" earns its place: Home's unread badge comes
+/// from the DM counts, and an unreachable conversation leaves one behind with
+/// no tile to click. Below it, the hidden places, so each stays one click away
+/// (#141).
 void showHomeMenu({
   required BuildContext context,
   required WidgetRef ref,
   required Offset anchor,
+  required void Function(SidebarItem item) openPlace,
 }) {
   showHollowMenu(
     context: context,
     anchor: anchor,
     builder: (menuContext, menuRef) {
       final unread = menuRef.watch(dmUnreadBadgeProvider);
+      final hidden = sidebarItemsHidden(
+        menuRef.watch(hiddenSidebarItemsProvider),
+        shopAvailable: menuRef.watch(shopAvailableProvider),
+        open: menuRef.watch(openShellTabProvider),
+      );
       return <HollowMenuEntry>[
         HollowMenuItem(
           icon: LucideIcons.checkCheck,
@@ -274,6 +284,7 @@ void showHomeMenu({
           trailing: unread > 0 ? '$unread' : null,
           onTap: () => _markAllDmsRead(context, ref),
         ),
+        ...hiddenPlaceMenuEntries(hidden: hidden, open: openPlace),
       ];
     },
   );

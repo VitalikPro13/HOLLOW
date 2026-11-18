@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/sidebar_items_provider.dart';
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 
 /// Shell chrome the user can size and shape (issue #54).
@@ -50,6 +51,7 @@ Future<void> loadLayoutPrefs(WidgetRef ref) async {
   await ref.read(callSidePanelWidthProvider.notifier).load();
   await ref.read(panelScaleProvider.notifier).load();
   await ref.read(collapsedMemberGroupsProvider.notifier).load();
+  await ref.read(hiddenSidebarItemsProvider.notifier).load();
 }
 
 /// Whether clicking a user opens the compact card or the full profile.

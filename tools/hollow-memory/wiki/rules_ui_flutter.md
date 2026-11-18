@@ -75,6 +75,12 @@ guard catches the breakage, this page says why. Mobile-only UI rules are in
   Settings = `openSettings()`, pages ONLY via `settings_kit.dart`; server settings ONLY
   via `openServerSettings(read, id)`, never the bare flag.
   `feedback_shell_centre_tabs_exclusive`, `feedback_settings_sections_dividers_explanations`.
+- The optional places beside the servers (Public channels, Share, Archive, Conferences, Shop) come
+  from ONE list, `sidebarItemsShown(hiddenSidebarItemsProvider, shopAvailable:, open:)`, in both the
+  Classic rail and the dock; a new place joins `SidebarItem`. Hiding one never strands it: the
+  Home menu lists every hidden place (`sidebarItemsHidden`), Home itself is never hideable, and the
+  setting (Appearance > Places) is local to the device; a hidden place that is the open tab
+  shows (with its mark) until you leave it (#141, `sidebar_items_test`).
 - First run: `HollowShell` builds NO shell until a real identity is on disk (`_shellOpen`: opened
   when `hasIdentity` says yes, or once Welcome's identity has loaded; NEVER for the first-run
   "Link a device" throwaway, whose every exit relaunches), so a fresh install meets Welcome on a

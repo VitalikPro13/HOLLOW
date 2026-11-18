@@ -12,6 +12,7 @@ import 'package:hollow/src/core/providers/help_panel_provider.dart';
 import 'package:hollow/src/core/providers/share_tab_provider.dart';
 import 'package:hollow/src/core/providers/shell_tab.dart';
 import 'package:hollow/src/core/providers/shop_tab_provider.dart';
+import 'package:hollow/src/core/providers/sidebar_items_provider.dart';
 import 'package:hollow/src/core/shop_availability.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
@@ -37,6 +38,7 @@ import 'package:hollow/src/ui/components/ui_scale.dart';
 import 'package:hollow/src/ui/dialogs/create_server_dialog.dart';
 import 'package:hollow/src/ui/shell/new_server_entry.dart';
 import 'package:hollow/src/ui/shell/server_context_menus.dart';
+import 'package:hollow/src/ui/shell/sidebar_places.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Width of the server rail at 100% panel zoom; every icon row inside it is
@@ -85,11 +87,14 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
       isSelected: homeSelected,
       unreadCount: selectedServerId != null ? dmUnreadTotal : 0,
       child: _ServerIcon(
-        // Right click is the "mark all DMs as read" escape hatch (#61).
+        // Right click (a long press on touch) is the Home menu: mark all DMs
+        // as read (#61) and the hidden places (#141).
+        touchLongPressMenu: true,
         onContextMenu: (position) => showHomeMenu(
           context: context,
           ref: ref,
           anchor: position,
+          openPlace: _openPlace,
         ),
         isSelected: homeSelected,
         backgroundColor: hollow.accent,
@@ -108,122 +113,29 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
       ),
     );
 
-    Widget shareIcon = _ServerIconWithIndicator(
-      isSelected: shareOpen,
-      child: _ServerIcon(
-        isSelected: shareOpen,
-        backgroundColor: hollow.elevated,
-        tooltip: 'Share',
-        onTap: () {
-          // Toggles, like every other centre-tab button (issue #28).
-          if (shareOpen) {
-            setShellTab(ref.read, null);
-            return;
-          }
-          setShellTab(ref.read, ShellTab.share);
-          ref.read(selectedServerProvider.notifier).state = null;
-          ref.read(channelListProvider.notifier).clear();
-          ref.read(selectedChannelProvider.notifier).state = null;
-          ref.read(serverSettingsOpenProvider.notifier).state = false;
-        },
-        child: Icon(
-          LucideIcons.share2,
-          color: shareOpen ? hollow.accent : hollow.textSecondary,
-          size: 20,
-        ),
-      ),
+    final shownPlaces = sidebarItemsShown(
+      ref.watch(hiddenSidebarItemsProvider),
+      shopAvailable: shopAvailable,
+      open: ref.watch(openShellTabProvider),
     );
-
-    Widget archiveIcon = _ServerIconWithIndicator(
-      isSelected: archiveOpen,
-      child: _ServerIcon(
-        isSelected: archiveOpen,
-        backgroundColor: hollow.elevated,
-        tooltip: 'Archive',
-        onTap: () {
-          if (archiveOpen) {
-            setShellTab(ref.read, null);
-            return;
-          }
-          ref.invalidate(archiveDmListProvider);
-          ref.invalidate(archiveChannelListProvider);
-          selectArchiveConversation(ref.read);
-          setShellTab(ref.read, ShellTab.archive);
-          ref.read(selectedServerProvider.notifier).state = null;
-          ref.read(channelListProvider.notifier).clear();
-          ref.read(selectedChannelProvider.notifier).state = null;
-          ref.read(serverSettingsOpenProvider.notifier).state = false;
-        },
-        child: Icon(
-          LucideIcons.archive,
-          color: archiveOpen ? hollow.accent : hollow.textSecondary,
-          size: 20,
-        ),
-      ),
-    );
-
-    // This strip is Classic mode's only permanent rail, so anything living on
-    // the dock's bars alone would be unreachable there (#58).
-    Widget guestIcon = _ServerIconWithIndicator(
-      isSelected: guestOpen,
-      child: _ServerIcon(
-        isSelected: guestOpen,
-        backgroundColor: hollow.elevated,
-        tooltip: 'Browse Public Channels',
-        onTap: () {
-          if (guestOpen) {
-            setShellTab(ref.read, null);
-            return;
-          }
-          setShellTab(ref.read, ShellTab.guest);
-          ref.read(selectedServerProvider.notifier).state = null;
-          ref.read(channelListProvider.notifier).clear();
-          ref.read(selectedChannelProvider.notifier).state = null;
-          ref.read(selectedPeerProvider.notifier).state = null;
-          ref.read(serverSettingsOpenProvider.notifier).state = false;
-        },
-        child: Icon(
-          LucideIcons.globe,
-          color: guestOpen ? hollow.accent : hollow.textSecondary,
-          size: 20,
-        ),
-      ),
-    );
-
-    Widget conferenceIcon = _ServerIconWithIndicator(
-      isSelected: conferencesOpen,
-      child: _ServerIcon(
-        isSelected: conferencesOpen,
-        backgroundColor: hollow.elevated,
-        tooltip: 'Conferences',
-        onTap: () => conferencesOpen
-            ? setShellTab(ref.read, null)
-            : ref.read(conferenceProvider.notifier).openTab(),
-        child: Icon(
-          LucideIcons.video,
-          color: conferencesOpen ? hollow.accent : hollow.textSecondary,
-          size: 20,
-        ),
-      ),
-    );
-
-    // Absent entirely on store builds (Apple 3.1.1 / Play): no gallery, no
-    // prices, no button.
-    Widget shopIcon = _ServerIconWithIndicator(
-      isSelected: shopOpen,
-      child: _ServerIcon(
-        isSelected: shopOpen,
-        backgroundColor: hollow.elevated,
-        tooltip: 'Hollow Shop',
-        onTap: () =>
-            shopOpen ? setShellTab(ref.read, null) : openShopTab(ref.read),
-        child: Icon(
-          LucideIcons.store,
-          color: shopOpen ? hollow.accent : hollow.textSecondary,
-          size: 20,
-        ),
-      ),
-    );
+    final placeOpen = {
+      SidebarItem.publicChannels: guestOpen,
+      SidebarItem.share: shareOpen,
+      SidebarItem.archive: archiveOpen,
+      SidebarItem.conferences: conferencesOpen,
+      SidebarItem.shop: shopOpen,
+    };
+    // The Shop sits at the bottom beside the guides (#141): it is not a place
+    // people move between all day, so it no longer pushes the servers down.
+    final topPlaces = [
+      for (final item in shownPlaces)
+        if (item != SidebarItem.shop)
+          _placeTile(item, open: placeOpen[item]!, hollow: hollow),
+    ];
+    final shopIcon = shownPlaces.contains(SidebarItem.shop)
+        ? _placeTile(SidebarItem.shop,
+            open: placeOpen[SidebarItem.shop]!, hollow: hollow)
+        : null;
 
     Widget helpIcon = Padding(
       padding: const EdgeInsets.only(bottom: HollowSpacing.xs),
@@ -281,17 +193,9 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
           children: [
             const SizedBox(height: HollowSpacing.md),
             homeIcon,
-            const SizedBox(height: HollowSpacing.xs),
-            guestIcon,
-            const SizedBox(height: HollowSpacing.xs),
-            shareIcon,
-            const SizedBox(height: HollowSpacing.xs),
-            archiveIcon,
-            const SizedBox(height: HollowSpacing.xs),
-            conferenceIcon,
-            if (shopAvailable) ...[
+            for (final tile in topPlaces) ...[
               const SizedBox(height: HollowSpacing.xs),
-              shopIcon,
+              tile,
             ],
             const SizedBox(height: HollowSpacing.sm),
             divider,
@@ -369,12 +273,75 @@ class _ServerStripState extends ConsumerState<ServerStrip> {
               ),
             ),
 
+            if (shopIcon != null)
+              Padding(
+                padding: const EdgeInsets.only(bottom: HollowSpacing.xs),
+                child: shopIcon,
+              ),
             helpIcon,
             addButton,
           ],
         ),
       ),
     );
+  }
+
+  /// One optional place: a toggle, like every centre-tab button (#28), with
+  /// a right-click Hide (#141).
+  Widget _placeTile(
+    SidebarItem item, {
+    required bool open,
+    required HollowTheme hollow,
+  }) {
+    return _ServerIconWithIndicator(
+      key: ValueKey(item),
+      isSelected: open,
+      child: _ServerIcon(
+        isSelected: open,
+        backgroundColor: hollow.elevated,
+        tooltip: item.label,
+        onContextMenu: (position) => showSidebarItemMenu(
+          context: context,
+          ref: ref,
+          anchor: position,
+          item: item,
+          host: PlacesHost.sidebar,
+        ),
+        onTap: () => open ? setShellTab(ref.read, null) : _openPlace(item),
+        child: Icon(
+          item.icon,
+          color: open ? hollow.accent : hollow.textSecondary,
+          size: 20,
+        ),
+      ),
+    );
+  }
+
+  /// Opens [item] the way its rail tile always has; the Home menu uses it
+  /// for the places hidden from the rail.
+  void _openPlace(SidebarItem item) {
+    switch (item) {
+      case SidebarItem.conferences:
+        ref.read(conferenceProvider.notifier).openTab();
+        return;
+      case SidebarItem.shop:
+        openShopTab(ref.read);
+        return;
+      case SidebarItem.archive:
+        ref.invalidate(archiveDmListProvider);
+        ref.invalidate(archiveChannelListProvider);
+        selectArchiveConversation(ref.read);
+      case SidebarItem.publicChannels || SidebarItem.share:
+        break;
+    }
+    setShellTab(ref.read, item.tab);
+    ref.read(selectedServerProvider.notifier).state = null;
+    ref.read(channelListProvider.notifier).clear();
+    ref.read(selectedChannelProvider.notifier).state = null;
+    if (item == SidebarItem.publicChannels) {
+      ref.read(selectedPeerProvider.notifier).state = null;
+    }
+    ref.read(serverSettingsOpenProvider.notifier).state = false;
   }
 
   Widget _buildServerIcon({
@@ -759,6 +726,7 @@ class _ServerIconWithIndicator extends StatefulWidget {
   final Widget child;
 
   const _ServerIconWithIndicator({
+    super.key,
     required this.isSelected,
     required this.child,
     this.unreadCount = 0,
@@ -848,10 +816,13 @@ class _ServerIcon extends StatefulWidget {
   final Color backgroundColor;
   final VoidCallback? onTap;
 
-  /// Right click, with the position already resolved to OVERLAY space. Only the
-  /// Home button uses it: server and folder icons carry their own detector,
-  /// because they also sit inside the drag machinery.
+  /// Right click, with the position already resolved to OVERLAY space: Home
+  /// and the optional places. Server and folder icons carry their own
+  /// detector, because they also sit inside the drag machinery.
   final void Function(Offset overlayPosition)? onContextMenu;
+
+  /// A touch long press opens the context menu too (Home only).
+  final bool touchLongPressMenu;
 
   final String? tooltip;
   final String? semanticLabel;
@@ -863,6 +834,7 @@ class _ServerIcon extends StatefulWidget {
     required this.backgroundColor,
     this.onTap,
     this.onContextMenu,
+    this.touchLongPressMenu = false,
     this.tooltip,
     this.semanticLabel,
     this.isSelected = false,
@@ -940,6 +912,7 @@ class _ServerIconState extends State<_ServerIcon> {
       icon = ContextMenuTarget(
         semanticLabel: '${label ?? 'Icon'} actions',
         onOpen: onContextMenu,
+        longPressOnTouch: widget.touchLongPressMenu,
         child: icon,
       );
     }

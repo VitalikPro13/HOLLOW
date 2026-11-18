@@ -123,6 +123,7 @@ const List<SettingsSearchEntry> kSettingsSearchIndex = [
   SettingsSearchEntry('Ambient light', SettingsCategory.appearance, 'ambient background glow'),
   SettingsSearchEntry('Window layout', SettingsCategory.appearance, 'dock classic'),
   SettingsSearchEntry('Messages', SettingsCategory.appearance, 'cozy compact density display'),
+  SettingsSearchEntry('Places', SettingsCategory.appearance, 'sidebar items dock rail hide hidden show home public channels share archive conferences shop'),
   SettingsSearchEntry('Keep running when closed', SettingsCategory.appearance, 'tray minimize'),
   SettingsSearchEntry('Open full profiles', SettingsCategory.appearance, 'profile card expanded'),
   SettingsSearchEntry('Interface', SettingsCategory.accessibility, 'zoom scale size bigger'),
