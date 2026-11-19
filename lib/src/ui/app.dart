@@ -15,6 +15,7 @@ import 'package:hollow/src/theme/hollow_theme_data.dart';
 import 'package:hollow/src/ui/components/hollow_scroll_behavior.dart';
 import 'package:hollow/src/ui/components/snapshot_paste.dart';
 import 'package:hollow/src/ui/components/ui_scale.dart';
+import 'package:hollow/src/ui/mobile/channel_on_screen_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_incoming_call.dart';
 import 'package:hollow/src/ui/mobile/call_proximity_controller.dart';
 import 'package:hollow/src/ui/shell/hollow_shell.dart';
@@ -51,7 +52,7 @@ class HollowApp extends ConsumerWidget {
       scrollBehavior: const HollowScrollBehavior(),
       actions: hollowAppActions(),
       home: const HollowHome(),
-      navigatorObservers: [routesAboveHome],
+      navigatorObservers: [routesAboveHome, pageRouteObserver],
       builder: (context, child) {
         final Widget body =
             _PointerFocusDismisser(child: child ?? const SizedBox.shrink());

@@ -24,6 +24,7 @@ import 'package:hollow/src/core/models/chat_message.dart';
 import 'package:hollow/src/core/models/file_attachment.dart';
 import 'package:hollow/src/core/moderation_format.dart';
 import 'package:hollow/src/core/providers/chat_provider.dart';
+import 'package:hollow/src/core/providers/channel_on_screen_provider.dart';
 import 'package:hollow/src/core/providers/channel_chat_provider.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/local_nickname_provider.dart';
@@ -85,6 +86,7 @@ import 'package:hollow/src/ui/components/identity_destroyed_banner.dart';
 import 'package:hollow/src/ui/components/security_alert_banner.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:hollow/src/ui/dialogs/message_proof_dialog.dart';
+import 'package:hollow/src/ui/mobile/channel_on_screen_route.dart';
 import 'package:hollow/src/ui/mobile/leave_with_server.dart';
 import 'package:hollow/src/ui/mobile/mobile_keyboard_panel.dart';
 import 'package:hollow/src/ui/mobile/mobile_call_chrome.dart';
@@ -150,7 +152,14 @@ class MobileChatRoute extends ConsumerStatefulWidget {
 }
 
 class _MobileChatRouteState extends ConsumerState<MobileChatRoute>
-    with ComposerDraftKeeper<MobileChatRoute> {
+    with
+        ComposerDraftKeeper<MobileChatRoute>,
+        ChannelOnScreenRoute<MobileChatRoute> {
+  @override
+  ScreenChannel? get onScreenChannel => widget.isDm || _isConference
+      ? null
+      : (serverId: widget.serverId!, channelId: widget.channelId!);
+
   @override
   String get draftScope => widget.isDm
       ? ComposerInsert.dmScope(
@@ -279,10 +288,9 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute>
     // available until AFTER initState, so it is deferred one frame.
     ref.read(channelListProvider.notifier).loadForServer(widget.serverId!);
     ref.read(channelLayoutProvider.notifier).loadForServer(widget.serverId!);
-    // On EVERY open, at route level, so no entry point is missed: without a
-    // subscription the channel receives no live topic broadcast and messages
-    // appear only on the next sync. The helper is node-safe, because a
-    // cold-start push tap opens this route before start_node() completes.
+    // On EVERY open, at route level, so no entry point misses the channel's
+    // relay ring catch-up. The helper is node-safe, because a cold-start push
+    // tap opens this route before start_node() completes.
     subscribeChannelTopics(
         serverId: widget.serverId!, channelIds: [widget.channelId!]);
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -322,6 +330,9 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute>
     // The route remounts per open, so the pill state is gone while the history
     // the cooldown derives from is not.
     _recomputeSlowMode();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _requestViewportFiles();
+    });
   }
 
   void _retryHistory() {
@@ -334,6 +345,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute>
 
   @override
   void dispose() {
+    _fileSweepDebounce?.cancel();
     _urlDebounce?.cancel();
     _latePreview.disarm();
     _slowModeTimer?.cancel();
@@ -354,6 +366,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute>
     // arrivals can change.
     final positions = _positionsListener.itemPositions.value;
     if (positions.isEmpty) return;
+    _requestViewportFiles();
     final minIndex =
         positions.map((p) => p.index).reduce((a, b) => a < b ? a : b);
     final wasInZone = _isInAutoScrollZone;
@@ -1607,7 +1620,41 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute>
     // or a demotion); the CRDT already propagated, so this only pops the route.
     if (!widget.isDm && widget.serverId != null && widget.channelId != null) {
       ref.listen(visibleChannelsProvider, _onVisibleChannelsChanged);
+      // Files pushed while this channel was off screen (app away, locked, or
+      // another route on top) kept only their card: pull the ones in view.
+      ref.listen<bool>(
+          channelsOnScreenProvider.select((s) => s.contains(
+              (serverId: widget.serverId!, channelId: widget.channelId!))),
+          (prev, shown) {
+        if (shown && prev != true) _requestViewportFiles();
+      });
     }
+  }
+
+  Timer? _fileSweepDebounce;
+
+  /// The channel viewport sweep, as on desktop: the files of the rows in view
+  /// (and around them) within the server's auto-download limit.
+  void _requestViewportFiles() {
+    if (widget.isDm || _isConference) return;
+    _fileSweepDebounce?.cancel();
+    _fileSweepDebounce = Timer(const Duration(milliseconds: 300), () {
+      if (!mounted || _routeDeactivated) return;
+      final positions = _positionsListener.itemPositions.value;
+      if (positions.isEmpty) return;
+      final msgs = _displayMessages(
+          ref.read(channelChatProvider)[_channelKey] ??
+              const <ChannelChatMessage>[]);
+      if (msgs.isEmpty) return;
+      // Positions are in REVERSED index space.
+      final indices = positions.map((p) => p.index);
+      final minRev = indices.reduce((a, b) => a < b ? a : b);
+      final maxRev = indices.reduce((a, b) => a > b ? a : b);
+      final firstVisible = (msgs.length - 1 - maxRev).clamp(0, msgs.length - 1);
+      final lastVisible = (msgs.length - 1 - minRev).clamp(0, msgs.length - 1);
+      ref.read(channelChatProvider.notifier).requestVisibleFiles(
+          widget.serverId!, widget.channelId!, msgs, firstVisible, lastVisible);
+    });
   }
 
   /// The server whose leaving the list closes this page. A meeting is never in

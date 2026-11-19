@@ -715,6 +715,26 @@ Call screen: answer `semantics:Accept`, hang up `semantics:Leave the call` (the 
 "Accept"/"End" sit outside the buttons). `xcrun simctl io <udid> screenshot` shows what the
 app's own shot cannot (the software keyboard).
 
+**iOS trap: the notification prompt (t18-archive, 2026-11-19).** A throwaway sim never answers
+the system "Hollow Would Like to Send You Notifications" alert, and `simctl privacy` has no
+notifications service, so the alert stays up for the whole run. It keeps the app `inactive`:
+`appLifecycleProvider.isBackground` is true, so a channel post takes the OS-notification path,
+in-app banners (`MobileInChatBanner`) never show, and the on-screen gate counts NO channel on
+screen (pushed files stay cards). The probe draws the Flutter tree, never the screen, so its
+shots never show the alert; only `xcrun simctl io <udid> screenshot` does. Any foreground
+notification, banner or on-screen check on an iOS sim is therefore blind: prove it on an Android
+emulator (`fleet.ps1` installs with `adb install -g`, which pre-grants POST_NOTIFICATIONS) or by
+hand. Answering it would need a tap on the Simulator window (input injection on the host, not
+allowed) or a third-party tool writing the sim's private permission store.
+
+**File fixtures are read where the PEER runs (t18-archive, 2026-11-19).** `attach_file` and
+`arm_file_pick` open the path inside the app's process: an Android emulator cannot see a Mac
+path (`PathNotFoundException`, then `'inTest': is not true` on the next tap), so push the fixture
+first (`adb -s <serial> push <file> /data/local/tmp/<name>` + `chmod 644`) and name the device
+path in the scenario (`onscreen_dm_over_channel_mobile.json`). `${REPO}` expands on the machine
+that runs `fleet.ps1`: Windows peers driven from the Mac get the Mac's path, so a Windows
+scenario with fixtures runs `fleet.ps1` ON the PC from its copy.
+
 **Mobile scenario notes (`mobile_friend_dm.json`):** `Send Friend Request` (not `Send Request`),
 `hint:Type a message...` + `semantics:Send` (Enter does not send), tap the composer before typing,
 and the Chats list grows a row for a friend only once a message exists, so the receiver opens

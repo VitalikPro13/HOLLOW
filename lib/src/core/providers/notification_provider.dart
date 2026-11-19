@@ -1,7 +1,7 @@
 import 'dart:convert';
 import 'dart:io' show Platform;
 
-import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/foundation.dart' show kIsWeb, visibleForTesting;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
@@ -18,6 +18,14 @@ enum NotificationLevel {
   /// No notifications (muted).
   nothing,
 }
+
+/// What a server whose level was never set notifies about: every channel arrives live on
+/// every device, so "all" would toast each post of a busy server. Its unread badges
+/// still count every post ([NotificationSettingsState.unreadLevel]).
+const NotificationLevel defaultServerLevel = NotificationLevel.mentions;
+
+/// The stored value of a server level that is back to the default (no delete call).
+const String _unsetServerLevel = 'default';
 
 /// Per-channel override — inherits from server default when null.
 enum ChannelNotificationLevel {
@@ -37,7 +45,8 @@ enum ChannelNotificationLevel {
 /// Manages notification settings for servers, channels, and DMs.
 ///
 /// Storage keys:
-/// - `notif:{serverId}` → "all" / "mentions" / "nothing"
+/// - `notif:{serverId}` → "all" / "mentions" / "nothing"; absent or "default" =
+///   never set ([defaultServerLevel])
 /// - `notif:{serverId}:{channelId}` → "inherit" / "all" / "mentions" / "nothing"
 /// - `notif:dm:{peerId}` → "true" / "false"
 class NotificationSettingsNotifier
@@ -45,6 +54,10 @@ class NotificationSettingsNotifier
   /// Reserved relay pref key for muted DM senders; the relay reads the same
   /// key (`DM_MUTE_PREF_KEY` in ws_handler.cpp).
   static const String dmMutePrefKey = '~dm';
+
+  /// Reserved relay pref key for the level of every server never set; the relay
+  /// reads the same key (`DEFAULT_PREF_KEY` in ws_handler.cpp).
+  static const String defaultPrefKey = '~default';
 
   /// Set by [loadAll]. A sync before it would replace the relay's filters with
   /// an empty set.
@@ -115,7 +128,8 @@ class NotificationSettingsNotifier
     }
 
     for (final sid in serverIds) {
-      serverLevels[sid] = _parseServerLevel(stored['notif:$sid']);
+      final level = parseStoredServerLevel(stored['notif:$sid']);
+      if (level != null) serverLevels[sid] = level;
     }
 
     for (final entry in channelIds.entries) {
@@ -156,9 +170,16 @@ class NotificationSettingsNotifier
     network_api.setPushPrefs(prefsJson: jsonEncode(prefs)).catchError((_) {});
   }
 
-  /// Get the effective notification level for a server.
-  NotificationLevel serverLevel(String serverId) {
-    return state.serverLevels[serverId] ?? NotificationLevel.all;
+  /// The level a server notifies at, as its settings show it.
+  NotificationLevel serverLevel(String serverId) => state.serverLevelOf(serverId);
+
+  /// Back to the never-set default (unmute), so it follows [defaultServerLevel].
+  Future<void> resetServerLevel(String serverId) async {
+    await storage_api.saveSetting(key: 'notif:$serverId', value: _unsetServerLevel);
+    final updated = Map<String, NotificationLevel>.from(state.serverLevels)
+      ..remove(serverId);
+    state = state.copyWith(serverLevels: updated);
+    _syncPushPrefsToRelay();
   }
 
   /// Set server-wide notification level.
@@ -174,17 +195,16 @@ class NotificationSettingsNotifier
     _syncPushPrefsToRelay();
   }
 
-  /// Get the effective notification level for a channel.
-  /// Falls back to server level if channel is set to inherit.
+  /// The level a channel NOTIFIES at (toast, sound, banner, push): its own
+  /// override, else its server's.
   NotificationLevel effectiveChannelLevel(
-      String serverId, String channelId) {
-    final key = '$serverId:$channelId';
-    final override = state.channelOverrides[key];
-    if (override != null && override != ChannelNotificationLevel.inherit) {
-      return _channelOverrideToLevel(override);
-    }
-    return serverLevel(serverId);
-  }
+      String serverId, String channelId) =>
+      state.notifyLevel(serverId, channelId);
+
+  /// The level a channel's unread badge counts at: as [effectiveChannelLevel],
+  /// except that a never-set server counts every post.
+  NotificationLevel effectiveUnreadLevel(String serverId, String channelId) =>
+      state.unreadLevel(serverId, channelId);
 
   /// Get the raw channel override (may be inherit).
   ChannelNotificationLevel channelOverride(
@@ -242,11 +262,14 @@ class NotificationSettingsNotifier
     return serverLevel(serverId) == NotificationLevel.nothing;
   }
 
-  static NotificationLevel _parseServerLevel(String? val) {
+  /// A level someone chose, or null for a server never set (absent, "default").
+  @visibleForTesting
+  static NotificationLevel? parseStoredServerLevel(String? val) {
     return switch (val) {
+      'all' => NotificationLevel.all,
       'mentions' => NotificationLevel.mentions,
       'nothing' => NotificationLevel.nothing,
-      _ => NotificationLevel.all,
+      _ => null,
     };
   }
 
@@ -259,20 +282,23 @@ class NotificationSettingsNotifier
     };
   }
 
-  static NotificationLevel _channelOverrideToLevel(
-      ChannelNotificationLevel override) {
-    return switch (override) {
-      ChannelNotificationLevel.all => NotificationLevel.all,
-      ChannelNotificationLevel.mentions => NotificationLevel.mentions,
-      ChannelNotificationLevel.nothing => NotificationLevel.nothing,
-      ChannelNotificationLevel.inherit => NotificationLevel.all,
-    };
-  }
 }
 
-/// The push filters the relay keeps for this phone: only what differs from its
-/// default of "all", so it never holds the list of servers or the channels
-/// left alone (C-RP-06). A channel set to its server's level is no override.
+NotificationLevel? _overrideLevel(ChannelNotificationLevel? override) {
+  return switch (override) {
+    ChannelNotificationLevel.all => NotificationLevel.all,
+    ChannelNotificationLevel.mentions => NotificationLevel.mentions,
+    ChannelNotificationLevel.nothing => NotificationLevel.nothing,
+    ChannelNotificationLevel.inherit || null => null,
+  };
+}
+
+/// The push filters the relay keeps for this phone: the reserved `~default`
+/// entry (every server never set notifies at [defaultServerLevel]) and only the
+/// servers and channels that differ from it, so the relay never holds the list
+/// of servers or the channels left alone (C-RP-06). A channel set to its
+/// server's level is no override. A relay older than `~default` drops that
+/// entry and keeps its own default of "all" for servers it is not told about.
 /// Muted DM senders ride the reserved `~dm` entry, keyed by DEVICE id because
 /// a wake carries the socket's device id and the relay never learns
 /// device to master.
@@ -287,16 +313,21 @@ Map<String, Map<String, dynamic>> pushPrefsForRelay({
     final sep = entry.key.indexOf(':');
     if (sep <= 0) continue;
     final sid = entry.key.substring(0, sep);
-    final serverLevel = serverLevels[sid] ?? NotificationLevel.all;
+    final serverLevel = serverLevels[sid] ?? defaultServerLevel;
     if (entry.value.name == serverLevel.name) continue;
     (channels[sid] ??= <String, String>{})[entry.key.substring(sep + 1)] =
         entry.value.name;
   }
-  final prefs = <String, Map<String, dynamic>>{};
+  final prefs = <String, Map<String, dynamic>>{
+    NotificationSettingsNotifier.defaultPrefKey: {
+      'level': defaultServerLevel.name,
+      'channels': <String, String>{},
+    },
+  };
   for (final sid in {...serverLevels.keys, ...channels.keys}) {
-    final level = serverLevels[sid] ?? NotificationLevel.all;
+    final level = serverLevels[sid] ?? defaultServerLevel;
     final overrides = channels[sid] ?? <String, String>{};
-    if (level == NotificationLevel.all && overrides.isEmpty) continue;
+    if (!serverLevels.containsKey(sid) && overrides.isEmpty) continue;
     prefs[sid] = {'level': level.name, 'channels': overrides};
   }
   if (mutedDmDevices.isNotEmpty) {
@@ -336,18 +367,27 @@ class NotificationSettingsState {
 
   bool isDmEnabled(String peerId) => dmEnabled[peerId] ?? true;
 
-  bool isServerMuted(String serverId) =>
-      (serverLevels[serverId] ?? NotificationLevel.all) ==
-      NotificationLevel.nothing;
+  /// A server's level as its settings show it: the one chosen, else the default.
+  NotificationLevel serverLevelOf(String serverId) =>
+      serverLevels[serverId] ?? defaultServerLevel;
 
-  bool isChannelMuted(String serverId, String channelId) {
-    final key = '$serverId:$channelId';
-    final override = channelOverrides[key];
-    if (override != null && override != ChannelNotificationLevel.inherit) {
-      return override == ChannelNotificationLevel.nothing;
-    }
-    return isServerMuted(serverId);
-  }
+  /// What a channel notifies about: its override, else its server's level.
+  NotificationLevel notifyLevel(String serverId, String channelId) =>
+      _overrideLevel(channelOverrides['$serverId:$channelId']) ??
+      serverLevelOf(serverId);
+
+  /// What a channel's unread badge counts: as [notifyLevel], but a server never
+  /// set counts every post, so the quieter default costs no badges.
+  NotificationLevel unreadLevel(String serverId, String channelId) =>
+      _overrideLevel(channelOverrides['$serverId:$channelId']) ??
+      serverLevels[serverId] ??
+      NotificationLevel.all;
+
+  bool isServerMuted(String serverId) =>
+      serverLevelOf(serverId) == NotificationLevel.nothing;
+
+  bool isChannelMuted(String serverId, String channelId) =>
+      notifyLevel(serverId, channelId) == NotificationLevel.nothing;
 }
 
 final notificationSettingsProvider = NotifierProvider<

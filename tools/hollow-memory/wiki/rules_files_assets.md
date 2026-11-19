@@ -35,6 +35,21 @@ stay in CLAUDE.md. Wiki `rust_file_handler`, `emotes`, `hollowpack`.
 
 ## File transfer mechanics
 
+- A pushed SERVER-CHANNEL file registers its stream only for a channel ON SCREEN on this
+  device (0.14.1, Vitalik: nothing a peer posts lands on disk unseen): Rust
+  `file_handler::channel_push_allows` (MLS arm + Olm arm), fed by FFI
+  `set_channels_on_screen` from Dart `channelsOnScreenProvider` (desktop selection + split
+  pane, the phone chat route whose page is on top; nothing while hidden, minimized,
+  backgrounded or locked, or under any centre tab incl. Settings; meetings and guest views
+  never). Otherwise it is declined like #41 (card kept, bytes
+  deleted, `auto_download_off` pin); the viewport sweep (`requestVisibleFiles`, desktop pane
+  AND phone route) pulls on view within the limit and re-runs when the channel comes back
+  on screen; share auto-start asks the same; a cut push is re-asked only while on screen;
+  the post-link `recent_files_sweep` takes DM files only. The push fetch node keeps no channel bytes. A
+  new path that writes peer content from a server to disk asks the same question. The set
+  (`node/on_screen.rs`) is process-global and defaults to "nothing" in builds, "everything" under `cfg(test)`
+  (tests that predate it); its own tests set channels under `OnScreenReset`. Wiki
+  `security_write_gates` §77.
 - The sender side needs the `FileCompleted` emit too: a new `FileHeader`/`StoredFile`
   field misses the sender's UI unless the send path emits it. `feedback_sender_file_completed`.
 - Share-backed large files (>34 MB): `FileHeader.share_ref` bypasses the size checks in 3

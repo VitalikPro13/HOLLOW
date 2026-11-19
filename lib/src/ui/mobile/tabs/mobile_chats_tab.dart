@@ -252,11 +252,14 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
                 muted ? LucideIcons.bell : LucideIcons.bellOff,
                 muted ? 'Unmute server' : 'Mute server',
                 () => _report(
-                    ref.read(notificationSettingsProvider.notifier).setServerLevel(
-                        serverId,
-                        muted
-                            ? NotificationLevel.all
-                            : NotificationLevel.nothing),
+                    // Unmuting goes back to the default, never to "All messages".
+                    muted
+                        ? ref
+                            .read(notificationSettingsProvider.notifier)
+                            .resetServerLevel(serverId)
+                        : ref
+                            .read(notificationSettingsProvider.notifier)
+                            .setServerLevel(serverId, NotificationLevel.nothing),
                     'Could not change notifications',
                     done: muted
                         ? 'Notifications unmuted'

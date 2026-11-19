@@ -11,6 +11,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/models/channel_chat_message.dart';
 import 'package:hollow/src/core/models/file_attachment.dart';
 import 'package:hollow/src/core/providers/channel_chat_provider.dart';
+import 'package:hollow/src/core/providers/channel_on_screen_provider.dart';
 import 'package:hollow/src/core/providers/file_transfer_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/providers/guest_provider.dart';
@@ -40,6 +41,19 @@ import 'package:hollow/src/ui/dialogs/message_proof_dialog.dart';
 import 'package:hollow/src/core/services/attachment_export.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
+
+/// Whether the guest view's viewport sweep pulls a file: images only, only
+/// while the app is on screen, within the server's auto-download limit.
+@visibleForTesting
+bool guestSweepTakes({
+  required bool appOnScreen,
+  required int limitMb,
+  required bool isImage,
+  required int sizeBytes,
+}) =>
+    appOnScreen &&
+    isImage &&
+    sweepTakes(limitMb: limitMb, sizeBytes: sizeBytes, voiceNote: false);
 
 class GuestChatPane extends ConsumerStatefulWidget {
   final String serverId;
@@ -113,6 +127,10 @@ class _GuestChatPaneState extends ConsumerState<GuestChatPane> {
     // Guest policy: images auto-fetch near the viewport, other types only on
     // demand, and always through the gated public-file request path.
     _itemPositionsListener.itemPositions.addListener(_onViewportChanged);
+    // Back on screen (window restored, app resumed): sweep what is in view.
+    ref.listenManual<bool>(appOnScreenProvider, (prev, shown) {
+      if (shown && prev == false) _onViewportChanged();
+    });
   }
 
   @override
@@ -141,18 +159,25 @@ class _GuestChatPaneState extends ConsumerState<GuestChatPane> {
         if (msgIndex > hi) hi = msgIndex;
       }
       if (hi < 0) return;
-      // Auto-download off for this server (#41): the viewport sweep is an
-      // auto-download too, so cards fall back to the Download button.
-      if (effectiveAutoDownloadMb(ref, 'server:${widget.serverId}') == 0) {
-        return;
-      }
+      // The viewport sweep is an auto-download too (#41): nothing while the
+      // pane is not on screen, nothing over the server's limit.
+      final appOnScreen = ref.read(appOnScreenProvider);
+      final limitMb = effectiveAutoDownloadMb(ref, 'server:${widget.serverId}');
+      if (!appOnScreen || limitMb == 0) return;
       lo = (lo - 15).clamp(0, list.length - 1);
       hi = (hi + 15).clamp(0, list.length - 1);
       final transfers = ref.read(fileTransferProvider);
       for (var i = lo; i <= hi; i++) {
         final msg = list[i];
         final att = msg.fileAttachment;
-        if (att == null || !att.isImage) continue;
+        if (att == null ||
+            !guestSweepTakes(
+                appOnScreen: appOnScreen,
+                limitMb: limitMb,
+                isImage: att.isImage,
+                sizeBytes: att.sizeBytes)) {
+          continue;
+        }
         if (att.isComplete || att.diskPath != null) continue;
         final transfer = transfers[att.fileId];
         if (transfer?.isComplete == true || transfer?.isDownloading == true) {

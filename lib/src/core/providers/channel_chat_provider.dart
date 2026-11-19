@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/models/channel_chat_message.dart';
 import 'package:hollow/src/core/models/file_attachment.dart';
+import 'package:hollow/src/core/providers/channel_on_screen_provider.dart';
 import 'package:hollow/src/core/providers/deleted_messages_provider.dart';
 import 'package:hollow/src/core/providers/chat_provider.dart' show generateMessageId;
 import 'package:hollow/src/core/providers/identity_provider.dart';
@@ -661,10 +662,17 @@ class ChannelChatNotifier
       String serverId, String channelId,
       List<ChannelChatMessage> messages,
       int firstVisible, int lastVisible) async {
-    // Auto-download off for this server (#41): the viewport sweep IS the
-    // auto-download for channel files, so skip it and offer a manual Download
-    // button. VOICE NOTES stay exempt, so the per-file loop still pulls those.
-    final gated = effectiveAutoDownloadMbRead(ref, 'server:$serverId') == 0;
+    // A pane left drawn in a hidden or minimized window is not looked at.
+    if (!ref
+        .read(channelsOnScreenProvider)
+        .contains((serverId: serverId, channelId: channelId))) {
+      return;
+    }
+    // The viewport sweep IS the auto-download for channel files (a push into a
+    // channel not on screen keeps only its card), so it pulls only what the
+    // server's setting takes (#41): nothing when off, nothing over the limit.
+    // VOICE NOTES stay exempt, so the per-file loop still pulls those.
+    final limitMb = effectiveAutoDownloadMbRead(ref, 'server:$serverId');
     final start = (firstVisible - 15).clamp(0, messages.length - 1);
     final end = (lastVisible + 15).clamp(0, messages.length - 1);
     // Candidates come from THIS server's online members (master-keyed) —
@@ -681,13 +689,16 @@ class ChannelChatNotifier
       // The name alone would let a sender label any bytes `voice_x.ogg` and have a
       // gated client pull them. The wire header's `voice` flag is not surfaced to
       // Dart yet, so name, extension and size carry the whole test here.
-      if (gated &&
-          !isGenuineVoiceNote(
-            voice: true,
-            name: att.fileName,
-            ext: att.fileExt,
-            sizeBytes: att.sizeBytes,
-          )) {
+      if (!sweepTakes(
+        limitMb: limitMb,
+        sizeBytes: att.sizeBytes,
+        voiceNote: isGenuineVoiceNote(
+          voice: true,
+          name: att.fileName,
+          ext: att.fileExt,
+          sizeBytes: att.sizeBytes,
+        ),
+      )) {
         continue;
       }
       if (_requestedFileIds.contains(att.fileId)) continue;
@@ -708,6 +719,9 @@ class ChannelChatNotifier
       ];
       if (candidates.isEmpty) continue; // no throttle — a later pass retries
       _requestedFileIds.add(att.fileId);
+      // A push declined off screen pinned the card: lift it so this pull's
+      // progress shows, as every manual Download does.
+      ref.read(fileTransferProvider.notifier).clearDeclined(att.fileId);
       for (final peerId in candidates) {
         try {
           await network_api.requestFileFromPeer(
@@ -774,6 +788,16 @@ List<ChannelChatMessage> _stableSortByTimestamp(List<ChannelChatMessage> list) {
     });
   return [for (final e in entries) e.value];
 }
+
+
+/// Whether the channel viewport sweep pulls a file of [sizeBytes] under a
+/// server auto-download limit of [limitMb] (0 = off). Voice notes are exempt.
+bool sweepTakes({
+  required int limitMb,
+  required int sizeBytes,
+  required bool voiceNote,
+}) =>
+    voiceNote || (limitMb > 0 && sizeBytes <= limitMb * 1024 * 1024);
 
 final channelChatProvider = NotifierProvider<ChannelChatNotifier,
     Map<String, List<ChannelChatMessage>>>(ChannelChatNotifier.new);

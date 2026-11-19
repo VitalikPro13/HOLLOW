@@ -6,6 +6,7 @@ import 'package:hollow/src/core/age_gate.dart';
 import 'package:hollow/src/core/providers/app_lock_provider.dart';
 import 'package:hollow/src/core/providers/archive_provider.dart';
 import 'package:hollow/src/core/providers/background_provider.dart';
+import 'package:hollow/src/core/providers/channel_on_screen_provider.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
@@ -51,9 +52,8 @@ class _MobileShellState extends ConsumerState<MobileShell> {
     MobileSettingsTab(),
   ];
 
-  /// Subscribes the node to a channel's relay topic; the relay only routes a
-  /// topic message to subscribed sockets. Unread channels of the same server
-  /// are included so mentions still arrive.
+  /// Tells the node a channel was opened, so it pulls that channel's relay ring
+  /// if this connection has not (unread channels of the server come along).
   void _subscribeActiveChannel(String serverId, String channelId) {
     final unread = ref.read(unreadProvider);
     final prefix = '$serverId:';
@@ -67,9 +67,26 @@ class _MobileShellState extends ConsumerState<MobileShell> {
     subscribeChannelTopics(serverId: serverId, channelIds: topics);
   }
 
+  /// Tells the on-screen gate that the phone shell, not the desktop selection,
+  /// decides which channel is shown.
+  late final StateController<bool> _shellActive;
+
+  @override
+  void dispose() {
+    final active = _shellActive;
+    Future.microtask(() {
+      if (active.mounted) active.state = false;
+    });
+    super.dispose();
+  }
+
   @override
   void initState() {
     super.initState();
+    _shellActive = ref.read(mobileShellActiveProvider.notifier);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _shellActive.state = true;
+    });
     listenForRelayLoginDenial(ref, () => context, touch: true);
     // Push taps land here, including the buffered cold-start ones, which are
     // delivered on registration.

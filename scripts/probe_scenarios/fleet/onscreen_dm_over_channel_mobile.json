@@ -1,0 +1,458 @@
+{
+ "_": [
+  "A DM opened over a channel takes the channel off screen (t18-archive item 2, 2026-11-19).",
+  "b befriends a, makes server dov-RUN, a joins. a opens #general, then b's profile from the",
+  "channel and Message: a DM page sits over the channel page. b posts a photo in #general.",
+  "a's node must keep only its card while the DM is on top (no 'File completed' for it",
+  "between MARK-DM-ON-TOP and MARK-DM-CLOSING in a's logcat); after Back the viewport sweep",
+  "pulls it and the photo renders. The picked photo is read ON the emulator: push it first,",
+  "adb -s <b> push scripts/probe_scenarios/fleet/image_check_fixtures/good_photo.webp /data/local/tmp/hollow_dov.webp && adb -s <b> shell chmod 644 /data/local/tmp/hollow_dov.webp",
+  "run (Mac mini): FLEET_BACKEND=android pwsh scripts/fleet.ps1 -Scenario onscreen_dm_over_channel_mobile -Peers a,b -Relay hollowtest.duckdns.org"
+ ],
+ "peers": [
+  "a",
+  "b"
+ ],
+ "steps": [
+  {
+   "peer": "all",
+   "op": "wait_for",
+   "provider": "connection",
+   "equals": "connected",
+   "timeout_ms": 120000
+  },
+  {
+   "peer": "a",
+   "op": "capture",
+   "from": "provider",
+   "key": "peerId",
+   "as": "PEER_A"
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "semantics:Friends",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "text:Add friend",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "enter_text",
+   "target": "hint:Paste an ID, or type a nickname",
+   "value": "${PEER_A}"
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "text:${PEER_A}",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "text:Send request",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "semantics:Friends, 1 friend request",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Friends",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "semantics:Accept friend request",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Accept friend request",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "log",
+   "message": "the accepted friend must reach the UI on BOTH sides, not just the friends table"
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "text:probe-b",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "text:probe-a",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "all",
+   "op": "tap",
+   "target": "semantics:Chats",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "semantics:Add a server",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "wait",
+   "ms": 1000
+  },
+  {
+   "peer": "b",
+   "op": "enter_text",
+   "target": "hint:My Awesome Server",
+   "value": "dov-${RUN}"
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "text:Create",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "text:dov-${RUN}",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "b",
+   "op": "wait",
+   "ms": 1000
+  },
+  {
+   "peer": "b",
+   "op": "long_press",
+   "target": "text:dov-${RUN}",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "wait",
+   "ms": 1000
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "text:Invite people",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "type:HollowCopyField",
+   "timeout_ms": 20000
+  },
+  {
+   "peer": "b",
+   "op": "capture",
+   "target": "type:HollowCopyField",
+   "as": "INVITE"
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "dialog > semantics:Close",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Add a server",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1000
+  },
+  {
+   "peer": "a",
+   "op": "enter_text",
+   "target": "hint:Invite link",
+   "value": "${INVITE}"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Join",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Chats",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "text:dov-${RUN}",
+   "timeout_ms": 120000
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 8000
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "semantics:Chats",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "text:dov-${RUN}",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "wait",
+   "ms": 1200
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "text:general",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "field",
+   "timeout_ms": 15000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:dov-${RUN}",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1200
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:general",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "field",
+   "timeout_ms": 15000
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "field",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "enter_text",
+   "target": "field",
+   "value": "hi from b ${RUN}"
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "semantics:Send message",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "text:hi from b ${RUN}",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "all",
+   "op": "wait",
+   "ms": 6000,
+   "why": "a's leaf and the group settle before the file"
+  },
+  {
+   "peer": "a",
+   "op": "log",
+   "message": "STEP: a opens b's profile from the channel and taps Message (MobileProfileSheet._openChat)"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:probe-b",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "text:Message",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Message",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "field",
+   "timeout_ms": 15000
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "dov-a-01-dm-over-channel"
+  },
+  {
+   "peer": "a",
+   "op": "log",
+   "message": "MARK-DM-ON-TOP"
+  },
+  {
+   "peer": "b",
+   "op": "arm_file_pick",
+   "path": "/data/local/tmp/hollow_dov.webp"
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "semantics:Attach a file",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "text:File",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "field",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "enter_text",
+   "target": "field",
+   "value": "covered photo ${RUN}"
+  },
+  {
+   "peer": "b",
+   "op": "tap",
+   "target": "semantics:Send message",
+   "index": 0
+  },
+  {
+   "peer": "b",
+   "op": "wait_for",
+   "target": "text:covered photo ${RUN}",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "b",
+   "op": "wait",
+   "ms": 3000
+  },
+  {
+   "peer": "b",
+   "op": "shot",
+   "name": "dov-b-01-posted"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 15000,
+   "why": "Absence proof: the push reaches a's node while the DM covers #general"
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "dov-a-02-still-in-dm"
+  },
+  {
+   "peer": "a",
+   "op": "log",
+   "message": "MARK-DM-CLOSING (no File completed for good_photo above this line since MARK-DM-ON-TOP)"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Back",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "text:covered photo ${RUN}",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 8000
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "dov-a-03-back-in-channel"
+  },
+  {
+   "peer": "a",
+   "op": "log",
+   "message": "MARK-END"
+  },
+  {
+   "peer": "all",
+   "op": "tap",
+   "target": "semantics:Back",
+   "index": 0,
+   "soft": true
+  }
+ ]
+}

@@ -60,6 +60,7 @@ import 'package:hollow/src/ui/shell/first_run_link.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/name_color_provider.dart';
 import 'package:hollow/src/core/providers/recent_files_sweep.dart';
+import 'package:hollow/src/core/providers/channel_on_screen_provider.dart';
 import 'package:hollow/src/core/providers/recording_provider.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
 import 'package:hollow/src/core/providers/accent_color_provider.dart';
@@ -249,9 +250,9 @@ class _HollowShellState extends ConsumerState<HollowShell>
     });
   }
 
-  /// Subscribes the node to a channel's relay topic, without which the relay
-  /// routes no topic message to this socket. Unread channels of the same server
-  /// come along so @mentions still arrive. Idempotent.
+  /// Tells the node a channel was opened, so it pulls that channel's relay ring
+  /// if this connection has not (unread channels of the server come along).
+  /// Every channel's posts arrive live either way. Idempotent.
   void _subscribeActiveChannel(String serverId, String channelId) {
     final unread = ref.read(unreadProvider);
     final prefix = '$serverId:';
@@ -472,6 +473,10 @@ class _HollowShellState extends ConsumerState<HollowShell>
     ref.listenManual(appLockedProvider, (prev, locked) {
       if (locked && prev != true) _runLockFlow();
     });
+    // The node keeps a pushed channel file's bytes only for a channel on screen.
+    ref.listenManual<Set<ScreenChannel>>(channelsOnScreenProvider,
+        (_, channels) => pushChannelsOnScreen(channels),
+        fireImmediately: true);
     _idleTimer = Timer.periodic(
         const Duration(seconds: 30), (_) => _maybeAutoLock());
   }

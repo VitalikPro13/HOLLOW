@@ -9,6 +9,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/services/gif_thumb_cache.dart';
 import 'package:hollow/src/core/rust_licenses.dart';
 import 'package:hollow/src/core/services/video_backend.dart';
+import 'package:hollow/src/core/providers/channel_on_screen_provider.dart';
 import 'package:hollow/src/core/providers/member_panel_provider.dart';
 import 'package:hollow/src/core/providers/webrtc_provider.dart';
 import 'package:hollow/src/core/app_relaunch.dart' show runBeforeAppExit;
@@ -384,17 +385,21 @@ class _HollowWindowListener extends WindowListener {
   @override
   void onWindowMinimize() {
     SharedTickers.instance.pause();
+    _container.read(windowMinimizedProvider.notifier).state = true;
   }
 
   @override
   void onWindowRestore() {
     SharedTickers.instance.resume();
+    _container.read(windowMinimizedProvider.notifier).state = false;
   }
 
   @override
   void onWindowFocus() {
     SharedTickers.instance.resume();
     _container.read(windowFocusedProvider.notifier).state = true;
+    // A focused window is not minimized, whichever way it came back.
+    _container.read(windowMinimizedProvider.notifier).state = false;
     // The window came back, so the last minimize did land: the next close
     // press minimizes again rather than quitting (#59).
     _linuxCloseMayHaveBeenIgnored = false;

@@ -5,6 +5,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hollow/src/core/providers/channel_on_screen_provider.dart';
 import 'package:hollow/src/core/age_gate.dart';
 import 'package:hollow/src/core/models/server_info.dart';
 import 'package:hollow/src/core/providers/app_lifecycle_provider.dart';
@@ -270,7 +271,14 @@ void main() {
   });
 
   testWidgets("a hidden server's media is never pulled on its own", (tester) async {
-    await pumpWith(tester, AgeGateMode.phoneRemote, _closed, const SizedBox());
+    // Both channels on screen: only the age gate may hold the hidden one back.
+    await pumpWith(tester, AgeGateMode.phoneRemote, _closed, const SizedBox(),
+        extra: [
+          channelsOnScreenProvider.overrideWithValue({
+            (serverId: 'hidden', channelId: 'ch'),
+            (serverId: 'shown', channelId: 'ch'),
+          }),
+        ]);
     final container = ProviderScope.containerOf(
         tester.element(find.byType(SizedBox).first));
     final events = container.read(eventStreamProvider.notifier);
@@ -456,7 +464,8 @@ void main() {
     c.read(appLifecycleProvider.notifier).state = AppLifecycleState.paused;
     expect(c.read(serverListProvider).keys, isEmpty, reason: 'setup: held off the list');
     await c.read(systemNotificationProvider.notifier).notifyChannel(
-        serverId: 'flagged', channelId: 'ch', fromPeerId: 'p', text: 'hi', isMention: false);
+        // A mention: a server never set notifies mentions only (0.14.1).
+        serverId: 'flagged', channelId: 'ch', fromPeerId: 'p', text: 'hi', isMention: true);
     expect(sink.names, ['flagged'],
         reason: 'the hold is about the screen, a live wake still names the server');
 

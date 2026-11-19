@@ -2,16 +2,17 @@ import 'dart:async';
 
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 
-/// Fire-and-forget relay-topic subscription, safe to call BEFORE the node is
-/// running: a cold-start push tap opens a channel while `start_node()` is
-/// still seconds away, and a bare `subscribeChannels()` then rejects into the
-/// zone crash handler AND registers nothing, so the tapped channel never gets
-/// its relay topic and live broadcasts silently stop arriving.
+/// Fire-and-forget "channel opened" notice to the node, safe to call BEFORE
+/// the node is running: a cold-start push tap opens a channel while
+/// `start_node()` is still seconds away, and a bare `subscribeChannels()` then
+/// rejects into the zone crash handler AND registers nothing, so the tapped
+/// channel's relay ring is never pulled. The node keeps every channel's live
+/// posts flowing whatever is named here.
 ///
-/// Rust's `SubscribeChannels` REPLACES the per-server topic set, so each retry
-/// loop carries a per-server sequence number and abandons itself once a newer
-/// subscription for that server is issued: a stale retry must never clobber
-/// the topics of a channel opened later.
+/// Rust's `SubscribeChannels` REPLACES the per-server set it remembers, so
+/// each retry loop carries a per-server sequence number and abandons itself
+/// once a newer one for that server is issued: a stale retry must never
+/// clobber the channel opened later.
 final _subscribeSeq = <String, int>{};
 
 void subscribeChannelTopics({

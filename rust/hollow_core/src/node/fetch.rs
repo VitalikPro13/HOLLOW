@@ -780,8 +780,9 @@ fn filter_by_notification_level(
         .collect()
 }
 
-/// Effective local level: the channel's own setting, else the server default,
-/// else "all".
+/// Effective local level: the channel's own setting, else the server's, else the
+/// never-set default "mentions" (as Dart's `defaultServerLevel`; a stored "default"
+/// means never set).
 pub(crate) fn channel_notification_level(
     store: &crate::storage::MessageStore,
     server_id: &str,
@@ -793,8 +794,8 @@ pub(crate) fn channel_notification_level(
         _ => store
             .load_setting(&format!("notif:{server_id}"))
             .unwrap_or(None)
-            .filter(|v| v == "mentions" || v == "nothing")
-            .unwrap_or_else(|| "all".to_string()),
+            .filter(|v| v == "all" || v == "mentions" || v == "nothing")
+            .unwrap_or_else(|| "mentions".to_string()),
     }
 }
 
@@ -1815,6 +1816,16 @@ mod tests {
         let fetched = handle_file_header(&bob, &me, header(&within, 13), &path, &pass);
         let wrote = landed(&within);
         assert!(fetched.is_some_and(|f| f.image_path.is_some()) && wrote, "a header within the limit no longer lands");
+
+        // t18: nothing is on screen in the push process, so a server channel's header
+        // (even one carrying inline bytes) leaves neither bytes nor a card.
+        let channel = crate::node::file_transfer::generate_file_id();
+        let mut in_channel = header(&channel, 13);
+        in_channel.sid = Some("a-server".to_string());
+        in_channel.cid = Some("a-server-general".to_string());
+        let fetched = handle_file_header(&bob, &me, in_channel, &path, &pass);
+        let wrote = landed(&channel);
+        assert!(fetched.is_none() && !wrote, "the push process kept a channel file's bytes");
     }
 
     /// HOL-SEC-035 (K1). The push fetch node and the iOS extension are fresh
@@ -2211,6 +2222,7 @@ mod tests {
         let other = kp(180).peer_id();
         let state = server_with("srv-c14", &[(&me, "Alice"), (&other, "Bob")]);
         store.save_server_state("srv-c14", &serde_json::to_string(&state).unwrap()).unwrap();
+        store.save_setting("notif:srv-c14", "all").unwrap();
         store.save_setting("notif:srv-c14:quiet", "mentions").unwrap();
         store.save_setting("notif:srv-c14:muted", "nothing").unwrap();
         let post = |cid: &str, mid: &str, text: &str| FetchedDm {
@@ -2242,6 +2254,21 @@ mod tests {
             vec!["q2", "q3", "o1"],
             "HOL-SEC-035: a mentions-only channel showed a post that does not mention us",
         );
+    }
+
+    /// t18: a server whose level was never set shows banners for mentions only, as its
+    /// settings say; one set to "all" shows every post.
+    #[test]
+    fn t18_a_server_never_set_banners_mentions_only() {
+        let (_tmp, path, pass) = temp_store();
+        let store = crate::storage::MessageStore::open(&path, &pass).unwrap();
+        assert_eq!(channel_notification_level(&store, "srv-unset", "c"), "mentions");
+        store.save_setting("notif:srv-reset", "default").unwrap();
+        assert_eq!(channel_notification_level(&store, "srv-reset", "c"), "mentions");
+        store.save_setting("notif:srv-all", "all").unwrap();
+        assert_eq!(channel_notification_level(&store, "srv-all", "c"), "all");
+        store.save_setting("notif:srv-unset:loud", "all").unwrap();
+        assert_eq!(channel_notification_level(&store, "srv-unset", "loud"), "all");
     }
 
     /// J4. The push payload names the server room, and a server we are not a

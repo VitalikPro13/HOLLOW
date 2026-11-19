@@ -177,8 +177,7 @@ class _MobileInChatBannerState extends ConsumerState<MobileInChatBanner>
           ref.read(selectedChannelProvider.notifier).state = channelId;
           ref.read(selectedServerProvider.notifier).state = serverId;
           ref.read(selectedPeerProvider.notifier).state = null;
-          // The relay only routes a topic message to subscribed sockets, so
-          // without this the freshly opened channel gets no live broadcasts.
+          // Pulls the opened channel's relay ring if this connection has not.
           // The helper never throws and retries until the node is up.
           subscribeChannelTopics(serverId: serverId, channelIds: [channelId]);
           final channelName = channels[channelId]?.name ?? '';

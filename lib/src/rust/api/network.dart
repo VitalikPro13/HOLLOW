@@ -62,6 +62,19 @@ Future<void> setAutoDownloadConfig({
   overridesJson: overridesJson,
 );
 
+/// The server channels on screen on this device right now, as paired lists
+/// (`server_ids[i]` holds `channel_ids[i]`); empty while the window is hidden,
+/// the app is backgrounded or locked. Only these channels take a pushed file's
+/// bytes without a tap. Safe before the node starts; it outlives node restarts.
+/// Synchronous, so two quick updates can never land out of order.
+void setChannelsOnScreen({
+  required List<String> serverIds,
+  required List<String> channelIds,
+}) => RustLib.instance.api.crateApiNetworkSetChannelsOnScreen(
+  serverIds: serverIds,
+  channelIds: channelIds,
+);
+
 /// Start the node with the persistent identity from disk. Returns the local peer ID.
 Future<String> startNode() => RustLib.instance.api.crateApiNetworkStartNode();
 
@@ -614,8 +627,8 @@ Future<void> syncReadMarker({required String key, required String messageId}) =>
 Future<void> setInvisible({required bool invisible}) =>
     RustLib.instance.api.crateApiNetworkSetInvisible(invisible: invisible);
 
-/// Subscribe to specific channels for topic-based relay routing: only subscribed
-/// channels arrive in real time, the rest sync on demand when opened.
+/// Note the channels just opened, pulling their relay rings if this connection has
+/// not; every channel of the server keeps arriving live whatever is named.
 Future<void> subscribeChannels({
   required String serverId,
   required List<String> channelIds,

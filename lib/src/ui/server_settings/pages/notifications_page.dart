@@ -33,7 +33,7 @@ class ServerNotificationsPage extends ConsumerWidget {
     final touch = SettingsDensity.touchOf(context);
     final state = ref.watch(notificationSettingsProvider);
     final notifier = ref.read(notificationSettingsProvider.notifier);
-    final level = state.serverLevels[serverId] ?? NotificationLevel.all;
+    final level = state.serverLevelOf(serverId);
     final serverName = ref.watch(serverListProvider)[serverId]?.name ?? 'This server';
     // Only channels you can see: naming a restricted one would leak it.
     final allAsync = ref.watch(serverChannelsProvider(serverId));

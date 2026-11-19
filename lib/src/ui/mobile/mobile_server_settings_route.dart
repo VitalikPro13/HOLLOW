@@ -86,8 +86,7 @@ class MobileServerSettingsRoute extends ConsumerWidget {
             server?.memberCount ??
             0;
     final level = ref.watch(notificationSettingsProvider
-            .select((s) => s.serverLevels[serverId])) ??
-        NotificationLevel.all;
+        .select((s) => s.serverLevelOf(serverId)));
 
     String? valueFor(ServerSettingsPage page) => switch (page) {
           ServerSettingsPage.members => '$members',

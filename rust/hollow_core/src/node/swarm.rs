@@ -5,6 +5,8 @@ use base64::Engine;
 use tokio::sync::mpsc;
 
 pub(crate) const MLS_BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(60);
+/// `channel_sync_sent` key prefix: a group whose frames we may not read, noted once a minute.
+const UNREADABLE_GROUP_NOTED: &str = "mls_unreadable:";
 
 /// At most one KeyPackage answered per group in this window: each answer mints and
 /// persists private key material.
@@ -842,8 +844,7 @@ async fn run_event_loop(
     // Pushed files declined by the auto-download gate this session. Stream bytes
     // that still arrive (the sender queued its push before any response could reach
     // it) are deleted instead of parked forever in `early_file_streams`.
-    let mut declined_file_ids: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
+    let mut declined_file_ids = file_handler::DeclinedFiles::default();
 
     // Auto-download preferences ADVERTISED by peer devices (issue #41): device
     // peer_id -> threshold MB for pushes from us (0 = off). The DM file fan-out
@@ -1356,8 +1357,6 @@ async fn run_event_loop(
     // "{group_key}|probe" for our own probes.
     let mut mls_epoch_hint_cooldown: HashMap<String, std::time::Instant> = HashMap::new();
 
-    // Track which channels the Dart UI is subscribed to per server (for scoped sync on decrypt failure).
-    let mut subscribed_channels: HashMap<String, Vec<String>> = HashMap::new();
 
     // MLS batch addition queue: collect KeyPackages and process them in a single commit.
     let mut pending_mls_key_packages: HashMap<String, Vec<(String, Vec<u8>)>> = HashMap::new();
@@ -1625,7 +1624,6 @@ async fn run_event_loop(
                     &mut vc_signal_rate_tokens,
                     &mut mls_dirty,
                     &guest_rooms,
-                    &subscribed_channels,
                     &db_path, &db_passphrase,
                     &local_peer_str, &from, is_invisible,
                     &mut pending_friend_accepts, &mut pending_friend_requests,
@@ -2969,15 +2967,15 @@ async fn run_event_loop(
                     }
 
                     NodeCommand::SubscribeChannels { server_id, channel_ids } => {
-                        hollow_log!("[HOLLOW-TOPIC] Subscribe room={server_id} topics={channel_ids:?}");
-                        subscribed_channels.insert(server_id.clone(), channel_ids.clone());
+                        hollow_log!("[HOLLOW-TOPIC] Opened room={server_id} channels={channel_ids:?} (room left unfiltered)");
                         let owner = server_states.get(&server_id).and_then(|s| s.anchor_owner());
+                        // An empty set lifts any filter, so every channel's posts land live:
+                        // each member keeps the full history of every channel it may see (the
+                        // Archive lists them all), and a filter on the open channel kept the
+                        // others' posts away until a reconnect or an open.
                         let _ = ws_cmd_tx.send(super::ws_client::WsCommand::Subscribe {
                             room_code: server_id.clone(),
-                            topics: channel_ids
-                                .iter()
-                                .map(|cid| super::ring_auth::ring_topic(&server_id, owner.as_deref(), cid))
-                                .collect(),
+                            topics: Vec::new(),
                         });
                         // Relay offline catch-up on CHANNEL OPEN, the safety net for the connect-time
                         // sweep: refresh the ring registration (covering channels created since anyone
@@ -3729,7 +3727,6 @@ async fn run_event_loop(
                                 &mut vc_signal_rate_tokens,
                                 &mut mls_dirty,
                                 &guest_rooms,
-                                &subscribed_channels,
                                 &db_path, &db_passphrase,
                                 &local_peer_str, &sender_peer_id, is_invisible,
                                 &mut pending_friend_accepts, &mut pending_friend_requests,
@@ -5670,7 +5667,6 @@ async fn run_event_loop(
                                 &mut vc_signal_rate_tokens,
                                 &mut mls_dirty,
                                 &guest_rooms,
-                                &subscribed_channels,
                                 &db_path, &db_passphrase,
                                 &local_peer_str, &from, is_invisible,
                                 &mut pending_friend_accepts, &mut pending_friend_requests,
@@ -6229,7 +6225,6 @@ async fn run_event_loop(
                                             &mut vc_signal_rate_tokens,
                                             &mut mls_dirty,
                                             &guest_rooms,
-                                            &subscribed_channels,
                                             &db_path, &db_passphrase,
                                             &local_peer_str, &from, is_invisible,
                                             &mut pending_friend_accepts, &mut pending_friend_requests,
@@ -6936,7 +6931,10 @@ async fn run_event_loop(
                     });
                     vc_signal_rate_tokens.retain(|_, (_, last)| last.elapsed() < stale);
                     decrypt_fail_cooldown.retain(|_, instant| instant.elapsed() < REKEY_COOLDOWN);
-                    channel_sync_sent.retain(|_, instant| instant.elapsed() < Duration::from_secs(30));
+                    channel_sync_sent.retain(|key, instant| {
+                        let keep = if key.starts_with(UNREADABLE_GROUP_NOTED) { MLS_BOOTSTRAP_TIMEOUT } else { Duration::from_secs(30) };
+                        instant.elapsed() < keep
+                    });
                     // Clean up orphaned early-arrival file streams (5 min TTL).
                     let mut stale_early: Vec<String> = Vec::new();
                     for (id, early) in early_file_streams.iter() {
@@ -8940,14 +8938,30 @@ async fn apply_remote_crdt_op_inner(
     false
 }
 
+/// The text channels the server-wide MLS group carries that `local` may read: every
+/// visible one outside a per-channel subgroup.
+fn server_group_channels(state: &ServerState, local: &str) -> Vec<String> {
+    state
+        .channels
+        .values()
+        .filter(|ch| {
+            matches!(ch.channel_type, crate::crdt::server_state::ChannelType::Text)
+                && !state.channel_uses_subgroup(&ch.channel_id)
+                && state.can_see_channel(local, &ch.channel_id)
+        })
+        .map(|ch| ch.channel_id.clone())
+        .collect()
+}
+
 /// Ask the member device whose frame in `group_key` we could not read for the channels
-/// it may have carried: that one for a subgroup, else every one we follow. At most once
-/// per sender per 5 s.
+/// it may have carried: that one for a subgroup, else every text channel of the server
+/// group we may read (rooms are unfiltered, so the frame may be any of them, opened or
+/// not). At most once per sender per 5 s.
 #[allow(clippy::too_many_arguments)]
 fn ask_sender_for_channels(
     channel_sync_sent: &mut HashMap<String, std::time::Instant>,
     channel_asks: &mut super::channel_asks::ChannelAsks,
-    subscribed_channels: &HashMap<String, Vec<String>>,
+    local_peer_str: &str,
     server_states: &HashMap<String, ServerState>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     db_path: &str,
@@ -8965,7 +8979,7 @@ fn ask_sender_for_channels(
     let state = server_states.get(server_id);
     let sync_cids: Vec<String> = match msg_channel_id {
         Some(cid) => vec![cid.clone()],
-        None => subscribed_channels.get(server_id).cloned().unwrap_or_default(),
+        None => state.map(|s| server_group_channels(s, local_peer_str)).unwrap_or_default(),
     }
     .into_iter()
     .filter(|c| crate::node::crypto_handler::sync_partner(state, peer_str, Some(c)))
@@ -9190,7 +9204,6 @@ fn handle_incoming_request(
     vc_signal_rate_tokens: &mut HashMap<String, (u32, std::time::Instant)>,
     mls_dirty: &mut bool,
     guest_rooms: &super::guest_view::GuestView,
-    subscribed_channels: &HashMap<String, Vec<String>>,
     db_path: &str,
     db_passphrase: &str,
     local_peer_str: &str,
@@ -9205,7 +9218,7 @@ fn handle_incoming_request(
     pending_file_asks: &mut HashMap<String, file_asks::PendingFileAsk>,
     pending_public_file_requests: &mut HashMap<String, (String, String, std::time::Instant)>,
     requested_file_receipts: &mut HashMap<String, std::time::Instant>,
-    declined_file_ids: &mut std::collections::HashSet<String>,
+    declined_file_ids: &mut file_handler::DeclinedFiles,
     peer_auto_dl: &mut HashMap<String, u32>,
     fwd_bridge: FwdBridge<'_>,
     request: HavenMessage,
@@ -9225,7 +9238,7 @@ fn handle_incoming_request(
         pending_mls_removals, mls_epoch_hint_cooldown, ws_cmd_tx, ws_room_peers, webrtc_peers, share_registry,
         pending_webrtc_sends, channel_sync_sent, channel_asks, slow_mode_clock, gossip_overlays, voice_channel_participants,
         voice_channel_gossip_mode, call_book, conference_host, vc_signal_rate_tokens, mls_dirty, guest_rooms,
-        subscribed_channels, db_path, db_passphrase, local_peer_str, peer_str, is_invisible,
+        db_path, db_passphrase, local_peer_str, peer_str, is_invisible,
         pending_friend_accepts, pending_friend_requests, pending_friend_removals, answer_resent,
         pending_asset_asks, overlay_book, pending_file_asks,
         pending_public_file_requests, requested_file_receipts, declined_file_ids, peer_auto_dl, fwd_bridge,
@@ -10235,7 +10248,6 @@ async fn handle_incoming_request_inner(
     vc_signal_rate_tokens: &mut HashMap<String, (u32, std::time::Instant)>,
     mls_dirty: &mut bool,
     guest_rooms: &super::guest_view::GuestView,
-    subscribed_channels: &HashMap<String, Vec<String>>,
     db_path: &str,
     db_passphrase: &str,
     local_peer_str: &str,
@@ -10250,7 +10262,7 @@ async fn handle_incoming_request_inner(
     pending_file_asks: &mut HashMap<String, file_asks::PendingFileAsk>,
     pending_public_file_requests: &mut HashMap<String, (String, String, std::time::Instant)>,
     requested_file_receipts: &mut HashMap<String, std::time::Instant>,
-    declined_file_ids: &mut std::collections::HashSet<String>,
+    declined_file_ids: &mut file_handler::DeclinedFiles,
     peer_auto_dl: &mut HashMap<String, u32>,
     fwd_bridge: FwdBridge<'_>,
     request: HavenMessage,
@@ -11681,9 +11693,16 @@ async fn handle_incoming_request_inner(
                     } else {
                         format!("server:{sid_str}")
                     };
+                    // A channel push lands only in the channel on screen.
                     let auto_ok = explicitly_requested
                         || pending_file_streams.contains_key(&fid)
-                        || file_handler::auto_download_allows(size, &name, &ext, &auto_dl_key, voice);
+                        || if sid_str.is_empty() {
+                            file_handler::auto_download_allows(size, &name, &ext, &auto_dl_key, voice)
+                        } else {
+                            file_handler::channel_push_allows(
+                                size, &name, &ext, &sid_str, Some(cid_str.as_str()), voice,
+                            )
+                        };
 
                     // Only a DM header inlines bytes (an offline image).
                     let mut inline_done = false;
@@ -11801,7 +11820,7 @@ async fn handle_incoming_request_inner(
                     if !already_complete && !inline_done && !auto_ok
                         && share_ref.is_none() && aes_key.is_some()
                     {
-                        declined_file_ids.insert(fid.clone());
+                        declined_file_ids.insert(&fid, peer_str);
                         if let Some(early) = early_file_streams.remove(&stream_id) {
                             let _ = tokio::fs::remove_file(&early.temp_path).await;
                         }
@@ -13376,6 +13395,22 @@ async fn handle_incoming_request_inner(
 
             if let Some(mls_mgr) = mls {
                 if !mls_mgr.has_group(&group_key) {
+                    // A restricted channel we may not read: every room member gets its frames
+                    // (rooms are unfiltered), so judging a bootstrap per post would elect a
+                    // coordinator for each. Noted once a minute in the dedup map, NEVER in
+                    // `mls_bootstrap_requested`, which judges whether a Welcome was asked for.
+                    let unreadable = match (&msg_channel_id, server_states.get(&server_id)) {
+                        (Some(cid), Some(state)) => !state.can_see_channel(&local_peer_str, cid),
+                        _ => false,
+                    };
+                    if unreadable {
+                        let noted = format!("{UNREADABLE_GROUP_NOTED}{group_key}");
+                        if !channel_sync_sent.get(&noted).is_some_and(|t| t.elapsed() < MLS_BOOTSTRAP_TIMEOUT) {
+                            channel_sync_sent.insert(noted, std::time::Instant::now());
+                            hollow_log!("[HOLLOW-MLS] Frames for {group_key}, a channel we may not read, are not ours (noted once a minute)");
+                        }
+                        return;
+                    }
                     hollow_log!("[HOLLOW-MLS] Received MlsChannelMessage for unknown group {group_key}");
 
                     // A member of this server without its MLS group lost the Welcome, so
@@ -13383,13 +13418,6 @@ async fn handle_incoming_request_inner(
                     // (expires after 60s) so this cannot spam.
                     if !mls_bootstrap_requested.get(&group_key).is_some_and(|t| t.elapsed() < MLS_BOOTSTRAP_TIMEOUT) {
                         if let Some(state) = server_states.get(&server_id) {
-                            // Subgroup: only bootstrap if we actually qualify for the
-                            // channel (a non-qualifying member never holds the key and
-                            // must NOT request it). Server group: any member bootstraps.
-                            let may_bootstrap = match &msg_channel_id {
-                                Some(cid) => state.can_see_channel(&local_peer_str, cid),
-                                None => true,
-                            };
                             // Coordinator = lowest online MASTER (excluding us). For a
                             // subgroup the candidate set is the qualifying members; for
                             // the server group it's all members.
@@ -13409,7 +13437,7 @@ async fn handle_incoming_request_inner(
                                     None
                                 }
                             };
-                            if may_bootstrap {
+                            {
                                 if let Some(coordinator) = coordinator {
                                     if let Ok(kp_bytes) = crate::node::crypto_handler::mint_group_key_package(mls_mgr, crypto_store, &group_key, false) {
                                         let msg = HavenMessage::MlsKeyPackage {
@@ -13441,7 +13469,7 @@ async fn handle_incoming_request_inner(
                     // used, so this frame's twin may be a message we never read.
                     Ok(crate::crypto::Decrypted::Replay) => {
                         ask_sender_for_channels(
-                            channel_sync_sent, channel_asks, subscribed_channels, server_states, ws_cmd_tx,
+                            channel_sync_sent, channel_asks, local_peer_str, server_states, ws_cmd_tx,
                             db_path, db_passphrase, &server_id, &msg_channel_id, &group_key, peer_str,
                         );
                     }
@@ -13979,7 +14007,7 @@ async fn handle_incoming_request_inner(
                         hollow_log!("[HOLLOW-MLS] Decrypt failed for {group_key}: {e}");
 
                         ask_sender_for_channels(
-                            channel_sync_sent, channel_asks, subscribed_channels, server_states, ws_cmd_tx,
+                            channel_sync_sent, channel_asks, local_peer_str, server_states, ws_cmd_tx,
                             db_path, db_passphrase, &server_id, &msg_channel_id, &group_key, peer_str,
                         );
 

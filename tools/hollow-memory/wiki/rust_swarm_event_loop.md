@@ -48,7 +48,6 @@ The loop owns ~40 mutable state variables. They are NOT consolidated into a stru
 - `pending_mls_key_packages: HashMap<String, Vec<(String, Vec<u8>)>>` — KeyPackages queued for batch MLS addition.
 - `mls_bootstrap_requested: HashSet<String>` — server_ids for which we already sent a KeyPackage to the owner.
 - `mls_decrypt_failures: HashMap<String, u32>` — consecutive MLS decrypt failure counter per server. Triggers recovery after 3.
-- `subscribed_channels: HashMap<String, Vec<String>>` — channels the Dart UI is subscribed to per server. Updated from `SubscribeChannels` command. Used to scope sync-on-decrypt-failure to only active channels.
 
 ### CRDT / Server State
 - `server_states: HashMap<String, ServerState>` — all server CRDT states, keyed by server_id. Loaded from SQLCipher on init, each auto-joins its WS relay room.
@@ -555,7 +554,7 @@ The relay never ACKs a direct message, so a dropped KeyRequest/KeyBundle/Session
 - **Prune** (`prune_stale_sessions`) returns pruned peer IDs; the caller clears their `key_request_in_flight` + `decrypt_fail_cooldown`.
 
 ### MLS decrypt failure
-1. **Immediate sync from sender** — request `ChannelSyncRequest` for all subscribed channels from the peer who sent the undecryptable message (5s dedup). Recovers the dropped message before the sender's next successful message advances per-sender timestamps past the gap.
+1. **Immediate sync from sender** — request `ChannelSyncRequest` from the peer who sent the undecryptable message (5s dedup): the subgroup's channel, or for the server group every text channel we may read outside a subgroup (`server_group_channels`; rooms are unfiltered since 0.14.1, so it may be any of them). A frame for a restricted channel we may not read never elects a bootstrap coordinator; it is noted once a minute (`mls_unreadable:` key in `channel_sync_sent`, never `mls_bootstrap_requested`, which judges whether a Welcome was asked for). Recovers the dropped message before the sender's next successful message advances per-sender timestamps past the gap.
 2. Increment per-server failure counter.
 3. After 3 consecutive failures: drop the broken MLS group, send recovery KeyPackage to the coordinator (lowest online peer).
 4. Reset counter on any successful decrypt.

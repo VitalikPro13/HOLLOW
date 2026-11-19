@@ -26,6 +26,7 @@ pub(crate) mod channel_asks;
 pub(crate) mod file_asks;
 pub(crate) mod file_commit;
 pub(crate) mod file_handler;
+pub(crate) mod on_screen;
 pub(crate) mod file_transfer;
 pub(crate) mod floor;
 pub(crate) mod forwarder_client;

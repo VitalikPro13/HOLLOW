@@ -1562,6 +1562,24 @@ pub fn set_auto_download_config(
     Ok(())
 }
 
+/// The server channels on screen on this device right now, as paired lists
+/// (`server_ids[i]` holds `channel_ids[i]`); empty while the window is hidden,
+/// the app is backgrounded or locked. Only these channels take a pushed file's
+/// bytes without a tap. Safe before the node starts; it outlives node restarts.
+/// Synchronous, so two quick updates can never land out of order.
+#[frb(sync)]
+pub fn set_channels_on_screen(
+    server_ids: Vec<String>,
+    channel_ids: Vec<String>,
+) -> Result<(), String> {
+    if server_ids.len() != channel_ids.len() {
+        crate::node::on_screen::set_channels_on_screen(std::iter::empty());
+        return Err("server and channel lists differ in length".to_string());
+    }
+    crate::node::on_screen::set_channels_on_screen(server_ids.into_iter().zip(channel_ids));
+    Ok(())
+}
+
 /// Start the node with the persistent identity from disk. Returns the local peer ID.
 #[frb]
 pub fn start_node() -> Result<String, String> {
@@ -3273,8 +3291,8 @@ pub fn set_invisible(invisible: bool) -> Result<(), String> {
     Ok(())
 }
 
-/// Subscribe to specific channels for topic-based relay routing: only subscribed
-/// channels arrive in real time, the rest sync on demand when opened.
+/// Note the channels just opened, pulling their relay rings if this connection has
+/// not; every channel of the server keeps arriving live whatever is named.
 #[frb]
 pub fn subscribe_channels(server_id: String, channel_ids: Vec<String>) -> Result<(), String> {
     let node = get_node();

@@ -127,6 +127,89 @@ pub(crate) fn auto_download_allows(
     mb > 0 && size <= mb * 1024 * 1024
 }
 
+/// `true` = a PUSHED server-channel file may register its stream: its channel is
+/// on screen AND the auto-download settings take it. The voice-note exemption
+/// therefore holds only in the channel on screen.
+pub(crate) fn channel_push_allows(
+    size: u64,
+    file_name: &str,
+    ext: &str,
+    server_id: &str,
+    channel_id: Option<&str>,
+    voice: bool,
+) -> bool {
+    super::on_screen::channel_on_screen(server_id, channel_id)
+        && auto_download_allows(size, file_name, ext, &format!("server:{server_id}"), voice)
+}
+
+/// Pushed files this session declined (auto-download off, or a channel not on
+/// screen), so their stream bytes that still arrive are deleted, not parked. Every
+/// member's post can add one, so the set is bounded: past [`Self::CAP`] the sender
+/// identity holding the most entries gives up its oldest.
+#[derive(Default)]
+pub(crate) struct DeclinedFiles {
+    /// File id -> the identity whose push put it here.
+    files: HashMap<String, String>,
+    /// Identity -> its files, oldest first.
+    by_sender: HashMap<String, std::collections::VecDeque<String>>,
+}
+
+impl DeclinedFiles {
+    pub(crate) const CAP: usize = 1024;
+
+    pub(crate) fn contains(&self, fid: &str) -> bool {
+        self.files.contains_key(fid)
+    }
+
+    /// Declines `fid`, pushed by the device `sender`.
+    pub(crate) fn insert(&mut self, fid: &str, sender: &str) {
+        if self.files.contains_key(fid) {
+            return;
+        }
+        if self.files.len() >= Self::CAP {
+            let heaviest = self
+                .by_sender
+                .iter()
+                .max_by(|a, b| a.1.len().cmp(&b.1.len()).then_with(|| b.0.cmp(a.0)))
+                .map(|(s, _)| s.clone());
+            if let Some(heaviest) = heaviest {
+                let list = self.by_sender.get_mut(&heaviest);
+                if let Some(old) = list.and_then(|l| l.pop_front()) {
+                    self.files.remove(&old);
+                }
+                if self.by_sender.get(&heaviest).is_some_and(|l| l.is_empty()) {
+                    self.by_sender.remove(&heaviest);
+                }
+            }
+        }
+        let share = crate::node::resolver::resolve(sender);
+        self.files.insert(fid.to_string(), share.clone());
+        self.by_sender.entry(share).or_default().push_back(fid.to_string());
+    }
+
+    pub(crate) fn remove(&mut self, fid: &str) -> bool {
+        let Some(share) = self.files.remove(fid) else { return false };
+        if let Some(list) = self.by_sender.get_mut(&share) {
+            list.retain(|f| f != fid);
+            if list.is_empty() {
+                self.by_sender.remove(&share);
+            }
+        }
+        true
+    }
+
+    fn ids(&self) -> impl Iterator<Item = &String> {
+        self.files.keys()
+    }
+}
+
+/// A cut stream nobody asked for is asked again (an explicit pull, past every
+/// gate) only while its push would still be let in: a channel's only while that
+/// channel is on screen.
+pub(crate) fn pushed_stream_may_reask(p: &PendingFileStream) -> bool {
+    p.pushed && (p.server_id.is_empty() || super::on_screen::channel_on_screen(&p.server_id, Some(&p.channel_id)))
+}
+
 /// Advertise our auto-download preference to one peer DEVICE. Counterparty devices
 /// get the effective threshold for the conversation with their identity; our own
 /// siblings get the GLOBAL threshold, because their mirrored pushes span every
@@ -2293,7 +2376,7 @@ pub(crate) async fn reask_dead_file_streams(
     event_tx: &tokio::sync::mpsc::Sender<crate::node::NetworkEvent>,
     pending_file_asks: &mut HashMap<String, super::file_asks::PendingFileAsk>,
     requested_file_receipts: &mut HashMap<String, std::time::Instant>,
-    declined_file_ids: &mut std::collections::HashSet<String>,
+    declined_file_ids: &mut DeclinedFiles,
     local_peer: &str,
     device_peer_id: &str,
     db_path: &str,
@@ -2321,7 +2404,7 @@ pub(crate) async fn reask_dead_file_streams(
     again.retain(|(fid, _)| {
         pending_file_asks.contains_key(fid)
             || pending_public_file_requests.contains_key(fid)
-            || pending_file_streams.get(fid).is_some_and(|p| p.pushed)
+            || pending_file_streams.get(fid).is_some_and(pushed_stream_may_reask)
     });
     if again.is_empty() {
         return;
@@ -2398,7 +2481,7 @@ pub(crate) async fn handle_request_file(
     event_tx: &tokio::sync::mpsc::Sender<crate::node::NetworkEvent>,
     pending_file_asks: &mut HashMap<String, super::file_asks::PendingFileAsk>,
     requested_file_receipts: &mut HashMap<String, std::time::Instant>,
-    declined_file_ids: &mut std::collections::HashSet<String>,
+    declined_file_ids: &mut DeclinedFiles,
     local_peer: &str,
     device_peer_id: &str,
     db_path: &str,
@@ -2683,12 +2766,12 @@ pub(crate) fn file_of_stream(
 
 /// The file a declined push streaming as `id` from `from` was for.
 pub(crate) fn declined_stream(
-    declined_file_ids: &std::collections::HashSet<String>,
+    declined_file_ids: &DeclinedFiles,
     id: &str,
     from: &str,
     us: &str,
 ) -> Option<String> {
-    stream_names(id, from, us, declined_file_ids).cloned()
+    stream_names(id, from, us, declined_file_ids.ids()).cloned()
 }
 
 /// The file a stream `from` opens under `id` carries, when we expect it: its sender's
@@ -3589,7 +3672,7 @@ pub(crate) async fn handle_envelope_file_header(
     // receipt): we hold no membership to judge the channel by.
     from_guest_pull: bool,
     requested_file_receipts: &mut HashMap<String, std::time::Instant>,
-    declined_file_ids: &mut std::collections::HashSet<String>,
+    declined_file_ids: &mut DeclinedFiles,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     ws_room_peers: &HashMap<String, std::collections::HashSet<String>>,
     local_device: &str,
@@ -3695,11 +3778,14 @@ pub(crate) async fn handle_envelope_file_header(
     // renders the card, but a gated push registers no pending stream and late bytes
     // are deleted rather than parked. An existing pending stream means a transfer we
     // already accepted, since the decrypt-fail retry re-requests WITHOUT a receipt.
+    // A push lands only in the channel on screen (`channel_push_allows`).
     let auto_ok = explicitly_requested
         || pending_file_streams.contains_key(&fid)
-        || auto_download_allows(size, &name, &ext, &format!("server:{server_id}"), voice);
+        || channel_push_allows(
+            size, &name, &ext, sid.as_deref().unwrap_or(server_id), cid.as_deref(), voice,
+        );
     if !complete && !auto_ok && share_ref.is_none() && aes_key.is_some() {
-        declined_file_ids.insert(fid.clone());
+        declined_file_ids.insert(&fid, &sender_peer_id);
         if let Some(early) = early_file_streams.remove(&stream_id) {
             let _ = tokio::fs::remove_file(&early.temp_path).await;
         }
@@ -3971,7 +4057,7 @@ mod tests {
             fid.to_string(), "a.png".into(), "png".into(), "image/png".into(), 10, 0, true, None, None,
             Some("m1".into()), Some("srv".into()), Some("srv-general".into()), 1,
             Some("11".repeat(32)), Some("22".repeat(12)), None, None, None, false, None, None, None, false,
-            &mut receipts, &mut std::collections::HashSet::new(), &ws_tx, &HashMap::new(),
+            &mut receipts, &mut DeclinedFiles::default(), &ws_tx, &HashMap::new(),
             "us", path, pass,
         ).await;
     }
@@ -4002,7 +4088,8 @@ mod tests {
         let (ws_tx, _ws_rx) = tokio::sync::mpsc::unbounded_channel();
         let (mut pending, mut early) = (HashMap::new(), HashMap::new());
         let mut receipts = HashMap::from([("f1".to_string(), std::time::Instant::now())]);
-        let mut declined = std::collections::HashSet::from(["f1".to_string()]);
+        let mut declined = DeclinedFiles::default();
+        declined.insert("f1", "someone");
         for meta_dev in [None, super::super::post_proof::sign_change(&keys(21).0, &card)] {
             let proven = meta_dev.is_some();
             handle_envelope_file_header(
@@ -4087,6 +4174,43 @@ mod tests {
         }
     }
 
+    /// Every member's post can decline a file, so the set stays bounded, and a flood
+    /// from one sender gives up its own oldest entries, never another sender's.
+    #[test]
+    fn declined_files_stay_bounded_and_a_flood_evicts_its_own() {
+        let mut d = DeclinedFiles::default();
+        d.insert("honest-1", "alice");
+        d.insert("honest-2", "alice");
+        let flood = DeclinedFiles::CAP * 3;
+        for i in 0..flood {
+            d.insert(&format!("flood-{i}"), "mallory");
+        }
+        assert_eq!(d.files.len(), DeclinedFiles::CAP, "the declined set grew past its cap");
+        assert!(d.contains("honest-1") && d.contains("honest-2"), "a flood evicted another sender's entries");
+        assert!(!d.contains("flood-0") && d.contains(&format!("flood-{}", flood - 1)), "the flood kept its oldest");
+        assert!(d.remove("honest-1") && !d.contains("honest-1") && !d.remove("honest-1"));
+        d.insert("flood-0", "mallory");
+        assert_eq!(d.files.len(), DeclinedFiles::CAP, "a removal's room went unused");
+    }
+
+    /// A channel push cut mid-stream is asked for again only while its channel is on
+    /// screen; a DM push and an asked file as before.
+    #[test]
+    fn a_cut_channel_push_is_asked_again_only_on_screen() {
+        let _screen = super::super::on_screen::OnScreenReset;
+        let dm = pending_header("alice", 1);
+        let mut channel = pending_header("alice", 1);
+        channel.server_id = "srv".into();
+        channel.channel_id = "general".into();
+        super::super::on_screen::set_channels_on_screen([("srv".to_string(), "other".to_string())]);
+        assert!(!pushed_stream_may_reask(&channel), "a push for a channel off screen was asked for again");
+        assert!(pushed_stream_may_reask(&dm), "a DM push is asked for again");
+        super::super::on_screen::set_channels_on_screen([("srv".to_string(), "general".to_string())]);
+        assert!(pushed_stream_may_reask(&channel));
+        channel.pushed = false;
+        assert!(!pushed_stream_may_reask(&channel), "an answered ask rides its ask, not the push");
+    }
+
     /// A header answering our ask is no push, and neither is a later copy of it; a
     /// push stays one until an ask of ours is answered.
     #[test]
@@ -4141,7 +4265,8 @@ mod tests {
         assert_eq!(file_of_stream(&headers, &file_stream_id(&f1, "bob", "us"), "carol", "us"), None, "carol replayed bob's stream id");
         assert_eq!(file_of_stream(&headers, &file_stream_id(&f1, "bob", "sibling"), "bob", "us"), None, "a stream meant for another device");
         assert_eq!(file_of_stream(&headers, &f1, "bob", "us"), None, "a stream under the bare file id");
-        let declined = std::collections::HashSet::from([f1.clone()]);
+        let mut declined = DeclinedFiles::default();
+        declined.insert(&f1, "bob");
         assert_eq!(declined_stream(&declined, &file_stream_id(&f1, "bob", "us"), "bob", "us"), Some(f1.clone()));
         assert_eq!(declined_stream(&declined, &file_stream_id(&f2, "bob", "us"), "bob", "us"), None);
     }

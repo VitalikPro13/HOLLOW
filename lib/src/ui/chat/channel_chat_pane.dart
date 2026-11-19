@@ -18,6 +18,7 @@ import 'package:hollow/src/core/moderation_format.dart';
 import 'package:hollow/src/core/models/file_attachment.dart';
 import 'package:hollow/src/core/providers/app_shortcuts_provider.dart';
 import 'package:hollow/src/core/providers/channel_chat_provider.dart';
+import 'package:hollow/src/core/providers/channel_on_screen_provider.dart';
 import 'package:hollow/src/core/providers/link_preview_settings_provider.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/blocked_users_provider.dart';
@@ -1466,6 +1467,14 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane>
     // this channel was already open at the bottom nothing else clears it: the
     // scroll handler only marks seen on a bottom re-ENTRY.
     ref.listen<bool>(windowFocusedProvider, _onWindowFocusChanged);
+    // Files pushed while this channel was off screen kept only their card: pull
+    // the ones in view once it is back (window restored, split pane shown).
+    ref.listen<bool>(
+        channelsOnScreenProvider.select((s) => s.contains(
+            (serverId: widget.serverId, channelId: widget.channelId))),
+        (prev, shown) {
+      if (shown && prev != true) _requestViewportFiles();
+    });
     // Opened by the global shortcut, which cannot focus the field itself.
     ref.listen<bool>(chatSearchOpenProvider, _onSearchOpenChanged);
     // "Mention", posted from a surface that has no reference to this composer.

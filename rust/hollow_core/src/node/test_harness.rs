@@ -375,6 +375,12 @@ struct RelayInner {
     topic_buffers: HashMap<(String, String), Vec<(String, Vec<u8>)>>,
     /// Topics nobody subscribes to, as on the relay: a frame only enters the ring.
     unsubscribed_topics: HashSet<String>,
+    /// (device, room) -> the topics its socket filters the room's topic frames to; no entry
+    /// means every topic reaches it and an empty subscribe lifts the filter, as the relay's
+    /// `apply_subscribe`. Only that rule is mirrored (no caps or topic-length check); a
+    /// filter ends with the session or a leave. A hidden sender's picks are intersected with
+    /// it, where the relay's `cast_of` decides both in one pass.
+    topic_filters: HashMap<(String, String), HashSet<String>>,
     /// A relay from before the catch-up end mark.
     withhold_catchup_end: bool,
     /// A relay without `roster_check` (design ROSTER-CHECK): says so, answers nothing.
@@ -1198,6 +1204,8 @@ impl MockRelay {
             conn.online = online;
             conn.client = ClientWire { joins: std::mem::take(&mut conn.client.joins), ..ClientWire::default() };
         }
+        // A fresh session starts unfiltered (mock nodes bypass ws_client, so nothing replays).
+        inner.topic_filters.retain(|(dev, _), _| dev != peer_id);
         if online {
             let session = MockSession::fresh(inner.ring_cap);
             inner.sessions.insert(peer_id.to_string(), session);
@@ -1708,6 +1716,7 @@ impl RelayInner {
                 }
             }
             WsCommand::LeaveRoom { room_code } => {
+                inner.topic_filters.remove(&(from.to_string(), room_code.clone()));
                 let visible = inner.receives(&room_code, from);
                 let was = inner
                     .rooms
@@ -1820,10 +1829,24 @@ impl RelayInner {
                 if inner.unsubscribed_topics.contains(&topic) {
                     return;
                 }
+                // A socket that filtered the room hears only the topics it named.
+                let reach = if inner.topic_filters.keys().any(|(_, r)| *r == room_code) {
+                    let heard: HashSet<String> = inner
+                        .room_slots(&room_code)
+                        .into_iter()
+                        .filter(|d| {
+                            inner.topic_filters.get(&(d.clone(), room_code.clone())).is_none_or(|t| t.contains(&topic))
+                        })
+                        .collect();
+                    Some(match reach {
+                        Some(picks) => picks.intersection(&heard).cloned().collect(),
+                        None => heard,
+                    })
+                } else {
+                    reach
+                };
                 if let Some(m) = inner.meter.as_mut() { m.send_topic_cmds += 1; }
                 let n = data.len() as u64;
-                // Simplify topic routing to a plain room broadcast (no test
-                // exercises topic filtering yet).
                 let delivered = inner.fan_out(&room_code, from, reach.as_ref(), WsEvent::Message {
                     room: room_code.clone(),
                     from: from.to_string(),
@@ -1833,6 +1856,15 @@ impl RelayInner {
                     m.deliveries += delivered;
                     m.broadcast_deliveries += delivered;
                     m.bytes_out += delivered * n;
+                }
+            }
+            WsCommand::Subscribe { room_code, topics } => {
+                // An empty set lifts the room's filter, as on the relay.
+                let key = (from.to_string(), room_code);
+                if topics.is_empty() {
+                    inner.topic_filters.remove(&key);
+                } else {
+                    inner.topic_filters.insert(key, topics.into_iter().collect());
                 }
             }
             WsCommand::SetTopicBuffer { room_code, channels, retention_secs, clear, auth } => {
@@ -27523,6 +27555,10 @@ async fn channel_file_header_reaches_a_member_without_a_leaf() {
 
     drain_events(&mut b);
     drain_events(&mut m);
+    // t18: the restricted channel is not on screen on B, so the Olm header lands as a
+    // card whose pushed bytes are declined.
+    let _screen = super::on_screen::OnScreenReset;
+    super::on_screen::set_channels_on_screen(std::iter::empty());
     let src = global_tmp.path().join("ledger.txt");
     std::fs::write(&src, b"restricted channel file body").expect("write src file");
     o.cmd_tx
@@ -27545,7 +27581,13 @@ async fn channel_file_header_reaches_a_member_without_a_leaf() {
         .unwrap();
 
     let mut got_fid: Option<String> = None;
+    let mut declined: Vec<String> = Vec::new();
     wait_event(&mut b, std::time::Duration::from_secs(20), |ev| {
+        if let NetworkEvent::FileFailed { file_id, error } = ev
+            && error == "auto_download_off"
+        {
+            declined.push(file_id.clone());
+        }
         if let NetworkEvent::FileHeaderReceived { file_id, file_name, .. } = ev {
             if file_name.starts_with("ledger") {
                 got_fid = Some(file_id.clone());
@@ -27562,6 +27604,10 @@ async fn channel_file_header_reaches_a_member_without_a_leaf() {
     );
     let meta = b.file_meta(&fid).expect("header persisted on the leaf-less member");
     assert_eq!(meta.file_name, "ledger.txt", "the header names the file");
+    assert!(
+        declined.contains(&fid),
+        "the Olm header of a channel not on screen must decline its pushed bytes, declined {declined:?}",
+    );
 
     // NOT asserted here, though it belongs to this site: that a member who does NOT
     // qualify is never sent the header. The complement set IS filtered through
@@ -28125,7 +28171,8 @@ fn harness_fixed_sleep_budget_does_not_grow() {
     // 2026-11-15: t14-chanfile's pull tests added one spawn stagger, one absence (no bytes
     // from a refused answer) and one settle on a running holder's DB, whose own catch-up
     // can rewrite the proof a test sets (5.5 s; scan 1247.9 s).
-    const BUDGET_MS: u64 = 1_248_900;
+    // 2026-11-19: t18-archive's unopened-channel test added one spawn stagger (1.2 s; scan 1249.2 s).
+    const BUDGET_MS: u64 = 1_249_200;
 
     let src = include_str!("test_harness.rs");
     // Built from pieces so this scan does not count its own source text.
@@ -70113,4 +70160,334 @@ async fn t17_name_color_rides_a_profile_relay() {
         wait_until(10, async || row() == Some(("cleared".into(), String::new()))).await,
         "the owner's clear rides the relay, got {:?}", row()
     );
+}
+
+// t18-archive
+// The Archive lists a channel only once it was opened on the device: the open channel's
+// topic filter kept every other channel's posts away while the device was online.
+
+/// A member that opened #general still stores what is posted live in a channel it never
+/// opened, so its Archive (and history) holds every channel it may see.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn t18_a_post_in_a_channel_never_opened_is_stored_while_another_is_open() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    const O_MASTER: u8 = 231;
+    const J_MASTER: u8 = 232;
+    let o_master = NativeKeypair::from_secret_bytes(&seed_bytes(O_MASTER)).peer_id();
+    let j_master = NativeKeypair::from_secret_bytes(&seed_bytes(J_MASTER)).peer_id();
+    let mut o = spawn_node_with_friends(&relay, O_MASTER, O_MASTER, &[&j_master]).await;
+    sleep_ms(1200).await; // spawn stagger, as in the subscribe race test
+    let mut j = spawn_node_with_friends(&relay, J_MASTER, J_MASTER, &[&o_master]).await;
+    expect_dm_pair_ready(&relay, &o, &j, 15).await;
+
+    let server_id = create_server_and_wait(&mut o, "Unopened Channel Server").await;
+    let general = general_channel_of(&server_id);
+    let second = crate::node::new_channel_id(&server_id);
+    o.cmd_tx
+        .send(NodeCommand::CreateChannel {
+            server_id: server_id.clone(),
+            channel_id: second.clone(),
+            name: "second".to_string(),
+            category: None,
+            channel_type: "text".to_string(),
+        })
+        .await
+        .unwrap();
+    assert!(
+        wait_event(&mut o, std::time::Duration::from_secs(5), |ev| {
+            matches!(ev, NetworkEvent::ChannelAdded { channel_id, .. } if *channel_id == second)
+        })
+        .await,
+        "the owner makes #second"
+    );
+
+    j.cmd_tx
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&server_id) })
+        .await
+        .unwrap();
+    assert!(
+        wait_event(&mut j, std::time::Duration::from_secs(8), |ev| {
+            matches!(ev, NetworkEvent::ServerJoined { server_id: sid, .. } if *sid == server_id)
+        })
+        .await,
+        "the member joins"
+    );
+    expect_mls_group(&[&o, &j], &server_id, 15).await;
+    assert!(
+        wait_until(10, async || j.server_state(&server_id).is_some_and(|s| s.channels.contains_key(&second))).await,
+        "the member holds #second"
+    );
+
+    // The member opens #general, and only #general.
+    let mark = relay.log_mark();
+    j.cmd_tx
+        .send(NodeCommand::SubscribeChannels { server_id: server_id.clone(), channel_ids: vec![general.clone()] })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(5, async || relay
+            .commands_since(&j.device_id, mark)
+            .iter()
+            .any(|(kind, _, _)| *kind == "subscribe"))
+        .await,
+        "the member's subscribe reaches the relay"
+    );
+    drain_events(&mut j);
+
+    post_channel(&o, &server_id, &general, "t18 opened post").await;
+    post_channel(&o, &server_id, &second, "t18 unopened post").await;
+
+    assert!(
+        wait_until(8, async || j.channel_messages(&server_id, &general).iter().any(|m| m.text == "t18 opened post")).await,
+        "the open channel's post lands"
+    );
+    assert!(
+        wait_until(8, async || j.channel_messages(&server_id, &second).iter().any(|m| m.text == "t18 unopened post")).await,
+        "a post in a channel the member never opened must be stored too, or the Archive never lists that channel"
+    );
+}
+
+/// A frame of the server group that fails to open on a device that never opened a channel
+/// asks its sender for the channels it may carry: rooms are unfiltered, so it can be any
+/// readable channel, opened or not.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn t18_a_failed_frame_on_a_device_that_opened_nothing_still_asks_for_the_channel() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (_o, mut v, c, server_id) = setup_epoch_race_trio(&relay, 233, 234, 235).await;
+    use super::types::HavenMessage;
+    let general = general_channel_of(&server_id);
+    relay.set_recording(&c.device_id, true);
+    expect_channel_post_arrives(&c, &mut v, &server_id, "t18 read once").await;
+    let replay = relay.recorded_frames(&c.device_id).into_iter().find_map(|f| {
+        match serde_json::from_slice::<HavenMessage>(super::frame_auth::unchecked_body(&f)) {
+            Ok(m @ HavenMessage::MlsChannelMessage { channel_id: None, .. }) => Some(m),
+            _ => None,
+        }
+    }).expect("C's post went out over the server group");
+
+    let asked = async || {
+        v.carried_to(&c.device_id)
+            .await
+            .iter()
+            .filter(|m| matches!(m, HavenMessage::ChannelSyncRequest { channel_id, .. } if *channel_id == general))
+            .count()
+    };
+    let before = asked().await;
+    relay.inject_direct(&server_id, &c.device_id, &v.device_id, frame(&replay));
+    assert!(
+        wait_until(10, async || asked().await > before).await,
+        "a device that opened no channel still asks the sender for the readable channel its failed frame may carry",
+    );
+}
+
+// t18-archive-onscreen
+// With the topic filter gone every member device hears every channel's posts live, so a
+// pushed file's BYTES land by themselves only in the channel on screen on that device.
+
+/// `node` posts `path` into `channel` of `server_id` (a voice note when `voice`) and
+/// returns its file id.
+async fn post_t18_file(
+    node: &mut TestNode, server_id: &str, channel: &str, path: &std::path::Path, mid: &str, voice: bool,
+) -> String {
+    node.cmd_tx
+        .send(NodeCommand::SendFile(Box::new(super::types::SendFilePayload {
+            peer_id: None,
+            server_id: Some(server_id.to_string()),
+            channel_id: Some(channel.to_string()),
+            file_path: path.to_str().unwrap().to_string(),
+            message_id: mid.to_string(),
+            message_text: String::new(),
+            vthumb: None,
+            override_width: None,
+            override_height: None,
+            share_ref: None,
+            voice,
+            poster: None,
+            album: None,
+        })))
+        .await
+        .unwrap();
+    let mut fid = None;
+    wait_event(node, std::time::Duration::from_secs(15), |ev| {
+        if let NetworkEvent::FileCompleted { file_id, .. } = ev {
+            fid = Some(file_id.clone());
+        }
+        fid.is_some()
+    })
+    .await;
+    fid.expect("the sender keeps its own copy")
+}
+
+/// A file and a voice note pushed into a channel that is not on screen leave the card and
+/// no bytes on every member device; in the channel on screen both land by themselves;
+/// an explicit pull of the declined file still lands.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn t18_a_channel_push_lands_by_itself_only_in_the_channel_on_screen() {
+    let _g = test_guard();
+    let _screen = super::on_screen::OnScreenReset;
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    super::file_handler::set_auto_download_conf(169, std::collections::HashMap::new());
+
+    let relay = MockRelay::new();
+    let (mut o, mut a, mut b, server_id) = fanout_trio(&relay, [(243, 244), (245, 246), (247, 248)]).await;
+    let general = general_channel_of(&server_id);
+    let declined_on = async |node: &mut TestNode, fid: &str| {
+        wait_event(node, std::time::Duration::from_secs(20), |ev| {
+            matches!(ev, NetworkEvent::FileFailed { file_id, error } if *file_id == fid && error == "auto_download_off")
+        })
+        .await
+    };
+
+    // Another channel of the server is on screen: #general's push keeps its card only.
+    super::on_screen::set_channels_on_screen([(server_id.clone(), "another-channel".to_string())]);
+    let plaintext = fanout_bytes();
+    let unseen = global_tmp.path().join("unseen.bin");
+    std::fs::write(&unseen, &plaintext).expect("write the file");
+    let fid_unseen = post_t18_file(&mut o, &server_id, &general, &unseen, "t18-unseen", false).await;
+    for node in [&mut a, &mut b] {
+        assert!(declined_on(node, &fid_unseen).await, "{} declines a push into a channel not on screen", node.device_id);
+    }
+
+    // Nothing on screen: a voice note is declined too.
+    super::on_screen::set_channels_on_screen(std::iter::empty());
+    let note_bytes: Vec<u8> = (0..4_000u32).map(|i| (i % 251) as u8).collect();
+    let note = global_tmp.path().join("voice_1700000000_ab12.ogg");
+    std::fs::write(&note, &note_bytes).expect("write the note");
+    let fid_note_unseen = post_t18_file(&mut o, &server_id, &general, &note, "t18-note-unseen", true).await;
+    for node in [&mut a, &mut b] {
+        assert!(declined_on(node, &fid_note_unseen).await, "{} declines a voice note in a channel not on screen", node.device_id);
+    }
+
+    expect_relay_drained(&relay, &o, "t18-unseen").await;
+    flush_frames(&relay, &mut a).await;
+    flush_frames(&relay, &mut b).await;
+    let kept = transfer_temps(".ws_recv_");
+    assert!(kept.is_empty(), "a declined push left bytes behind: {kept:?}");
+    for node in [&a, &b] {
+        for fid in [&fid_unseen, &fid_note_unseen] {
+            let meta = node.file_meta(fid).unwrap_or_else(|| panic!("{} keeps the card of {fid}", node.device_id));
+            assert!(meta.disk_path.is_none(), "{} kept the bytes of {fid} from a channel not on screen", node.device_id);
+        }
+    }
+
+    // #general on screen: a file and a voice note land by themselves. B's bytes wait until
+    // A's landed, since the harness's nodes share one files folder.
+    super::on_screen::set_channels_on_screen([(server_id.clone(), general.clone())]);
+    relay.hold_streams(&o.device_id, &b.device_id);
+    let seen = global_tmp.path().join("seen.bin");
+    let seen_bytes: Vec<u8> = plaintext.iter().map(|x| x.wrapping_add(1)).collect();
+    std::fs::write(&seen, &seen_bytes).expect("write the file");
+    let fid_seen = post_t18_file(&mut o, &server_id, &general, &seen, "t18-seen", false).await;
+    expect_file_lands(&mut a, &fid_seen, &seen_bytes).await;
+    relay.release_streams(&o.device_id, &b.device_id, true);
+    expect_file_lands(&mut b, &fid_seen, &seen_bytes).await;
+
+    relay.hold_streams(&o.device_id, &b.device_id);
+    let note2 = global_tmp.path().join("voice_1700000001_cd34.ogg");
+    let note2_bytes: Vec<u8> = note_bytes.iter().map(|x| x.wrapping_add(7)).collect();
+    std::fs::write(&note2, &note2_bytes).expect("write the note");
+    let fid_note_seen = post_t18_file(&mut o, &server_id, &general, &note2, "t18-note-seen", true).await;
+    expect_file_lands(&mut a, &fid_note_seen, &note2_bytes).await;
+    relay.release_streams(&o.device_id, &b.device_id, true);
+    expect_file_lands(&mut b, &fid_note_seen, &note2_bytes).await;
+
+    // Nothing on screen again: asking for the declined file still brings it.
+    super::on_screen::set_channels_on_screen(std::iter::empty());
+    a.cmd_tx
+        .send(NodeCommand::RequestFile { file_id: fid_unseen.clone(), peer_id: o.master_id.clone(), chunks: Vec::new() })
+        .await
+        .unwrap();
+    expect_file_lands(&mut a, &fid_unseen, &plaintext).await;
+}
+
+/// A channel push cut part way is asked for again only while its channel is on screen:
+/// off screen the stalled stream is dropped and nothing re-asks it (the re-ask is an
+/// explicit pull, past the on-screen gate); on screen it completes.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn t18_a_cut_channel_push_is_asked_again_only_on_screen() {
+    let _g = test_guard();
+    let _screen = super::on_screen::OnScreenReset;
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    super::file_handler::set_auto_download_conf(169, std::collections::HashMap::new());
+
+    let relay = MockRelay::new();
+    let (mut o, mut a, b, server_id) = fanout_trio(&relay, [(249, 250), (251, 252), (253, 254)]).await;
+    let general = general_channel_of(&server_id);
+    super::on_screen::set_channels_on_screen([(server_id.clone(), general.clone())]);
+
+    // Cuts O's push to A after two frames, the channel on screen or not by then.
+    #[allow(clippy::too_many_arguments)]
+    async fn cut_push(
+        relay: &MockRelay, o: &mut TestNode, a: &TestNode, b: &TestNode, server_id: &str, general: &str,
+        path: &std::path::Path, mid: &str,
+    ) -> String {
+        relay.hold_streams(&o.device_id, &a.device_id);
+        relay.hold_streams(&o.device_id, &b.device_id);
+        let fid = post_t18_file(o, server_id, general, path, mid, false).await;
+        let stream_id = super::file_handler::file_stream_id(&fid, &o.device_id, &a.device_id);
+        assert!(
+            wait_until(20, async || relay.held_stream_count(&o.device_id, &a.device_id) > 2
+                && super::ws_stream_transfer::relay_streams_running(&o.device_id) == 0).await,
+            "O pushes the file to A",
+        );
+        relay.release_streams_part(&o.device_id, &a.device_id, 2);
+        let partial = || super::ws_stream_transfer::stream_progress()
+            .lock()
+            .ok()
+            .and_then(|m| m.get(&stream_id).map(|p| p.bytes_received.load(std::sync::atomic::Ordering::Relaxed)))
+            .unwrap_or(0);
+        assert!(wait_until(10, async || partial() > 0).await, "precondition: A holds part of the push");
+        fid
+    }
+    let (o_dev, a_dev) = (o.device_id.clone(), a.device_id.clone());
+    let stalled = |fid: &str| super::file_handler::file_stream_id(fid, &o_dev, &a_dev);
+    let streaming = |id: &str| super::ws_stream_transfer::stream_progress().lock().ok().is_some_and(|m| m.contains_key(id));
+
+    // Off screen by the time the stream stalls: dropped, never asked for again.
+    let bytes_off = fanout_bytes();
+    let off = global_tmp.path().join("cut_off.bin");
+    std::fs::write(&off, &bytes_off).expect("write the file");
+    let fid_off = cut_push(&relay, &mut o, &a, &b, &server_id, &general, &off, "t18-cut-off").await;
+    let stream_off = stalled(&fid_off);
+    super::on_screen::set_channels_on_screen(std::iter::empty());
+    super::ws_stream_transfer::DEAD_FILE_STREAM_IDLE_MS.store(2_000, std::sync::atomic::Ordering::Relaxed);
+    let dropped = wait_until(15, async || !streaming(&stream_off)).await;
+    let landed = wait_event(&mut a, std::time::Duration::from_secs(8), |ev| {
+        matches!(ev, NetworkEvent::FileCompleted { file_id, .. } if *file_id == fid_off)
+    })
+    .await;
+    super::ws_stream_transfer::DEAD_FILE_STREAM_IDLE_MS.store(150_000, std::sync::atomic::Ordering::Relaxed);
+    assert!(dropped, "precondition: A dropped the stalled stream");
+    assert!(!landed, "a cut push was asked for again while its channel was off screen");
+    assert!(a.file_meta(&fid_off).is_some_and(|m| m.disk_path.is_none()), "A holds bytes of a channel off screen");
+    relay.release_streams(&o.device_id, &b.device_id, true);
+
+    // On screen: the stalled push is asked for again and lands whole.
+    super::on_screen::set_channels_on_screen([(server_id.clone(), general.clone())]);
+    let bytes_on: Vec<u8> = bytes_off.iter().map(|x| x.wrapping_add(3)).collect();
+    let on = global_tmp.path().join("cut_on.bin");
+    std::fs::write(&on, &bytes_on).expect("write the file");
+    let fid_on = cut_push(&relay, &mut o, &a, &b, &server_id, &general, &on, "t18-cut-on").await;
+    super::ws_stream_transfer::DEAD_FILE_STREAM_IDLE_MS.store(2_000, std::sync::atomic::Ordering::Relaxed);
+    let done = wait_event(&mut a, std::time::Duration::from_secs(30), |ev| {
+        matches!(ev, NetworkEvent::FileCompleted { file_id, .. } if *file_id == fid_on)
+    })
+    .await;
+    super::ws_stream_transfer::DEAD_FILE_STREAM_IDLE_MS.store(150_000, std::sync::atomic::Ordering::Relaxed);
+    assert!(done, "the cut push never completed with its channel on screen");
+    relay.release_streams(&o.device_id, &b.device_id, true);
+    drop(b);
 }

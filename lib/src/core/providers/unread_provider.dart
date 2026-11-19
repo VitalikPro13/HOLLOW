@@ -150,7 +150,7 @@ class UnreadNotifier extends Notifier<UnreadState> {
 
       for (final cid in entry.value) {
         final stateKey = '$serverId:$cid';
-        final level = notifSettings.effectiveChannelLevel(serverId, cid);
+        final level = notifSettings.effectiveUnreadLevel(serverId, cid);
         if (level == NotificationLevel.nothing) continue;
 
         final val = storedSeen['seen:ch:$stateKey'];
@@ -218,7 +218,7 @@ class UnreadNotifier extends Notifier<UnreadState> {
     for (final cid in channelIds) {
       final key = '$serverId:$cid';
       try {
-        final level = notifSettings.effectiveChannelLevel(serverId, cid);
+        final level = notifSettings.effectiveUnreadLevel(serverId, cid);
         if (level == NotificationLevel.nothing) {
           updatedCounts.remove(key);
           updatedMentions.remove(key);

@@ -101,7 +101,6 @@ List<String> _select(
       effectiveMb: (key) => mb[key] ?? 169,
       busy: busy.contains,
       blocked: (_) => false,
-      hiddenServer: (_) => false,
       limit: limit,
     ).map((a) => a.fileId).toList();
 
@@ -135,35 +134,20 @@ void main() {
     expect(picked, ['small']);
   });
 
-  test('a channel file is gated by its server and asked of its poster', () {
-    final rows = [
-      _file('ch', context: 'channel', contextId: 'srv1:general', sender: 'poster-master'),
-      _file('muted', context: 'channel', contextId: 'srv2:general'),
-    ];
-    final asks = selectRecentFilesToFetch(
-      rows,
-      now: _now,
-      effectiveMb: (key) => key == 'server:srv2' ? 0 : 169,
-      busy: (_) => false,
-      blocked: (_) => false,
-      hiddenServer: (_) => false,
-    );
-    expect(asks.map((a) => (a.fileId, a.peerId)), [('ch', 'poster-master')]);
-  });
-
-  test('nothing of a server this device hides as age-restricted is asked', () {
-    final asks = selectRecentFilesToFetch(
-      [
-        _file('adult', context: 'channel', contextId: 'adult:general'),
-        _file('clean', context: 'channel', contextId: 'clean:general'),
-      ],
-      now: _now,
-      effectiveMb: (_) => 169,
-      busy: (_) => false,
-      blocked: (_) => false,
-      hiddenServer: (sid) => sid == 'adult',
-    );
-    expect(asks.map((a) => a.fileId), ['clean']);
+  // Vitalik 11-19: nothing posted in a server channel lands unless that channel
+  // is on screen, so the post-link sweep leaves every channel file alone.
+  test('no channel file is swept, voice notes included', () {
+    final picked = _select([
+      _file('ch-photo', context: 'channel', contextId: 'srv1:general', sender: 'poster-master'),
+      _file('ch-voice',
+          context: 'channel',
+          contextId: 'srv1:general',
+          name: 'voice_1791_ab12.ogg',
+          ext: 'ogg',
+          size: 90 * 1024),
+      _file('dm-photo'),
+    ]);
+    expect(picked, ['dm-photo']);
   });
 
   test('a DM file is asked of the conversation', () {
@@ -173,7 +157,6 @@ void main() {
       effectiveMb: (_) => 169,
       busy: (_) => false,
       blocked: (_) => false,
-      hiddenServer: (_) => false,
     );
     expect(asks.single.peerId, 'friend-master');
   });

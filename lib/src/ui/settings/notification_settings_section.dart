@@ -528,7 +528,7 @@ class _ServerNotificationRowState
   Widget build(BuildContext context) {
     final touch = SettingsDensity.touchOf(context);
     final notif = ref.watch(notificationSettingsProvider);
-    final level = notif.serverLevels[widget.serverId] ?? NotificationLevel.all;
+    final level = notif.serverLevelOf(widget.serverId);
     final levelLabel = _levelLabels[level]!;
     final overrides = notif.channelOverrides.keys
         .where((k) => k.startsWith('${widget.serverId}:'))

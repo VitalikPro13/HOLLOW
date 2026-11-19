@@ -1,7 +1,6 @@
 import 'dart:async';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:hollow/src/core/age_gate.dart';
 import 'package:hollow/src/core/providers/blocked_users_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/file_transfer_provider.dart';
@@ -23,24 +22,24 @@ const int kRecentFilesMaxAsks = 100;
 class RecentFileAsk {
   final String fileId;
 
-  /// The conversation (DM) or the poster (channel); the node walks the other
-  /// holders, own siblings included, when this one cannot answer.
+  /// The conversation; the node walks the other holders, own siblings
+  /// included, when this one cannot answer.
   final String peerId;
   const RecentFileAsk(this.fileId, this.peerId);
 }
 
-/// The files a linked device pulls on its own: from the last [kRecentFilesWindow],
-/// newest first, and only what the auto-download settings would have pulled for
-/// that conversation (voice notes exempt, as everywhere). Nothing of a blocked
-/// identity: [blocked] takes any peer id, device or master. Nothing of a server
-/// this device hides as age-restricted.
+/// The DM files a linked device pulls on its own: from the last
+/// [kRecentFilesWindow], newest first, and only what the auto-download settings
+/// would have pulled for that conversation (voice notes exempt, as everywhere).
+/// Nothing of a blocked identity: [blocked] takes any peer id, device or master.
+/// Never a server channel's file, voice notes included: those land only once
+/// their channel is on screen (the viewport sweep).
 List<RecentFileAsk> selectRecentFilesToFetch(
   Iterable<StoredFileInfo> missing, {
   required DateTime now,
   required int Function(String contextKey) effectiveMb,
   required bool Function(String fileId) busy,
   required bool Function(String peerId) blocked,
-  required bool Function(String serverId) hiddenServer,
   int limit = kRecentFilesMaxAsks,
 }) {
   final since = now.subtract(kRecentFilesWindow).millisecondsSinceEpoch;
@@ -51,23 +50,10 @@ List<RecentFileAsk> selectRecentFilesToFetch(
     if (f.shareRootHash != null) continue;
     if (busy(f.fileId)) continue;
     // Our own siblings would answer for them, past the node's block guard.
-    if (blocked(f.senderId) || (f.contextType == 'dm' && blocked(f.contextId))) {
-      continue;
-    }
-    final String key;
-    final String peer;
-    switch (f.contextType) {
-      case 'dm':
-        key = 'dm:${f.contextId}';
-        peer = f.contextId;
-      case 'channel':
-        final server = f.contextId.split(':').first;
-        if (server.isEmpty || hiddenServer(server)) continue;
-        key = 'server:$server';
-        peer = f.senderId;
-      default:
-        continue;
-    }
+    if (f.contextType != 'dm') continue;
+    if (blocked(f.senderId) || blocked(f.contextId)) continue;
+    final key = 'dm:${f.contextId}';
+    final peer = f.contextId;
     // Older rows stamped seconds; a millisecond stamp is far past this mark.
     final created = f.createdAt < 100000000000 ? f.createdAt * 1000 : f.createdAt;
     if (created < since) continue;
@@ -154,7 +140,6 @@ class RecentFilesSweep {
         return t != null && (t.isDownloading || t.isComplete);
       },
       blocked: (peer) => blockedIds.contains(links.identityOf(peer)),
-      hiddenServer: _ref.read(ageGateProvider).hidden.contains,
     );
     unawaited(network_api
         .logFromDart(

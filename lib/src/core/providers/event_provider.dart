@@ -34,6 +34,7 @@ import 'package:hollow/src/core/services/pending_join_ffi.dart'
     show discardPendingJoin;
 import 'package:hollow/src/core/providers/security_alerts_provider.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
+import 'package:hollow/src/core/providers/channel_on_screen_provider.dart';
 import 'package:hollow/src/core/providers/split_view_provider.dart';
 import 'package:hollow/src/core/providers/avatar_frame_provider.dart';
 import 'package:hollow/src/core/providers/server_avatar_anim_provider.dart';
@@ -99,16 +100,19 @@ import 'package:hollow/src/ui/dialogs/age_gate_dialogs.dart'
 import 'package:hollow/src/ui/dialogs/twitch_join_dialog.dart' show showTwitchJoinDialog, handleTwitchJoinResult, showJoinRejectedDialog, showNsfwConfirmDialog;
 
 /// The auto-download setting a share-backed file header is judged by, or null while
-/// its server's catch-up is still running. A DM has no catch-up to wait out: its sync
-/// never completes a server's, so waiting would block every large DM file for good.
+/// its server's catch-up is still running or its channel is not on screen (nothing a
+/// peer posts lands on disk by itself in a channel nobody is looking at). A DM has no
+/// catch-up to wait out: its sync never completes a server's, so waiting would block
+/// every large DM file for good.
 @visibleForTesting
 String? shareAutoDownloadScope({
   required String serverId,
   required String senderIdentity,
   required bool serverSyncDone,
+  required bool channelOnScreen,
 }) {
   if (serverId.isEmpty) return 'dm:$senderIdentity';
-  return serverSyncDone ? 'server:$serverId' : null;
+  return serverSyncDone && channelOnScreen ? 'server:$serverId' : null;
 }
 
 /// A voice channel or meeting of a server the relay now refuses cannot go on
@@ -238,6 +242,14 @@ class EventStreamNotifier extends Notifier<bool> {
   /// Message IDs already processed via ChannelMessageReceived, so a
   /// ChannelNotificationHint for the same id is not double-counted.
   final Set<String> _processedChannelMessageIds = {};
+
+  /// When a hint counted a message id: its post landing within
+  /// [hintLiveWindow] is the same live delivery and still notifies (the hint
+  /// never does); a post repaired later stays silent.
+  final Map<String, DateTime> _hintCountedAt = {};
+
+  @visibleForTesting
+  Duration hintLiveWindow = const Duration(seconds: 15);
 
   final _albumNotifications = AlbumNotificationGate();
 
@@ -665,9 +677,24 @@ class EventStreamNotifier extends Notifier<bool> {
               .read(unreadMarkerProvider.notifier)
               .noteLive(channelMarkerKey(serverId, channelId), messageId);
         }
-        final channelNotifLevel = ref
-            .read(notificationSettingsProvider.notifier)
-            .effectiveChannelLevel(serverId, channelId);
+        // Its hint got here first and already counted it: never count it twice.
+        // Live, the hint routinely wins the race (it skips the store), so the
+        // post still notifies; one repaired long after (a ring overflow, then
+        // the gap repair) does not.
+        final hintAt =
+            messageId.isEmpty ? null : _hintCountedAt.remove(messageId);
+        final hintCounted = messageId.isNotEmpty &&
+            _processedChannelMessageIds.contains(messageId);
+        if (hintCounted &&
+            (hintAt == null ||
+                DateTime.now().difference(hintAt) > hintLiveWindow)) {
+          break;
+        }
+        final notifSettings = ref.read(notificationSettingsProvider.notifier);
+        final channelNotifLevel =
+            notifSettings.effectiveChannelLevel(serverId, channelId);
+        final unreadLevel =
+            notifSettings.effectiveUnreadLevel(serverId, channelId);
         final isChannelMuted =
             channelNotifLevel == NotificationLevel.nothing;
         final localPeerId = ref.read(identityProvider).peerId ?? '';
@@ -683,10 +710,17 @@ class EventStreamNotifier extends Notifier<bool> {
             (localNick != null && text.contains('@$localNick')) ||
             replyToOwn;
         final isMentionFiltered = channelNotifLevel == NotificationLevel.mentions && !isMentioned;
-        if (!isChannelMuted && !isMentionFiltered && !senderMasterBlocked) {
-          ref.read(unreadProvider.notifier).onChannelMessage(
-              serverId, channelId, messageId, isViewingChannel,
-              isMention: isMentioned);
+        // A server never set notifies on mentions only but counts every post.
+        final unreadFiltered = unreadLevel == NotificationLevel.nothing ||
+            (unreadLevel == NotificationLevel.mentions && !isMentioned);
+        if (!unreadFiltered && !senderMasterBlocked) {
+          if (!hintCounted) {
+            ref.read(unreadProvider.notifier).onChannelMessage(
+                serverId, channelId, messageId, isViewingChannel,
+                isMention: isMentioned);
+          }
+          // The hint carries no text, so a live post records the preview even
+          // when its hint already counted it.
           if (isMentioned && !isViewingChannel) {
             ref.read(mentionPreviewProvider.notifier).record(MentionPreview(
                   serverId: serverId,
@@ -1323,10 +1357,11 @@ class EventStreamNotifier extends Notifier<bool> {
         if (isViewingChannel) break;
         // Deterministic dedup against ChannelMessageReceived on a subscribed channel.
         if (messageId.isNotEmpty && _processedChannelMessageIds.contains(messageId)) break;
-        final channelNotifLevel = ref
+        // A hint only counts unread, so it follows the unread level.
+        final unreadLevel = ref
             .read(notificationSettingsProvider.notifier)
-            .effectiveChannelLevel(serverId, channelId);
-        if (channelNotifLevel == NotificationLevel.nothing) break;
+            .effectiveUnreadLevel(serverId, channelId);
+        if (unreadLevel == NotificationLevel.nothing) break;
         final localName = displayNameFor(
             ref.read(profileProvider), localPeerId);
         final localNick =
@@ -1335,12 +1370,18 @@ class EventStreamNotifier extends Notifier<bool> {
             mentionedNames.contains(localName) ||
             (localNick != null && mentionedNames.contains(localNick)) ||
             isReplyToOwn;
-        if (channelNotifLevel == NotificationLevel.mentions && !isMentioned) break;
+        if (unreadLevel == NotificationLevel.mentions && !isMentioned) break;
         // Use the real message ID (not a synthetic hint- ID).
         final hintMid = messageId.isNotEmpty
             ? messageId
             : 'hint-${DateTime.now().millisecondsSinceEpoch}';
         _processedChannelMessageIds.add(hintMid);
+        if (messageId.isNotEmpty) {
+          _hintCountedAt[messageId] = DateTime.now();
+          if (_hintCountedAt.length > 500) {
+            _hintCountedAt.remove(_hintCountedAt.keys.first);
+          }
+        }
         ref.read(unreadProvider.notifier).onChannelMessage(
             serverId, channelId, hintMid,
             false, isMention: isMentioned);
@@ -1425,9 +1466,12 @@ class EventStreamNotifier extends Notifier<bool> {
             serverId: serverId,
             senderIdentity: ref.read(deviceLinkProvider).identityOf(senderId),
             serverSyncDone: _serverSyncDone.contains(serverId),
+            channelOnScreen: ref
+                .read(channelsOnScreenProvider)
+                .contains((serverId: serverId, channelId: channelId)),
           );
           if (scope == null) {
-            debugPrint('[HOLLOW] Share-backed file during sync — skipping auto-download for $fileId');
+            debugPrint('[HOLLOW] Share-backed file during sync or off screen — skipping auto-download for $fileId');
           } else {
           // Per-conversation override then global threshold; 0 = off (#41).
           final thresholdMb = effectiveAutoDownloadMbRead(ref, scope);

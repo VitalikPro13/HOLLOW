@@ -79,18 +79,19 @@ List<HollowMenuEntry> _serverIconEntries(
       // Un-awaited, so the failure is caught here: a sync try/catch around a
       // dangling Future catches nothing and the rejection reaches the zone
       // crash handler.
-      onTap: () => ref
-          .read(notificationSettingsProvider.notifier)
-          .setServerLevel(
-            serverId,
-            muted ? NotificationLevel.all : NotificationLevel.nothing,
-          )
-          .catchError((Object _) {
-        if (context.mounted) {
-          HollowToast.show(context, 'Could not change notifications',
-              type: HollowToastType.error);
-        }
-      }),
+      onTap: () {
+        final notifier = ref.read(notificationSettingsProvider.notifier);
+        // Unmuting goes back to the default, never to an explicit "All messages".
+        (muted
+                ? notifier.resetServerLevel(serverId)
+                : notifier.setServerLevel(serverId, NotificationLevel.nothing))
+            .catchError((Object _) {
+          if (context.mounted) {
+            HollowToast.show(context, 'Could not change notifications',
+                type: HollowToastType.error);
+          }
+        });
+      },
     ),
     const HollowMenuDivider(),
     HollowMenuItem(
