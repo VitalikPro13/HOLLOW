@@ -1,6 +1,6 @@
 # Storage nodes: volunteer and self-hosted storage for servers and people
 
-**Status:** PLANNED. Design drafted 2026-09-17 (Vitalik + Fable session) from three research passes (Cloudflare docs, self-hosted storage, the vault and fetch code as it stands). Nothing built. Vitalik's decisions on the open points folded in the same day (section 15).
+**Status:** PLANNED. Design drafted 2026-09-17 (Vitalik + Fable session) from three research passes (Cloudflare docs, self-hosted storage, the vault and fetch code as it stands). Nothing built. Vitalik's decisions on the open points folded in the same day (section 15). Extended 2026-11-18 after issue #136: nodes are THE answer to server availability and also hold server message history (section 17, which overrides earlier sections where they differ).
 **Owner:** Vitalik (architect).
 **Companion memory:** `project_r2_decision` (Hollow never hosts; the 2026-09-06 bring-your-own-bucket decision this supersedes in shape but not in principle), `project_federation_decision` (hosting is not trusting), `project_relay_availability_cache` (what the relay rings hold, and the parked per-server storage idea), `project_file_card_honest_states` (the card states a node joins), `project_autodownload_gate`, `project_at_rest_file_encryption_plan`, `feedback_share_backed_files`.
 **Plan checklist:** HOLLOW_PLAN.md, the "Volunteer full-file storage pool" item (this document is its design; rewrite the bullet when phase 1 starts).
@@ -31,7 +31,7 @@ Decision summary:
 - **Blobs are chunked ciphertext** with a stable id, so any node can serve any range and any client can verify it. This is a new at-rest-independent format; the FileHeader gains a `blob` reference.
 - **Reads need no signature.** Knowing a 256-bit blob id is the capability. **Writes need a pass**, which every member's client gets automatically from the owner or an admin.
 - **Budgets live in the Worker, not in Cloudflare:** Cloudflare has no spend cap for R2 and budget alerts only send email. The Worker plus the free Workers plan's hard daily request limit are what make zero billing true.
-- **Whole blobs, no erasure coding** on nodes (range reads and simple repair). The vault stays for servers without nodes. **Nodes replace Share** up to a per-server size limit (100 MB by default, up to 500 MB).
+- **Whole blobs, no erasure coding** on nodes (range reads and simple repair). The vault stays for servers without nodes. **Nodes replace Share** up to each node's size limit, set by its operator (500 MB by default, never below 34 MB, no upper bound; decision 32).
 - **Allowed by default, asked once per conversation:** before the first fetch from a node in a DM or server, a dialog explains what the node's provider sees and offers to keep nodes off for that conversation.
 
 ---
@@ -108,7 +108,7 @@ Unconfirmed (verify during phase 2): the rate limiting binding on the Free plan,
 - **No Hollow-operated storage**, on the official relay or anywhere else. The `project_r2_decision` principle stands.
 - **No pooled R2 credentials.** Nobody ever holds a credential to anyone else's bucket.
 - **No erasure coding across nodes** in this plan. Whole blobs keep range reads and repair simple; erasure coding stays the vault's.
-- **No message storage on nodes.** Text stays peer-held plus the relay rings. Only file bytes.
+- ~~No message storage on nodes.~~ Reversed 2026-11-18: server nodes also hold sealed message history (section 17). Personal nodes stay file-only until a later decision.
 - **No relay proxying of node traffic.** Clients talk to nodes directly.
 - **No streaming protocol of our own.** HTTP range requests are the streaming protocol.
 - **No federation.** A node is a holder for a server or a person, not an independent server.
@@ -234,7 +234,7 @@ StorageNodeRecord {
 
 - **Who adds:** any member, like a Discord boost. No approval. The operator signs their own record; last writer wins per `node_id` by `(version, updated_at)`, and only the operator (or the owner, to remove an abusive node) can change it.
 - **Distribution:** MLS broadcast plus Olm to members without a leaf, the vault manifest path, **with sync**: the registry is part of the join bootstrap and any member answers `StorageRegistryRequest`, so an offline member catches up (the vault manifest's missing sync is not repeated).
-- **The storage dashboard** (server settings > Storage, visible to every member): each node's operator, backend, plan, quota, used, free, uptime, health and flags from the pool checks (6.7), placement priority, this month's storage and operation counts with the estimated cost (7.4), state, and the pool's totals: capacity at the current copy setting, used, and estimated monthly cost. Good faith is the model; the dashboard is what makes it loud when a node misbehaves.
+- **The storage dashboard** (server settings > Storage, visible to every member; since 2026-11-18 the operator's name shows only if they opt in, section 17.1): each node's operator, backend, plan, quota, used, free, uptime, health and flags from the pool checks (6.7), placement priority, this month's storage and operation counts with the estimated cost (7.4), state, and the pool's totals: capacity at the current copy setting, used, and estimated monthly cost. Good faith is the model; the dashboard is what makes it loud when a node misbehaves.
 
 ### 6.2 Placement
 
@@ -268,7 +268,7 @@ Nodes come before peers when enabled because they are the fast, always-on path a
 
 ### 6.5 File policy
 
-- **Size limit for node-backed files:** a server setting, 100 MB by default when the server has nodes, adjustable by owners and admins up to 500 MB. A file under the limit is a blob on a node and never a Share. A file over the limit is still offered as a Hollow Share, as today. Personal nodes have the same default and ceiling, set by their owner. The ceiling is a code constant raised on request, not a setting.
+- **Size limit for node-backed files** (revised 2026-11-18, decision 32): each node's operator sets it, 500 MB by default, never below 34 MB, with no upper bound ("no limit" allowed). Placement only uses nodes whose limit fits the file. A file that fits no node is still offered as a Hollow Share, as today. Personal nodes work the same, set by their owner.
 - **File types:** all kinds by default (images, video, audio, PDFs, archives, anything). Owners and admins can block categories (video, audio, archives, executables, documents) or extensions in the Storage page; blocked files are never placed on nodes and fall back to peers. Enforced by the uploading client, since a node only ever sees ciphertext: the same trust level as every other posting rule a modified client could ignore.
 - Both settings are CRDT server settings (not secret).
 
@@ -412,7 +412,7 @@ The same protocol with `scope = personal`. One node per identity (a Cloudflare n
 
 - **Outgoing media:** when a personal node is configured, every file you send is also placed there. For DMs this is the difference: the header reaches an offline friend through the relay, and they fetch the file from your node when they come online, with no need for you to be online. The inline-image and metadata-only offline paths (`file_handler.rs:1381`) become the fallback.
 - **Multi-device history:** a newly linked device fetches old attachments from your node instead of waiting for a sibling to be online.
-- **Large files:** a blob-backed send goes past the 34 MB direct limit up to the personal node's size limit (100 MB by default, up to 500 MB, section 6.5). Above it the large-file dialog offers a Hollow Share, as today.
+- **Large files:** a blob-backed send goes past the 34 MB direct limit up to the personal node's size limit (500 MB by default, set by its owner, never below 34 MB, no upper bound; section 6.5). Above it the large-file dialog offers a Hollow Share, as today.
 - **Channels:** personal nodes also serve your channel posts, as an extra holder alongside the server pool; readers learn it from the `nodes` hint.
 - **Privacy:** friends who fetch from your node reveal their IP to your node's provider, the same trade as a server node, under the same per-conversation choice.
 
@@ -459,6 +459,7 @@ Consequences and rules:
 |---|---|---|
 | 1 | Blob format, `BlobRef`, v4 signing, client chunked uploader and range fetcher with verification, the video loopback reading blobs by range, `hollow-blobd` with fs backend, passes for personal scope, the personal node end to end on desktop and mobile (DM offline delivery, sibling history, large files) | Yes. Smallest trust surface: one person, their own node. |
 | 2 | Server pool: registry with sync and join bootstrap, server passes and reissue, placement with rendezvous hashing, the ladder change, card states, readers repair, the public storage dashboard (nodes, operators, capacity at the copy setting, health, priority, cost, add, remove), pool health checks on the 30-minute timer with shared reports, capacity-weighted priority, extra copies, file size and type policy, retreat with hand-off, the per-conversation dialog and global default, compose profile and NAS guide | Yes. Self-hosted pools work. |
+| 2b | Server history on nodes (section 17): the history key and its rotation, send-time uploads of every item with batch reads, the node as a catch-up source in the sync ladder, deletion handling, one node serving several servers with per-server allocations and the operator's rules, the opt-in operator name and member leaderboard, the live bandwidth panel | Yes, on top of 2. |
 | 3 | Cloudflare backend: the Worker and Durable Object, billing guards, one-click setup and update, paid-plan detection, endpoint moves | Yes. |
 | 4 | Vault integration: skip vault uploads when a pool has enough nodes; measure what the vault still does; decide whether to keep it as the zero-setup tier or retire it. `s3` backend for blobd (Garage). | Each item alone. |
 
@@ -485,7 +486,7 @@ Mobile parity within each phase (`feedback_mobile_parity_always`), except setup 
 3. **Cloudflare quota:** 9.5 GB default; "are you sure" between 9.5 and 10 GB; a cost estimate above 10 GB (7.2).
 4. **Adding a node:** any member, no approval, like a boost; a public dashboard keeps it honest, with pool health checks against deleting or black-hole nodes (6.1, 6.7).
 5. **Signing:** extended. v4 binds the blob through a digest of all optional fields, ending per-field versions (4.2).
-6. **Share:** nodes replace it up to a size limit of 100 MB by default, 500 MB at most, set by owners and admins; bigger files still use Share (6.5).
+6. **Share:** nodes replace it up to a size limit; bigger files still use Share (6.5). The limit itself was revised by decision 32.
 7. **File types:** all kinds, with owner and admin block lists (6.5).
 8. **The token** stays on the volunteer's device for updates and retreat, revocable; the pool never sees it. Retreat hands files to accepting nodes (6.6, 8.2).
 
@@ -518,7 +519,64 @@ Decided in the follow-up the same day:
 - `lib/src/core/providers/file_transfer_provider.dart`: background placement instead of the vault upload when the pool is healthy.
 - Settings > Privacy: the global node default; per-conversation settings: the node choice; the first-connection dialog.
 - `node/crypto_handler.rs`: `hollow-msg4` with the extras digest; `SignedExtras` gains `blob_id` and `blob_size`.
-- Server settings: extra copies (0 to 5), node file size limit (100 to 500 MB), blocked file types.
+- Server settings: extra copies (0 to 5), blocked file types. Node settings (operator): file size limit (34 MB minimum, 500 MB default, no maximum).
 - Wiki `security_write_gates.md`: rows for registry ingest, pass grants, blob ingest.
 - `WHITEPAPER.md`: a storage nodes section (format, passes, what nodes learn).
 - `HOLLOW_PLAN.md`: rewrite the volunteer storage pool bullet to point here.
+
+---
+
+## 17. Server history on nodes (Vitalik, 2026-11-18, issue #136)
+
+Issue #136 asked for a self-hosted box that holds and serves a whole server's data. The answer is the storage node: **members host their own server's files and history.** Hollow still hosts nothing. Paid storage (Hollow Heart) stays personal backup only, as `reports/planned/business/SUBSCRIPTION_ECONOMICS_2026_11.md` decides, and is never spent on a server.
+
+### 17.1 Decisions
+
+13. **Nodes are the availability answer for servers.** A server with a healthy pool serves its files and its history while every member is offline. The vault and the relay rings stay for servers without nodes and for short-term offline delivery.
+14. **Server nodes hold message history**, not only file bytes (this reverses the section 3 non-goal for server scope). History is sealed under a history key (17.3), so a node still sees only ciphertext.
+15. **A node is never an MLS member and never admits anyone.** A join still waits for a member to come online (join lock answer, MLS Welcome) exactly as today. What the node fixes is everything after admission: a member admitted while the others are away, or one coming back, catches up from the node with nobody else online.
+16. **One node, several servers.** The operator links a node to their identity and gives each server its own allocation, plus their own rules for how it is used (accepted kinds, size limits, per-member fairness). This replaces the single scope per node in sections 5 and 8.
+17. **The operator's name is opt-in.** Without it the dashboard still shows every node's numbers (capacity, used, health, bandwidth, uptime) with no name and no peer id. A contributor leaderboard exists only inside the server, for its members, and lists only operators who opted in. The display hides the operator; the registry write itself still has to come from a member, so "anonymous" means hidden from other members' view, not hidden from their clients. See 17.6 item 2.
+18. **Live bandwidth panel** on the dashboard, like the relay's. When the node runs on the same box as a relay, it reads the relay's counters instead of measuring twice.
+19. **Deleted content stays on the node by default and belongs to the box owner.** A deletion (by the author, or a moderator removing a banned member's media) marks the rows and files as deleted on the node, as members mark them; it does not erase them. The dashboard's usage bar shows deleted content as its own segment, so everyone sees what it takes. Only the node's operator decides to purge deleted content, because it is their storage. In the node's rules they may delegate that right to server roles (Owner, Admins, Moderators), the same way relay operators set their rules. A purge removes the bytes from that node only; members' local copies are untouched.
+
+### 17.2 What members keep today (read from the code 2026-11-18, channels; not yet proven by a test)
+
+- **Deleted posts:** every member keeps the text and the file as evidence, next to the signed deletion proof. Chat hides them; the Archive shows them with "Deleted at". The member channel sync page carries deleted rows with their text to current members who may see the channel (HOL-SEC-194), so a new member receives them too, and `FileRequest` still serves a deleted post's file to members (non-members get silence).
+- **Edits:** earlier versions (`message_edits`) exist only on members who were present for the edit. Sync gives a newcomer only the current text and `edited_at` (`sync_handler.rs`, `upsert_synced_channel_message`), so their Archive shows no earlier versions.
+- To verify before 2b starts: the same for DMs, and a harness test pinning both behaviours, since history on nodes will copy whichever is chosen.
+
+### 17.3 The history key
+
+- A per-server history key, and one per restricted channel (matching the per-channel MLS subgroups), that only members hold. Nobody outside the server, and no member who may not see a restricted channel, can read an item.
+- Handed over at admission by the admitting member, along with every earlier history key covering what the joiner may read.
+- Rotated on kick, ban, device removal, restriction change and invite reset, the same moments that move the join lock. A removed member keeps what they already had, as with members' local copies today, but cannot open anything written after the rotation.
+- Keys travel only inside MLS or Olm, never in CRDT state, push payloads or logs, and are wiped like other key material.
+
+### 17.4 Settled in the follow-up (2026-11-18)
+
+20. **Edits replace.** The node keeps only the latest version of an edited message, which matches what sync gives a newcomer.
+21. **The node behaves like an always-on member for availability.** A member's local clear, or a member deleting old media on their own device, never touches the node.
+22. **No operator names**, except on the in-server leaderboard for operators who opt in (decision 17). Nothing beyond display hiding for the first build.
+23. **Catch-up reads the node first**, because it is always on; an online member's normal sync then fills any gap.
+24. **Members only.** No public channels and no guests on node history.
+25. **Eviction order when full:** deleted files first, then the oldest files. History goes last, since text is small and history is why the node exists.
+26. **An operator who stops being a member** (kicked, banned, left): their node leaves the registry at once and the history key rotates. They keep only what they already had. Their files are rebuilt onto the other nodes from members who hold them, because the normal hand-off (6.6) assumes a cooperating operator.
+27. **Retention:** keep everything by default; the operator's rules may set "keep history for N days", and the dashboard shows that limit.
+
+28. **The author uploads at send time.** Every author's client uploads what it sends to the node at that moment, sealed under the history key, and retries later if the node was unreachable. The node never collects anything itself and holds no key; it acts as a member that is always online without being one. Any member who was offline fetches and decrypts on their own device. No elected uploader.
+29. **No compression and no compaction.** Encrypted data does not compress, text is tiny next to media, and media is already compressed, so it would buy almost nothing. Storage is managed by deletion purges, eviction and per-server allocations instead.
+30. **Fair uploads.** Uploads are fair-queued per member (per pass, not only per IP, since members can share a home router), so one member's flood cannot starve the others. Text is never capped; files fall under the fair share and the operator's quota.
+31. **Seeding.** When a node is added, its operator's client uploads the history it already holds, so the node starts with the server's past.
+32. **File size limit belongs to the node's operator:** 500 MB by default, never below the 34 MB direct-send limit, and no upper bound, so a big self-hosted box may allow files of many gigabytes or no limit at all. It replaces the 100 to 500 MB server setting of decision 6. A file that fits no node's limit still goes over Share.
+
+### 17.5 Also settled (Vitalik, 2026-11-18)
+
+- **Batch reads instead of blocks.** With one item per message, a returning member could need thousands of requests. The node keeps small items in its own index database (`hollow-blobd`'s SQLite) and answers "everything for this server after cursor X" in one response, paged. Files stay separate blobs with range reads. The Cloudflare backend's equivalent is settled in phase 3.
+- **The stream carries everything a member online would have received**, not only posts: edits, deletions, reactions and server state changes (CRDT ops). Otherwise a returning member gets the messages but misses, for example, a new channel or a role change. Every item is judged on arrival exactly as live or sync traffic is (signatures, `ingest_remote`, `change_may_touch_row`).
+- **Who may change an item on the node.** The node cannot read roles, so a pass carries a role tier signed by the server's authority keys. The pass that uploaded an item may replace it (an edit) or mark it deleted; a Moderator-tier pass or above may mark anyone's item deleted; purging deleted content follows the operator's rules (decision 19), which name the tiers allowed. Restricted-channel items carry an opaque channel tag so members who cannot see that channel skip them without downloading.
+
+### 17.6 Open
+
+1. **DM check.** Confirm 17.2 for DMs and pin both behaviours with a harness test before 2b starts.
+2. **Operator anonymity beyond display** (a registry record members cannot link to a member), only if display hiding proves not to be enough.

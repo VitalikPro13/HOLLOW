@@ -14,8 +14,10 @@
 # relay = Linux only: --quick runs the light bash suites on the VPS (relay); the
 # full C++ + sanitizer build runs on the Linux VM (hollowvm), never the production
 # box (an ASan compile OOM-killed there). The script starts the VM over the PC and
-# powers it off again if it started it. RELAY_TEST_HOST overrides. rust = the full
-# nextest suite on the Windows PC via scripts/pc_sync.sh (one at a time there).
+# powers it off again if it started it. RELAY_TEST_HOST overrides. dart = analyze
+# here, flutter test on the Linux VM like CI's runner (Linux-only paths such as the
+# D-Bus notifier run only there). rust = the full nextest suite on the Windows PC
+# via scripts/pc_sync.sh (one at a time there).
 set -uo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -122,7 +124,19 @@ relay_quick='bash relay-uws/test/release_feed/run_tests.sh && bash relay-uws/tes
 relay_full="bash relay-uws/test/run_tests.sh && RELAY_LIVE_JOBS=2 SANITIZE=1 bash relay-uws/test/run_tests.sh && cmake -S relay-uws -B relay-uws/build -DCMAKE_BUILD_TYPE=Release >/dev/null && cmake --build relay-uws/build -j\$(nproc) >/dev/null && $relay_quick"
 
 dart_analyze() { flutter pub get >/dev/null && flutter analyze --no-fatal-warnings --no-fatal-infos; }
-dart_test() { flutter test test/; }
+# The whole tree (tests read android/, ios/, flatpak/, .github/ ...) minus the relay
+# submodules, into a folder that keeps .dart_tool and build/ so native-asset hooks
+# are not rebuilt every run.
+dart_test_vm() {
+    local host=hollowvm dir='$HOME/hollow-ci-dart' bin=${VM_FLUTTER_BIN:-'$HOME/Documents/flutter/bin'}
+    git ls-files -z --cached --others --exclude-standard |
+        grep -zv -x -F -f <(git submodule status --recursive | awk '{print $2}') |
+        grep -zv '^tmp[0-9]*\.txt$' |
+        COPYFILE_DISABLE=1 tar --null -T - --no-xattrs --no-mac-metadata -czf - |
+        ssh -o ConnectTimeout=10 -o ServerAliveInterval=15 "$host" "set -e; mkdir -p $dir; cd $dir; \
+            find . -mindepth 1 -maxdepth 1 ! -name .dart_tool ! -name build -exec rm -rf {} +; \
+            tar xzf -; export PATH=$bin:\$PATH; flutter pub get >/dev/null; flutter test test/"
+}
 
 clippy_lib() { (cd rust/hollow_core && cargo clippy --lib); }
 
@@ -148,14 +162,17 @@ for job in "${jobs[@]}"; do
             step relay-all relay_suites "$relay_full" "$relay_host"
         elif vm_up; then
             step relay-all relay_suites "$relay_full" hollowvm
-            vm_down
         else
             echo "relay-all                    FAIL (the Linux VM did not start)"; results+=("FAIL relay-all")
         fi
         ;;
     dart)
         step dart-analyze dart_analyze
-        step dart-test dart_test
+        if vm_up; then
+            step dart-test-linux dart_test_vm
+        else
+            echo "dart-test-linux              FAIL (the Linux VM did not start)"; results+=("FAIL dart-test-linux")
+        fi
         ;;
     clippy) step clippy clippy_lib ;;
     rust) step rust-nextest-pc rust_pc ;;

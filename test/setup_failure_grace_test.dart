@@ -25,7 +25,8 @@ const _failed = RTCPeerConnectionState.RTCPeerConnectionStateFailed;
 const _connecting = RTCPeerConnectionState.RTCPeerConnectionStateConnecting;
 const _connected = RTCPeerConnectionState.RTCPeerConnectionStateConnected;
 
-const _grace = Duration(milliseconds: 120);
+// Wall-clock: long enough that a loaded runner drains the event queue inside it.
+const _grace = Duration(milliseconds: 500);
 Future<void> _pastGrace() => Future<void>.delayed(_grace * 2);
 
 void main() {

@@ -602,10 +602,18 @@ void main() {
       await tester.pump();
     }
 
+    // On Linux the system row asks the session bus for a notification server
+    // under a 5 s timeout; it runs out here rather than outliving the tree.
+    void settingsTest(String name, Future<void> Function(WidgetTester) body) =>
+        testWidgets(name, (tester) async {
+          await body(tester);
+          await tester.pump(const Duration(seconds: 6));
+        });
+
     Finder toggle() => find.byWidgetPredicate(
         (w) => w is HollowToggle && w.semanticLabel == 'Fall back to Google');
 
-    testWidgets('the row is on by default and saves a change', (tester) async {
+    settingsTest('the row is on by default and saves a change', (tester) async {
       await pump(tester);
       expect(tester.widget<HollowToggle>(toggle()).value, isTrue);
       await tester.tap(toggle());
@@ -615,7 +623,7 @@ void main() {
       expect(tester.widget<HollowToggle>(toggle()).value, isFalse);
     });
 
-    testWidgets('a broken pick stays selected, even when not installed',
+    settingsTest('a broken pick stays selected, even when not installed',
         (tester) async {
       api.settings[kFirebaseFallbackSetting] = '0';
       controller.status.value = const UnifiedPushStatus(
@@ -632,7 +640,7 @@ void main() {
           findsOneWidget);
     });
 
-    testWidgets('a silent reinstalled pick asks to be opened once',
+    settingsTest('a silent reinstalled pick asks to be opened once',
         (tester) async {
       controller.status.value = const UnifiedPushStatus(
           UnifiedPushPhase.failed,
@@ -646,7 +654,7 @@ void main() {
           findsOneWidget);
     });
 
-    testWidgets('with the fallback on it says Google covers', (tester) async {
+    settingsTest('with the fallback on it says Google covers', (tester) async {
       controller.status.value = const UnifiedPushStatus(
           UnifiedPushPhase.failed,
           distributor: _ntfy,
@@ -658,7 +666,7 @@ void main() {
           findsOneWidget);
     });
 
-    testWidgets('never shows where UnifiedPush does not exist',
+    settingsTest('never shows where UnifiedPush does not exist',
         (tester) async {
       UnifiedPushController.supportedForTest = false;
       await pump(tester);

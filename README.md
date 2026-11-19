@@ -63,7 +63,7 @@ If you find a vulnerability, please report it privately as described in [SECURIT
 | macOS (12+) | [.dmg](https://anonlisten.com/hollow/releases/hollow-0.14.1.dmg) |
 | Linux | [Flatpak](https://anonlisten.com/hollow/releases/hollow-0.14.1-linux-x86_64.flatpak) / [.tar.gz](https://anonlisten.com/hollow/releases/hollow-0.14.1-linux.tar.gz) |
 | Android (7+) | [.apk](https://anonlisten.com/hollow/releases/hollow-0.14.1-android.apk) |
-| iOS (16+) | [App Store](https://apps.apple.com/app/hollow-distributed-messenger/id6777748033) |
+| iOS (15+) | [App Store](https://apps.apple.com/app/id6777748033) |
 
 What changed in each version is on the [releases page](https://github.com/VitalikPro13/HOLLOW/releases).
 

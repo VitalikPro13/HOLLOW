@@ -1,5 +1,11 @@
 [
   {
+    "id": "2026-11-19-v0141",
+    "date": "November 19, 2026",
+    "title": "v0.14.1 - Name Colors, Hideable Sidebar Places & Screen Share Audio Fix",
+    "body": "A couple of new features from GitHub Issues, plus bug fixes. Also, TestFlight closes on November 22! The status notice already mentions it, and the timer is ticking. The App Store version is already [available](https://apps.apple.com/app/id6777748033). It'll get updated screenshots with this release soon. As for bigger stuff, Storage Nodes are coming! It will be a lightweight service that you can run either beside your relay or on a different VPS/NAS where you have lots of disk space, and use as an extra layer of redundancy for your server data. It's all encrypted and still preserves privacy, but it makes it easier to access all content whenever members are offline. Stay tuned!"
+  },
+  {
     "id": "2026-11-15-v0140",
     "date": "November 15, 2026",
     "title": "v0.14 - Lost Device Protection, Invite Link Reset, Call Route Badge & Get Help Page",
