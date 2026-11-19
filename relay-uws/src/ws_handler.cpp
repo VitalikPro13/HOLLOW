@@ -17,12 +17,14 @@
 #include "validate.h"
 #include "turn_uris.h"
 #include "push_queue.h"
+#include "push_pref.h"
 #include "session_bounds.h"
 #include "sib_mute.h"
 #include "json.hpp"
 #include <cstdio>
 #include <cstring>
 #include <algorithm>
+#include <atomic>
 #include <memory>
 #include <optional>
 #include <sys/socket.h>
@@ -33,7 +35,6 @@
 using json = nlohmann::json;
 
 static constexpr size_t MAX_ROOMS_PER_PEER = 10000;
-static constexpr int PUSH_SIDECAR_PORT = 3001;
 static constexpr int PUSH_DEBOUNCE_SECS = 10;
 // The live tests (test/run_live.sh) fill an address with a few sockets.
 // check_peers bounds (RELAY-3). The client asks about its offline friends, so a
@@ -1422,6 +1423,9 @@ struct PushJob {
 // a flood — drop oldest beyond this (push is best-effort; the DM still delivers).
 constexpr size_t PUSH_QUEUE_MAX = 4096;
 
+// The sidecar's port (Config::push_port), set before the first push is queued.
+static std::atomic<uint16_t> g_push_port{push_port::DEFAULT};
+
 void deliver_push(const PushJob& job) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return;
@@ -1432,7 +1436,7 @@ void deliver_push(const PushJob& job) {
 
     struct sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    addr.sin_port = htons(PUSH_SIDECAR_PORT);
+    addr.sin_port = htons(g_push_port.load());
     inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
 
     if (connect(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
@@ -1762,13 +1766,11 @@ void sweep_door_grace(RelayState& state) {
 
 // Muted DM senders ride the reserved `~dm` server-pref entry (sender device
 // id -> "nothing"), so the snapshot codec and set_push_prefs stay unchanged.
-static const char* DM_MUTE_PREF_KEY = "~dm";
-
 static bool dm_push_muted(const std::string& target_peer_id,
                           const std::string& sender_peer_id, const RelayState& state) {
     auto pit = state.push_prefs.find(target_peer_id);
     if (pit == state.push_prefs.end()) return false;
-    auto dit = pit->second.find(DM_MUTE_PREF_KEY);
+    auto dit = pit->second.find(push_pref::DM_KEY);
     if (dit == pit->second.end()) return false;
     auto sit = dit->second.channels.find(sender_peer_id);
     return sit != dit->second.channels.end() && sit->second == "nothing";
@@ -2197,29 +2199,11 @@ static void handle_kill_ack(PerSocketData* data, const json& j, RelayState& stat
 static void handle_set_push_prefs(PerSocketData* data, const json& j, RelayState& state) {
     // A push isolate's socket never speaks for the device's prefs (nor its `~sib` level).
     if (data->is_guest || data->is_fetch) return;
-    if (!j.contains("prefs") || !j["prefs"].is_object()) return;
+    auto it = j.find("prefs");
+    if (it == j.end() || !it->is_object()) return;
 
-    std::unordered_map<std::string, RelayState::ServerPushPref> prefs;
-    size_t server_count = 0;
-    for (auto& [server, val] : j["prefs"].items()) {
-        if (++server_count > 256) break;  // defensive cap
-        if (!val.is_object()) continue;
-        // `~dm` is the reserved entry for muted DM senders (DM_MUTE_PREF_KEY).
-        if (server != "~dm" && !is_valid_room_code(server)) continue;
-        RelayState::ServerPushPref p;
-        p.level = val.value("level", "all");
-        if (p.level != "all" && p.level != "mentions" && p.level != "nothing") p.level = "all";
-        if (val.contains("channels") && val["channels"].is_object()) {
-            size_t chan_count = 0;
-            for (auto& [cid, lv] : val["channels"].items()) {
-                if (++chan_count > 1024) break;  // defensive cap
-                if (!lv.is_string() || cid.empty() || cid.size() > 128) continue;
-                const std::string& s = lv.get_ref<const std::string&>();
-                if (s == "all" || s == "mentions" || s == "nothing") p.channels[cid] = s;
-            }
-        }
-        prefs[server] = std::move(p);
-    }
+    auto prefs = push_pref::parse<std::unordered_map<std::string, RelayState::ServerPushPref>>(
+        *it, [](const std::string& server) { return is_valid_room_code(server); });
     auto local = j.find("sib_local");
     auto view = j.find("sib_view");
     auto& held = state.push_prefs[data->peer_id];
@@ -2414,7 +2398,7 @@ static void handle_topic_catchup(SSLWebSocket* ws, PerSocketData* data,
 }
 
 // Fire a channel push for an offline server member, filtered by their
-// registered prefs (default "all") + mention flag, with per-(peer,server)
+// registered prefs (push_pref::level_for) + mention flag, with per-(peer,server)
 // debounce and an offline cap so a chatty server can't spam a phone that
 // never reconnects.
 static void try_channel_push_notify(const std::string& target, const std::string& sender,
@@ -2423,20 +2407,8 @@ static void try_channel_push_notify(const std::string& target, const std::string
     auto tok_it = state.push_tokens.find(target);
     if (tok_it == state.push_tokens.end()) return;
 
-    // Prefs filter. Unregistered peer / unknown server = "all" (older clients
-    // keep working); per-channel override beats the server level.
-    std::string level = "all";
     auto pit = state.push_prefs.find(target);
-    // A sibling's mark silences mentions too: the server is one the device hides.
-    if (pit != state.push_prefs.end() && sib::muted(pit->second, server)) return;
-    if (pit != state.push_prefs.end()) {
-        auto sit = pit->second.find(server);
-        if (sit != pit->second.end()) {
-            level = sit->second.level;
-            auto cit = sit->second.channels.find(channel);
-            if (cit != sit->second.channels.end()) level = cit->second;
-        }
-    }
+    const std::string level = push_pref::level_for(pit == state.push_prefs.end() ? nullptr : &pit->second, server, channel);
     if (level == "nothing") return;
     if (level == "mentions" && !mention) return;
 
@@ -5138,6 +5110,7 @@ static void logged_in(RelayState& state, SSLWebSocket* ws, const PerSocketData* 
 }
 
 void setup_ws_handler(uWS::SSLApp& app, RelayState& state, const Config& config) {
+    g_push_port.store(config.push_port);
     g_diag = &state.diag;
     g_state = &state;
     g_forwarder_peer_id = config.forwarder_peer_id;

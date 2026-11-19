@@ -294,9 +294,11 @@ NotificationLevel? _overrideLevel(ChannelNotificationLevel? override) {
 }
 
 /// The push filters the relay keeps for this phone: the reserved `~default`
-/// entry (every server never set notifies at [defaultServerLevel]) and only the
-/// servers and channels that differ from it, so the relay never holds the list
-/// of servers or the channels left alone (C-RP-06). A channel set to its
+/// entry (every server never set notifies at [defaultServerLevel]), the servers
+/// someone set (an explicit choice is kept even where it matches the default, so
+/// a relay older than `~default` still honours it) and the channels that differ
+/// from their server (in a server never set, every channel choice), so the relay
+/// never holds the list of servers or the channels left alone (C-RP-06). A channel set to its
 /// server's level is no override. A relay older than `~default` drops that
 /// entry and keeps its own default of "all" for servers it is not told about.
 /// Muted DM senders ride the reserved `~dm` entry, keyed by DEVICE id because
@@ -313,8 +315,10 @@ Map<String, Map<String, dynamic>> pushPrefsForRelay({
     final sep = entry.key.indexOf(':');
     if (sep <= 0) continue;
     final sid = entry.key.substring(0, sep);
-    final serverLevel = serverLevels[sid] ?? defaultServerLevel;
-    if (entry.value.name == serverLevel.name) continue;
+    // In a server never set, any channel choice is sent, even one matching the
+    // default: a relay older than `~default` still honours it.
+    final serverLevel = serverLevels[sid];
+    if (serverLevel != null && entry.value.name == serverLevel.name) continue;
     (channels[sid] ??= <String, String>{})[entry.key.substring(sep + 1)] =
         entry.value.name;
   }

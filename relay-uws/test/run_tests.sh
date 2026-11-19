@@ -5,8 +5,10 @@
 #   bash run_tests.sh            (from relay-uws/test, needs g++, libsodium, OpenSSL;
 #                                 the live tests also zlib and the uWebSockets submodules)
 #   SANITIZE=1 bash run_tests.sh
+#   RELAY_TESTS_KEEP=<dir>   build and log there and keep it (the live clients' logs too)
 cd "$(dirname "$0")" || exit 1
-out=$(mktemp -d)
+out=${RELAY_TESTS_KEEP:-$(mktemp -d)}
+mkdir -p "$out"
 flags="-std=c++17 -O1"
 if [ "${SANITIZE:-0}" = 1 ]; then
     flags="$flags -g -fsanitize=address,undefined -fno-sanitize-recover=undefined -fno-omit-frame-pointer"
@@ -73,6 +75,7 @@ else
 fi
 run test_presence_batch
 run test_presence_view $LIBS
+run test_push_pref
 run test_snapshot_codec
 run test_turn_uris
 # The TURN port lock against real packets in a namespace of its own; it needs root and
@@ -147,5 +150,5 @@ fi
 bash ./run_live.sh "$out" || fail=1
 # The same relay across a restart, the snapshot handed over through a stand-in fd store.
 bash ./run_restart.sh "$out" || fail=1
-rm -rf "$out"
+[ -n "${RELAY_TESTS_KEEP:-}" ] || rm -rf "$out"
 exit $fail

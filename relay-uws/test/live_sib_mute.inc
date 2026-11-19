@@ -33,10 +33,7 @@ static int64_t sib_now_ms() {
 static void test_sib_mute() {
     printf("sibling mutes: a computer silences its phones' wakes of the servers it names\n");
     int lfd = hold_push_port();
-    if (lfd < 0) {
-        printf("  skip sibling mutes (127.0.0.1:3001 stays taken)\n");
-        return;
-    }
+    if (lfd < 0) return;
     const int64_t now = sib_now_ms();
     // Mentions skip the 120 s debounce; each case wakes its own phone, so the 5 s floor
     // per phone never meets another case.

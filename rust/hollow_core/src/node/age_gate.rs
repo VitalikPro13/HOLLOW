@@ -840,6 +840,16 @@ mod tests {
         assert_eq!(v["a"]["level"], "mentions");
     }
 
+    #[test]
+    fn t18_the_default_entry_rides_the_hidden_overlay() {
+        let dart = r#"{"~default":{"level":"mentions","channels":{}}}"#;
+        let out = overlay_push_prefs(dart, &["s".into()]).unwrap();
+        let v: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["~default"]["level"], "mentions", "servers never set keep their default at the relay");
+        assert_eq!(v["s"]["level"], "nothing");
+        assert_eq!(v.len(), 2, "the overlay names only the servers this phone hides");
+    }
+
     fn level_of(prefs: &str, sid: &str) -> serde_json::Value {
         serde_json::from_str::<serde_json::Value>(prefs).unwrap()[sid]["level"].clone()
     }

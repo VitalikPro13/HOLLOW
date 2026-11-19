@@ -24,11 +24,13 @@ void main() {
         'loud:lobby': ChannelNotificationLevel.all,
         'busy:alerts': ChannelNotificationLevel.mentions,
         'busy:inherited': ChannelNotificationLevel.inherit,
-        'unset:quiet': ChannelNotificationLevel.mentions,
+        'unset:inherited': ChannelNotificationLevel.inherit,
         // These differ, so the relay needs them.
         'loud:noise': ChannelNotificationLevel.nothing,
         'muted:urgent': ChannelNotificationLevel.all,
         'unset:feed': ChannelNotificationLevel.all,
+        // A choice in a server never set, though it matches the default.
+        'unset:quiet': ChannelNotificationLevel.mentions,
       },
       mutedDmDevices: const {},
     );
@@ -46,18 +48,35 @@ void main() {
     });
     expect(prefs['unset'], {
       'level': 'mentions',
-      'channels': {'feed': 'all'},
-    }, reason: 'a never-set server is named only for an override that differs');
+      'channels': {'feed': 'all', 'quiet': 'mentions'},
+    }, reason: 'a never-set server is named only for its channel choices, all of '
+        'them, so a relay older than ~default honours each');
   });
 
   test('a phone that never set a level sends only the default', () {
     final prefs = pushPrefsForRelay(
       serverLevels: const {},
-      channelOverrides: const {'a:x': ChannelNotificationLevel.mentions},
+      channelOverrides: const {'a:x': ChannelNotificationLevel.inherit},
       mutedDmDevices: const {},
     );
     expect(prefs, _default,
         reason: 'the relay replaces the set wholesale; no server is named');
+  });
+
+  test("a channel's choice in a never-set server is sent even at the default",
+      () {
+    final prefs = pushPrefsForRelay(
+      serverLevels: const {},
+      channelOverrides: const {'quiet:alerts': ChannelNotificationLevel.mentions},
+      mutedDmDevices: const {},
+    );
+    expect(prefs, {
+      ..._default,
+      'quiet': {
+        'level': 'mentions',
+        'channels': {'alerts': 'mentions'},
+      },
+    }, reason: 'a relay older than ~default would wake every post there');
   });
 
   test('muted DM senders ride the reserved entry by device id', () {

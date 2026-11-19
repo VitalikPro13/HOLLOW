@@ -900,6 +900,30 @@ int main() {
         check("and this build writes it byte for byte", snapshot::encode(v12_sample()) == std::string(v12));
     }
 
+    // The reserved push-pref entries (push_pref.h) ride the push prefs record as servers
+    // whose names no room code takes, so they need no record or VERSION of their own.
+    {
+        snapshot::Data in;
+        snapshot::PushPref p;
+        p.peer = "12D3KooWPhone";
+        p.servers.push_back({"~default", "mentions", {}});
+        p.servers.push_back({"~dm", "all", {{"12D3KooWMutedSender", "nothing"}}});
+        p.servers.push_back({"~sib", "nothing", {{"srv:adult", "nothing"}, {"~at", "7"}}});
+        p.servers.push_back({"srv:loud", "all", {}});
+        in.push_prefs.push_back(p);
+        const std::string bytes = snapshot::encode(in);
+        snapshot::Data out;
+        check("prefs with a default decode", snapshot::decode(bytes, out));
+        check("the default, muted DMs and siblings' marks come back as written",
+              out.push_prefs.size() == 1 && out.push_prefs[0].servers.size() == 4 &&
+                  out.push_prefs[0].servers[0].server == "~default" &&
+                  out.push_prefs[0].servers[0].level == "mentions" &&
+                  out.push_prefs[0].servers[0].channels.empty() &&
+                  out.push_prefs[0].servers[1].channels[0].channel == "12D3KooWMutedSender" &&
+                  out.push_prefs[0].servers[2].channels[1].level == "7");
+        check("and re-encode byte for byte", snapshot::encode(out) == bytes);
+    }
+
     if (failures) {
         printf("%d FAILURE(S)\n", failures);
         return 1;

@@ -178,6 +178,26 @@ else
     echo "  FAIL --check-denylist legacy: ($legacy_rc) $legacy_out"
     fail=1
 fi
+# A push port that is no port refuses the start, before any socket or file is touched.
+port_refusals=0
+for bad in 0 70000 abc " 3001" 3001x -1; do
+    bad_port_out=$(HOLLOW_PUSH_PORT="$bad" timeout 10 "$dir/relay_main" --port 1 2>&1)
+    [ $? = 2 ] && grep -qxF "[config] HOLLOW_PUSH_PORT must be a port number from 1 to 65535" <<<"$bad_port_out" &&
+        port_refusals=$((port_refusals + 1))
+done
+if [ $port_refusals = 6 ]; then
+    echo "  ok   a HOLLOW_PUSH_PORT that is no port refuses the start"
+else
+    echo "  FAIL a HOLLOW_PUSH_PORT that is no port started a relay ($port_refusals of 6 refused)"
+    fail=1
+fi
+# Each relay posts wakes to a loopback port of its own (HOLLOW_PUSH_PORT), which the client
+# holds (RELAY_LIVE_PUSH_PORT): no test relay ever posts to a real sidecar on 3001, and the
+# live push cases always run.
+free_port() {
+    python3 -I -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])' 2> /dev/null ||
+        echo $((33000 + RANDOM % 20000))
+}
 # A third argument is HOLLOW_CONN_RATE_EXEMPT for that run, which runs only the rate cases;
 # a fourth the relay's send buffer in bytes, which runs only the dropped-write case; a fifth
 # (shadow or enforce) scales the breaker down and runs only its cases; a sixth is the
@@ -185,6 +205,8 @@ fi
 run_variant() {
     local v=$1 name=${2:-$1} exempt=${3-} backpressure=${4-} breaker=${5-} budget=${6-} port tries=0 log=$dir/relay_${2:-$1}.log
     local extra=() args=() only=${RELAY_LIVE_ONLY-} stall= denylist=$dir/denylist_${2:-$1}.json mode=enforce
+    local push_port
+    push_port=$(free_port)
     # Three sockets an address, ten new ones a minute after a burst of thirty; a carrier-NAT
     # relay keeps every default (512 an address, 120 a minute, the login windows).
     local limits=(CONN_LIMIT_IPV4=3 CONN_LIMIT_IPV6=3 CONN_RATE_IPV4=10 CONN_RATE_IPV6=10 HOLLOW_RELAY_TEST_CONN_BURST=30)
@@ -241,7 +263,7 @@ run_variant() {
             -u HOLLOW_RELAY_TEST_BREAKER_T -u HOLLOW_RELAY_TEST_SEND_BUDGET -u HOLLOW_RELAY_TEST_STALL_MS \
             -u CONN_LIMIT_IPV4 -u CONN_LIMIT_IPV6 -u CONN_RATE_IPV4 -u CONN_RATE_IPV6 -u LOGIN_WINDOW_PER_BLOCK \
             -u LOGIN_WINDOW_TOTAL -u CONNECTED_LIMIT -u BREAKER_MODE -u HOLLOW_RELAY_TEST_CONN_BURST \
-            "${limits[@]}" "${extra[@]}" TURN_SECRET=live-test "$dir/relay_$v" "${args[@]}" --port "$port" --domain "$domain" \
+            "${limits[@]}" "${extra[@]}" TURN_SECRET=live-test HOLLOW_PUSH_PORT="$push_port" "$dir/relay_$v" "${args[@]}" --port "$port" --domain "$domain" \
             --cert-file "$dir/cert.pem" --key-file "$dir/key.pem" \
             --keys-file "$dir/no-keys.json" --reports-file "$dir/reports_$name.json" \
             --denylist-file "$denylist" > "$log" 2>&1 &
@@ -267,7 +289,7 @@ run_variant() {
     # The client's last case sends the relay SIGTERM itself (the drain hint); its pid
     # also lets a probe read the relay's memory. Under ASan the run takes about 96 s.
     RELAY_LIVE_DENYLIST=$denylist RELAY_LIVE_KEYS=$dir/no-keys.json RELAY_LIVE_BREAKER_MODE=$mode \
-    RELAY_LIVE_ONLY=$only RELAY_LIVE_BACKPRESSURE=$backpressure RELAY_LIVE_SEND_BUDGET=$budget RELAY_LIVE_STALL_MS=$stall RELAY_LIVE_SANITIZED=${SANITIZE:-0} RELAY_LIVE_PID=$relay_pid timeout 240 "$dir/client" "$port" "$domain" \
+    RELAY_LIVE_PUSH_PORT=$push_port RELAY_LIVE_ONLY=$only RELAY_LIVE_BACKPRESSURE=$backpressure RELAY_LIVE_SEND_BUDGET=$budget RELAY_LIVE_STALL_MS=$stall RELAY_LIVE_SANITIZED=${SANITIZE:-0} RELAY_LIVE_PID=$relay_pid timeout 240 "$dir/client" "$port" "$domain" \
         > "$dir/client_$name.log" 2>&1
     local rc=$?
     # A relay that does not exit on SIGTERM is down until systemd kills it.
@@ -296,6 +318,7 @@ run_variant() {
     fi
     # The denylist is announced by its counts alone: no server id, identity or address.
     grep -qF "[deny] loaded: 0 servers, 0 identities, 0 networks" "$log" || said="no denylist count line"
+    grep -qxF "[config] Push sidecar port: $push_port" "$log" || said="the relay did not take HOLLOW_PUSH_PORT"
     if grep -E '^\[deny\]' "$log" | grep -qE '[0-9a-f]{32}|12D3KooW|127\.0\.[0-9]+\.[0-9]+'; then
         said="a denylist line names an entry"
     fi

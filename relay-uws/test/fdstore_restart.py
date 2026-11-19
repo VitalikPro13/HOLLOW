@@ -49,6 +49,12 @@ def main():
     env = {k: v for k, v in os.environ.items()
            if not k.startswith("LISTEN_") and k not in ("NOTIFY_SOCKET", "HOLLOW_PUSH_TOKEN")}
     env["TURN_SECRET"] = "live-test"
+    # Wakes go to a loopback port of this run's own, which the client holds: never 3001,
+    # where a real push sidecar may listen.
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        push_port = s.getsockname()[1]
+    env["HOLLOW_PUSH_PORT"] = str(push_port)
     env["NOTIFY_SOCKET"] = notify_path
     denylist = os.path.join(work, "denylist.json")
     with open(denylist, "w") as f:
@@ -92,6 +98,7 @@ def main():
         relays.append(p1)
         client_env = dict(os.environ)
         client_env["RELAY_LIVE_RESTART"] = work
+        client_env["RELAY_LIVE_PUSH_PORT"] = str(push_port)
         with open(os.path.join(work, "client.log"), "w") as log:
             c = subprocess.Popen([client, str(port1), "relay.live.test"], env=client_env,
                                  stdout=log, stderr=subprocess.STDOUT)

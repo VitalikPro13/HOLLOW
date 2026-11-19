@@ -113,7 +113,7 @@ ONLY — E2EE preserved).
 ## push-sidecar — FCM/APNs sender
 
 `push-sidecar/index.js` (Node, on the VPS, `hollow-push` systemd service, port
-3001 localhost). Receives `POST /push {token, platform, sender}`.
+3001 localhost; its `PUSH_PORT` and the relay's `HOLLOW_PUSH_PORT` must agree). Receives `POST /push {token, platform, sender}`.
 
 - Data block is `{type:'wake', sender}` for a bare (0.12.1) token and one
   `sealed` field for a keyed token (see "Sealed wakes") — **no content** either way.
@@ -208,7 +208,7 @@ db_passphrase) -> Vec<FetchedDm>`.
 
 - `register_push_token(token, platform)` — stored on the relay; re-sent on every
   WS reconnect (`swarm.rs`).
-- `set_push_prefs(prefs_json)` — channel push filters; the reserved `~dm` entry carries muted DM senders as device ids → "nothing" (relay `dm_push_muted()` skips only the wake-up, the deposit stays buffered; synced on `setDmEnabled` and on device-list or own-device-id changes, only after `loadAll`). It ALSO lists our OWN sibling device ids (#90), because a sibling now leaves a relay-buffered copy of our own DMs for an offline phone and that must never wake it; channel push filters
+- `set_push_prefs(prefs_json)` — channel push filters; since 0.14.1 the reserved `~default` entry (`pushPrefsForRelay`, always `mentions`) is the level of every server never set, so the prefs name only the servers the person set (even to the default) and channels that differ from their server (in a server never set, every channel choice, so a relay older than `~default` honours it); a relay older than it drops just that key and wakes never-set servers on every post. The reserved `~dm` entry carries muted DM senders as device ids → "nothing" (relay `dm_push_muted()` skips only the wake-up, the deposit stays buffered; synced on `setDmEnabled` and on device-list or own-device-id changes, only after `loadAll`). It ALSO lists our OWN sibling device ids (#90), because a sibling now leaves a relay-buffered copy of our own DMs for an offline phone and that must never wake it; channel push filters
   (`{server: {level, channels{cid: level}}}`) registered with the relay; cached
   in swarm.rs and re-sent on every reconnect like the token.
 - Age-restricted servers (0.14, `sib_mute.h`, gates wiki `security_write_gates`
@@ -382,8 +382,10 @@ replayed as 0x06 on room join exactly like DMs) and calls
 `try_channel_push_notify`, which filters by:
 1. **Push prefs registry** (`set_push_prefs` text msg → `RelayState::push_prefs`,
    `peer → server → {level, channels{cid→level}}`, RAM only, replaced wholesale).
-   Channel override beats server level; unregistered peer/server = "all"
-   (backward compatible). Filtering MUST be relay-side: iOS alert pushes cannot
+   Lookup (`push_pref::level_for`, `push_pref.h`): a sibling's mark, then the
+   server's channel override, its level, then the phone's `~default` entry
+   (0.14.1, the level of servers it never set), else "all" (unregistered peer
+   or an older client, backward compatible). DM wakes read only `~dm`. Filtering MUST be relay-side: iOS alert pushes cannot
    be suppressed after delivery. The app syncs prefs via
    `notification_provider._syncPushPrefsToRelay()` on loadAll/setServerLevel/
    setChannelOverride — **MOBILE-ONLY** (desktop sync would overwrite the

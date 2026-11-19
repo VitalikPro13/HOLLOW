@@ -9,8 +9,8 @@
 // A negative ("receives nothing") is read after a barrier, never a sleep: the sender
 // and then the receiver each finish a round trip, and the relay handles one frame at a
 // time, so whatever it sent the receiver for the sender's frame arrived before the
-// receiver's answer. Never registers a push token: the relay would post to whatever
-// listens on 127.0.0.1:3001.
+// receiver's answer. A case registers a push token only while it holds the relay's own
+// push port (RELAY_LIVE_PUSH_PORT, the relay's HOLLOW_PUSH_PORT), never 3001.
 
 #include "auth_frame.h"
 #include "crypto.h"
@@ -57,6 +57,8 @@ using json = nlohmann::json;
 
 static int failures = 0;
 static int g_port = 0;
+// Where this run's relay posts wakes (run_live.sh, fdstore_restart.py); 0 = not given.
+static int g_push_port = 0;
 static std::string g_domain;
 static SSL_CTX* g_ctx = nullptr;
 static int g_next_source = 0;
@@ -2544,22 +2546,33 @@ static void test_session_gap_mailbox() {
     check("a resume without a gap replays no mailbox", !got(*a3, bin(mail)));
 }
 
-// The relay posts a push to 127.0.0.1:3001. Only when this test holds that port does it
-// register a token, so a real sidecar there never sees one.
+// Holds 127.0.0.1 at this run's push port, where its relay posts wakes; -1 when it cannot.
+// A case that cannot hold it FAILS, never skips: it would prove nothing about wakes.
+static int hold_push_port() {
+    if (g_push_port <= 0 || g_push_port > 65535) {
+        check("RELAY_LIVE_PUSH_PORT names the relay's push port", false);
+        return -1;
+    }
+    for (int attempt = 0; attempt < 10; attempt++) {
+        int lfd = socket(AF_INET, SOCK_STREAM, 0);
+        sockaddr_in at{};
+        at.sin_family = AF_INET;
+        at.sin_port = htons(static_cast<uint16_t>(g_push_port));
+        at.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        int one = 1;
+        setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+        if (lfd >= 0 && bind(lfd, reinterpret_cast<sockaddr*>(&at), sizeof(at)) == 0 && listen(lfd, 16) == 0) return lfd;
+        if (lfd >= 0) close(lfd);
+        sleep_ms(200);
+    }
+    check("the run's push port is free for the test to hold", false);
+    return -1;
+}
+
 static void test_session_push_in_grace() {
     printf("sessions: a direct into a ring in grace wakes the phone\n");
-    int lfd = socket(AF_INET, SOCK_STREAM, 0);
-    sockaddr_in at{};
-    at.sin_family = AF_INET;
-    at.sin_port = htons(3001);
-    at.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    int one = 1;
-    setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
-    if (lfd < 0 || bind(lfd, reinterpret_cast<sockaddr*>(&at), sizeof(at)) != 0 || listen(lfd, 8) != 0) {
-        if (lfd >= 0) close(lfd);
-        printf("  skip push in grace (127.0.0.1:3001 is taken)\n");
-        return;
-    }
+    int lfd = hold_push_port();
+    if (lfd < 0) return;
     // Only a post naming this run's token counts: another relay on the machine may post here.
     const std::string token = "token-" + g_tag;
     auto wake = [lfd, &token](int timeout_ms) {
@@ -2622,23 +2635,6 @@ static void test_session_push_in_grace() {
 
 // The relay's PRESENCE_PASS_MS (state.h): one socket's presence passes come no closer.
 static constexpr int PRESENCE_PACE_MS = 2000;
-
-// Holds 127.0.0.1:3001, where the relay posts pushes, waiting while another suite has it.
-static int hold_push_port() {
-    for (int attempt = 0; attempt < 40; attempt++) {
-        int lfd = socket(AF_INET, SOCK_STREAM, 0);
-        sockaddr_in at{};
-        at.sin_family = AF_INET;
-        at.sin_port = htons(3001);
-        at.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-        int one = 1;
-        setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
-        if (lfd >= 0 && bind(lfd, reinterpret_cast<sockaddr*>(&at), sizeof(at)) == 0 && listen(lfd, 16) == 0) return lfd;
-        if (lfd >= 0) close(lfd);
-        sleep_ms(500);
-    }
-    return -1;
-}
 
 // Whether the relay posts a push naming `token` within `timeout_ms`; every post is
 // answered so its worker moves on, since another relay on the machine may post here too.
@@ -2964,10 +2960,7 @@ static void test_hidden_session() {
 static void test_hidden_no_push() {
     printf("presence: a hidden device whose socket is live is never woken\n");
     const int lfd = hold_push_port();
-    if (lfd < 0) {
-        printf("  skip hidden push (127.0.0.1:3001 is taken)\n");
-        return;
-    }
+    if (lfd < 0) return;
     const std::string token = "hide-token-" + g_tag;
     const std::string room = room_name("hide-push"), server = room_name("hide-push-srv"),
                       elsewhere = room_name("hide-push-else");
@@ -3680,18 +3673,8 @@ static void hs_one_ack_timer() {
 
 static void hs_push_reach() {
     printf("handshake review: grace gives a stranger no new way to wake a phone\n");
-    int lfd = socket(AF_INET, SOCK_STREAM, 0);
-    sockaddr_in at{};
-    at.sin_family = AF_INET;
-    at.sin_port = htons(3001);
-    at.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    int one = 1;
-    setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
-    if (lfd < 0 || bind(lfd, reinterpret_cast<sockaddr*>(&at), sizeof(at)) != 0 || listen(lfd, 8) != 0) {
-        if (lfd >= 0) close(lfd);
-        printf("  skip push reach (127.0.0.1:3001 is taken)\n");
-        return;
-    }
+    int lfd = hold_push_port();
+    if (lfd < 0) return;
     // Only a post naming this run's token counts: another relay on the machine may post here.
     const std::string token = "hs-token-" + g_tag;
     auto woken = [lfd, token](int timeout_ms) {
@@ -3993,6 +3976,9 @@ static void deny_restart_after(const std::string& dir);
 // The 0.14 presence part of the restart case (live_t14_relay.inc).
 static void t14_restart_before();
 static void t14_restart_after();
+// The push default's part of the restart case (live_push_default.inc).
+static void pd_restart_before();
+static void pd_restart_after();
 
 static void hs_restart(const std::string& dir) {
     printf("handshake review: a session restored from a snapshot proves its doors again\n");
@@ -4033,6 +4019,7 @@ static void hs_restart(const std::string& dir) {
     settle({b.get()});
     deny_restart_before(dir);
     t14_restart_before();
+    pd_restart_before();
 
     if (FILE* f = fopen((dir + "/ready").c_str(), "w")) {
         fputs("1", f);
@@ -4046,6 +4033,7 @@ static void hs_restart(const std::string& dir) {
     g_port = atoi(port.c_str());
     deny_restart_first();
     t14_restart_after();
+    pd_restart_after();
 
     auto b2 = login(idb);
     auto mb = join(*b2, locked, {{"door_proof", door_proof(*b2, locked, door)}});
@@ -4733,29 +4721,11 @@ static void test_bounds_active() {
     check("and none for a room where nothing was", count(*a, typed("members", r2)) == 0);
 }
 
-// The relay posts a push to 127.0.0.1:3001; held here, and only then is a token registered.
+// The relay posts wakes to the run's push port; held here, and only then is a token registered.
 static void test_bounds_push_debounce() {
     printf("bounds: frames into a ring in grace wake the phone once per debounce\n");
-    // Another suite on a shared machine may hold the port for a few seconds.
-    int lfd = -1;
-    for (int attempt = 0; attempt < 40 && lfd < 0; attempt++) {
-        lfd = socket(AF_INET, SOCK_STREAM, 0);
-        sockaddr_in at{};
-        at.sin_family = AF_INET;
-        at.sin_port = htons(3001);
-        at.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-        int one = 1;
-        setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
-        if (lfd >= 0 && (bind(lfd, reinterpret_cast<sockaddr*>(&at), sizeof(at)) != 0 || listen(lfd, 16) != 0)) {
-            close(lfd);
-            lfd = -1;
-            sleep_ms(500);
-        }
-    }
-    if (lfd < 0) {
-        printf("  skip push debounce (127.0.0.1:3001 is taken)\n");
-        return;
-    }
+    int lfd = hold_push_port();
+    if (lfd < 0) return;
     // The pushes naming this run's token within `ms`, every post answered so the relay's
     // worker moves on: another relay on the machine may post here too.
     const std::string token = "burst-" + g_tag;
@@ -7026,6 +6996,7 @@ static void test_denylist() {
 #include "live_t14_relay.inc"
 #include "live_rostercheck.inc"
 #include "live_sib_mute.inc"
+#include "live_push_default.inc"
 
 int main(int argc, char** argv) {
     if (argc != 3) {
@@ -7034,6 +7005,7 @@ int main(int argc, char** argv) {
     }
     if (sodium_init() < 0) return 2;
     g_port = atoi(argv[1]);
+    if (const char* pp = getenv("RELAY_LIVE_PUSH_PORT")) g_push_port = atoi(pp);
     g_domain = argv[2];
     g_tag = random_hex(4);
     g_ctx = SSL_CTX_new(TLS_client_method());
@@ -7068,6 +7040,13 @@ int main(int argc, char** argv) {
     // =sib: the sibling mute cases alone (the mutation pass).
     if (only && std::string(only) == "sib") {
         test_sib_mute();
+        SSL_CTX_free(g_ctx);
+        if (failures) printf("%d FAILED\n", failures);
+        return failures ? 1 : 0;
+    }
+    // =push_default: the `~default` push pref cases alone (the mutation pass).
+    if (only && std::string(only) == "push_default") {
+        test_push_default();
         SSL_CTX_free(g_ctx);
         if (failures) printf("%d FAILED\n", failures);
         return failures ? 1 : 0;
@@ -7338,6 +7317,7 @@ int main(int argc, char** argv) {
         test_mailbox_gap_after_read();
         test_session_push_in_grace();
         test_sib_mute();
+        test_push_default();
         test_session_expiry();
         test_handshake_review();
         test_hidden();

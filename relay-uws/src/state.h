@@ -474,7 +474,8 @@ struct RelayState {
     // Channel push prefs (RAM only — replaced wholesale by set_push_prefs,
     // re-sent by the app on every connect). peer_id -> server room -> pref.
     // Filtering happens HERE because iOS alert pushes can't be suppressed
-    // after delivery. Unknown server / unregistered peer defaults to "all".
+    // after delivery. A server with no entry takes the reserved `~default`
+    // entry's level, else "all" (push_pref.h).
     struct ServerPushPref {
         std::string level;  // "all" / "mentions" / "nothing"
         std::unordered_map<std::string, std::string> channels;  // channel_id -> level

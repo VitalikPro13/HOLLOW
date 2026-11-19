@@ -11,6 +11,7 @@
 #include "conn_limits.h"
 #include "conn_rate_exempt.h"
 #include "deny_list.h"
+#include "push_port.h"
 #include "server_stats.h"
 #include "session.h"
 
@@ -31,6 +32,8 @@ struct Config {
     // update the flag + restart (no hot-reload machinery by design). Empty =
     // not configured. Zero-knowledge: one static id, no per-stream metadata.
     std::string forwarder_peer_id;
+    // HOLLOW_PUSH_PORT: the push sidecar's loopback port (push_port.h).
+    uint16_t push_port = push_port::DEFAULT;
     // How long a session outlives its socket (--session-grace-secs, 30 to 600).
     int64_t session_grace_secs = session::DEFAULT_GRACE_SECS;
     // HOLLOW_CONN_RATE_EXEMPT, read from the environment only: it names the operator's
@@ -164,6 +167,13 @@ inline Config parse_args(int argc, char** argv) {
         exit(check_denylist(argv[i + 1]));
     }
 
+    if (const auto p = push_port::parse(getenv("HOLLOW_PUSH_PORT"))) {
+        config.push_port = *p;
+    } else {
+        fprintf(stderr, "[config] HOLLOW_PUSH_PORT must be a port number from 1 to 65535\n");
+        exit(2);
+    }
+    if (config.push_port != push_port::DEFAULT) fprintf(stderr, "[config] Push sidecar port: %u\n", config.push_port);
     const char* turn_env = getenv("TURN_SECRET");
     if (turn_env) config.turn_secret = turn_env;
     config.public_stats = server_stats::parse_public_stats(getenv("PUBLIC_STATS"));
