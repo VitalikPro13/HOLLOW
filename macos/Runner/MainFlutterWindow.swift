@@ -64,6 +64,22 @@ class MainFlutterWindow: NSWindow {
       call.method == "verified" ? result(BundleSeal.verified) : result(FlutterMethodNotImplemented)
     }
 
+    // Poster stills of a picked video (VideoPoster.swift): the Mac ships no ffmpeg.
+    let poster = FlutterMethodChannel(
+      name: VideoPoster.channelName,
+      binaryMessenger: flutterViewController.engine.binaryMessenger)
+    poster.setMethodCallHandler { call, result in
+      VideoPoster.handle(call.method, call.arguments) { answer in
+        switch answer {
+        case .unknownMethod: result(FlutterMethodNotImplemented)
+        case .value(let value): result(value)
+        case .frame(let jpeg, var meta):
+          meta["image"] = FlutterStandardTypedData(bytes: jpeg)
+          result(meta)
+        }
+      }
+    }
+
     let relayChannel = FlutterMethodChannel(
       name: "hollow/relay_triggers",
       binaryMessenger: flutterViewController.engine.binaryMessenger)

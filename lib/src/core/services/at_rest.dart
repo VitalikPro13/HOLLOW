@@ -1,4 +1,7 @@
+import 'dart:io';
+
 import 'package:flutter/foundation.dart';
+import 'package:path/path.dart' as p;
 
 import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:hollow/src/rust/api/at_rest.dart' as ffi;
@@ -10,10 +13,13 @@ const String kImageNotYet = 'Hollow is still checking this image';
 /// Runs [read] again while Rust is still checking the image it returns, one
 /// second apart and at most [attempts] times ([waitFirst]: a second before the
 /// first too); a refusal or any other failure is rethrown at once.
-Future<T> whileImageChecked<T>(Future<T> Function() read,
-    {int attempts = 60, bool waitFirst = false}) async {
+Future<T> whileImageChecked<T>(
+  Future<T> Function() read, {
+  int attempts = 60,
+  bool waitFirst = false,
+}) async {
   if (waitFirst) await Future<void>.delayed(AtRest.debugImageRetryDelay);
-  for (var attempt = 1;; attempt++) {
+  for (var attempt = 1; ; attempt++) {
     try {
       return await read();
     } catch (e) {
@@ -52,11 +58,9 @@ class AtRest {
   /// them whole; throws for a file it refused, so the caller shows its fallback.
   /// While Rust is still waiting to check the file it asks again, up to a minute.
   static Future<Uint8List> readImage(String path) => whileImageChecked(() {
-        final override = debugReadImage;
-        return override != null
-            ? override(path)
-            : ffi.readAtRestImage(path: path);
-      }, attempts: 61);
+    final override = debugReadImage;
+    return override != null ? override(path) : ffi.readAtRestImage(path: path);
+  }, attempts: 61);
 
   /// The wait between two asks while Rust is still checking an image.
   @visibleForTesting
@@ -65,7 +69,7 @@ class AtRest {
   /// Replaces the ranged read in tests.
   @visibleForTesting
   static Future<Uint8List> Function(String path, int offset, int len)?
-      debugReadRange;
+  debugReadRange;
 
   static Future<Uint8List> readRange(String path, int offset, int len) {
     final override = debugReadRange;
@@ -90,26 +94,51 @@ class AtRest {
     if (cached != null) return Future.value(cached);
     // BLOCK body, never `() => _mediaUrlsInFlight.remove(path)`: Map.remove
     // returns this very future and whenComplete would then wait on itself.
-    return _mediaUrlsInFlight[path] ??= _mediaUrl(path).then((url) {
-      _mediaUrls[path] = url;
-      return url;
-    }).whenComplete(() {
-      _mediaUrlsInFlight.remove(path);
-    });
+    return _mediaUrlsInFlight[path] ??= _mediaUrl(path)
+        .then((url) {
+          _mediaUrls[path] = url;
+          return url;
+        })
+        .whenComplete(() {
+          _mediaUrlsInFlight.remove(path);
+        });
   }
 
   static Future<AtRestStatus> status() => _status();
 
   /// Whether [path] sits under the data root, and so is stored encrypted. Only
   /// for the few places that must hand a decoder a real file name or nothing.
+  ///
+  /// Resolved like Rust's `under_data_root` (`..` and links followed on the
+  /// part that exists); a path that cannot be resolved counts as managed, so
+  /// it never reaches a decoder that would need a plaintext file.
   static bool isManaged(String path) {
     try {
-      final root = _canonical(hollowDataDir);
-      final candidate = _canonical(path);
+      final root = _canonical(_resolved(hollowDataDir));
+      final candidate = _canonical(_resolved(path));
       return candidate.startsWith(root.endsWith('/') ? root : '$root/');
     } catch (_) {
-      return false;
+      return true;
     }
+  }
+
+  /// [path] with its deepest existing ancestor resolved by the OS; a missing
+  /// tail that climbs (`..`) is refused, as `under_data_root` refuses it.
+  static String _resolved(String path) {
+    if (path.contains('\u0000')) throw ArgumentError.value(path, 'path');
+    var anchor = p.absolute(path);
+    final tail = <String>[];
+    while (FileSystemEntity.typeSync(anchor) == FileSystemEntityType.notFound) {
+      final name = p.basename(anchor);
+      final parent = p.dirname(anchor);
+      if (name == '..' || name == '.' || parent == anchor) {
+        throw ArgumentError.value(path, 'path');
+      }
+      tail.add(name);
+      anchor = parent;
+    }
+    final real = File(anchor).resolveSymbolicLinksSync();
+    return p.joinAll([real, ...tail.reversed]);
   }
 
   static String _canonical(String path) =>
@@ -118,8 +147,7 @@ class AtRest {
   static Future<Uint8List> _read(String path) => ffi.readAtRest(path: path);
 
   static Future<Uint8List> _readRange(String path, int offset, int len) =>
-      ffi.readAtRestRange(
-          path: path, offset: BigInt.from(offset), len: len);
+      ffi.readAtRestRange(path: path, offset: BigInt.from(offset), len: len);
 
   static Future<void> _write(String path, Uint8List bytes) =>
       ffi.writeAtRest(path: path, bytes: bytes);

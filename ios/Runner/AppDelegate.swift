@@ -367,6 +367,22 @@ struct TaskHolds {
         }
       }
 
+      // hollow/video_poster -> poster stills of a picked video (VideoPoster.swift).
+      let poster = FlutterMethodChannel(
+        name: VideoPoster.channelName,
+        binaryMessenger: controller.binaryMessenger)
+      poster.setMethodCallHandler { call, result in
+        VideoPoster.handle(call.method, call.arguments) { answer in
+          switch answer {
+          case .unknownMethod: result(FlutterMethodNotImplemented)
+          case .value(let value): result(value)
+          case .frame(let jpeg, var meta):
+            meta["image"] = FlutterStandardTypedData(bytes: jpeg)
+            result(meta)
+          }
+        }
+      }
+
       // hollow/relay_triggers -> network changes for relay_triggers.dart.
       let relayChannel = FlutterMethodChannel(
         name: "hollow/relay_triggers",

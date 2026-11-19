@@ -269,74 +269,41 @@ The server binds to the IPv4 loopback address on a random available port (`HttpS
 
 File: `lib/src/core/services/video_thumbnail_service.dart`
 
-Static-only service that extracts first-frame thumbnails from video files using the bundled ffmpeg binary, encoding them as lossless WebP. Also provides the shared `findFfmpegBinary()` used by VoiceMessageRecorder, AudioTranscodeService, and AudioProbeService.
+Static-only service that cuts a video's poster still (the image that rides the FileHeader and shows on the video card) plus the source dimensions and duration. Also provides the shared `findFfmpegBinary()` and `runFfmpeg()` used by VoiceMessageRecorder, AudioTranscodeService and AudioProbeService.
 
-### ffmpeg binary location
+### Who cuts the poster (t18, Nov 19)
 
-**`findFfmpegBinary() -> String?`** (static, cached after first call via `_cachedFfmpegPath` / `_searchedForFfmpeg`)
+| Platform | File the person picked | Attachment on disk (ciphertext, `AtRest.isManaged`) |
+|---|---|---|
+| Windows, Linux | bundled/system ffmpeg, file path | ffmpeg, bytes piped on stdin |
+| macOS | AVFoundation (`macos/Runner/VideoPoster.swift`) | ffmpeg if one exists (the release ships none; Homebrew's 9.x has no libwebp), else none |
+| iOS | AVFoundation (`ios/Runner/VideoPoster.swift`, identical copy) | none |
+| Android | `MediaMetadataRetriever` (`VideoPoster.kt`) | none |
 
-1. Resolves the directory containing the running executable (`Platform.resolvedExecutable`).
-2. Checks for `ffmpeg.exe` (Windows) or `ffmpeg` (other platforms) in that directory.
-3. On macOS, also checks `Contents/MacOS/ffmpeg` as a fallback (`.app` bundle structure).
-4. Returns the absolute path if found, null otherwise.
-5. Logs the result via `network_api.logFromDart()`.
+The platform decoder never sees an attachment on disk: it would need a plaintext copy, and none is ever written. `AtRest.isManaged` resolves the path like Rust's `under_data_root` (`..` and links followed on the part that exists, a climbing missing tail refused) and answers managed when it cannot tell. The vault path's temp poster is written with `AtRest.write` and removed with `AtRest.remove`. A received video on a phone keeps the poster its sender shipped. Before t18 phones and macOS sent videos with no poster and no dimensions at all (no ffmpeg found), and Windows posters were black for any video that fades in longer than half a second.
 
-**`isAvailable`** (static getter) -- returns `findFfmpegBinary() != null`.
+### Choosing the frame
 
-### Thumbnail cache
+One rule for every platform, in Dart (`pickPosterMs`), over samples every 500 ms through the first 6 s (`posterSampleTimesMs`, 12 frames):
+- frame 0 counts only when nothing later exists (a clip under half a second);
+- the pick is the first sample whose mean luma is at least 24 (of 255, below = black) and that is done brightening: neither of the NEXT TWO samples is brighter than 1.15x + 4. Only two count: comparing against the brightest frame anywhere later let a late flash or a pan to a brighter scene win (review, Nov 19);
+- no such sample = null, and the caller cuts the old frame. The ladder is always `{pick or 500 ms, 0}`: a cut at a point past the end is empty and falls through to frame 0.
 
-- **Location:** `~/.hollow/files/{basename}.thumb.webp` (or `$HOLLOW_DATA_DIR/files/` if env var set)
-- **`thumbCachePathFor(String videoPath) -> String?`** -- computes the canonical cache path: strips the video's extension, appends `.thumb.webp`, places in `~/.hollow/files/`.
-- **`cachedThumbFor(String videoPath) -> String?`** -- synchronous check: returns cache path if file exists on disk, null otherwise. Safe to call from `build()`.
-- **`_hollowFilesDir()`** -- resolves `~/.hollow/files/` from `USERPROFILE` or `HOME`, creates the directory if needed.
+ffmpeg path, two runs inside one 10 s budget:
+1. **Sample** (`posterSampleArgs`, at most 5 s): `-vf scale=32:32 -r 2 -frames:v 12 -c:v libwebp -lossless 1 -compression_level 0 -f image2pipe pipe:1`. Output rate conversion (`-r`) is fftools' own and works in the minimal build; there is NO `thumbnail`, `blackframe`, `signalstats`, `select` or `fps` filter there, which is why the luma is measured in Dart: `splitWebpStream` splits the back-to-back RIFF files, `meanLuma` decodes each 32 px still with the pure-Dart `image` package (BT.601).
+2. **Cut** (`posterFrameArgs`) at the pick, the remaining budget as its timeout (the 10 s `extractBudget` is counted after an attachment's bytes are read, `sampleBudget` 5 s): `-ss` before `-i` for a file (fast seek), after `-i` for a pipe (decodes to the point; at most 5.5 s in); `-vf scale=-2:<targetHeight> -frames:v 1 -update 1 -c:v libwebp -lossless 1 -compression_level 6 -f image2pipe pipe:1`. A sampling failure or timeout skips straight to the old frame; a non-zero exit of the cut is a real error (null); a `ProcessException` (no binary) ends at once. `runFfmpeg` arms its kill timer BEFORE writing stdin and races the write against the process ending, so a pipe ffmpeg stopped reading cannot hold it past the timeout.
+- **CRITICAL: every flag must exist in the minimal build** (`-pred mixed` once killed every extraction); test against the bundled binary, never a system ffmpeg. On a non-zero exit the log keeps the stderr TAIL.
+- `_parseFfmpegStderr` reads duration (`Duration: HH:MM:SS.cs`) and the first `Video:` stream's WxH from the cut's stderr.
 
-### Thumbnail extraction
+Platform path (`_extractNative`, channel `hollow/video_poster`): `sample {path, timesMs, deadlineMs}` answers `{durationMs, width, height, lumas}` (displayed size, rotation applied; a luma per time or null past the end), drawn at 16x16 (Apple, DeviceGray) or 32 px (Android, BT.601); `frame {path, atMs, maxHeight, deadlineMs}` answers `{image: JPEG (q 0.9) fitted in 2*maxHeight x maxHeight, durationMs, width, height}`, so a stalled or failed sample still yields the old frame WITH dimensions. Deadlines on both sides: Dart times `sample` at `sampleBudget` and each `frame` at what is left of `extractBudget`; Apple loads metadata and frames asynchronously and cancels at `deadlineMs` (`cancelLoading`, `cancelAllCGImageGeneration`), each call on its own global-queue worker; Android answers null at `deadlineMs` from a watchdog and runs each call on its own pooled thread, so a hung decode costs one stuck thread, never the next poster (its retriever is released by that thread when the decoder returns: `MediaMetadataRetriever` is not thread-safe and a `release()` racing a native frame call can crash the process). Apple opens the asset with `AVAssetReferenceRestrictions.forbidAll`; Android sets the source by file descriptor.
 
-**`ensureCachedThumb(String videoPath) -> Future<String?>`**
+### Cache and result
 
-1. Computes cache path. Returns null if unable.
-2. If cache file already exists, returns the path immediately (no re-extraction).
-3. If source video doesn't exist, returns null.
-4. Calls `extractVideoThumbnail()`.
-5. Writes the resulting WebP bytes to the cache path with `flush: true`.
-
-**`extractVideoThumbnail({required String videoPath, int targetHeight = 480}) -> Future<VideoThumbnailResult?>`**
-
-1. Locates ffmpeg. Returns null if missing.
-2. Verifies source video exists.
-3. Creates a system temp directory (`hollow_thumb_` prefix).
-4. Runs ffmpeg with args:
-   - `-y` overwrite output
-   - `-ss 00:00:00.5` seek 0.5s (avoids black first frames)
-   - `-i <videoPath>` input
-   - `-vf scale=-2:<targetHeight>` scale to target height, auto-width (even number)
-   - `-frames:v 1 -update 1` one frame, single-image output
-   - `-c:v libwebp -lossless 1 -compression_level 6` lossless WebP
-   - `-f image2` explicit muxer — the bundled MINIMAL ffmpeg has no `webp` muxer, so the `.webp` extension cannot drive the format guess
-   - **CRITICAL: every flag must exist in the minimal build** — `-pred mixed` was silently killing all extractions ("Unrecognized option"); test new flags against the bundled binary, never a system ffmpeg
-5. 10-second timeout. On timeout, logs and returns null.
-6. On non-zero exit, logs the stderr TAIL (last 500 chars — the head is just the version banner and hides the real error) and returns null.
-7. Reads the output WebP file. Returns null if empty or missing.
-8. Parses ffmpeg stderr for source video metadata (duration, dimensions) via `_parseFfmpegStderr()`.
-9. Returns `VideoThumbnailResult(webpBytes, durationMs, sourceWidth, sourceHeight)`.
-10. Cleans up the temp directory in `finally` block.
-
-### ffmpeg stderr parsing
-
-**`_parseFfmpegStderr(String stderr) -> _ParsedProbe`**
-
-Extracts two pieces of metadata from ffmpeg's stderr probe output:
-
-1. **Duration:** Regex `Duration:\s*(\d+):(\d+):(\d+)\.(\d+)` parses HH:MM:SS.cs. Handles variable fractional digit counts (2 digits = centiseconds, 3 = milliseconds, other = proportional via `_pow10()`).
-2. **Dimensions:** Regex `Stream #\d+:\d+.*?: Video:.*?(\d{2,5})x(\d{2,5})` captures the first video stream's WxH resolution.
-
-### Result type
-
-`VideoThumbnailResult` contains:
-- `webpBytes` (Uint8List) -- the lossless WebP thumbnail image bytes
-- `durationMs` (int) -- source video duration in milliseconds
-- `sourceWidth` (int) -- source video width in pixels (NOT the thumbnail width)
-- `sourceHeight` (int) -- source video height in pixels
+- `thumbCachePathFor(videoPath)`: `<data root>/files/<sha256(absolute path|size|mtime)[:32]>.thumb.webp` (two picks named `IMG_0001.MOV` in different folders, or a file replaced in place, are different videos; the basename alone used to share one poster); the bytes may be JPEG on phones and macOS (displays go through `read_at_rest_image`, which sniffs content). `cachedThumbFor` = sync existence check, safe in `build()`.
+- `ensureCachedThumb(videoPath)`: returns the cache, else extracts and writes through `AtRest.write`. The bubble calls it for our own video or after the tap only (C-FILES-02).
+- `VideoThumbnailResult`: `posterBytes` (WebP from ffmpeg, JPEG from a platform decoder), `posterExt` (`webp`/`jpg`, used to name the vault path's temp so Rust's image path decodes it by its real format), `durationMs`, `sourceWidth`/`sourceHeight` (the SOURCE video, not the still).
+- Rust only re-encodes what Dart hands it (`file_handler::encode_video_poster`, lossy WebP at 400/320/256 px under the wire budget). Posters already cached before t18 are not recut.
+- Tests: `video_poster_pick_test.dart` (rule, args, split, platform path, ciphertext never reaches the platform decoder), `video_poster_ffmpeg_test.dart` (real ffmpeg on a 2 s fade-in, a 0.3 s clip, a black clip; `HOLLOW_TEST_FFMPEG` names the binary, `HOLLOW_TEST_POSTER_CLIPS` a folder of clips for builds that cannot make them), `video_poster_native_test.dart` (both Swift copies identical, every runner registers the channel).
 
 ---
 

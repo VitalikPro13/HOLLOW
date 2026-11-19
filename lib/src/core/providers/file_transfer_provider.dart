@@ -9,6 +9,7 @@ import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/share.dart' as share_api;
 import 'package:path/path.dart' as p;
 
+import '../services/at_rest.dart';
 import '../services/video_thumbnail_service.dart';
 import 'channel_provider.dart';
 
@@ -62,10 +63,13 @@ class FileTransferState {
   final int chunksReceived;
   final bool isComplete;
   final bool isSending;
+
   /// True while a streamed transfer is in flight (no chunk-based progress).
   final bool isDownloading;
+
   /// Vault content ID (set when vault_upload_file is called for 6+ member servers).
   final String? contentId;
+
   /// Vault download phase ("Collecting shards...", "Reconstructing...", "Decrypting...").
   final String? vaultPhase;
   final String? error;
@@ -73,13 +77,17 @@ class FileTransferState {
   final bool isImage;
   final int? width;
   final int? height;
+
   /// Video thumbnail back-reference: non-null means this file is a thumbnail
   /// for the vault-stored video at `videoThumb.cid`, so the UI draws a play button.
   final network_api.VideoThumbRef? videoThumb;
+
   /// Share root hash — set for share-backed files (>34 MB channel files).
   final String? shareRootHash;
+
   /// Number of active seeders — updated from ShareProgress events.
   final int? seeders;
+
   /// Declined by the auto-download gate (issue #41). While true, progress from
   /// ANY byte source is ignored: the sender pushes regardless and the bytes are
   /// discarded, so the bubble must keep its Download button, not a spinner.
@@ -112,8 +120,7 @@ class FileTransferState {
     this.availability,
   });
 
-  double get progress =>
-      totalChunks > 0 ? chunksReceived / totalChunks : 0;
+  double get progress => totalChunks > 0 ? chunksReceived / totalChunks : 0;
 
   /// [clearAvailability] is the only way back to "nothing known": the plain
   /// `??` merge below can never null a field out.
@@ -152,8 +159,9 @@ class FileTransferState {
       shareRootHash: shareRootHash,
       seeders: seeders ?? this.seeders,
       declined: declined ?? this.declined,
-      availability:
-          clearAvailability ? null : (availability ?? this.availability),
+      availability: clearAvailability
+          ? null
+          : (availability ?? this.availability),
     );
   }
 }
@@ -187,17 +195,14 @@ class _PendingShareSend {
 }
 
 /// Tracks active file transfers.
-class FileTransferNotifier
-    extends Notifier<Map<String, FileTransferState>> {
+class FileTransferNotifier extends Notifier<Map<String, FileTransferState>> {
   @override
   Map<String, FileTransferState> build() => {};
 
   final Map<String, _PendingShareSend> _pendingShareSends = {};
 
   /// Video file extensions handled by the Phase 6.75 video preview path.
-  static const _videoExtensions = {
-    'mp4', 'webm', 'mov', 'mkv', 'avi', 'm4v',
-  };
+  static const _videoExtensions = {'mp4', 'webm', 'mov', 'mkv', 'avi', 'm4v'};
 
   /// Initiate a file send. [memberCount] >= 6 also triggers a vault upload.
   /// [isVoice] marks a recorded voice message: the FileHeader carries a `voice`
@@ -232,9 +237,11 @@ class FileTransferNotifier
     final isVideo = _videoExtensions.contains(ext);
     // A restricted channel stays out of the vault: its manifest carries the
     // file's key to every member of the server. Rust refuses one too.
-    final restricted = channelId != null &&
+    final restricted =
+        channelId != null &&
         (ref.read(channelListProvider)[channelId]?.usesSubgroup ?? false);
-    final isVaultMode = serverId != null &&
+    final isVaultMode =
+        serverId != null &&
         channelId != null &&
         memberCount >= 6 &&
         !restricted;
@@ -249,7 +256,8 @@ class FileTransferNotifier
       );
       if (videoThumb != null) {
         debugPrint(
-            '[HOLLOW] Pre-extracted video dimensions: ${videoThumb.sourceWidth}x${videoThumb.sourceHeight}');
+          '[HOLLOW] Pre-extracted video dimensions: ${videoThumb.sourceWidth}x${videoThumb.sourceHeight}',
+        );
       }
     }
 
@@ -260,7 +268,9 @@ class FileTransferNotifier
       final fileSize = File(filePath).lengthSync();
       const maxDirectSize = 34 * 1024 * 1024;
       if (fileSize > maxDirectSize) {
-        debugPrint('[HOLLOW] File >34 MB ($fileSize bytes) — creating hidden Share');
+        debugPrint(
+          '[HOLLOW] File >34 MB ($fileSize bytes) — creating hidden Share',
+        );
         _pendingShareSends[filePath] = _PendingShareSend(
           peerId: peerId,
           serverId: serverId,
@@ -315,7 +325,7 @@ class FileTransferNotifier
         isVoice: isVoice,
         // Poster frame for the receiver's bubble: Rust re-encodes it small and rides
         // it on the FileHeader, so the video previews before any bytes download.
-        posterBytes: videoThumb?.webpBytes,
+        posterBytes: videoThumb?.posterBytes,
         album: album,
       );
 
@@ -373,14 +383,16 @@ class FileTransferNotifier
     String? album,
   }) async {
     // Reuse sendFile()'s thumbnail if provided, else extract one now.
-    final thumb = preExtractedThumb ??
+    final thumb =
+        preExtractedThumb ??
         await VideoThumbnailService.extractVideoThumbnail(videoPath: filePath);
 
     if (thumb == null) {
       // Extraction failed: fall through to the legacy dual-call path.
       debugPrint(
-          '[HOLLOW] Video thumbnail extraction failed for $filePath — '
-          'falling back to legacy file card path');
+        '[HOLLOW] Video thumbnail extraction failed for $filePath — '
+        'falling back to legacy file card path',
+      );
       await network_api.sendFile(
         peerId: null,
         serverId: serverId,
@@ -425,15 +437,16 @@ class FileTransferNotifier
       rethrow;
     }
 
-    // Write the thumbnail to a temp .webp so the existing sendFile FFI can take
-    // it. The data root's temp, so a send that dies mid-way leaves nothing past
-    // the next launch or a wipe.
+    // Write the thumbnail to a temp image so the existing sendFile FFI can take
+    // it, named for its real format (a phone's poster is JPEG). Sealed in the
+    // data root's temp like every file there: a send that dies mid-way leaves
+    // nothing readable, and the next launch or a wipe clears it.
     final stage = Directory(p.join(hollowDataDir, 'temp'));
     await stage.create(recursive: true);
     final tempDir = await stage.createTemp('vthumb_');
-    final thumbPath = p.join(tempDir.path, '$messageId.webp');
+    final thumbPath = p.join(tempDir.path, '$messageId.${thumb.posterExt}');
     try {
-      await File(thumbPath).writeAsBytes(thumb.webpBytes, flush: true);
+      await AtRest.write(thumbPath, thumb.posterBytes);
 
       final videoStat = await File(filePath).stat();
       final vthumb = network_api.VideoThumbRef(
@@ -471,8 +484,13 @@ class FileTransferNotifier
         state = withVThumb;
       }
       debugPrint(
-          '[HOLLOW] Vault video sent: cid=$contentId thumb=${thumb.webpBytes.length} bytes');
+        '[HOLLOW] Vault video sent: cid=$contentId thumb=${thumb.posterBytes.length} bytes',
+      );
     } finally {
+      // Through AtRest first, so the file's key row goes with it.
+      try {
+        await AtRest.remove(thumbPath);
+      } catch (_) {}
       try {
         await tempDir.delete(recursive: true);
       } catch (_) {}
@@ -483,34 +501,38 @@ class FileTransferNotifier
   /// large file send, send the FileHeader with share_ref via the normal file path.
   void onShareCreatedForFile(String link, String fileName, String rootHash) {
     final matchKey = _pendingShareSends.keys.cast<String?>().firstWhere(
-          (k) => k != null && k.endsWith(fileName),
-          orElse: () => null,
-        );
+      (k) => k != null && k.endsWith(fileName),
+      orElse: () => null,
+    );
     if (matchKey == null) return;
     final ctx = _pendingShareSends.remove(matchKey)!;
-    debugPrint('[HOLLOW] Share ready for large file — sending FileHeader with share_ref');
+    debugPrint(
+      '[HOLLOW] Share ready for large file — sending FileHeader with share_ref',
+    );
 
     final info = share_api.shareDecodeLink(link: link);
-    info.then((decoded) async {
-      final keyHex = _extractKeyHexFromLink(link);
-      await network_api.sendFile(
-        peerId: ctx.peerId,
-        serverId: ctx.serverId,
-        channelId: ctx.channelId,
-        filePath: ctx.filePath,
-        messageId: ctx.messageId,
-        messageText: ctx.messageText,
-        vthumb: null,
-        overrideWidth: ctx.videoThumb?.sourceWidth,
-        overrideHeight: ctx.videoThumb?.sourceHeight,
-        shareRootHash: decoded.rootHash,
-        shareKeyHex: keyHex,
-        posterBytes: ctx.videoThumb?.webpBytes,
-        album: ctx.album,
-      );
-    }).catchError((e) {
-      debugPrint('[HOLLOW] Failed to send share-backed file: $e');
-    });
+    info
+        .then((decoded) async {
+          final keyHex = _extractKeyHexFromLink(link);
+          await network_api.sendFile(
+            peerId: ctx.peerId,
+            serverId: ctx.serverId,
+            channelId: ctx.channelId,
+            filePath: ctx.filePath,
+            messageId: ctx.messageId,
+            messageText: ctx.messageText,
+            vthumb: null,
+            overrideWidth: ctx.videoThumb?.sourceWidth,
+            overrideHeight: ctx.videoThumb?.sourceHeight,
+            shareRootHash: decoded.rootHash,
+            shareKeyHex: keyHex,
+            posterBytes: ctx.videoThumb?.posterBytes,
+            album: ctx.album,
+          );
+        })
+        .catchError((e) {
+          debugPrint('[HOLLOW] Failed to send share-backed file: $e');
+        });
   }
 
   String _extractKeyHexFromLink(String link) {
@@ -594,8 +616,7 @@ class FileTransferNotifier
   void onFileAvailability(String fileId, String availability, String peerId) {
     final current = state[fileId];
     if (current?.isComplete == true) return;
-    final next =
-        FileAvailabilityState(state: availability, peerId: peerId);
+    final next = FileAvailabilityState(state: availability, peerId: peerId);
     final updated = Map<String, FileTransferState>.from(state);
     if (current == null) {
       updated[fileId] = FileTransferState(
@@ -736,7 +757,11 @@ class FileTransferNotifier
 
   /// Handle vault download progress — update phase text on file transfer.
   /// contentId is matched against transfers that have contentId set.
-  void onVaultDownloadProgress(String contentId, String phase, double progress) {
+  void onVaultDownloadProgress(
+    String contentId,
+    String phase,
+    double progress,
+  ) {
     final updated = Map<String, FileTransferState>.from(state);
     for (final entry in updated.entries) {
       if (entry.value.contentId == contentId) {
@@ -783,5 +808,7 @@ class FileTransferNotifier
   }
 }
 
-final fileTransferProvider = NotifierProvider<FileTransferNotifier,
-    Map<String, FileTransferState>>(FileTransferNotifier.new);
+final fileTransferProvider =
+    NotifierProvider<FileTransferNotifier, Map<String, FileTransferState>>(
+      FileTransferNotifier.new,
+    );

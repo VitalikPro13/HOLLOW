@@ -67,6 +67,14 @@ stay in CLAUDE.md. Wiki `rust_file_handler`, `emotes`, `hollowpack`.
   stands in); a voice note's duration comes from its Ogg pages in Dart
   (`AudioProbeService.oggDurationMs`), ffmpeg waits for play. `video_thumb_gate_test`,
   `audio_probe_gate_test`.
+- A video's poster is the first sampled frame that is lit and past any fade-in (one Dart rule,
+  `pickPosterMs`, for ffmpeg and the platform decoders). Phones and macOS cut it with
+  AVFoundation / `MediaMetadataRetriever` (channel `hollow/video_poster`), and ONLY for a file
+  outside the data root (`AtRest.isManaged`: resolved like `under_data_root`, unsure = managed):
+  an attachment there is ciphertext, never copied out in plain, so it goes to ffmpeg's pipe or
+  gets no local poster. Every native call has its own deadline on both sides; a hung decode never
+  blocks the next poster. The minimal ffmpeg has only `scale`.
+  `video_poster_pick_test`, `video_poster_ffmpeg_test`, wiki `services_media_storage`.
 
 ## Profile media, frames, showcase
 

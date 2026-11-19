@@ -318,7 +318,7 @@ socket and tells nobody, mirroring the field.
 
 **Rule:** Any new flag in an ffmpeg invocation (`VideoThumbnailService`, audio transcode/probe, voice recorder) must be verified against `vendor/ffmpeg`'s minimal build, never a system ffmpeg.
 
-**Why:** The minimal build (`--disable-everything --enable-small`) rejected `-pred mixed` outright and has no `webp` muxer (output format can't be guessed from a `.webp` extension — needs explicit `-f image2 -update 1`). This silently killed every video thumbnail/dimension/poster extraction for months; the failure log truncated stderr from the head, showing only the version banner. Error logs for subprocess ffmpeg must log the stderr TAIL. See memory `project_ffmpeg_minimal_build`.
+**Why:** The minimal build (`--disable-everything --enable-small`) rejected `-pred mixed` outright and has no `webp` muxer (output format can't be guessed from a `.webp` extension — needs explicit `-f image2 -update 1`). This silently killed every video thumbnail/dimension/poster extraction for months; the failure log truncated stderr from the head, showing only the version banner. Error logs for subprocess ffmpeg must log the stderr TAIL. See memory `project_ffmpeg_minimal_build`. Its only video filter is `scale` (no `thumbnail`, `blackframe`, `signalstats`, `select`, `fps`), so a choice that needs pixel statistics samples tiny WebP frames with output `-r` and measures them in Dart (the video poster, wiki `services_media_storage`). A system ffmpeg is no stand-in either way: Homebrew's 9.x has no `libwebp` encoder at all.
 
 ### Explicit file requests carry a receipt that bypasses the size cap
 
