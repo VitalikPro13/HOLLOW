@@ -1,3 +1,44 @@
+v0.14.1 - Name Colors, Hideable Sidebar Places & Screen Share Audio Fix
+
+No breaking changes, so 0.14.0 and 0.14.1 work together. Self-hosters, update your relay too, so phones using it follow the new mentions-only notification default.
+
+SECURITY
+
+- Important security fixes for server joins and Linux notifications
+
+VOICE & CALLS
+
+- Fixed some viewers hearing no sound from a screen share in a voice room (#135)
+- Restarting or quitting Hollow during a call now hangs up first, so the other person isn't left in a dead call (#146)
+
+SERVERS
+
+- Servers whose notifications you never changed now notify you only for mentions
+- Posts from every channel arrive live, so the Archive, unread counts and search include channels you haven't opened
+- Files download only for the channel you are looking at
+- Fixed a server's messages, voice and screen shares sometimes failing for good after its members updated at different times
+
+PROFILES
+
+- You can give your name one color or a gradient, and turn off other people's colors in Appearance (#140)
+
+INTERFACE
+
+- You can hide the places beside your servers, such as the Shop and public channels (#141)
+- Settings stays readable over a bright or busy wallpaper (#144)
+- The status banner is easier to read, and its countdown shows days
+- Video previews show a real frame on every platform instead of a black one
+
+PHONES
+
+- Tablets scale the interface to their screen until you set the scale yourself
+- The Welcome page opens full screen on tablets
+- Conferences and the Archive show Join and Export buttons instead of bare icons
+
+LINUX
+
+- Notifications say Hollow and show its icon
+
 v0.14 - Lost Device Protection, Invite Link Reset, Call Route Badge & Get Help Page
 
 0.14 is a clean break from 0.13, so everyone in a server should update to keep it working together. A 0.13 app can stop seeing a server that 0.14 members use, and its new posts there may not reach them. Self-hosters, a 0.14 relay still serves 0.13 apps, and updating it brings a denylist, connection limits you can set and fairer upload sharing.
