@@ -249,6 +249,17 @@ void main() {
     }
   });
 
+  group('a notice bar over a wallpaper', () {
+    for (final (name, hollow) in _themes) {
+      test('$name theme: stays solid at every Darken', () {
+        for (final d in [0.4, 0.7, 1.0]) {
+          final bar = hollow.overWallpaper(d).noticeSurface(hollow.accent);
+          expect(bar.a, 1.0, reason: 'Darken $d shows the picture through');
+        }
+      });
+    }
+  });
+
   group('a hovered message over a wallpaper', () {
     testWidgets('is a small lift on any picture, never a slab',
         (tester) async {

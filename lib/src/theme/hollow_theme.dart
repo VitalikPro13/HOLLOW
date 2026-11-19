@@ -254,10 +254,11 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
   ///
   /// A bare `tint.withValues(alpha: …)` is transparent, so over the chat the
   /// bar shows the user's wallpaper and stops reading as part of the app
-  /// (issue #54). Blending onto [elevated] keeps it a raised strip whether it
-  /// sits on the canvas or the chrome, and still honours panel opacity.
+  /// (issue #54). Blending onto an opaque [elevated] keeps it a solid raised
+  /// strip on the canvas, the chrome or a wallpaper at any Darken.
   Color noticeSurface(Color tint, {double alpha = 0.14}) =>
-      Color.alphaBlend(tint.withValues(alpha: alpha), elevated);
+      Color.alphaBlend(
+          tint.withValues(alpha: alpha), elevated.withValues(alpha: 1));
 
   /// A message row's hover on the canvas: half a step toward [elevated], so a
   /// card or file inside the row, which IS elevated, still stands out. Over a
