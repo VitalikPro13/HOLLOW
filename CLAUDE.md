@@ -24,7 +24,7 @@ flutter run -d windows
 flutter build windows
 # build_hooks error? scripts/flutter_win.ps1 <args>
 flutter test test/
-cd rust/hollow_core && cargo check  # + clippy
+cd rust/hollow_core && cargo check # + clippy
 
 cargo test --lib test_harness -- --nocapture
 cargo nextest run --lib
@@ -33,11 +33,11 @@ cargo nextest run --lib
 flutter_rust_bridge_codegen generate --rust-input "crate::api" --rust-root "rust/hollow_core" --dart-output "lib/src/rust"
 
 # Relay deploy: scp src/*.cpp *.h *.c + CMakeLists.txt -> ~/relay-uws/, cmake+make, `sudo install`, restart; NO setcap (`feedback_relay_rules`)
-# Relay tests (VPS, before every deploy): bash relay-uws/test/run_tests.sh, then SANITIZE=1
+# Relay tests (VPS, before every deploy): bash relay-uws/test/run_tests.sh, then SANITIZE=1 (own HOLLOW_PUSH_PORT)
 
 # Windows release (build->sign->installer->zip, Certum PIN)
-pwsh scripts\build_release.ps1  # full pipeline (-SkipBuild to repackage)
-pwsh scripts\sign_release.ps1  # sign every .exe/.dll in Release
+pwsh scripts\build_release.ps1 # full (-SkipBuild = repackage)
+pwsh scripts\sign_release.ps1 # sign each .exe/.dll
 ```
 **Releases: load the `release` skill FIRST** (go-live gate; `reference_release_pipeline`). **Certum:** CNG binding self-heals (`reference_certum_signing_procedure`). **Linux = BOTH artifacts + `scripts/publish_flatpak_repo.sh` (own GPG-signed OSTree repo, NEVER Flathub) BEFORE the LAST step `scripts\sign_manifest.ps1`** (key OUTSIDE repo, `project_update_integrity`). **Zips: .NET '/' zipping, NEVER Compress-Archive** (`feedback_compress_archive_backslash_zip`).
 
