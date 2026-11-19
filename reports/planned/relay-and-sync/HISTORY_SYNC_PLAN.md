@@ -149,12 +149,14 @@ DMs are 1:1 and usually small; a linked device gets the database whole at link t
 
 ## 10. Decisions for Vitalik
 
-1. One window per device (proposed) or per server.
-2. Pinned posts below the window: not kept in v1 (the pins panel loads them like scroll-up), or kept as exempt rows.
-3. Peeked rows: no downloads in v1 (proposed).
-4. A2 tail-first for returning members, and its threshold, after T0.
-5. Fix server `retention_messages` through window marks, or delete the dormant arm.
-6. Decided Nov 19: the ascending join path is deleted in 0.15, as part of its clean break.
+All decided by Vitalik, Nov 19-20 2026:
+
+1. **One window per device**, chosen by the user on each device (a week on desktop, a day on the phone); default **All** on every device. The window is what a device KEEPS, never what it pulls first: pulling is always newest-first, and an All device fills the rest in the background.
+2. **Pinned posts below the window: on demand.** Pins are CRDT state, so the pins panel knows the ids; opening it peeks a small descending page at each pinned post's timestamp from any member holding it (same ask, gates and RAM cache as scroll-up, §4). No exempt rows, no new wire.
+3. **Peeked rows: shown from RAM, no file downloads in v1.**
+4. **A2 tail-first for returning members: yes**, threshold set from the T0 data.
+5. **Fix server `retention_messages` through window marks** (T4), never delete the arm.
+6. The ascending join path is deleted in 0.15, as part of its clean break.
 
 ## 11. Proposed copy (goes through Sepia before shipping; no em dashes)
 

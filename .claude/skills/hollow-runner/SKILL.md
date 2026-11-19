@@ -58,6 +58,17 @@ section after the Windows fleet); these rules hold for every command that runs O
 - `tar` reads `C:/` as a remote host: use `--force-local`.
 - The app reads HOME before USERPROFILE; a sandboxing script sets both.
 
+## Shared machines: lease first (two Claude sessions may run at once)
+
+Every job on a shared machine runs inside a lease, taken on the Mac:
+`bash scripts/lease.sh run <resource> --who <your session/track> -- <command>`. Resources:
+`mac-build` (2 slots: cargo builds, nextest, flutter test, Xcode on the mini), `mac-ios-sims`,
+`mac-android`, `mac-desktop-app`, `pc-fleet`, `pc-build` (PC nextest/builds), `linux-vm`,
+`hollowsrv`, `vps-relay-tests`. It waits its turn first-come-first-served; waiting is normal, never
+a reason to skip the lease or go around it. A job that must outlive one shell (a background fleet):
+`acquire` (prints an id, `--ttl` minutes, default 60), `renew` while it runs, `release` after.
+`bash scripts/lease.sh status` shows who holds what. Report time spent waiting under NOTES.
+
 ## Process and disk hygiene
 
 - Stop only processes you started, by PID (`Stop-Process -Id <pid>`). Never by image name: it once
