@@ -1023,13 +1023,14 @@ pub(crate) fn now_ms() -> i64 {
         .as_millis() as i64
 }
 
-/// `t` moved back by `by`, or by as much of it as the monotonic clock allows: on
-/// Windows `Instant` counts from boot, so on a machine up for less than `by` a plain
-/// `checked_sub` fails and a fallback to `t` would read "due long ago" as "due now".
+/// `t` moved back by `by`, or by as much of it as the monotonic clock allows. `Instant`
+/// counts from boot, so on a machine up for less than `by` the result is LATER than
+/// asked: fit only where waiting a little longer is harmless. A mark meaning "due now"
+/// is [`Since::LongAgo`], never an instant in the past.
 pub(crate) fn earlier_by(t: std::time::Instant, by: std::time::Duration) -> std::time::Instant {
     let mut back = by;
     while !back.is_zero() {
-        if let Some(earlier) = t.checked_sub(back) {
+        if let Some(earlier) = t.checked_sub(back).filter(|e| clock_reaches(*e)) {
             return earlier;
         }
         back /= 2;
@@ -1037,10 +1038,81 @@ pub(crate) fn earlier_by(t: std::time::Instant, by: std::time::Duration) -> std:
     t
 }
 
-/// [`earlier_by`] from now.
-pub(crate) fn instant_ago(by: std::time::Duration) -> std::time::Instant {
-    earlier_by(std::time::Instant::now(), by)
+/// Whether the monotonic clock reaches back to `t`: always outside tests, which can
+/// pretend the machine booted moments ago ([`pretend_booted_at`]).
+fn clock_reaches(t: std::time::Instant) -> bool {
+    #[cfg(test)]
+    return BOOTED_AT.with(|b| b.get().is_none_or(|boot| t >= boot));
+    #[cfg(not(test))]
+    {
+        let _ = t;
+        true
+    }
 }
+
+#[cfg(test)]
+thread_local! {
+    static BOOTED_AT: std::cell::Cell<Option<std::time::Instant>> = const { std::cell::Cell::new(None) };
+}
+
+/// TEST-ONLY: on this thread the monotonic clock starts at `boot` (None: where the OS
+/// starts it), as on a machine that booted moments ago.
+#[cfg(test)]
+pub(crate) fn pretend_booted_at(boot: Option<std::time::Instant>) {
+    BOOTED_AT.with(|b| b.set(boot));
+}
+
+/// When a wait began, or [`Since::LongAgo`]: every wait counted from it is already over.
+/// "Due now" is spelled out because `Instant` counts from boot, so on a machine up for
+/// less than the wait no instant that far back exists.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Since {
+    /// Declared first so it sorts before every instant (longest waiting first).
+    LongAgo,
+    At(std::time::Instant),
+}
+
+impl Since {
+    pub(crate) fn now() -> Self {
+        Since::At(std::time::Instant::now())
+    }
+
+    /// How long before `now` the wait began; `Duration::MAX` for [`Since::LongAgo`].
+    pub(crate) fn elapsed_at(self, now: std::time::Instant) -> std::time::Duration {
+        match self {
+            Since::LongAgo => std::time::Duration::MAX,
+            Since::At(t) => now.saturating_duration_since(t),
+        }
+    }
+
+    pub(crate) fn elapsed(self) -> std::time::Duration {
+        self.elapsed_at(std::time::Instant::now())
+    }
+}
+
+impl From<std::time::Instant> for Since {
+    fn from(t: std::time::Instant) -> Self {
+        Since::At(t)
+    }
+}
+
+/// TEST-ONLY: until dropped, this thread's monotonic clock starts `up` before now.
+#[cfg(test)]
+pub(crate) struct FreshBoot;
+
+#[cfg(test)]
+pub(crate) fn booted_moments_ago(up: std::time::Duration) -> FreshBoot {
+    pretend_booted_at(Some(std::time::Instant::now() - up));
+    FreshBoot
+}
+
+#[cfg(test)]
+impl Drop for FreshBoot {
+    fn drop(&mut self) {
+        pretend_booted_at(None);
+    }
+}
+
 
 /// A fresh channel id: the server's first 8 characters, then 4 random bytes.
 ///
@@ -6445,7 +6517,7 @@ mod standing_wire_tests {
 
 #[cfg(test)]
 mod instant_ago_tests {
-    use super::earlier_by;
+    use super::{earlier_by, Since};
     use std::time::{Duration, Instant};
 
     /// A clock that started less than `by` ago (Windows counts `Instant` from boot)
@@ -6459,5 +6531,19 @@ mod instant_ago_tests {
         assert!(back < now, "the instant did not move back at all");
         assert_eq!(earlier_by(now, Duration::from_secs(1)), now - Duration::from_secs(1));
         assert_eq!(earlier_by(now, Duration::ZERO), now);
+    }
+
+    /// "Due now" reads as every wait spent and sorts first, whenever the clock started.
+    #[test]
+    fn long_ago_is_past_every_wait_on_a_machine_up_for_a_second() {
+        let _boot = super::booted_moments_ago(Duration::from_secs(1));
+        let now = Instant::now();
+        assert_eq!(Since::LongAgo.elapsed_at(now), Duration::MAX);
+        assert!(Since::LongAgo.elapsed() >= Duration::from_secs(3600));
+        assert!(Since::LongAgo < Since::At(now) && Since::At(now) < Since::now());
+        assert_eq!(Since::At(now).elapsed_at(now), Duration::ZERO);
+        let later = Since::At(now + Duration::from_secs(5));
+        assert_eq!(later.elapsed_at(now), Duration::ZERO, "a mark ahead of the clock is no wait spent");
+        assert!(earlier_by(now, Duration::from_secs(3600)) > now - Duration::from_secs(2), "the clock reaches no further back");
     }
 }

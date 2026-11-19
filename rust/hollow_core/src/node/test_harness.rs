@@ -30473,7 +30473,7 @@ async fn at_rest_share_partial_written_encrypted_and_resumes() {
                 peer_have: std::collections::HashMap::new(),
                 inflight: std::collections::HashMap::new(),
                 dial_after: std::collections::HashMap::new(),
-                last_have_broadcast: now,
+                last_have_broadcast: now.into(),
                 speed_samples: Vec::new(),
                 speed_bps: 0,
                 manifest_requested_at: None,

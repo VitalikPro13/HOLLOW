@@ -69,9 +69,12 @@ release pipeline is the `release` skill.
   `fire_and_forget` coroutine (a WinRT failure = terminate), so App Lock calls it on phones only;
   a desktop biometric feature must fork it first. Both guarded by
   `test/windows_audio_plugin_guard_test.dart`.
-- `std::time::Instant` counts from boot on Windows: `now.checked_sub(d)` fails on a machine up
-  for less than `d`. Never write "long ago" as `checked_sub(d).unwrap_or(now)` (it becomes
-  "now"); use `node::types::instant_ago` / `earlier_by` (wiki `rust_test_harness`, t15).
+- `std::time::Instant` counts from boot (Windows, macOS, Linux): `now.checked_sub(d)` fails on a
+  machine up for less than `d`, and no instant that far back exists. A mark meaning "due now"
+  is `node::types::Since::LongAgo` (elapsed = `Duration::MAX`), never an instant in the past;
+  `earlier_by` (as far back as the clock reaches) only where a later start is harmless, e.g.
+  test agers (wiki `rust_test_harness`, t15, t18). Tests pretend a fresh boot with
+  `types::booted_moments_ago`.
 - Known, not fixed: the vendored `setSourceUrl`/`setSourceBytes` threads hold a raw `AudioPlayer*`,
   so a dispose landing mid-set is a use-after-free (mostly unreachable: `SoundService` awaits play).
 

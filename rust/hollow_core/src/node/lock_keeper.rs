@@ -14,7 +14,7 @@ use crate::crdt::operations::{CrdtPayload, JoinSecret};
 use crate::crdt::server_state::ServerState;
 use crate::identity::native_identity::NativeKeypair;
 use super::join_lock::{self, LockLink, NewLock};
-use super::types::{ServerStates, WsCmdTx, WsRoomPeers};
+use super::types::{ServerStates, Since, WsCmdTx, WsRoomPeers};
 use super::ws_client::WsCommand;
 
 /// How long the relay's chain as we last read it is good enough to build on.
@@ -206,8 +206,8 @@ pub(crate) struct LockKeeper {
     views: HashMap<String, (Vec<LockLink>, Instant)>,
     asked: HashMap<String, Instant>,
     in_flight: HashMap<String, InFlight>,
-    due_since: HashMap<String, Instant>,
-    stuck_since: HashMap<String, Instant>,
+    due_since: HashMap<String, Since>,
+    stuck_since: HashMap<String, Since>,
     granted_at: HashMap<String, Instant>,
     /// No offer to the relay for a server before this.
     quiet_until: HashMap<String, Instant>,
@@ -357,7 +357,7 @@ impl LockKeeper {
 
     /// Someone who held a key was just removed by us: move the lock on the next tick.
     pub(crate) fn nudge(&mut self, server_id: &str) {
-        self.due_since.insert(server_id.to_string(), super::types::instant_ago(Duration::from_secs(3600)));
+        self.due_since.insert(server_id.to_string(), Since::LongAgo);
     }
 
     /// Devices a roster fold removed or a recovery dropped: every server of each identity
@@ -461,7 +461,7 @@ impl LockKeeper {
             _ => RETRY_LOCK,
         };
         if removed_tip {
-            self.stuck_since.insert(server_id.to_string(), super::types::instant_ago(RESET_GRACE));
+            self.stuck_since.insert(server_id.to_string(), Since::LongAgo);
         } else if !accepted {
             self.missed(server_id, wait);
         }
@@ -651,7 +651,7 @@ impl LockKeeper {
         }
 
         if (lock.rotation_due() || removal_due) && state.holds_moderation(local) {
-            let since = *self.due_since.entry(server_id.to_string()).or_insert_with(Instant::now);
+            let since = *self.due_since.entry(server_id.to_string()).or_insert_with(Since::now);
             if since.elapsed() < self.stagger(server_id, state, local, ws_room_peers) {
                 return None;
             }
@@ -674,7 +674,7 @@ impl LockKeeper {
             // about to hear of. Past the grace the owner starts over past it, and an admin
             // or mod extends the newest lock it holds, which the relay takes only once the
             // device that made every later link stopped counting.
-            let stuck = *self.stuck_since.entry(server_id.to_string()).or_insert_with(Instant::now);
+            let stuck = *self.stuck_since.entry(server_id.to_string()).or_insert_with(Since::now);
             if stuck.elapsed() >= RESET_GRACE && seen.elapsed() <= VIEW_FRESH {
                 if is_owner {
                     let reset = join_lock::mint_owner_base(server_id, tip.n + 1, keys.master, nonce.as_deref(), keys.device)?;
@@ -1319,5 +1319,29 @@ mod tests {
         assert_eq!(devices.len(), join_lock::GRANT_DEVICES);
         assert_eq!(devices[0], root.peer_id(), "the root first");
         assert_eq!(&devices[1..4], chain.as_slice(), "then by depth");
+    }
+
+    /// `Instant` counts from boot: a nudged lock is due now on a machine up for seconds as
+    /// on one up for days, and waits out no stagger.
+    #[test]
+    fn a_due_lock_is_due_at_once_on_a_machine_up_for_seconds() {
+        let _boot = crate::node::types::booted_moments_ago(Duration::from_secs(2));
+        let mut keeper = LockKeeper::default();
+        keeper.nudge("s");
+        assert!(keeper.due_since["s"].elapsed() >= Duration::from_secs(3600), "a nudged lock waited out a stagger");
+    }
+
+    /// A removed device's newest lock gives way at the next tick on a machine up for
+    /// seconds too, without waiting out the grace.
+    #[test]
+    fn a_removed_tip_gives_way_at_once_on_a_machine_up_for_seconds() {
+        let _l = resolver::test_lock();
+        let _boot = crate::node::types::booted_moments_ago(Duration::from_secs(2));
+        let (moderator, mod_dev) = (kp(72), kp(73));
+        let (mut keeper, state, chain) = our_move_meets(&moderator, &mod_dev);
+        let server = state.server_id.clone();
+        keeper.pre_removal.insert(server.clone());
+        refused(&mut keeper, &state, chain, &moderator, Some(&mod_dev));
+        assert!(acts_at_once(&keeper, &server), "a removed device's newest lock waited out the grace");
     }
 }

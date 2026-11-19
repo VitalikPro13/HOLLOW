@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 use super::crypto_handler::{online_devices_for, ws_room_for_peer};
-use super::types::{HavenMessage, NetworkEvent};
+use super::types::{HavenMessage, NetworkEvent, Since};
 use crate::crdt::server_state::ServerState;
 
 /// Ceiling on outstanding pulls. Overflow evicts the oldest ask, so a burst of
@@ -66,7 +66,8 @@ pub(crate) struct PendingFileAsk {
     /// Devices that answered `FileUnavailable` on this connection, with reason.
     pub(crate) negatives: Vec<(String, String)>,
     pub(crate) first_asked_at: Instant,
-    pub(crate) last_asked_at: Instant,
+    /// When this connection last asked: `LongAgo` once a new socket makes the ask due.
+    pub(crate) last_asked_at: Since,
 }
 
 impl PendingFileAsk {
@@ -233,7 +234,7 @@ async fn dispatch_one(
     if let Some(ask) = pending.get_mut(file_id) {
         ask.asked.insert(device.to_string());
         ask.in_flight = Some((device.to_string(), now));
-        ask.last_asked_at = now;
+        ask.last_asked_at = Since::At(now);
     }
     let _ = event_tx
         .send(NetworkEvent::FileAvailability {
@@ -357,7 +358,7 @@ pub(crate) async fn upsert_and_advance(
                     in_flight: None,
                     negatives: Vec::new(),
                     first_asked_at: now,
-                    last_asked_at: now,
+                    last_asked_at: Since::At(now),
                 },
             );
             evict_overflow(pending);
@@ -700,12 +701,11 @@ pub(crate) async fn retry_stale_asks(
 /// dead connection told us. `last_asked_at` is stamped stale so the next roster
 /// snapshot dispatches at once rather than waiting out a dead socket's window.
 pub(crate) fn reset_on_disconnect(pending: &mut HashMap<String, PendingFileAsk>) {
-    let stale_now = super::types::instant_ago(Duration::from_secs(FILE_ASK_TIMEOUT_SECS));
     for ask in pending.values_mut() {
         ask.asked.clear();
         ask.negatives.clear();
         ask.in_flight = None;
-        ask.last_asked_at = stale_now;
+        ask.last_asked_at = Since::LongAgo;
     }
 }
 

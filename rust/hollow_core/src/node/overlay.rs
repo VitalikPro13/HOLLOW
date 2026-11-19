@@ -20,7 +20,7 @@ use tokio::sync::mpsc;
 
 use super::assets::MAX_BUNDLE_REPLY_BYTES;
 use super::overlay_look;
-use super::types::{HavenMessage, NetworkEvent, OverlayField};
+use super::types::{HavenMessage, NetworkEvent, OverlayField, Since};
 use crate::identity::native_identity::NativeKeypair;
 use crate::storage::MessageStore;
 
@@ -724,7 +724,7 @@ pub(crate) struct Want {
     /// Images of this look we already hold.
     held: Vec<String>,
     /// Devices asked for this look, and when. Only these may answer it.
-    asked: HashMap<String, Instant>,
+    asked: HashMap<String, Since>,
     /// The device whose answer we are waiting for.
     in_flight: Option<(String, Instant)>,
     /// Asks sent and not answered yet: an answer finishes the pull only when it is the
@@ -742,9 +742,8 @@ impl Want {
     /// Something newer to fetch: every device may be asked at once, and the answers of
     /// those already asked still count.
     fn ask_again_now(&mut self) {
-        let long_ago = super::types::instant_ago(ASK_RETRY);
         for at in self.asked.values_mut() {
-            *at = (*at).min(long_ago);
+            *at = Since::LongAgo;
         }
         self.in_flight = None;
         self.rounds = 0;
@@ -967,7 +966,7 @@ fn dispatch(
         let mut devices: Vec<String> = super::crypto_handler::online_devices_for(ws_room_peers, master)
             .into_iter()
             .filter(|d| d != device_peer_id && roster_counted(d).as_deref() == Some(master.as_str()))
-            .filter(|d| want.asked.get(d).is_none_or(|at| now.duration_since(*at) >= ASK_RETRY))
+            .filter(|d| want.asked.get(d).is_none_or(|at| at.elapsed_at(now) >= ASK_RETRY))
             .collect();
         devices.sort();
         if let Some(hint) = &want.hint
@@ -980,7 +979,7 @@ fn dispatch(
             continue;
         };
         send_ask(ws_cmd_tx, &device, &want.held);
-        want.asked.insert(device.clone(), now);
+        want.asked.insert(device.clone(), Since::At(now));
         want.in_flight = Some((device, now));
         want.unanswered += 1;
         want.rest_until = None;
@@ -1192,7 +1191,7 @@ async fn handle_envelope_overlay_look_answer_inner(
     }
     // More images than one answer holds: ask the same device for the rest.
     send_ask(ws_cmd_tx, sender, &want.held);
-    want.asked.insert(sender.to_string(), Instant::now());
+    want.asked.insert(sender.to_string(), Since::now());
     want.in_flight = Some((sender.to_string(), Instant::now()));
     want.unanswered += 1;
 }
@@ -1700,7 +1699,7 @@ mod tests {
         let bundle = String::from_utf8(crate::api::showcase::encode_asset_bundle(&[(hash.clone(), img)])).unwrap();
         let mut book = OverlayBook::new();
         let mut want = Want::new(9, None, Vec::new());
-        want.asked.insert(asked.clone(), Instant::now());
+        want.asked.insert(asked.clone(), Since::now());
         book.wants.insert(m.clone(), want);
         let (ws_tx, _ws_rx) = mpsc::unbounded_channel();
         let (ev_tx, mut ev_rx) = mpsc::channel(8);
@@ -1746,7 +1745,7 @@ mod tests {
         }
         let mut book = OverlayBook::new();
         let mut want = Want::new(10, None, Vec::new());
-        want.asked.insert(dev.clone(), Instant::now());
+        want.asked.insert(dev.clone(), Since::now());
         want.unanswered = 2;
         book.wants.insert(m.clone(), want);
         let (ws_tx, _ws_rx) = mpsc::unbounded_channel();
@@ -1975,7 +1974,7 @@ mod so_review_tests {
         let bundle = String::from_utf8(crate::api::showcase::encode_asset_bundle(&[(h.clone(), bytes)])).unwrap();
         let mut book = OverlayBook::new();
         let mut want = Want::new(5, None, Vec::new());
-        want.asked.insert(d.clone(), Instant::now());
+        want.asked.insert(d.clone(), Since::now());
         want.unanswered = 1;
         book.wants.insert(m.clone(), want);
         let (ws_tx, _ws_rx) = mpsc::unbounded_channel();
@@ -2395,5 +2394,16 @@ mod so_review_fix_tests {
         crate::api::storage::set_test_store(MessageStore::open(":memory:", &pass).unwrap());
         assert_eq!(before, Some(vec![0, 3]), "CONTROL: the friend was on the page");
         assert_eq!(after, Some(vec![0]), "a person whose field turned off stayed on the page");
+    }
+
+    /// A newer look asks every device at once, on a machine up for a moment too, and the
+    /// devices already asked may still answer.
+    #[test]
+    fn asking_again_asks_at_once_on_a_machine_up_for_a_moment() {
+        let _boot = crate::node::types::booted_moments_ago(Duration::from_millis(500));
+        let mut want = Want::new(1, None, Vec::new());
+        want.asked.insert("dev".into(), Instant::now().into());
+        want.ask_again_now();
+        assert!(want.asked["dev"].elapsed() >= ASK_RETRY, "the asked device waits out a retry first");
     }
 }

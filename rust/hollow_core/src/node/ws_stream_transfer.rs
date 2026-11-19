@@ -609,13 +609,14 @@ async fn send_relay_chunks(
             break;
         }
         chunk.truncate(header.len() + n);
-        let sent = ws_cmd_tx.send(WsCommand::SendBinaryDirect {
+        let chunk = WsCommand::SendBinaryDirect {
             room_code: room_code.to_string(),
             target_peer: target_peer.to_string(),
             data: chunk,
             credit: StreamCredit::new(permit, stream.written),
-        });
-        if sent.is_err() {
+        };
+        if !send_while_placed(ws_cmd_tx, stream.us, stream.seq, chunk) {
+            hollow_log!("[HOLLOW-WS-STREAM] {id} to {target_peer} ended at {bytes_sent}/{total_size}");
             return;
         }
         bytes_sent += n as u64;
@@ -623,6 +624,17 @@ async fn send_relay_chunks(
     }
 
     hollow_log!("[HOLLOW-WS-STREAM] Sent {id} ({total_size} bytes) to {target_peer} in {chunk_count} chunks");
+}
+
+/// Hands a chunk of relay stream `seq` of `us` to the socket only while the stream
+/// holds its place. A successor of the same id takes that place under this lock before
+/// its first chunk exists, so a chunk the displaced stream was still reading never lands
+/// behind the successor's first chunk, where the receiver would append it to the new
+/// stream (frames name only the id).
+fn send_while_placed(ws_cmd_tx: &mpsc::UnboundedSender<WsCommand>, us: &str, seq: u64, chunk: WsCommand) -> bool {
+    let senders = relay_senders();
+    let placed = senders.get(us).is_some_and(|s| s.streams.iter().any(|e| e.seq == seq));
+    placed && ws_cmd_tx.send(chunk).is_ok()
 }
 
 /// Append `payload` to an open stream, ending it when it reaches its declared size.
@@ -1431,6 +1443,46 @@ mod tests {
         drop(next);
     }
 
+    /// A stream displaced while it read its next chunk sends nothing more: frames name only
+    /// the id, so its late chunk would land behind the new stream's first and join it.
+    #[test]
+    fn a_late_frame_from_a_displaced_stream_never_joins_the_new_one() {
+        let _g = super::super::resolver::test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        unsafe { std::env::set_var("HOLLOW_DATA_DIR", tmp.path()); }
+        let us = "late_us";
+        let id = stream_of(us, "asker", 1);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let frame = |data: Vec<u8>| WsCommand::SendBinaryDirect {
+            room_code: "r".into(),
+            target_peer: "asker".into(),
+            data,
+            credit: StreamCredit::default(),
+        };
+        let mut at_asker = HashMap::new();
+        let mut deliver = |rx: &mut mpsc::UnboundedReceiver<WsCommand>| {
+            let mut done = None;
+            while let Ok(WsCommand::SendBinaryDirect { data, .. }) = rx.try_recv() {
+                done = ws_stream_receive(&mut at_asker, us, &data, open).or(done);
+            }
+            done
+        };
+
+        let old = start_relay_stream(us, "asker", &id, RelayRank::Member, 8).unwrap();
+        assert!(send_while_placed(&tx, us, old.place.seq, frame(first_frame(&id, 8, b"OLD1"))));
+        assert!(deliver(&mut rx).is_none());
+        // The asker hid and asked again: its new stream replaces the old one, whose task is
+        // still reading its next chunk.
+        assert_eq!(orphan_relay_streams_to(us, "asker"), 1);
+        let new = start_relay_stream(us, "asker", &id, RelayRank::Member, 8).expect("the ask replaces a stale stream");
+        assert!(send_while_placed(&tx, us, new.place.seq, frame(first_frame(&id, 8, b"NEW1"))));
+        assert!(!send_while_placed(&tx, us, old.place.seq, frame(continuation(&id, b"OLD2"))), "the displaced stream sent on");
+        assert!(send_while_placed(&tx, us, new.place.seq, frame(continuation(&id, b"NEW2"))));
+        let done = deliver(&mut rx).expect("the new stream completes");
+        assert_eq!(std::fs::read(&done.temp_path).unwrap(), b"NEW1NEW2", "a late frame joined the new stream");
+        drop((old, new));
+    }
+
     /// A device that left every room we share may only be hidden, still taking our
     /// frames, so its stream goes on; when it asks for that stream again its receive state
     /// is gone, and the ask replaces the stream instead of waiting behind it.
@@ -1494,5 +1546,54 @@ mod tests {
         let began = std::time::Instant::now();
         assert!(relay_credit(&stream, 10, &mut ended, std::time::Duration::from_secs(60), std::time::Duration::from_secs(60)).await.is_none());
         assert!(began.elapsed() < std::time::Duration::from_secs(5), "an ended stream kept waiting");
+    }
+
+    async fn next_chunk(rx: &mut mpsc::UnboundedReceiver<WsCommand>) -> Option<Vec<u8>> {
+        match tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv()).await {
+            Ok(Some(WsCommand::SendBinaryDirect { data, .. })) => Some(data),
+            _ => None,
+        }
+    }
+
+    /// The real sender task, displaced while it blocks reading its next chunk (a FIFO
+    /// source), sends nothing more once the successor's first chunk is queued.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_task_displaced_mid_read_sends_nothing_more() {
+        use std::io::Write as _;
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let fifo = tmp.path().join("src.fifo");
+        assert!(std::process::Command::new("mkfifo").arg(&fifo).status().unwrap().success());
+        let us = "fifo_us";
+        let id = stream_of(us, "asker", 1);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut old = start_relay_stream(us, "asker", &id, RelayRank::Member, 10).unwrap();
+        old.place.staged = Some(fifo.clone());
+        let f2 = fifo.clone();
+        let writer = std::thread::spawn(move || std::fs::OpenOptions::new().write(true).open(f2).unwrap());
+        spawn_relay_stream(&tx, old, "r", "asker", &StreamKind::File, &id, 10);
+        let mut w = tokio::task::spawn_blocking(move || writer.join().unwrap()).await.unwrap();
+        w.write_all(b"OLD1").unwrap();
+        w.flush().unwrap();
+        let first = next_chunk(&mut rx).await.expect("the old first chunk");
+        assert_eq!(first[0], TYPE_FILE);
+        assert_eq!(&first[73..], b"OLD1");
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        // The asker hid and asked again while the old task blocks in its read.
+        assert_eq!(orphan_relay_streams_to(us, "asker"), 1);
+        let new = start_relay_stream(us, "asker", &id, RelayRank::Member, 10).expect("replaces");
+        let frame = WsCommand::SendBinaryDirect { room_code: "r".into(), target_peer: "asker".into(), data: first_frame(&id, 10, b"NEW1"), credit: StreamCredit::default() };
+        assert!(send_while_placed(&tx, us, new.place.seq, frame));
+        w.write_all(b"OLD2").unwrap();
+        w.flush().unwrap();
+        drop(w);
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let mut after = Vec::new();
+        while let Ok(WsCommand::SendBinaryDirect { data, .. }) = rx.try_recv() {
+            after.push(data);
+        }
+        assert_eq!(after.len(), 1, "frames after displacement: {:?}", after.iter().map(|d| d[0]).collect::<Vec<_>>());
+        assert_eq!(after[0][0], TYPE_FILE, "the displaced task sent a continuation behind the new first chunk");
+        drop(new);
     }
 }

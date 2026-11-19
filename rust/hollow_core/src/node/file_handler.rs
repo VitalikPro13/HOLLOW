@@ -4243,7 +4243,7 @@ mod tests {
             in_flight: Some((device.to_string(), now)),
             negatives: Vec::new(),
             first_asked_at: now,
-            last_asked_at: now,
+            last_asked_at: now.into(),
         };
         let asks = HashMap::from([("asked".to_string(), ask("bob")), ("stale".to_string(), ask("bob"))]);
         receipts.insert("guest".to_string(), now);

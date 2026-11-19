@@ -373,8 +373,11 @@ Tests: `mailbox_requires_a_roster_that_counts_the_device`,
 - **`Instant` on Windows counts from boot.** `checked_sub(1 h)` fails on a PC up for less
   than an hour, so `.unwrap_or(now)` turned "due long ago" into "due now": test agers
   (`age_held_commits`, `join_hold::age`) silently aged nothing, and `lock_keeper::nudge`
-  waited out its stagger after a removal. Move an `Instant` back only through
-  `types::earlier_by` / `types::instant_ago` (as far back as the clock allows).
+  waited out its stagger after a removal. Even `earlier_by` (as far back as the clock
+  allows) is later than asked on a box up for less than the wait, so "due now" marks are
+  `types::Since::LongAgo` (t18: lock_keeper nudge and removed tip, file and asset asks,
+  overlay re-asks, share Have rebroadcast and coexistence pause). `earlier_by` stays for
+  test agers; `types::booted_moments_ago` makes a test thread's clock start moments ago.
 
 ## Waits that a duplicate or an earlier frame can satisfy (session 22, 2026-10-01)
 

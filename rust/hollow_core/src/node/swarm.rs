@@ -971,8 +971,7 @@ async fn run_event_loop(
     let mut seed_budget = super::share_handler::SeedBudget::new();
     // Coexistence: any messaging/voice send bumps this; the share scheduler
     // pauses chunk requests while it's recent.
-    let mut last_message_traffic: std::time::Instant =
-        super::types::instant_ago(std::time::Duration::from_secs(60));
+    let mut last_message_traffic = super::types::Since::LongAgo;
     // Auto-rejoin every share row with seeding=1 so we keep serving across restarts.
     super::share_handler::auto_rejoin_seeders(&mut share_registry, &bundle_keypair, &ws_cmd_tx);
 
@@ -1682,7 +1681,7 @@ async fn run_event_loop(
                         });
                     }
                     NodeCommand::SendMessage { peer_id: peer_id_str, text, message_id, reply_to_mid, link_preview } => {
-                        last_message_traffic = std::time::Instant::now();
+                        last_message_traffic = super::types::Since::now();
                         message_ops::handle_send_message(
                             &mut olm, &crypto_store, &event_tx, &ws_cmd_tx, &cmd_tx, &ws_room_peers,
                             &mut pending_messages, &mut key_request_in_flight,
@@ -1694,7 +1693,7 @@ async fn run_event_loop(
                     }
 
                     NodeCommand::SendChannelMessage { server_id, channel_id, text, message_id, reply_to_mid, link_preview } => {
-                        last_message_traffic = std::time::Instant::now();
+                        last_message_traffic = super::types::Since::now();
                         message_ops::handle_send_channel_message(
                             &mut olm, &crypto_store, &mut mls, &server_states,
                             &event_tx, &ws_cmd_tx, &ws_room_peers,
@@ -3359,7 +3358,7 @@ async fn run_event_loop(
 
                     // -- Voice call signaling --
                     NodeCommand::CallSendSignal { peer_id, signal_type, payload } => {
-                        last_message_traffic = std::time::Instant::now();
+                        last_message_traffic = super::types::Since::now();
                         voice_handler::handle_call_send_signal(
                             peer_id, signal_type, payload, &mut call_book,
                             &mut olm, &crypto_store, &event_tx,
@@ -3392,7 +3391,7 @@ async fn run_event_loop(
                     }
 
                     NodeCommand::VoiceChannelSendSignal { server_id, channel_id, peer_id, signal_type, payload } => {
-                        last_message_traffic = std::time::Instant::now();
+                        last_message_traffic = super::types::Since::now();
                         voice_handler::handle_voice_channel_send_signal(
                             server_id, channel_id, peer_id, signal_type, payload,
                             &mut mls, &mut olm, &crypto_store,
@@ -3416,7 +3415,7 @@ async fn run_event_loop(
                     // -- Media forwarder control plane (media forwarding step 3) --
 
                     NodeCommand::ForwarderSendSignal { forwarder_peer_id, signal_type, payload } => {
-                        last_message_traffic = std::time::Instant::now();
+                        last_message_traffic = super::types::Since::now();
                         // Phase 2: a signal addressed to OURSELVES is the peer
                         // forwarder's own display leg (viewer #0) — inject it
                         // straight into the embedded engine, no Olm round-trip.
@@ -3560,7 +3559,7 @@ async fn run_event_loop(
                     }
 
                     NodeCommand::ConferenceSendChat { conf_id, text, timestamp } => {
-                        last_message_traffic = std::time::Instant::now();
+                        last_message_traffic = super::types::Since::now();
                         super::conference::handle_conference_send_chat(
                             &mut mls, &crypto_store, &ws_cmd_tx,
                             &conf_id, text, timestamp,
@@ -7536,8 +7535,7 @@ async fn run_event_loop(
             // pause when messaging or voice traffic is recent so a share never starves it.
             _ = share_tick_timer.tick() => {
                 arm_started = Some(("timer", "share_tick", std::time::Instant::now()));
-                let messaging_active = std::time::Instant::now()
-                    .duration_since(last_message_traffic) < super::share_handler::COEXIST_PAUSE;
+                let messaging_active = last_message_traffic.elapsed() < super::share_handler::COEXIST_PAUSE;
                 super::share_handler::tick(&mut share_registry, &ws_cmd_tx, messaging_active, &webrtc_share_peers, &event_tx, &bundle_keypair).await;
             }
 

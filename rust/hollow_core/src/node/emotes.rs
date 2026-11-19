@@ -22,7 +22,7 @@ use tokio::sync::mpsc;
 pub(crate) use super::assets::AssetKind;
 use super::assets::MAX_BUNDLE_REPLY_BYTES;
 use super::crypto_handler::{online_devices_for, ws_room_for_peer};
-use super::types::{HavenMessage, NetworkEvent};
+use super::types::{HavenMessage, NetworkEvent, Since};
 use crate::hollow_log;
 
 /// Responder-side bound on hashes answered from one request (the largest
@@ -64,7 +64,8 @@ pub(crate) struct PendingAsk {
     /// DEVICE peer_ids already asked on THIS connection.
     pub(crate) asked: HashSet<String>,
     pub(crate) first_asked_at: Instant,
-    pub(crate) last_asked_at: Instant,
+    /// When this connection last asked: `LongAgo` once a new socket makes the ask due.
+    pub(crate) last_asked_at: Since,
 }
 
 /// Every holder we could still ask for this blob, best first and otherwise in
@@ -140,7 +141,7 @@ fn dispatch_asks(
             for h in chunk {
                 if let Some(ask) = pending.get_mut(h) {
                     ask.asked.insert(target.clone());
-                    ask.last_asked_at = now;
+                    ask.last_asked_at = Since::At(now);
                 }
             }
         }
@@ -249,7 +250,7 @@ pub(crate) fn retry_stale_asks(
         .iter()
         .filter(|(_, a)| {
             a.asked.len() < MAX_ASK_CANDIDATES
-                && now.duration_since(a.last_asked_at) >= Duration::from_secs(ASSET_RETRY_SECS)
+                && a.last_asked_at.elapsed_at(now) >= Duration::from_secs(ASSET_RETRY_SECS)
         })
         .map(|(h, _)| h.clone())
         .collect();
@@ -280,10 +281,9 @@ pub(crate) fn retry_stale_asks(
 pub(crate) fn reset_asked_on_disconnect(pending: &mut HashMap<String, PendingAsk>) {
     // Let the next sweep act immediately rather than waiting out a staleness
     // window measured against the dead socket.
-    let stale_now = super::types::instant_ago(Duration::from_secs(ASSET_RETRY_SECS));
     for ask in pending.values_mut() {
         ask.asked.clear();
-        ask.last_asked_at = stale_now;
+        ask.last_asked_at = Since::LongAgo;
     }
 }
 
@@ -440,7 +440,7 @@ pub(crate) fn handle_request_emotes(
                 peer_hint: peer_hint.clone(),
                 asked: HashSet::new(),
                 first_asked_at: now,
-                last_asked_at: now,
+                last_asked_at: Since::At(now),
             },
         );
     }
@@ -750,5 +750,27 @@ mod tests {
         assert!(parse_asset_token(&format!("[a:g:{hash}:0:10]")).is_none());
         assert!(parse_asset_token(&format!("[a:g:{hash}:10:5000]")).is_none());
         assert!(parse_asset_token(&format!("[a:g:{hash}:10:10:9]")).is_none());
+    }
+
+    /// A new socket makes every pending ask due at once, on a machine up for a moment too.
+    #[test]
+    fn a_reset_ask_is_due_at_once_on_a_machine_up_for_a_moment() {
+        use std::collections::{HashMap, HashSet};
+        use std::time::{Duration, Instant};
+        let _boot = crate::node::types::booted_moments_ago(Duration::from_millis(500));
+        let mut pending = HashMap::new();
+        pending.insert("h".to_string(), super::PendingAsk {
+            kind: AssetKind::Emote,
+            server_id: None,
+            peer_hint: None,
+            asked: HashSet::from(["dev".to_string()]),
+            first_asked_at: Instant::now(),
+            last_asked_at: Instant::now().into(),
+        });
+        super::reset_asked_on_disconnect(&mut pending);
+        assert!(
+            pending["h"].last_asked_at.elapsed() >= Duration::from_secs(super::ASSET_RETRY_SECS),
+            "the reset ask waits out a retry first"
+        );
     }
 }

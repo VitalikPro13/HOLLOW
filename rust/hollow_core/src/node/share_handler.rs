@@ -14,7 +14,7 @@ use crate::hollow_log;
 use crate::identity::native_identity::NativeKeypair;
 use crate::storage::messages::{MessageStore, StoredShare};
 
-use super::types::{HavenMessage, Lane, NetworkEvent, ShareEntryRef, ShareManifest};
+use super::types::{HavenMessage, Lane, NetworkEvent, ShareEntryRef, ShareManifest, Since};
 use super::ws_client::WsCommand;
 
 // ── Constants ────────────────────────────────────────────────────────────
@@ -492,8 +492,8 @@ pub struct ShareSwarmState {
     pub inflight: HashMap<u32, (String, Instant)>,
     /// Peers a complete copy holds its dial for, until the instant given.
     pub dial_after: HashMap<String, Instant>,
-    /// When we last sent our own Have bitmap into the swarm room.
-    pub last_have_broadcast: Instant,
+    /// When we last sent our own Have bitmap into the swarm room (`LongAgo`: due now).
+    pub last_have_broadcast: Since,
     /// Sliding window of (timestamp, bytes) for speed calculation.
     pub speed_samples: Vec<(Instant, usize)>,
     /// Cached speed value (bytes/sec) recomputed each chunk arrival.
@@ -755,7 +755,7 @@ pub async fn handle_command_share_create(
         peer_have: HashMap::new(),
         inflight: HashMap::new(),
         dial_after: HashMap::new(),
-        last_have_broadcast: now_inst,
+        last_have_broadcast: Since::At(now_inst),
         speed_samples: Vec::new(),
         speed_bps: 0,
         manifest_requested_at: None,
@@ -841,7 +841,7 @@ pub async fn handle_command_share_open_link(
             peer_have: HashMap::new(),
             inflight: HashMap::new(),
             dial_after: HashMap::new(),
-            last_have_broadcast: now_inst,
+            last_have_broadcast: Since::At(now_inst),
             speed_samples: Vec::new(),
             speed_bps: 0,
             manifest_requested_at: Some(now_inst),
@@ -1261,7 +1261,7 @@ fn rebuild_seed_state(
         peer_have: HashMap::new(),
         inflight: HashMap::new(),
         dial_after: HashMap::new(),
-        last_have_broadcast: super::types::earlier_by(now_inst, HAVE_REBROADCAST_INTERVAL),
+        last_have_broadcast: Since::LongAgo,
         speed_samples: Vec::new(),
         speed_bps: 0,
         manifest_requested_at: None,
@@ -1448,12 +1448,12 @@ async fn tick_rebroadcast_have(
     now: Instant,
 ) {
     let do_rebroadcast = registry.get(root_hash)
-        .map(|s| now.duration_since(s.last_have_broadcast) >= HAVE_REBROADCAST_INTERVAL)
+        .map(|s| s.last_have_broadcast.elapsed_at(now) >= HAVE_REBROADCAST_INTERVAL)
         .unwrap_or(false);
     if !do_rebroadcast { return; }
     broadcast_have(registry, ws_cmd_tx, root_hash).await;
     if let Some(state) = registry.get_mut(root_hash) {
-        state.last_have_broadcast = now;
+        state.last_have_broadcast = Since::At(now);
     }
 }
 
@@ -2088,8 +2088,8 @@ pub async fn handle_envelope_share_chunk_response(
 
     let now_inst = Instant::now();
     state.speed_samples.push((now_inst, pt.len()));
-    let cutoff = super::types::earlier_by(now_inst, Duration::from_secs_f64(SPEED_WINDOW_SECS));
-    state.speed_samples.retain(|(t, _)| *t >= cutoff);
+    let window = Duration::from_secs_f64(SPEED_WINDOW_SECS);
+    state.speed_samples.retain(|(t, _)| now_inst.duration_since(*t) <= window);
     let window_bytes: usize = state.speed_samples.iter().map(|(_, b)| b).sum();
     let window_dt = state.speed_samples.first()
         .map(|(t, _)| now_inst.duration_since(*t).as_secs_f64())
@@ -2200,8 +2200,8 @@ pub async fn handle_webrtc_share_chunk_complete(
 
     let now_inst = Instant::now();
     state.speed_samples.push((now_inst, pt.len()));
-    let cutoff = super::types::earlier_by(now_inst, Duration::from_secs_f64(SPEED_WINDOW_SECS));
-    state.speed_samples.retain(|(t, _)| *t >= cutoff);
+    let window = Duration::from_secs_f64(SPEED_WINDOW_SECS);
+    state.speed_samples.retain(|(t, _)| now_inst.duration_since(*t) <= window);
     let window_bytes: usize = state.speed_samples.iter().map(|(_, b)| b).sum();
     let window_dt = state.speed_samples.first()
         .map(|(t, _)| now_inst.duration_since(*t).as_secs_f64())
@@ -2254,7 +2254,7 @@ mod tests {
             root_hash: [0; 32], key: [0; 32], manifest, file_ext: String::new(), save_dir: None,
             have, data_path: None, writer: None, seeding: true, bytes_uploaded: 0,
             bytes_downloaded: 0, peer_have: HashMap::new(), inflight: HashMap::new(), dial_after: HashMap::new(),
-            last_have_broadcast: now, speed_samples: Vec::new(), speed_bps: 0,
+            last_have_broadcast: now.into(), speed_samples: Vec::new(), speed_bps: 0,
             manifest_requested_at: None, last_seeding_emit: now, sequential: false,
             hidden: false, server_id: None, context_type: None,
         }
@@ -2353,6 +2353,31 @@ mod tests {
         assert!(rebuild_seed_state(row(&manifest), &db).is_some(), "control: a sound seed is rebuilt");
         let bad = ShareManifest { total_size: u64::MAX / 2, ..manifest };
         assert!(rebuild_seed_state(row(&bad), &db).is_none(), "a stored manifest that does not add up was seeded");
+    }
+
+    /// A seed rebuilt at start announces its Have at the first tick, on a machine up for
+    /// seconds as on one up for days.
+    #[test]
+    fn a_rebuilt_seed_announces_at_once_on_a_machine_up_for_seconds() {
+        let _boot = crate::node::types::booted_moments_ago(Duration::from_secs(2));
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let db = MessageStore::open(&tmp.path().join("s.db").to_string_lossy(), &"5e".repeat(32)).unwrap();
+        let file = tmp.path().join("seed.bin");
+        std::fs::write(&file, b"x").unwrap();
+        let manifest = ShareManifest {
+            version: MANIFEST_VERSION, file_name: "a.bin".into(), mime: "application/octet-stream".into(),
+            total_size: 1, chunk_size: CHUNK_SIZE, chunk_count: 1,
+            chunk_hashes: vec![[1; 32]], created_at: 1, note: None,
+        };
+        let row = StoredShare {
+            root_hash: hex::encode([3u8; 32]), file_name: "a.bin".into(), file_ext: "bin".into(),
+            mime: manifest.mime.clone(), total_size: 1, chunk_size: CHUNK_SIZE, chunk_count: 1,
+            manifest_json: serde_json::to_string(&manifest).unwrap(), encryption_key: vec![4; 32], share_link: String::new(),
+            state: "completed".into(), seeding: true, disk_path: Some(file.to_string_lossy().into_owned()),
+            bytes_uploaded: 0, created_at: 0, completed_at: None, save_dir: None, server_id: None, context_type: None,
+        };
+        let (_, state) = rebuild_seed_state(row, &db).expect("a sound seed is rebuilt");
+        assert!(state.last_have_broadcast.elapsed() >= HAVE_REBROADCAST_INTERVAL, "a rebuilt seed waits out a rebroadcast first");
     }
 
     fn sent_haves(rx: &mut mpsc::UnboundedReceiver<WsCommand>) -> Vec<(String, String, Vec<u8>)> {
