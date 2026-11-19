@@ -8,6 +8,7 @@ import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:hollow/src/core/version_compare.dart';
 import 'package:hollow/src/rust/api/updater.dart' as updater_api;
+import 'package:hollow/src/core/app_relaunch.dart' show exitApp;
 
 const kManifestUrl = 'https://anonlisten.com/hollow/releases/manifest.json';
 
@@ -504,7 +505,7 @@ class UpdateNotifier extends Notifier<UpdateState> {
       await Process.start('cmd', ['/c', 'start', '', scriptPath],
           mode: ProcessStartMode.detached);
     }
-    exit(0);
+    await exitApp();
   }
 
   void cancelDownload() {

@@ -410,6 +410,35 @@ header is the one channel-wide line, and it reports OUR OWN link only, through
 
 `LinkAction.giveUp` is the ONLY path from a network problem to a hangup.
 
+6. A rebuild (step 3) refreshes the restart budget but NOT the window
+   (`LinkResilience.noteRebuilt`, via `LinkWatchdog.noteConnectionRebuilt`):
+   the lapse runs on until the rebuilt connection reaches `connected`, which
+   reports `recovered`. The side answering a `media_restart` opens a lapse
+   there if its link looked healthy. Until the rebuild's offer is answered
+   (`noteRebuildAnswered`: our `sdp_answer` arrived, or we answered theirs)
+   the lapse may run to `absoluteCeiling` (90 s), since the offer may only be
+   waiting for a router to come back; an answered rebuild that still fails
+   keeps the 45 s window. Until #146 a rebuild called `reset()`,
+   so a rebuild offer nobody answered (the peer's app had closed, e.g. the
+   "Always relay calls" restart) sat in `new` forever: the call stayed active
+   with nobody in it and every later call from that person got `busy`.
+
+**A lost call is replaced, never defended (#146).** An `invite` under a NEW
+call id from the DEVICE in our call (incoming: the one that rang; outgoing:
+`CallState.answeredBy`) while the call's link is lapsing means that device lost
+the call: `decideInviteAction` returns `replaceLost`, we end ours (sends `end`)
+and ring theirs. A sibling device never can (only the call's device may end it,
+as `call_book` holds), and a healthy call still answers `busy`. During the
+teardown the newest such invite waits (one it supersedes is told busy, an `end`
+naming it cancels it). And our own app hangs up before it ends itself: every
+self-exit goes through `app_relaunch.dart` (`relaunchApp`, `exitForRelaySwitch`,
+`exitApp`) or the tray quit paths, which run `runBeforeAppExit()` first;
+`HollowShell._bootstrap` points that hook at `hangUpBeforeExit` (not `main()`:
+the fleet probe never runs it) (bounded at 3 s, a meeting host steps
+out). The guard in `call_lost_by_peer_test` sweeps `lib/` for any other
+`exit(`, `SystemNavigator.pop(` or `windowManager.destroy(`.
+`test/call_lost_by_peer_test.dart`, `test/link_resilience_test.dart`.
+
 ### Why recovery rebuilds instead of restarting ICE
 
 An in-place `restartIce()` recovers the transport and destroys SFrame with it:

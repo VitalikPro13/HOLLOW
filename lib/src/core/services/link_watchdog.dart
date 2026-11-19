@@ -165,10 +165,10 @@ class LinkWatchdog {
     _resilience.notePeerPresenceReturned();
   }
 
-  /// Forget the current lapse because the lane rebuilt the peer connection
-  /// underneath us: a fresh transport deserves a fresh budget.
+  /// The lane rebuilt the peer connection underneath us: a fresh restart
+  /// budget, but the lapse runs on until the new one connects (#146).
   void noteConnectionRebuilt() {
-    _resilience.reset();
+    _resilience.noteRebuilt(DateTime.now());
     _probe.reset();
     _video.restore();
     _rungApplied = false;
@@ -178,6 +178,9 @@ class LinkWatchdog {
     _restartsThisLapse = 0;
     _publishCurrent();
   }
+
+  /// The rebuilt connection's offer was answered: the ordinary window again.
+  void noteRebuildAnswered() => _resilience.noteRebuildAnswered();
 
   void _tick() {
     if (_stopped) return;

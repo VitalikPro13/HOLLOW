@@ -11,6 +11,7 @@ import 'package:hollow/src/core/rust_licenses.dart';
 import 'package:hollow/src/core/services/video_backend.dart';
 import 'package:hollow/src/core/providers/member_panel_provider.dart';
 import 'package:hollow/src/core/providers/webrtc_provider.dart';
+import 'package:hollow/src/core/app_relaunch.dart' show runBeforeAppExit;
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/identity.dart' as identity_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
@@ -251,6 +252,7 @@ Future<void> main(List<String> args) async {
 /// minimize-to-tray is off (Windows and macOS; Linux quits via [_linuxQuit]).
 Future<void> _quitApp() async {
   await windowManager.hide();
+  await runBeforeAppExit();
   try {
     await _container.read(webRtcProvider.notifier).disposeAll();
   } catch (_) {}
@@ -307,6 +309,7 @@ void _warnLinuxCloseIgnored() {
 
 /// Clean shutdown on Linux (no tray to clean up).
 Future<void> _linuxQuit() async {
+  await runBeforeAppExit();
   try {
     await _container.read(webRtcProvider.notifier).disposeAll();
   } catch (_) {}

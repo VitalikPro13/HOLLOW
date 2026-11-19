@@ -294,6 +294,15 @@ scrim, which also works).
 
 ## Traps, each of which cost a run
 
+- **An in-app restart (`relaunchApp`, e.g. "Restart now" under Always relay calls) replays
+  the peer's inbox** (t18, #146). The waiter relaunches the same probe exe with the same env,
+  and the new probe re-runs `inbox.jsonl` from line 1: on 11-19 it re-toggled the setting and
+  restarted again in a loop. Before such a tap, start a guard on the peer's machine that
+  waits for the old pid to exit and then keeps `build\fleet_out\<x>\inbox.jsonl` empty for
+  30 s, then stop the relaunched process by PID: it never answers the agent. `-Attach` does not see `windows:` peers from the Mac; use `fleet_send.ps1`.
+  **Never tap a restart on a macOS peer:** the relaunch goes through LaunchServices (`open`),
+  which drops `HOLLOW_DATA_DIR`/`HOME`, so the new process could boot on the real profile.
+
 0. **The probe binding used to swallow the Navigator's pointer cancel** (fixed 2026-09-26).
    A route pushed mid-gesture (a long press opening a sheet) cancels the active pointers, and
    `LiveTestWidgetsFlutterBinding` counted that cancel as a DEVICE event and dropped it, so the

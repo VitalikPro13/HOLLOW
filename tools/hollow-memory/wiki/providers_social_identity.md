@@ -463,7 +463,7 @@ On `build()`, state is composed from the (empty) credential cache and the privac
 - **`build()` uses `ref.listen(alwaysRelayCallsProvider)`, never `ref.watch`.** Watching re-runs `build()`, which resets those fields and silently drops every later connection to STUN-only. This is the non-obvious trap in the file.
 - **Fails closed:** toggle on with no credentials yet yields an empty server list, so the connection does not form rather than quietly taking a direct path. Unreachable in practice — TURN credentials ride the same authenticated relay WS as the signalling needed to place a call.
 - The flag is loaded in the **local-first** bootstrap block of `hollow_shell.dart`, before `nodeProvider.start()`, so no peer connection can be built with the wrong policy.
-- Applies to **new** connections only; toggling mid-call takes effect on the next call. `VoiceChannelNotifier.build()` carries a `ref.listen(iceConfigProvider)` that pushes updates into `VoiceChannelService.iceServers` (a join-time snapshot nothing else reassigns), so peers who join a channel *after* a flip do get the new policy.
+- Applies to **new** connections only; toggling mid-call takes effect on the next call. `VoiceChannelNotifier.build()` carries a `ref.listen(iceConfigProvider)` that pushes updates into `VoiceChannelService.iceServers` (a join-time snapshot nothing else reassigns), so peers who join a channel *after* a flip do get the new policy. The toggle's "Restart now" mid-call hangs the call up first (`runBeforeAppExit` in `relaunchApp`, #146): before that the restart cut the connection, and the other side held a dead call open and turned the restarted person's next call away as busy.
 
 See memory `project_always_relay_calls`.
 

@@ -12,6 +12,10 @@ enum InviteAction {
   /// outgoing invite and drop theirs. They will take ours.
   glareImpolite,
 
+  /// Our call with this very device is lapsing and it is calling again: its
+  /// side lost the call (the app closed or restarted). End ours, then ring.
+  replaceLost,
+
   /// We are occupied with an unrelated call.
   busy,
 
@@ -28,11 +32,17 @@ enum InviteAction {
 ///
 /// [ourMaster] and [theirMaster] must BOTH be masters: the tiebreak only works
 /// if the two ends compare the same pair of strings.
+///
+/// [lapsingCallWithThisDevice]: the invite comes from the DEVICE in our call,
+/// under another call id, and the call's media link is down. Only that device
+/// may end the call (as `call_book` holds), so a sibling never can, and a
+/// healthy call is never replaced.
 InviteAction decideInviteAction({
   required bool ringingOutgoingToSamePerson,
   required bool idle,
   required String ourMaster,
   required String theirMaster,
+  bool lapsingCallWithThisDevice = false,
 }) {
   // Glare FIRST. This ordering is the whole point of the function.
   if (ringingOutgoingToSamePerson) {
@@ -40,6 +50,7 @@ InviteAction decideInviteAction({
         ? InviteAction.glarePolite
         : InviteAction.glareImpolite;
   }
+  if (!idle && lapsingCallWithThisDevice) return InviteAction.replaceLost;
   if (!idle) return InviteAction.busy;
   return InviteAction.ring;
 }

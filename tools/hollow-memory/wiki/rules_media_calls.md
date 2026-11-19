@@ -82,6 +82,11 @@ the signal whitelist's four touches, the stream overlay consent detail, share ba
 - `disconnected` is NOT a hangup, and NEVER restarts ICE: lanes HOLD it
   (`LinkWatchdog`, 45s); recovery REBUILDS the media session (an in-place restart kills
   SFrame), only after `failed`; ONLY `onGiveUp` ends a call. Cameras carry a rung cap.
+  A rebuild refreshes the restart budget, NEVER the window (`noteRebuilt`): the lapse
+  runs until the rebuilt PC connects (90 s while its offer is unanswered, 45 s once
+  answered), else a rebuild the peer never answers holds a dead call forever (#146).
+  Every self-exit runs `runBeforeAppExit()` (hangs up) first: exit only via
+  `app_relaunch.dart` or the tray quit paths (swept by `call_lost_by_peer_test`).
   `project_call_hold_open_resilience`.
 - A `failed` BEFORE a link's first connect is not final either: every lane (DM call, VC leg,
   share leg, data channel) holds it in `SetupFailureGrace` (8 s; only `connected` or the lane's

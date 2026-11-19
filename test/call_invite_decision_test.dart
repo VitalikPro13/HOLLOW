@@ -48,6 +48,49 @@ void main() {
     });
   });
 
+  // #146: the person we are in a call with closed or restarted their app (the
+  // "Always relay calls" restart). Their next call came back busy for as long
+  // as our side held the dead call open.
+  group('a call the other side lost', () {
+    test('their new call replaces ours while our link is down', () {
+      expect(
+        decideInviteAction(
+          ringingOutgoingToSamePerson: false,
+          idle: false,
+          ourMaster: 'aaa',
+          theirMaster: 'bbb',
+          lapsingCallWithThisDevice: true,
+        ),
+        InviteAction.replaceLost,
+      );
+    });
+
+    test('a healthy call is never cut off by an invite', () {
+      expect(
+        decideInviteAction(
+          ringingOutgoingToSamePerson: false,
+          idle: false,
+          ourMaster: 'aaa',
+          theirMaster: 'bbb',
+        ),
+        InviteAction.busy,
+      );
+    });
+
+    test('glare is still settled first', () {
+      expect(
+        decideInviteAction(
+          ringingOutgoingToSamePerson: true,
+          idle: false,
+          ourMaster: 'aaa',
+          theirMaster: 'bbb',
+          lapsingCallWithThisDevice: true,
+        ),
+        InviteAction.glarePolite,
+      );
+    });
+  });
+
   group('tiebreak', () {
     test('exactly one side yields, whichever way round it is asked', () {
       InviteAction from(String us, String them) => decideInviteAction(

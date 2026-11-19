@@ -386,6 +386,90 @@ void main() {
     });
   });
 
+  // #146: the peer's app closed mid-call (an "Always relay calls" restart). The
+  // DM lane rebuilt its connection, the rebuild offer was never answered, and
+  // the reset that rebuild did left the call "active" with nobody in it for
+  // good, turning every later call from that person away as busy.
+  group('a rebuilt connection is still the same lapse', () {
+    LinkAction? rebuildOnRestart(LinkResilience link, int s) {
+      final action = link.tick(_at(s));
+      if (action == LinkAction.restartIce) link.noteRebuilt(_at(s));
+      return action;
+    }
+
+    test('a rebuild nobody answers still gives up, at the ceiling', () {
+      final link = _live();
+      link.onTransportState(_failed, _at(0));
+      int? gaveUp;
+      for (var s = 1; s <= 200 && gaveUp == null; s++) {
+        if (rebuildOnRestart(link, s) == LinkAction.giveUp) gaveUp = s;
+      }
+      expect(gaveUp, 90,
+          reason: 'the ceiling runs from the first lapse, rebuilds or not');
+      expect(link.health, LinkHealth.reconnecting);
+    });
+
+    test('an answered rebuild that keeps failing ends with the window', () {
+      final link = _live();
+      link.onTransportState(_failed, _at(0));
+      expect(_firstSecondWith(link, LinkAction.restartIce, to: 20), 8);
+      link.noteRebuilt(_at(8));
+      link.noteRebuildAnswered();
+      expect(_firstSecondWith(link, LinkAction.giveUp, from: 9, to: 120), 45);
+    });
+
+    test('a 50 s outage the rebuild waits out is not a hangup', () {
+      final link = _live();
+      link.onTransportState(_failed, _at(0));
+      expect(_firstSecondWith(link, LinkAction.restartIce, to: 20), 8);
+      link.noteRebuilt(_at(8));
+      expect(_firstSecondWith(link, LinkAction.giveUp, from: 9, to: 50),
+          isNull,
+          reason: 'a router reboot outlasts the 45 s window; its rebuild '
+              'offer only goes out once the network is back');
+      expect(link.onTransportState(_connected, _at(50)), LinkAction.recovered);
+    });
+
+    test('a 95 s outage still ends', () {
+      final link = _live();
+      link.onTransportState(_failed, _at(0));
+      expect(_firstSecondWith(link, LinkAction.restartIce, to: 20), 8);
+      link.noteRebuilt(_at(8));
+      expect(_firstSecondWith(link, LinkAction.giveUp, from: 9, to: 95), 90);
+    });
+
+    test('the answering side, rebuilt while it looked healthy, gives up too',
+        () {
+      final link = _live();
+      link.noteRebuilt(_at(0));
+      expect(link.isLapsing, isTrue,
+          reason: 'the fresh connection has not carried anything yet');
+      link.noteRebuildAnswered();
+      expect(_firstSecondWith(link, LinkAction.giveUp, to: 120), 45);
+    });
+
+    test('a rebuild that connects recovers and clears the lapse', () {
+      final link = _live();
+      link.onTransportState(_failed, _at(0));
+      expect(_firstSecondWith(link, LinkAction.restartIce, to: 20), 8);
+      link.noteRebuilt(_at(8));
+      expect(link.onTransportState(_connected, _at(10)), LinkAction.recovered);
+      expect(link.isLapsing, isFalse);
+      expect(link.health, LinkHealth.healthy);
+      expect(_firstSecondWith(link, LinkAction.giveUp, from: 11, to: 200),
+          isNull);
+    });
+
+    test('a peer gone from the relay as well resolves in seconds', () {
+      final link = _live();
+      link.onTransportState(_failed, _at(0));
+      link.notePeerPresenceLost(_at(2));
+      link.noteRebuilt(_at(8));
+      expect(_firstSecondWith(link, LinkAction.giveUp, from: 9, to: 60), 12,
+          reason: 'a rebuild must not wipe the corroboration');
+    });
+  });
+
   group('remainingGrace', () {
     test('is null when healthy and counts down while lapsing', () {
       final link = _live();

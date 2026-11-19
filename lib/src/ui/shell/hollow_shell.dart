@@ -11,6 +11,9 @@ import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/services/destroy_flow.dart';
 import 'package:hollow/src/core/services/overlay_publisher.dart';
 import 'package:hollow/src/core/providers/overlay_settings_provider.dart';
+import 'package:hollow/src/core/app_relaunch.dart' show beforeAppExit;
+import 'package:hollow/src/core/providers/call_provider.dart'
+    show hangUpBeforeExit;
 import 'package:hollow/src/ui/dialogs/relay_denied_dialog.dart';
 import 'package:hollow/src/ui/settings/stream_overlay/overlay_port_toast.dart';
 import 'package:hollow/src/core/services/app_lock_service.dart';
@@ -1119,6 +1122,11 @@ class _HollowShellState extends ConsumerState<HollowShell>
   Future<void> _bootstrap() async {
     if (_initialized) return;
     _initialized = true;
+
+    // Every way the app ends itself hangs up first (#146). Here rather than in
+    // main(), so the fleet probe, which never runs main(), does it too.
+    final container = ProviderScope.containerOf(context, listen: false);
+    beforeAppExit = () => hangUpBeforeExit(container.read);
 
     // Backing out of "Link a device" leaves a throwaway identity, and a wipe the
     // last session could not finish leaves its marker. Wipe the data dir HERE,

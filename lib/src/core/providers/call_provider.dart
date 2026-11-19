@@ -116,6 +116,10 @@ class CallState {
   /// when the track arrives AFTER the video_state signal.
   final int remoteVideoTrackSeq;
 
+  /// The DEVICE that took our outgoing call. An incoming call's [peerId] is
+  /// already the device that rang.
+  final String? answeredBy;
+
   const CallState({
     this.status = CallStatus.idle,
     this.peerId,
@@ -139,6 +143,7 @@ class CallState {
     this.screenShareLabel,
     this.remoteScreenShareLabel,
     this.remoteVideoTrackSeq = 0,
+    this.answeredBy,
   });
 
   CallState copyWith({
@@ -166,6 +171,7 @@ class CallState {
     String? remoteScreenShareLabel,
     bool clearRemoteScreenShareLabel = false,
     int? remoteVideoTrackSeq,
+    String? answeredBy,
   }) =>
       CallState(
         status: status ?? this.status,
@@ -194,6 +200,7 @@ class CallState {
             ? null
             : (remoteScreenShareLabel ?? this.remoteScreenShareLabel),
         remoteVideoTrackSeq: remoteVideoTrackSeq ?? this.remoteVideoTrackSeq,
+        answeredBy: answeredBy ?? this.answeredBy,
       );
 
   static const idle = CallState();
@@ -1948,9 +1955,25 @@ class CallNotifier extends Notifier<CallState> {
       idle: state.status == CallStatus.idle,
       ourMaster: links.identityOf(localPeerId),
       theirMaster: links.identityOf(peerId),
+      lapsingCallWithThisDevice: state.status == CallStatus.active &&
+          state.callId != callId &&
+          peerId == _callDevice &&
+          callLinkLapsing,
     );
 
     switch (action) {
+      case InviteAction.replaceLost:
+        _callLog('[HOLLOW-CALL] $peerId is calling again while our '
+            'call=${state.callId} with it is down: its side lost it');
+        // The latest invite wins; one it replaces is told busy.
+        final superseded = _pendingLostInvite;
+        _pendingLostInvite = (peerId: peerId, callId: callId, payload: payload);
+        if (superseded != null) {
+          _sendSignal(superseded.peerId, 'busy', superseded.callId);
+          return;
+        }
+        unawaited(_replaceLostCall());
+        return;
       case InviteAction.glareImpolite:
         _callLog('[HOLLOW-CALL] Glare with $peerId: impolite, keeping our '
             'call=${state.callId}');
@@ -2015,6 +2038,39 @@ class CallNotifier extends Notifier<CallState> {
     });
   }
 
+  /// The invite waiting for a lost call's teardown; an `end` naming it drops it.
+  ({String peerId, String callId, String payload})? _pendingLostInvite;
+
+  /// The device in the live call: the only one that may replace it.
+  String? get _callDevice => state.direction == CallDirection.incoming
+      ? state.peerId
+      : state.answeredBy;
+
+  /// Whether the live call's media link is lapsing. Overridden in tests,
+  /// which have no live connection to watch.
+  @visibleForOverriding
+  bool get callLinkLapsing => _linkWatch?.isLapsing ?? false;
+
+  /// Ends a call its device has lost, then takes the newest invite it sent.
+  Future<void> _replaceLostCall() async {
+    final lost = state.callId;
+    try {
+      _endCause = CallEndCause.linkLost;
+      await endCall();
+    } catch (e) {
+      _callLog('[HOLLOW-CALL] Ending the lost call failed: $e');
+    }
+    final next = _pendingLostInvite;
+    _pendingLostInvite = null;
+    if (next == null) return;
+    if (state.callId == lost && state.status != CallStatus.idle) {
+      _sendSignal(next.peerId, 'busy', next.callId);
+      return;
+    }
+    // Anything that arrived meanwhile is judged as usual: ring, or busy.
+    _handleInvite(next.peerId, next.payload);
+  }
+
   Future<void> _handleAccept(String peerId, String payload) async {
     String callId;
     try {
@@ -2034,7 +2090,7 @@ class CallNotifier extends Notifier<CallState> {
     // They picked up; machine time starts here, everything earlier was deciding.
     CallSetupTrace.markCurrent(CallSetupTrace.kAccept);
     SoundService.instance.stopRingback();
-    state = state.copyWith(status: CallStatus.connecting);
+    state = state.copyWith(status: CallStatus.connecting, answeredBy: peerId);
 
     await _ensureDevicePreferences();
 
@@ -2101,6 +2157,11 @@ class CallNotifier extends Notifier<CallState> {
   }
 
   Future<void> _handleEnd(String peerId, String callId) async {
+    final pending = _pendingLostInvite;
+    if (pending != null && pending.callId == callId) {
+      _pendingLostInvite = null;
+      return;
+    }
     if (state.callId != callId) return;
     debugPrint('[HOLLOW-CALL] Call ended by $peerId');
     _endCause = CallEndCause.remoteEnd;
@@ -2230,6 +2291,8 @@ class CallNotifier extends Notifier<CallState> {
       final answerPayload = jsonEncode({'call_id': callId, 'sdp': answerSdp});
       _sendSignal(peerId, 'sdp_answer', answerPayload);
       CallSetupTrace.markCurrent(CallSetupTrace.kSdpSent);
+      // Their rebuild reached us, so the path carries signalling.
+      _linkWatch?.noteRebuildAnswered();
     }
   }
 
@@ -2243,6 +2306,7 @@ class CallNotifier extends Notifier<CallState> {
     // The deadline gathering had to beat: checks can start from here.
     CallSetupTrace.markCurrent(CallSetupTrace.kRemoteSdp);
     await _service.handleAnswer(sdp);
+    _linkWatch?.noteRebuildAnswered();
     // Our renegotiation round-trip settled: process any offer that collided.
     _drainQueuedRenegOffer();
   }
@@ -2691,4 +2755,21 @@ Future<void> leaveVoiceForDmCall(ProviderRead read,
         : conference.stepOut();
   }
   return read(voiceChannelProvider.notifier).leaveChannel();
+}
+
+/// Hangs up every live call before the app ends itself (the shell hands it to
+/// `runBeforeAppExit`), so the people in it hear a hangup rather than a
+/// connection that just stops (#146). A meeting host steps out. Bounded: a
+/// teardown that wedges never holds the exit up.
+Future<void> hangUpBeforeExit(ProviderRead read,
+    {Duration limit = const Duration(seconds: 3)}) async {
+  final steps = <Future<void>>[
+    if (read(callProvider).status != CallStatus.idle)
+      read(callProvider.notifier).endCall(),
+    if (read(voiceChannelProvider).isInVoiceChannel) leaveVoiceForDmCall(read),
+  ];
+  if (steps.isEmpty) return;
+  try {
+    await Future.wait(steps).timeout(limit);
+  } catch (_) {}
 }

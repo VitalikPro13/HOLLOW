@@ -229,7 +229,11 @@ class LinkResilience {
   /// shorten the wait, never extend it.
   DateTime _deadline() {
     final ceiling = _lapseStart!.add(config.absoluteCeiling);
-    var full = _lapseStart!.add(config.graceWindow + _unusable);
+    // A rebuild nobody has answered may only be waiting for the network to
+    // carry its offer (a router reboot), so it gets the whole ceiling.
+    var full = _rebuildUnanswered
+        ? ceiling
+        : _lapseStart!.add(config.graceWindow + _unusable);
     if (full.isAfter(ceiling)) full = ceiling;
 
     final presence = _presenceLostAt;
@@ -252,7 +256,27 @@ class LinkResilience {
     _unusable = Duration.zero;
     _lastTick = null;
     _downSince = null;
+    _rebuildUnanswered = false;
   }
+
+  /// The lane replaced the peer connection to recover this link. The new one
+  /// gets a fresh restart budget but NOT a fresh window: until it connects the
+  /// lapse goes on (opened now if the link looked healthy), so a rebuild the
+  /// peer never answers, because their app closed, still ends the call (#146).
+  void noteRebuilt(DateTime now) {
+    _rebuildUnanswered = true;
+    _phase = _Phase.pending;
+    _lapseStart ??= now;
+    _downSince = null;
+    _lastRestart = null;
+    _qualityDegraded = false;
+  }
+
+  /// The rebuild's offer was answered (or, answering, we got theirs): the
+  /// path carries signalling, so the ordinary window applies again.
+  void noteRebuildAnswered() => _rebuildUnanswered = false;
+
+  bool _rebuildUnanswered = false;
 
   LinkAction _settle(_Phase phase, DateTime now) {
     final previous = _phase;
@@ -260,7 +284,10 @@ class LinkResilience {
 
     switch (phase) {
       case _Phase.up:
-        if (previous == _Phase.wobbling || previous == _Phase.down) {
+        // A rebuilt connection connecting ends the lapse it was built for.
+        if (previous == _Phase.wobbling ||
+            previous == _Phase.down ||
+            _lapseStart != null) {
           // A recovered lapse hands its whole budget back: the next outage
           // is a new event, or a long call on a flaky line would burn its
           // restarts by the evening.
@@ -270,6 +297,7 @@ class LinkResilience {
           _presenceLostAt = null;
           _unusable = Duration.zero;
           _downSince = null;
+          _rebuildUnanswered = false;
           return LinkAction.recovered;
         }
         return LinkAction.none;
