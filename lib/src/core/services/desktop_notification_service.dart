@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
@@ -16,8 +17,8 @@ import 'package:flutter_local_notifications_platform_interface/flutter_local_not
 import 'package:flutter_local_notifications_windows/flutter_local_notifications_windows.dart';
 import 'package:hollow/src/core/hidden_notification.dart';
 import 'package:hollow/src/core/message_preview.dart';
+import 'package:hollow/src/core/services/linux_notifier.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
-import 'package:local_notifier/local_notifier.dart';
 
 /// Notification-routing breadcrumbs into hollow_debug.log.
 ///
@@ -43,17 +44,31 @@ void notifLog(String msg) {
 /// through `UNUserNotificationCenter` (avatar, inline Reply, per-conversation
 /// thread): the `NSUserNotificationCenter` that `local_notifier` uses is
 /// deprecated and delivers nothing on current macOS, so a posted toast never
-/// reached Notification Center. Linux keeps `local_notifier`, since rich
-/// actions and images are unreliable across desktop environments.
+/// reached Notification Center. Linux posts plain toasts through
+/// [LinuxNotifier], since rich actions and images are unreliable across
+/// desktop environments.
 ///
 /// [SystemNotificationNotifier] decides WHEN to call this; this decides HOW.
 /// Windows carries the toast's launch arguments in `payload`, so a Reply
 /// encodes its target as `reply:<peerId>` and the typed text arrives in
 /// `response.data[<inputId>]`.
 class DesktopNotificationService {
-  DesktopNotificationService._();
+  DesktopNotificationService._({String? os, LinuxNotifier? linux})
+      : _os = os ?? Platform.operatingSystem,
+        _linuxNotifier = linux;
   static final DesktopNotificationService instance =
       DesktopNotificationService._();
+
+  /// A service that takes the [os] branch (`Platform.operatingSystem` names)
+  /// and posts Linux toasts through [linux].
+  @visibleForTesting
+  factory DesktopNotificationService.forTest(
+          {required String os, LinuxNotifier? linux}) =>
+      DesktopNotificationService._(os: os, linux: linux);
+
+  final String _os;
+  bool get _isWindows => _os == 'windows';
+  bool get _isMacOS => _os == 'macos';
 
   /// Windows rich-toast plugin, constructed LAZILY and only on Windows: the
   /// constructor dlopen's `flutter_local_notifications_windows.dll`, which
@@ -85,8 +100,12 @@ class DesktopNotificationService {
   /// earlier toast: replacing wipes any reply the user is mid-typing.
   int _toastCounter = 0;
 
-  /// Last local_notifier instance per source, so a follow-up can close it.
-  final Map<String, LocalNotification> _activeNative = {};
+  LinuxNotifier? _linuxNotifier;
+  LinuxNotifier get _linux => _linuxNotifier ??= LinuxNotifier();
+
+  /// The last Linux toast per source, so a follow-up can close it. Held as a
+  /// future so a second toast still finds the first while it is being posted.
+  final Map<String, Future<int?>> _activeNative = {};
 
   /// The newest toast ids posted per payload, so one person's can be taken
   /// back after a block.
@@ -135,7 +154,7 @@ class DesktopNotificationService {
   Future<void> _init() async {
     if (_initialized || !isSupported) return;
     try {
-      if (Platform.isWindows) {
+      if (_isWindows) {
         _brandIconPath = await _writeBrandIcon();
         final ready = await _win.initialize(
           WindowsInitializationSettings(
@@ -154,7 +173,7 @@ class DesktopNotificationService {
         if (!ready) {
           throw StateError('the Windows notification platform is unavailable');
         }
-      } else if (Platform.isMacOS) {
+      } else if (_isMacOS) {
         // `initialize` IS the permission request, so the prompt shows at
         // startup (the shell bootstrap awaits this), not at the first message.
         // The alert and sound requests are spelled out rather than left to the
@@ -181,14 +200,12 @@ class DesktopNotificationService {
         );
         notifLog('macOS notification permission granted=$granted');
       } else {
-        // local_notifier needs a one-time setup with a shortcut.
-        await localNotifier.setup(
-          appName: 'Hollow',
-          shortcutPolicy: ShortcutPolicy.requireCreate,
-        );
+        // Throws when no notification server answers on the session bus.
+        final caps = await _linux.capabilities();
+        notifLog('Linux notification server: ${caps.join(',')}');
       }
       _initialized = true;
-      notifLog('backend ready (${Platform.operatingSystem}, '
+      notifLog('backend ready ($_os, '
           'brandIcon=${_brandIconPath != null})');
     } catch (e) {
       // On Windows this covers `_win.initialize()`. If it throws,
@@ -206,7 +223,7 @@ class DesktopNotificationService {
   /// plugin instance [init] configured: a second `initialize` would re-register
   /// the reply category and re-raise the prompt.
   Future<NotificationsEnabledOptions?> checkPermission() async {
-    if (!Platform.isMacOS) return null;
+    if (!_isMacOS) return null;
     try {
       return await _mac.checkPermissions();
     } catch (e) {
@@ -218,7 +235,7 @@ class DesktopNotificationService {
   /// Asks macOS for alert and sound permission. Answers false without showing
   /// anything once the user has denied it, so the caller offers system settings.
   Future<bool> requestPermission() async {
-    if (!Platform.isMacOS) return false;
+    if (!_isMacOS) return false;
     try {
       final granted = await _mac.requestPermissions(alert: true, sound: true);
       notifLog('macOS permission re-request granted=$granted');
@@ -241,14 +258,14 @@ class DesktopNotificationService {
     const title = 'Hollow';
     const body = 'Notifications are working on this device.';
     final id = (_toastCounter++) & 0x7fffffff;
-    if (Platform.isWindows) {
+    if (_isWindows) {
       await _win.show(id, title, body,
           payload: '', details: const WindowsNotificationDetails());
-    } else if (Platform.isMacOS) {
+    } else if (_isMacOS) {
       await _mac.show(id, title, body,
           payload: '', notificationDetails: const DarwinNotificationDetails());
     } else {
-      await LocalNotification(title: title, body: body).show();
+      await _linux.show(title, body);
     }
     notifLog('test toast posted id=$id');
   }
@@ -258,15 +275,12 @@ class DesktopNotificationService {
   Future<void> clearAll() async {
     if (!_initialized) return;
     try {
-      if (Platform.isWindows) {
+      if (_isWindows) {
         await _win.cancelAll();
-      } else if (Platform.isMacOS) {
+      } else if (_isMacOS) {
         await _mac.cancelAll();
       } else {
-        for (final n in _activeNative.values) {
-          await n.close();
-        }
-        _activeNative.clear();
+        await _closeAllNative();
       }
     } catch (_) {}
   }
@@ -339,7 +353,7 @@ class DesktopNotificationService {
     // OS toasts cannot render emote images or attachments; show the same one
     // line every other preview surface shows.
     body = messagePreviewText(body);
-    if (Platform.isWindows) {
+    if (_isWindows) {
       await _showWindows(
         sourceHash: sourceKey.hashCode & 0x7fffffff,
         title: title,
@@ -348,7 +362,7 @@ class DesktopNotificationService {
         payload: sourceKey,
         replyTarget: sourceKey,
       );
-    } else if (Platform.isMacOS) {
+    } else if (_isMacOS) {
       await _showMac(
         threadKey: 'dm:$sourceKey',
         title: title,
@@ -358,7 +372,7 @@ class DesktopNotificationService {
         reply: true,
       );
     } else {
-      await _showNative(sourceKey: 'dm:$sourceKey', title: title, body: body);
+      unawaited(_postNative(sourceKey: 'dm:$sourceKey', title: title, body: body));
     }
   }
 
@@ -378,7 +392,7 @@ class DesktopNotificationService {
     }
     body = messagePreviewText(body);
     final key = '$serverId:$channelId';
-    if (Platform.isWindows) {
+    if (_isWindows) {
       await _showWindows(
         sourceHash: key.hashCode & 0x7fffffff,
         title: title,
@@ -387,7 +401,7 @@ class DesktopNotificationService {
         payload: 'channel:$serverId:$channelId',
         replyTarget: null,
       );
-    } else if (Platform.isMacOS) {
+    } else if (_isMacOS) {
       await _showMac(
         threadKey: 'ch:$key',
         title: title,
@@ -397,7 +411,7 @@ class DesktopNotificationService {
         reply: false,
       );
     } else {
-      await _showNative(sourceKey: 'ch:$key', title: title, body: body);
+      unawaited(_postNative(sourceKey: 'ch:$key', title: title, body: body));
     }
   }
 
@@ -409,20 +423,21 @@ class DesktopNotificationService {
       return;
     }
     try {
-      if (Platform.isWindows) {
+      if (_isWindows) {
         await _win.show(_lockedToastId, kHiddenNotificationTitle,
             kHiddenNotificationBody,
             payload: lockedPayload, details: const WindowsNotificationDetails());
-      } else if (Platform.isMacOS) {
+      } else if (_isMacOS) {
         await _mac.show(_lockedToastId, kHiddenNotificationTitle,
             kHiddenNotificationBody,
             payload: lockedPayload,
             notificationDetails: const DarwinNotificationDetails());
       } else {
-        await _showNative(
+        final id = await _postNative(
             sourceKey: lockedPayload,
             title: kHiddenNotificationTitle,
             body: kHiddenNotificationBody);
+        if (id == null) return;
       }
       notifLog('locked toast posted');
     } catch (e) {
@@ -436,13 +451,13 @@ class DesktopNotificationService {
     try {
       for (final key in sourceKeys) {
         for (final id in _postedBySource.remove(key) ?? const <int>{}) {
-          if (Platform.isWindows) {
+          if (_isWindows) {
             await _win.cancel(id);
-          } else if (Platform.isMacOS) {
+          } else if (_isMacOS) {
             await _mac.cancel(id);
           }
         }
-        _activeNative.remove('dm:$key')?.close();
+        await _closeNative('dm:$key');
       }
     } catch (e) {
       notifLog('withdrawing DM toasts FAILED: $e');
@@ -454,15 +469,12 @@ class DesktopNotificationService {
   Future<void> withdrawAll() async {
     if (!_initialized) return;
     try {
-      if (Platform.isWindows) {
+      if (_isWindows) {
         await _win.cancelAll();
-      } else if (Platform.isMacOS) {
+      } else if (_isMacOS) {
         await _mac.cancelAll();
       } else {
-        for (final n in _activeNative.values) {
-          n.close();
-        }
-        _activeNative.clear();
+        await _closeAllNative();
       }
       _postedBySource.clear();
     } catch (e) {
@@ -599,33 +611,38 @@ class DesktopNotificationService {
     }
   }
 
-  Future<void> _showNative({
+  /// Posts a Linux toast for [sourceKey], replacing that source's last one.
+  /// Registers it at once, so a withdraw reaches a toast still being posted;
+  /// the future completes with the server's id, null when posting failed.
+  Future<int?> _postNative({
     required String sourceKey,
     required String title,
     required String body,
-  }) async {
-    try {
-      _activeNative.remove(sourceKey)?.close();
-    } catch (_) {}
-    final notification = LocalNotification(title: title, body: body);
-    notification.onClick = () {
-      // local_notifier has no per-action payload; map the click to the
-      // source. sourceKey is "dm:<peer>" or "ch:<server>:<channel>".
-      if (sourceKey.startsWith('dm:')) {
-        _openHandler?.call(sourceKey.substring(3));
-      } else if (sourceKey.startsWith('ch:')) {
-        _openHandler?.call('channel:${sourceKey.substring(3)}');
-      } else if (sourceKey == lockedPayload) {
-        _openHandler?.call(lockedPayload);
-      }
-    };
-    _activeNative[sourceKey] = notification;
-    try {
-      await notification.show();
+  }) {
+    final previous = _activeNative.remove(sourceKey);
+    final posted = _linux.show(title, body).then<int?>((id) {
       notifLog('native toast posted $sourceKey');
-    } catch (e) {
+      return id;
+    }, onError: (Object e) {
       debugPrint('[HOLLOW] native toast failed: $e');
       notifLog('native toast FAILED $sourceKey: $e');
+      return null;
+    });
+    _activeNative[sourceKey] = posted;
+    if (previous != null) {
+      unawaited(previous.then((id) => id == null ? null : _linux.close(id)));
+    }
+    return posted;
+  }
+
+  Future<void> _closeNative(String sourceKey) async {
+    final id = await _activeNative.remove(sourceKey);
+    if (id != null) await _linux.close(id);
+  }
+
+  Future<void> _closeAllNative() async {
+    for (final key in _activeNative.keys.toList()) {
+      await _closeNative(key);
     }
   }
 }

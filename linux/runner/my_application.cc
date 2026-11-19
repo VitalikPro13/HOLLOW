@@ -180,6 +180,14 @@ static void my_application_startup(GApplication* application) {
   // Perform any actions required at application startup.
 
   G_APPLICATION_CLASS(my_application_parent_class)->startup(application);
+
+  // WM_CLASS class part, which GNOME shows as the app's name (notification
+  // header, dock tooltip) when it finds no .desktop file for the window: a
+  // flatpak before the next login, a test shell. Matching uses the instance
+  // part (the prgname, StartupWMClass), so it is unchanged. Only after the
+  // parent's startup: gtk_init resets it to the prgname capitalised,
+  // "Com.anonlisten.hollow".
+  gdk_set_program_class("Hollow");
 }
 
 // Implements GApplication::shutdown.

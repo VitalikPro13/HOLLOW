@@ -92,7 +92,8 @@ device, device targeting, channel push fan-out, the NSE) stay in CLAUDE.md; wiki
 - Local notifications (distinct from FCM): ONE surface per message; a desktop toast when
   hidden/unfocused, the in-app card only when visible AND focused; mobile foreground =
   `MobileInChatBanner` only. macOS toasts = `MacOSFlutterLocalNotificationsPlugin`
-  (NEVER `local_notifier`, dead on macOS 26), Linux = `local_notifier`.
+  (NEVER `local_notifier`, dead on macOS 26), Linux = `LinuxNotifier` (D-Bus `Notify` with
+  the artifact's `desktop-entry` hint; wiki `providers_event_settings`).
   `project_local_notifications_desktop_mobile`.
 - Every FCM/APNs wake goes through `openFirebaseWake` (Rust `open_push_wake`) before
   anything reads it, the tap router included; the NSE through `hollow_push_open_wake`.

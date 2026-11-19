@@ -93,6 +93,13 @@ release pipeline is the `release` skill.
 - Flatpak: `flatpak/` + `build-flatpak.sh`; requires `--socket=x11` (NOT
   `fallback-x11`), `--socket=session-bus` + `--own-name` (else it never launches, #59),
   and a bundled libsecret. `feedback_flatpak_libsecret_and_vm_no_gui`.
+- Desktop ids: the tarball is `com.anonlisten.hollow` (CMake APPLICATION_ID, its `.desktop`,
+  the GApplication id, the prgname = WM_CLASS instance), the flatpak `com.anonlisten.Hollow`
+  (app id, exported `.desktop` and icon); both `.desktop` files carry
+  `StartupWMClass=com.anonlisten.hollow`. Toasts name the running one (`FLATPAK_ID`), and the
+  WM_CLASS class is `Hollow` (what GNOME shows for a window it cannot match). Renaming any of
+  these breaks dock grouping or the notification header silently; `test/linux_notifier_test.dart`
+  pins them.
 - Wake inside the flatpak needs `--system-talk-name=org.freedesktop.login1` (logind's
   `PrepareForSleep(false)`), accepted only from the bus owner of `org.freedesktop.login1`.
   Network change = `GNetworkMonitor` (sees a new default route while NetworkManager still
