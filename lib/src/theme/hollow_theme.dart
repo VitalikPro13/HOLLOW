@@ -220,13 +220,27 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
         : HollowColors.textOnDeepAccent;
   }
 
-  /// Returns a copy with semi-transparent panels, for a custom background
-  /// image. [opacity] runs 0.0 (clear) to 1.0 (opaque).
-  HollowTheme withPanelOpacity(double opacity) {
+  /// The one dim laid over a wallpaper for Appearance's Darken (0.4 to 1.0).
+  /// Every step of the slider changes it. At its lowest, primary text still
+  /// clears 4.5:1 over a pure white picture; at full, the muted tiers do too
+  /// (#144).
+  static double wallpaperDim(double darken) {
+    final t = ((darken - 0.4) / 0.6).clamp(0.0, 1.0);
+    return 0.62 + t * (0.92 - 0.62);
+  }
+
+  /// This theme over a wallpaper that already wears [wallpaperDim].
+  ///
+  /// The canvas is clear, so canvases nested in each other (a chat inside its
+  /// pane) or side by side (Settings, the chat) all show the picture under the
+  /// same single dim instead of stacking their own (#144). Chrome and raised
+  /// surfaces keep a translucent step above it.
+  HollowTheme overWallpaper(double darken) {
+    final base = darken.clamp(0.3, 0.95);
     return copyWith(
-      background: background.withValues(alpha: opacity),
-      surface: surface.withValues(alpha: opacity),
-      elevated: elevated.withValues(alpha: opacity),
+      background: background.withValues(alpha: 0),
+      surface: surface.withValues(alpha: (base * 0.85).clamp(0.4, 0.92)),
+      elevated: elevated.withValues(alpha: (base * 0.95).clamp(0.5, 0.95)),
     );
   }
 
@@ -246,8 +260,13 @@ class HollowTheme extends ThemeExtension<HollowTheme> {
       Color.alphaBlend(tint.withValues(alpha: alpha), elevated);
 
   /// A message row's hover on the canvas: half a step toward [elevated], so a
-  /// card or file inside the row, which IS elevated, still stands out.
-  Color get rowHover => Color.lerp(background, elevated, 0.5)!;
+  /// card or file inside the row, which IS elevated, still stands out. Over a
+  /// wallpaper it is a state layer of the ink instead: the same small lift on
+  /// any picture, where a step toward [elevated] darkens a light one into a
+  /// slab (#144).
+  Color get rowHover => background.a < 1
+      ? textPrimary.withValues(alpha: 0.06)
+      : Color.lerp(background, elevated, 0.5)!;
 
   static HollowTheme of(BuildContext context) =>
       Theme.of(context).extension<HollowTheme>()!;

@@ -125,11 +125,18 @@ After layout dispatch, the body is wrapped in a `Scaffold` with a `Stack` contai
 3. `ActiveCallBar` — active voice call indicator
 4. `IncomingCallOverlay` — incoming call dialog
 
-If `backgroundProvider.hasBackground` is true, the scaffold is further wrapped in a `Stack` with:
-1. `Image.memory(bg.imageBytes!)` — full-bleed background image with `BoxFit.cover` on a black container
-2. The scaffold on top (with transparent background so the image shows through)
+`HollowHome` (app.dart's `home:`) wraps the WHOLE `HollowShell` in `WallpaperBackdrop`
+(`lib/src/ui/components/wallpaper_backdrop.dart`). It sits ABOVE the shell because the shell reads
+`HollowTheme.of(context)` in its own build and hands that `hollow` to every pane Container; a
+backdrop below it left the DM, channel, Home and split panes painting the opaque canvas over the
+picture (#144 review, `wallpaper_shell_test`). With a wallpaper set it paints, bottom to top:
+1. `Image.memory(bg.imageBytes!)`: full-bleed, `BoxFit.cover`, on black
+2. ONE dim, the opaque canvas colour at `HollowTheme.wallpaperDim(darken)` (Appearance > Darken
+   0.4 to 1.0 maps to 0.62 to 0.92, every step changes it; at its lowest primary text clears
+   4.5:1 over a pure white picture, at full the muted tiers do too)
+3. The scaffold, under a `Theme` whose `HollowTheme` is `overWallpaper(darken)`
 
-The transparency levels for panels are NOT handled here — they're in `HollowApp.build()` (see below).
+See "Theme over a wallpaper" below for why the dim lives here and not in the theme.
 
 ## Classic Layout Mode
 
@@ -405,11 +412,38 @@ Providers read:
 - `accentHueProvider` — custom accent hue
 - `backgroundProvider` — custom background image
 
-When a background image is set (`bg.hasBackground`), theme colors get alpha-adjusted:
-- `background` (chat area, home dashboard) → `base * 0.65`, clamped 0.15-0.8 (most transparent, see image through)
-- `surface` (sidebars, member panel, channel header) → `base * 0.85`, clamped 0.4-0.92 (more opaque)
-- `elevated` (cards, inputs) → `base * 0.95`, clamped 0.5-0.95 (most opaque)
-- `scaffoldBackgroundColor` set to `Colors.transparent`
+### Theme over a wallpaper (#144)
+
+`HollowApp` keeps the theme OPAQUE. Only `WallpaperBackdrop`'s subtree (the desktop shell, the
+phone shell, the phone chat route) gets `HollowTheme.overWallpaper(darken)`:
+- `background` (the canvas: chat, Settings, dashboards) is fully CLEAR. The picture's one dim
+  sits under it, so canvases nested in each other (the shell pane + the message list) or side
+  by side (Settings beside the chat) all show the same dim. Before #144 the canvas carried the
+  dim as a translucent token, so the chat stacked two (~0.85) while Settings had one (~0.62)
+  and a hovered row stacked a third into a near-black slab.
+- `surface` (chrome) `base * 0.85` clamped 0.4-0.92 and `elevated` (cards, inputs) `base * 0.95`
+  clamped 0.5-0.95 stay a translucent step above the dim (`base` = darken clamped 0.3-0.95).
+- `scaffoldBackgroundColor` is transparent there only. A page pushed over it (phone Settings
+  pages, Conferences, call routes, dialogs) keeps the opaque canvas: it has no picture behind it.
+- `rowHover` over a see-through canvas is a state layer of the ink (`textPrimary` at 6%), the
+  same small lift on any picture; on an opaque canvas it stays half a step toward `elevated`.
+- Something that must be SOLID (an ink on a filled control, a focus ring's casing, a presence
+  dot's ring) uses `opaqueBackground`, never `background` (clear over a wallpaper).
+- Reduce transparency: the backdrop paints the opaque canvas instead of the picture.
+- The backdrop keeps ONE widget shape in every state (wallpaper on or off, Reduce transparency):
+  its child is the whole shell, and a changed ancestor remounts it, which reruns the shell's
+  bootstrap ("Node is already running", the user bar reads Error). Seen in the #144 fleet run
+  when a wallpaper was set; `wallpaper_dim_test` "never remounts".
+- A backdrop inside another adds nothing (`MobileShell` sits under `HollowHome`'s; the pushed
+  `MobileChatRoute` paints its own). `showHollowSheet` re-themes its sheet with
+  `WallpaperBackdrop.opaqueThemeOf(opener)`: `showModalBottomSheet` copies the opener's (clear)
+  theme into a route with no picture behind it. `showHollowDialog` (`showGeneralDialog`) copies
+  nothing, so dialogs are opaque already.
+- A widget built from a State's `hollow` read ABOVE the backdrop (the phone chat route's search
+  bar) gets the opaque theme: read the theme in its own context (`Builder`) when it should match
+  the see-through chrome around it.
+- Tests: `test/widget/wallpaper_dim_test.dart`; fleet `wallpaper_144_desktop.json`,
+  `wallpaper_144_mobile.json` (probe op `seed_wallpaper`).
 
 Global navigator key: `hollowNavigatorKey` — used for showing toasts from providers without `BuildContext`.
 

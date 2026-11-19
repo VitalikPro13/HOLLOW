@@ -1153,7 +1153,7 @@ class _HomeConversationsState extends ConsumerState<HomeConversations> {
               final inCall = c.peerId != null && c.peerId == callMaster;
               final row = ConversationRow(
                 leading: homeConversationLeading(c,
-                    size: _kRowAvatar, ring: hollow.background),
+                    size: _kRowAvatar, ring: hollow.opaqueBackground),
                 title: c.title,
                 detail: c.detail,
                 preview: c.preview,

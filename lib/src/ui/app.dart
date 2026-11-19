@@ -5,15 +5,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/accent_color_provider.dart';
 import 'package:hollow/src/core/providers/app_lock_provider.dart';
-import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/providers/annotation_mode_provider.dart';
-import 'package:hollow/src/core/providers/background_provider.dart';
 import 'package:hollow/src/core/providers/display_scale_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/theme_provider.dart';
 import 'package:hollow/src/core/providers/window_chrome_provider.dart';
 import 'package:hollow/src/core/services/window_fullscreen.dart';
-import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_theme_data.dart';
 import 'package:hollow/src/ui/components/hollow_scroll_behavior.dart';
 import 'package:hollow/src/ui/components/snapshot_paste.dart';
@@ -35,33 +32,11 @@ class HollowApp extends ConsumerWidget {
     final themeMode = ref.watch(themeModeProvider);
     final hue = ref.watch(accentHueProvider);
     final isCustomHue = (hue - defaultAccentHue).abs() > 1;
-    final bg = ref.watch(backgroundProvider);
-
-    var themeData = themeMode == ThemeMode.dark
+    final themeData = themeMode == ThemeMode.dark
         ? HollowThemeData.dark(accentHue: isCustomHue ? hue : null)
         : HollowThemeData.light(accentHue: isCustomHue ? hue : null);
-
-    final reduceTransparency =
-        ref.watch(reduceTransparencyProvider).valueOrNull ?? false;
-
-    if (bg.hasBackground && !reduceTransparency) {
-      final hollow = themeData.extension<HollowTheme>()!;
-      final base = bg.panelOpacity.clamp(0.3, 0.95);
-      // A ladder by role: background (chat, dashboard) shows most of the
-      // image, surface (sidebars, header) less, elevated (cards, inputs) least.
-      final bgAlpha = (base * 0.65).clamp(0.15, 0.8);
-      final surfaceAlpha = (base * 0.85).clamp(0.4, 0.92);
-      final elevatedAlpha = (base * 0.95).clamp(0.5, 0.95);
-      final transparentHollow = hollow.copyWith(
-        background: hollow.background.withValues(alpha: bgAlpha),
-        surface: hollow.surface.withValues(alpha: surfaceAlpha),
-        elevated: hollow.elevated.withValues(alpha: elevatedAlpha),
-      );
-      themeData = themeData.copyWith(
-        scaffoldBackgroundColor: Colors.transparent,
-        extensions: [transparentHollow],
-      );
-    }
+    // A wallpaper's see-through theme is applied by `WallpaperBackdrop`, only
+    // to the pages the picture sits behind.
 
     final isDesktop =
         Platform.isWindows || Platform.isMacOS || Platform.isLinux;
@@ -75,7 +50,7 @@ class HollowApp extends ConsumerWidget {
       // instead of a thumb painted over its last 10px (issue #54).
       scrollBehavior: const HollowScrollBehavior(),
       actions: hollowAppActions(),
-      home: const HollowShell(),
+      home: const HollowHome(),
       navigatorObservers: [routesAboveHome],
       builder: (context, child) {
         final Widget body =

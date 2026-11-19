@@ -497,7 +497,7 @@ Provider: `backgroundProvider` -- `NotifierProvider<BackgroundNotifier, Backgrou
 ### BackgroundState
 - `imageBytes: Uint8List?` -- Raw bytes of the custom background image.
 - `imageName: String?` -- The picked file's display name, persisted in the `bg_image_name` setting so Appearance names it after a restart (null for an image saved before 2026-09-24: it reads "Custom image").
-- `panelOpacity: double` -- 0.0 (fully transparent panels) to 1.0 (solid, default). Controls overlay panel opacity when a background image is set.
+- `panelOpacity: double` -- Appearance > Darken, 0.4 to 1.0 (default 1.0). `WallpaperBackdrop` turns it into the ONE dim over the picture (`HollowTheme.wallpaperDim`) and the see-through theme of the pages it sits behind (`overWallpaper`); wiki `ui_shell_layout` "Theme over a wallpaper".
 - `hasBackground` -- Convenience getter, true when `imageBytes` is non-null and non-empty.
 
 ### BackgroundNotifier Methods
@@ -556,7 +556,7 @@ Provider: `reduceMotionProvider` -- `AsyncNotifierProvider<ReduceMotionNotifier,
 
 ### Reduce Transparency
 Provider: `reduceTransparencyProvider` -- `AsyncNotifierProvider<ReduceTransparencyNotifier, bool>`
-- Key: `'reduce_transparency'`. Default `false`. Governs the chat wallpaper panel (`app.dart`) only: dialogs lost their backdrop blur in design sweep 8, and the `reduceTransparencyFlag` mirror that fed them is gone.
+- Key: `'reduce_transparency'`. Default `false`. Governs the wallpaper only (`WallpaperBackdrop` paints the opaque canvas instead of the picture): dialogs lost their backdrop blur in design sweep 8, and the `reduceTransparencyFlag` mirror that fed them is gone.
 
 ### Audio Input Device
 Provider: `audioInputDeviceProvider` -- `AsyncNotifierProvider<AudioInputDeviceNotifier, String?>`

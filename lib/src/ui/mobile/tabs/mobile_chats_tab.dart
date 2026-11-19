@@ -717,7 +717,7 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
       case _DmEntry(:final c):
         return ConversationRow(
           touch: true,
-          leading: homeConversationLeading(c, size: _kAvatar, ring: hollow.background),
+          leading: homeConversationLeading(c, size: _kAvatar, ring: hollow.opaqueBackground),
           title: c.title,
           preview: c.preview,
           fromMe: c.fromMe,
@@ -729,7 +729,7 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
       case _MentionEntry(:final c):
         return ConversationRow(
           touch: true,
-          leading: homeConversationLeading(c, size: _kAvatar, ring: hollow.background),
+          leading: homeConversationLeading(c, size: _kAvatar, ring: hollow.opaqueBackground),
           title: c.title,
           detail: c.detail,
           preview: c.preview,

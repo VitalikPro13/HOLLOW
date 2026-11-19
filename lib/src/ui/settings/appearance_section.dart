@@ -238,7 +238,7 @@ class _DarkenRow extends ConsumerWidget {
     final opacity = ref.watch(backgroundProvider).panelOpacity;
     return SettingsSliderRow(
       title: 'Darken',
-      subtitle: 'How much the panels cover the image',
+      subtitle: 'Dims the image behind the app',
       value: opacity,
       min: 0.4,
       max: 1.0,

@@ -14,7 +14,6 @@ import 'package:hollow/src/core/providers/unread_provider.dart';
 import 'package:hollow/src/core/services/channel_topic_service.dart';
 import 'package:hollow/src/core/services/push_notification_service.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
-import 'package:hollow/src/theme/hollow_colors.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/ui/dialogs/relay_denied_dialog.dart';
 import 'package:hollow/src/ui/mobile/mobile_chat_route.dart';
@@ -31,6 +30,7 @@ import 'package:hollow/src/ui/mobile/tabs/mobile_settings_tab.dart';
 import 'package:hollow/src/ui/shell/mobile_nav.dart';
 import 'package:hollow/src/ui/shell/clock_skew_banner.dart';
 import 'package:hollow/src/ui/shell/system_status_banner.dart';
+import 'package:hollow/src/ui/components/wallpaper_backdrop.dart';
 
 /// Lets a widget test on a computer route push taps through the shell.
 @visibleForTesting
@@ -240,31 +240,7 @@ class _MobileShellState extends ConsumerState<MobileShell> {
       child: scaffold,
     );
 
-    if (bg.hasBackground) {
-      final darkenAlpha = bg.panelOpacity.clamp(0.0, 0.92);
-      scaffold = Stack(
-        children: [
-          Positioned.fill(
-            child: Container(
-              color: HollowColors.mediaBlack,
-              child: Image.memory(
-                bg.imageBytes!,
-                fit: BoxFit.cover,
-                gaplessPlayback: true,
-                width: double.infinity,
-                height: double.infinity,
-              ),
-            ),
-          ),
-          Positioned.fill(
-            child: Container(
-              color: hollow.background.withValues(alpha: darkenAlpha),
-            ),
-          ),
-          scaffold,
-        ],
-      );
-    }
+    scaffold = WallpaperBackdrop(child: scaffold);
 
     return Stack(
       children: [

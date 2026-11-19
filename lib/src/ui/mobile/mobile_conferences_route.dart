@@ -132,13 +132,13 @@ class _MobileConferencesRouteState
                   HollowTypography.heading.copyWith(color: hollow.textPrimary),
             ),
           ),
-          HollowIconButton(
-            icon: LucideIcons.logIn,
-            label: 'Join a meeting',
-            size: 44,
+          HollowButton.ghost(
+            touch: true,
+            semanticLabel: 'Join a meeting',
             onPressed: () => showJoinConferenceDialog(context),
+            child: const Text('Join'),
           ),
-          const SizedBox(width: HollowSpacing.xs),
+          const SizedBox(width: HollowSpacing.sm),
           HollowIconButton(
             icon: LucideIcons.plus,
             label: 'Create a room',

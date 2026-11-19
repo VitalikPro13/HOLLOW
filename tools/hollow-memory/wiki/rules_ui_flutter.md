@@ -118,6 +118,14 @@ guard catches the breakage, this page says why. Mobile-only UI rules are in
 - Theme: 5 surfaces: `surface` = chrome BELOW the canvas, NEVER a card; `background`
   canvas, `elevated` cards/inputs, `overlay` floating + opaque, `hover`. `accentText` =
   accent TEXT (`accent` fills), `textTertiary` faded; 4.5:1 everywhere (CI).
+- A wallpaper wears ONE dim, painted by `WallpaperBackdrop` (`HollowHome` ABOVE the whole shell,
+  plus the phone chat route); under it the canvas `background` is CLEAR (`overWallpaper`), so
+  nested canvases never stack a darker dim (#144). A theme read ABOVE the backdrop is opaque: read
+  it in the widget's own context. A wrapper above the shell keeps one shape in every state (a
+  changed ancestor remounts the shell and restarts the node). Never dim a pane yourself; a colour that must be SOLID (an ink
+  on a fill, a ring, a casing) is `opaqueBackground`. A pushed page or sheet with no picture
+  behind it keeps the opaque theme. `wallpaper_dim_test`, `wallpaper_shell_test`, wiki
+  `ui_shell_layout`.
 - Accessibility iron rules: PURPOSE labels on icon-only controls; focus rides
   `HollowFocusRing` (both CI-guarded); reduce motion ONLY via `ReduceMotionController` +
   `hollowMobileRoute()`; StatusDot = SHAPE (`filled:`); never `dart format` mid-edit.

@@ -1,0 +1,350 @@
+{
+ "_": [
+  "#144 + phone labels: Archive's per-server Export and Conferences' Join (part 1), then one light",
+  "busy wallpaper at Darken 100/70/40 over the Settings and Chats tabs (part 2). Single peer, throwaway identity.",
+  "run (Mac mini): pwsh -NoProfile -File scripts/fleet.ps1 -Scenario wallpaper_144_mobile -Peers a=ios:d  (Android: FLEET_BACKEND=android ... -Peers a=d)"
+ ],
+ "peers": [
+  "a"
+ ],
+ "steps": [
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "provider": "connection",
+   "equals": "connected",
+   "timeout_ms": 120000
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 2500
+  },
+  {
+   "peer": "a",
+   "op": "seed_server",
+   "name": "wallm-${RUN}",
+   "as": "INVITE"
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "text:wallm-${RUN}",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "a",
+   "op": "seed_channel",
+   "server": "wallm-${RUN}",
+   "channel": "general",
+   "text": "did the stems export finish"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 400
+  },
+  {
+   "peer": "a",
+   "op": "seed_channel",
+   "server": "wallm-${RUN}",
+   "channel": "general",
+   "text": "almost, uploading them to the server now"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 400
+  },
+  {
+   "peer": "a",
+   "op": "seed_channel",
+   "server": "wallm-${RUN}",
+   "channel": "general",
+   "text": "I want to try the new filter envelope tonight"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 400
+  },
+  {
+   "peer": "a",
+   "op": "seed_channel",
+   "server": "wallm-${RUN}",
+   "channel": "general",
+   "text": "the pad on track 4 needs a slower attack, it clicks on the downbeat"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 400
+  },
+  {
+   "peer": "a",
+   "op": "seed_channel",
+   "server": "wallm-${RUN}",
+   "channel": "general",
+   "text": "sending the bounce in a minute"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 400
+  },
+  {
+   "peer": "a",
+   "op": "seed_channel",
+   "server": "wallm-${RUN}",
+   "channel": "general",
+   "text": "sounds good"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 400
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Archive",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 2500
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "p1-archive"
+  },
+  {
+   "peer": "a",
+   "op": "dump",
+   "name": "p1-archive"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Chats",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Conferences",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "semantics:Create a room",
+   "timeout_ms": 20000
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "p1-conferences"
+  },
+  {
+   "peer": "a",
+   "op": "dump",
+   "name": "p1-conferences"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Join a meeting",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1200
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "p1-join-dialog",
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "key",
+   "value": "escape",
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Back",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1200
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Chats",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "a",
+   "op": "seed_wallpaper",
+   "darken": "1.0"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1200
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Settings",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "w144-m-settings-100"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Chats",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "w144-m-chats-100"
+  },
+  {
+   "peer": "a",
+   "op": "seed_wallpaper",
+   "darken": "0.7"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1200
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Settings",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "w144-m-settings-70"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Chats",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "w144-m-chats-70"
+  },
+  {
+   "peer": "a",
+   "op": "seed_wallpaper",
+   "darken": "0.4"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1200
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Settings",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "w144-m-settings-40"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Chats",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "w144-m-chats-40"
+  },
+  {
+   "peer": "a",
+   "op": "seed_delete_server",
+   "name": "wallm-${RUN}"
+  }
+ ]
+}

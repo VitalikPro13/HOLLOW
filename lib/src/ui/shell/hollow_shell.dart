@@ -75,7 +75,6 @@ import 'package:hollow/src/core/providers/notification_provider.dart';
 import 'package:hollow/src/core/providers/system_notification_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
 import 'package:hollow/src/core/providers/updater_provider.dart';
-import 'package:hollow/src/theme/hollow_colors.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -164,6 +163,7 @@ import 'package:hollow/src/ui/guest/public_channel_browser.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:window_manager/window_manager.dart';
 import 'package:hollow/src/ui/components/hollow_spinner.dart';
+import 'package:hollow/src/ui/components/wallpaper_backdrop.dart';
 
 const _kDesktopBreakpoint = 1024.0;
 const _kTabletBreakpoint = 600.0;
@@ -172,6 +172,17 @@ const _kTabletBreakpoint = 600.0;
 ///
 /// Desktop is ServerStrip | ChannelSidebar | ChatPane | MemberPanel, tablet
 /// drops to a toggleable member panel, mobile to one tab view plus a nav bar.
+/// The app's home: the shell over the user's wallpaper. The backdrop sits
+/// ABOVE the shell because the shell reads its theme in its own build; below
+/// it, the panes would paint the opaque canvas over the picture (#144).
+class HollowHome extends StatelessWidget {
+  const HollowHome({super.key});
+
+  @override
+  Widget build(BuildContext context) =>
+      const WallpaperBackdrop(child: HollowShell());
+}
+
 class HollowShell extends ConsumerStatefulWidget {
   const HollowShell({super.key});
 
@@ -2955,19 +2966,16 @@ class _UnlockingOverlay extends StatelessWidget {
   }
 }
 
-/// Isolates the background image and scaffold from the main shell build, so it
-/// rebuilds only when the background changes.
-class _ShellScaffold extends ConsumerWidget {
+/// The shell's scaffold. Over a wallpaper the canvas is clear: the picture
+/// and its dim are painted by [HollowHome]'s backdrop.
+class _ShellScaffold extends StatelessWidget {
   final Widget body;
   const _ShellScaffold({required this.body});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final hollow = HollowTheme.of(context);
-    final bg = ref.watch(backgroundProvider);
-
-    Widget scaffold = Scaffold(
-      backgroundColor: bg.hasBackground ? Colors.transparent : hollow.background,
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: HollowTheme.of(context).background,
       body: Stack(
         children: [
           body,
@@ -2977,27 +2985,5 @@ class _ShellScaffold extends ConsumerWidget {
         ],
       ),
     );
-
-    if (bg.hasBackground) {
-      scaffold = Stack(
-        children: [
-          Positioned.fill(
-            child: Container(
-              color: HollowColors.mediaBlack,
-              child: Image.memory(
-                bg.imageBytes!,
-                fit: BoxFit.cover,
-                gaplessPlayback: true,
-                width: double.infinity,
-                height: double.infinity,
-              ),
-            ),
-          ),
-          scaffold,
-        ],
-      );
-    }
-
-    return scaffold;
   }
 }

@@ -351,7 +351,7 @@ class _MobileControlButton extends StatelessWidget {
     final hollow = HollowTheme.of(context);
     final (fill, ink) = switch (control.tone) {
       MobileControlTone.rest => (hollow.hover, hollow.textPrimary),
-      MobileControlTone.on => (hollow.textPrimary, hollow.background),
+      MobileControlTone.on => (hollow.textPrimary, hollow.opaqueBackground),
       MobileControlTone.alarm => (
           hollow.error.withValues(alpha: 0.18),
           hollow.error

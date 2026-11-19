@@ -66,6 +66,8 @@ Five colour-only levels per theme, in `lib/src/theme/surface_ladder.dart`, plus 
 
 A card painted `surface` is a bug: with chrome below the canvas it reads as a hole. `opaqueSurface` and `opaqueBackground` are the same tokens at full alpha, for bars that stay solid over a wallpaper.
 
+**Over a wallpaper.** The picture wears one dim, the Darken the person chose, and the canvas above it is clear, so every screen (chat, Settings, dashboards) sits on the same dim and nested panes never darken further. Chrome and raised surfaces keep a translucent step above the dim. A hover on the canvas there is a state layer of the ink, a small lift on any picture.
+
 **Shadows.** Only on `overlay` things and small: `blurRadius` at most 12, and the one shadow is `HollowShadows.float`. A shadow is never a substitute for a surface step, and never appears on a card or a row.
 
 **Ambient background.** Flat by default. The drifting blobs are an opt-in in Appearance (`ambientBackgroundProvider`) and stay off under reduce motion.

@@ -20,7 +20,6 @@ import 'package:hollow/src/ui/components/hollow_badge.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_chip_tabs.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
-import 'package:hollow/src/ui/components/hollow_icon_button.dart';
 import 'package:hollow/src/ui/components/hollow_list_row.dart';
 import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/components/hollow_sheet.dart';
@@ -228,10 +227,9 @@ class _MobileMessagesViewState extends ConsumerState<_MobileMessagesView> {
   }
 
   Widget _exportServer(ArchiveChannelGroup g) {
-    return HollowIconButton(
-      icon: LucideIcons.fileOutput,
-      label: 'Export ${g.serverName}',
-      size: 44,
+    return HollowButton.ghost(
+      touch: true,
+      semanticLabel: 'Export ${g.serverName}',
       onPressed: () => showExportArchiveDialog(
         context,
         isDm: false,
@@ -245,6 +243,7 @@ class _MobileMessagesViewState extends ConsumerState<_MobileMessagesView> {
         name: g.serverName,
         messageCount: g.channels.fold<int>(0, (s, c) => s + c.messageCount),
       ),
+      child: const Text('Export'),
     );
   }
 

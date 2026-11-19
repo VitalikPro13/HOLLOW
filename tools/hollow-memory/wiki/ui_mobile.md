@@ -37,11 +37,12 @@ Bottom bar (56px) with 4 `_NavTab` widgets + center `_AddButton`. Uses `LayoutBu
 - Settings tab
 
 ### Background Image Layer
-`MobileShell` watches `backgroundProvider`. When `bg.hasBackground`:
-- Scaffold `backgroundColor` → `Colors.transparent`
-- Wraps scaffold in Stack: `Image.memory(bg.imageBytes!, fit: BoxFit.cover)` → darken overlay `Container(color: hollow.background.withValues(alpha: darkenAlpha))` → scaffold
-- `darkenAlpha = bg.panelOpacity.clamp(0.0, 0.92)` — user-controlled via Settings > Appearance > Panel Opacity slider
-- Same pattern must be applied in `MobileChatRoute` (and any other pushed full-screen route) since pushed routes fully cover the shell
+`MobileShell` sits under `HollowHome`'s `WallpaperBackdrop` (its own wrap adds nothing there) and
+`MobileChatRoute` (a pushed route that fully covers the shell) wraps its scaffold in one: the picture, ONE dim from Appearance > Darken
+(`HollowTheme.wallpaperDim`, 0.62 to 0.92), and `HollowTheme.overWallpaper` for the subtree (clear
+canvas, translucent chrome and raised). Any other pushed page that should show the wallpaper wraps
+itself the same way; one that does not keeps the opaque canvas. Rules and the #144 history: wiki
+`ui_shell_layout` "Theme over a wallpaper".
 
 ### The minimised call (was the floating pills)
 `MobileShell` wraps its `Scaffold` in a `Stack` with `MobileMinimisedCall()` on top: the call you are in, floating 12 px above the nav bar. `MobileChatRoute` DOCKS it under its header (`MobileMinimisedCall(floating: false)`) instead. Call routes are pushed on top and cover it. **CRITICAL:** never in the `app.dart` builder: that layer is above the navigator and no route can cover it. Only the incoming screen lives there. See wiki `ui_call_surfaces` (Phone).

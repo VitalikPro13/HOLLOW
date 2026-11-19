@@ -1,9 +1,11 @@
 import 'dart:io';
+import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:flutter/painting.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hollow/src/core/providers/background_provider.dart';
 import 'package:hollow/src/core/providers/channel_chat_provider.dart';
 import 'package:hollow/src/core/providers/chat_provider.dart';
 import 'package:hollow/src/core/providers/file_transfer_provider.dart';
@@ -30,6 +32,7 @@ import 'package:path_provider/path_provider.dart';
 /// | `seed_image` | `contact` or `server` + `channel`, `name` | a generated PNG, as the composer sends one |
 /// | `seed_avatar` | | a generated avatar on the own profile |
 /// | `seed_delete_server` | `name` | the owner deletes a server it created |
+/// | `seed_wallpaper` | `darken` (0.4 to 1.0) | a generated light, busy wallpaper at that Darken |
 const linkSeedOps = {
   'seed_server',
   'seed_join',
@@ -38,6 +41,7 @@ const linkSeedOps = {
   'seed_image',
   'seed_avatar',
   'seed_delete_server',
+  'seed_wallpaper',
 };
 
 class LinkSeedFailure implements Exception {
@@ -111,6 +115,16 @@ Future<String> linkSeedOp(String op, WidgetTester tester,
             );
       });
       return 'set a generated avatar';
+    case 'seed_wallpaper':
+      final darken = double.tryParse('${step['darken'] ?? 1.0}') ?? 1.0;
+      await tester.runAsync(() async {
+        final notifier = container.read(backgroundProvider.notifier);
+        if (!container.read(backgroundProvider).hasBackground) {
+          await notifier.setImage(await _busyWallpaper(), name: 'busy.png');
+        }
+        await notifier.setOpacity(darken);
+      });
+      return 'wallpaper at Darken ${(darken * 100).round()}%';
     case 'seed_delete_server':
       final name = arg('name');
       await tester.runAsync(() async =>
@@ -194,6 +208,28 @@ Future<(String, String)> _channel(String server, String channel) async {
 
 /// A PNG unique to [seed]: content-addressed file ids would fold two
 /// identical images into one.
+/// Light and busy, like the #144 report: pale ground, white stripes, a dark
+/// red shape and grey blocks, so text crosses every kind of patch.
+Future<Uint8List> _busyWallpaper() async {
+  const w = 1600.0, h = 1000.0;
+  final recorder = ui.PictureRecorder();
+  final canvas = ui.Canvas(recorder);
+  ui.Paint fill(int argb) => ui.Paint()..color = ui.Color(argb);
+  canvas.drawRect(const ui.Rect.fromLTWH(0, 0, w, h), fill(0xFFEDE3D2));
+  for (var i = 0; i < 16; i++) {
+    canvas.drawRect(ui.Rect.fromLTWH(i * 100.0, 0, 40, h), fill(0xFFFFFFFF));
+  }
+  canvas.drawCircle(const ui.Offset(900, 450), 330, fill(0xFF8E1B1B));
+  for (var i = 0; i < 12; i++) {
+    canvas.drawRect(
+        ui.Rect.fromLTWH((i * 137) % 1500.0, (i * 89) % 900.0, 160, 110),
+        fill(i.isEven ? 0xFF9A9A9A : 0xFFC8B27A));
+  }
+  final image = await recorder.endRecording().toImage(w.toInt(), h.toInt());
+  final data = await image.toByteData(format: ui.ImageByteFormat.png);
+  return data!.buffer.asUint8List();
+}
+
 Future<List<int>> _png(String seed, int size) async {
   final hue = (seed.hashCode % 360).abs().toDouble();
   final recorder = ui.PictureRecorder();

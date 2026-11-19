@@ -43,7 +43,6 @@ import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/typing_provider.dart';
 import 'package:hollow/src/core/providers/unread_marker_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
-import 'package:hollow/src/theme/hollow_colors.dart';
 import 'package:hollow/src/theme/hollow_shadows.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -114,6 +113,7 @@ import 'package:hollow/src/core/services/attachment_export.dart';
 import 'package:hollow/src/ui/components/hollow_sheet.dart';
 import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:hollow/src/ui/chat/server_recovery_notices.dart';
+import 'package:hollow/src/ui/components/wallpaper_backdrop.dart';
 import 'package:hollow/src/core/providers/name_color_provider.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
@@ -1511,7 +1511,12 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute>
                         .watch(deviceLinkProvider)
                         .identityOf(widget.peerId!)),
               // Searching would bring a blocked person's messages back.
-              if (_searchOpen && !_watchDmPeerBlocked()) _buildSearchBar(hollow),
+              // Its own context: the header's see-through chrome over a
+              // wallpaper, not the route's opaque theme.
+              if (_searchOpen && !_watchDmPeerBlocked())
+                Builder(
+                    builder: (context) =>
+                        _buildSearchBar(HollowTheme.of(context))),
               if (!widget.isDm) _buildSyncIndicator(hollow),
               if (!widget.isDm && !_isConference)
                 ServerRecoveryNotices(serverId: widget.serverId!, touch: true),
@@ -1571,9 +1576,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute>
       ),
     );
 
-    if (bg.hasBackground) {
-      scaffold = _wrapWithBackground(scaffold, bg, hollow);
-    }
+    scaffold = WallpaperBackdrop(child: scaffold);
 
     return LeaveWithServer(
       serverId: _listedServerId,
@@ -1944,33 +1947,6 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute>
       return;
     }
     setState(() => _isRecordingVoice = true);
-  }
-
-  Widget _wrapWithBackground(
-      Widget scaffold, BackgroundState bg, HollowTheme hollow) {
-    final darkenAlpha = bg.panelOpacity.clamp(0.0, 0.92);
-    return Stack(
-      children: [
-        Positioned.fill(
-          child: Container(
-            color: HollowColors.mediaBlack,
-            child: Image.memory(
-              bg.imageBytes!,
-              fit: BoxFit.cover,
-              gaplessPlayback: true,
-              width: double.infinity,
-              height: double.infinity,
-            ),
-          ),
-        ),
-        Positioned.fill(
-          child: Container(
-            color: hollow.background.withValues(alpha: darkenAlpha),
-          ),
-        ),
-        scaffold,
-      ],
-    );
   }
 
   bool _retryingSync = false;

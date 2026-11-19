@@ -1,0 +1,378 @@
+{
+ "_": [
+  "#144 desktop: one light busy wallpaper at Darken 100/70/40: the chat with a hovered message and",
+  "Settings (Appearance, Audio & video). Single peer, throwaway identity.",
+  "run (Mac mini): FLEET_BACKEND=macos pwsh -NoProfile -File scripts/fleet.ps1 -Scenario wallpaper_144_desktop -Peers a=c"
+ ],
+ "peers": [
+  "a"
+ ],
+ "steps": [
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "provider": "connection",
+   "equals": "connected",
+   "timeout_ms": 120000
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 2500
+  },
+  {
+   "peer": "a",
+   "op": "seed_server",
+   "name": "wall-${RUN}",
+   "as": "INVITE"
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "server:wall-${RUN}",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "a",
+   "op": "seed_channel",
+   "server": "wall-${RUN}",
+   "channel": "general",
+   "text": "did the stems export finish"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 400
+  },
+  {
+   "peer": "a",
+   "op": "seed_channel",
+   "server": "wall-${RUN}",
+   "channel": "general",
+   "text": "almost, uploading them to the server now"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 400
+  },
+  {
+   "peer": "a",
+   "op": "seed_channel",
+   "server": "wall-${RUN}",
+   "channel": "general",
+   "text": "I want to try the new filter envelope tonight"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 400
+  },
+  {
+   "peer": "a",
+   "op": "seed_channel",
+   "server": "wall-${RUN}",
+   "channel": "general",
+   "text": "the pad on track 4 needs a slower attack, it clicks on the downbeat"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 400
+  },
+  {
+   "peer": "a",
+   "op": "seed_channel",
+   "server": "wall-${RUN}",
+   "channel": "general",
+   "text": "sending the bounce in a minute"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 400
+  },
+  {
+   "peer": "a",
+   "op": "seed_channel",
+   "server": "wall-${RUN}",
+   "channel": "general",
+   "text": "sounds good"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 400
+  },
+  {
+   "peer": "a",
+   "op": "open_server",
+   "name": "wall-${RUN}"
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "channel:general",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "a",
+   "op": "open_channel",
+   "name": "general"
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "text:sounds good",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "a",
+   "op": "seed_wallpaper",
+   "darken": "1.0"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1200
+  },
+  {
+   "peer": "a",
+   "op": "hover",
+   "target": "text:sending the bounce in a minute",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 600
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "w144-chat-100"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Settings",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Appearance",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1200
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "w144-settings-100"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Audio & video",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1200
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "w144-settings-av-100",
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "key",
+   "value": "escape"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1200
+  },
+  {
+   "peer": "a",
+   "op": "seed_wallpaper",
+   "darken": "0.7"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1200
+  },
+  {
+   "peer": "a",
+   "op": "hover",
+   "target": "text:sending the bounce in a minute",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 600
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "w144-chat-70"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Settings",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Appearance",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1200
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "w144-settings-70"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Audio & video",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1200
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "w144-settings-av-70",
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "key",
+   "value": "escape"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1200
+  },
+  {
+   "peer": "a",
+   "op": "seed_wallpaper",
+   "darken": "0.4"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1200
+  },
+  {
+   "peer": "a",
+   "op": "hover",
+   "target": "text:sending the bounce in a minute",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 600
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "w144-chat-40"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Settings",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Appearance",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1200
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "w144-settings-40"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Audio & video",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1200
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "w144-settings-av-40",
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "key",
+   "value": "escape"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1200
+  },
+  {
+   "peer": "a",
+   "op": "seed_delete_server",
+   "name": "wall-${RUN}"
+  }
+ ]
+}

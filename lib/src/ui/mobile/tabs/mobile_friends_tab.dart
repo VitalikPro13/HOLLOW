@@ -361,7 +361,7 @@ class _FriendRow extends ConsumerWidget {
             peerId: peerId,
             size: 40,
             online: isOnline,
-            ring: hollow.background,
+            ring: hollow.opaqueBackground,
           ),
           const SizedBox(width: HollowSpacing.md),
           Expanded(

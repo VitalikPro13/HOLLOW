@@ -96,12 +96,8 @@ const _allowed = <String, (int, String)>{
       (1, 'gated: the poster is re-encoded by peer_thumb_for_display'),
   'lib/src/ui/media/media_video_page.dart':
       (1, 'gated: the poster is re-encoded by peer_thumb_for_display'),
-  'lib/src/ui/mobile/mobile_chat_route.dart':
-      (1, 'own: the chat background the user picked'),
   'lib/src/ui/mobile/mobile_image_crop_route.dart':
       (3, 'own: the image the user picked to crop'),
-  'lib/src/ui/mobile/mobile_shell.dart':
-      (1, 'own: the chat background the user picked'),
   'lib/src/ui/server_settings/pages/overview_page.dart':
       (11, 'own: the picked icon or banner, seeded as sent; gated: the rail'),
   'lib/src/ui/settings/appearance_section.dart':
@@ -114,7 +110,7 @@ const _allowed = <String, (int, String)>{
       (2, 'gated: overlay_image_bytes (shown)'),
   'lib/src/ui/shell/channel_sidebar.dart':
       (1, 'gated: the server banner via get_server_banner (rail)'),
-  'lib/src/ui/shell/hollow_shell.dart':
+  'lib/src/ui/components/wallpaper_backdrop.dart':
       (1, 'own: the chat background the user picked'),
   'lib/src/ui/shop/hollowpack_import.dart':
       (2, 'gated: what the import stored, via get_emote_bytes'),

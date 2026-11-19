@@ -114,7 +114,7 @@ class _HollowFocusRingState extends State<HollowFocusRing>
             color: hollow.focusRing,
             // The accent ring alone would vanish on an accent-filled control,
             // and background is the deepest contrast to it in both themes.
-            casing: hollow.background,
+            casing: hollow.opaqueBackground,
             borderRadius: widget.borderRadius,
             repaint: _fade,
           ),

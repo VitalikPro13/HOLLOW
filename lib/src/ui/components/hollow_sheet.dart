@@ -7,6 +7,7 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
+import 'package:hollow/src/ui/components/wallpaper_backdrop.dart';
 
 /// The height cap of a tall sheet (a profile, a game card, the expression
 /// picker): the strip left above it shows what it covers and is where a tap
@@ -42,6 +43,33 @@ Future<T?> showHollowSheet<T>({
   RouteSettings? routeSettings,
 }) {
   final hollow = HollowTheme.of(context);
+  // The route copies the opener's theme; over a wallpaper that is the
+  // see-through one, and a sheet has no picture behind it.
+  final opaque = WallpaperBackdrop.opaqueThemeOf(context);
+  Widget body(BuildContext sheetContext) {
+    Widget sheet = ColoredBox(
+      color: HollowTheme.of(sheetContext).overlay,
+      child: handle
+          ? Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const HollowSheetHandle(),
+                Flexible(child: builder(sheetContext)),
+              ],
+            )
+          : builder(sheetContext),
+    );
+    if (maxHeightFactor != null) {
+      sheet = ConstrainedBox(
+        constraints: BoxConstraints(
+          maxHeight: MediaQuery.sizeOf(sheetContext).height * maxHeightFactor,
+        ),
+        child: sheet,
+      );
+    }
+    return enableDrag ? _SheetPullScope(child: sheet) : sheet;
+  }
+
   return showModalBottomSheet<T>(
     context: context,
     // The surface is painted inside the builder from the sheet's own context,
@@ -60,29 +88,9 @@ Future<T?> showHollowSheet<T>({
     shape: RoundedRectangleBorder(
       borderRadius: BorderRadius.vertical(top: Radius.circular(hollow.radiusXl)),
     ),
-    builder: (sheetContext) {
-      Widget sheet = ColoredBox(
-        color: HollowTheme.of(sheetContext).overlay,
-        child: handle
-            ? Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const HollowSheetHandle(),
-                  Flexible(child: builder(sheetContext)),
-                ],
-              )
-            : builder(sheetContext),
-      );
-      if (maxHeightFactor != null) {
-        sheet = ConstrainedBox(
-          constraints: BoxConstraints(
-            maxHeight: MediaQuery.sizeOf(sheetContext).height * maxHeightFactor,
-          ),
-          child: sheet,
-        );
-      }
-      return enableDrag ? _SheetPullScope(child: sheet) : sheet;
-    },
+    builder: (_) => opaque == null
+        ? Builder(builder: body)
+        : Theme(data: opaque, child: Builder(builder: body)),
   );
 }
 
