@@ -235,6 +235,18 @@ off)
     UU_TEXT="unattended security updates are switched OFF in apt's settings (APT::Periodic::Update-Package-Lists or APT::Periodic::Unattended-Upgrade is 0), and I leave them that way. sudo dpkg-reconfigure -plow unattended-upgrades turns them on"
     echo "  $UU_TEXT" ;;
 esac
+hollow_os_base
+if [ "$HOLLOW_OS_DERIVED" = 1 ]; then
+    echo "  taking security updates from $HOLLOW_OS_BASE_NAME's archive, which this system is built on"
+    hollow_base_security_dropin "$HOLLOW_OS_BASE" "$HOLLOW_OS_BASE_CODENAME" |
+        write_file "$HOLLOW_APT_CONF_D/$HOLLOW_BASE_SECURITY_FILE"
+    note "security updates from $HOLLOW_OS_BASE_NAME's archive allowed in $HOLLOW_APT_CONF_D/$HOLLOW_BASE_SECURITY_FILE"
+    if ! hollow_base_security_served "$HOLLOW_OS_BASE" "$HOLLOW_OS_BASE_CODENAME"; then
+        BASE_SEC_TEXT="no software source here serves $HOLLOW_OS_BASE_NAME's security archive ($HOLLOW_OS_BASE_CODENAME-security), so the packages this system takes from $HOLLOW_OS_BASE_NAME get no security updates. Add that archive to the software sources, and check-host shows a FAIL line until then"
+        echo "  $BASE_SEC_TEXT"
+        note "$BASE_SEC_TEXT"
+    fi
+fi
 if [ "$DRY" = "1" ]; then
     note "fail2ban and $UU_TEXT"
 else

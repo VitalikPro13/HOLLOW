@@ -190,3 +190,94 @@ hollow_auto_upgrades_file() {
         echo "$HOLLOW_APT_CONF_D/20auto-upgrades"
     fi
 }
+
+# hollow_os_field <file> <key>: one value from an os-release file, unquoted.
+hollow_os_field() {
+    [ -r "$1" ] || return 0
+    sed -n "s/^[[:space:]]*$2=//p" "$1" | tail -n 1 | sed "s/[[:space:]]*\$//; s/^\"\(.*\)\"\$/\1/; s/^'\(.*\)'\$/\1/"
+}
+
+# hollow_base_version <ubuntu|debian> <codename>: the release number of a
+# codename, empty for one this setup does not know. Released versions only: a
+# derivative of Debian testing gets the same answer as Debian testing itself.
+hollow_base_version() {
+    case "$1:$2" in
+    ubuntu:bionic) echo 18.04 ;; ubuntu:focal) echo 20.04 ;; ubuntu:jammy) echo 22.04 ;;
+    ubuntu:kinetic) echo 22.10 ;; ubuntu:lunar) echo 23.04 ;; ubuntu:mantic) echo 23.10 ;;
+    ubuntu:noble) echo 24.04 ;; ubuntu:oracular) echo 24.10 ;; ubuntu:plucky) echo 25.04 ;;
+    ubuntu:questing) echo 25.10 ;; ubuntu:resolute) echo 26.04 ;;
+    debian:buster) echo 10 ;; debian:bullseye) echo 11 ;; debian:bookworm) echo 12 ;;
+    debian:trixie) echo 13 ;;
+    esac
+}
+
+# hollow_os_base [os-release file]: the Ubuntu or Debian release this system
+# is, or is built on. Sets HOLLOW_OS_BASE (ubuntu, debian, or empty when there
+# is none we know), HOLLOW_OS_BASE_VER, HOLLOW_OS_BASE_CODENAME,
+# HOLLOW_OS_BASE_NAME ("Ubuntu 24.04") and HOLLOW_OS_DERIVED (1 for Linux Mint,
+# Pop!_OS and the like). A derivative counts only when ID_LIKE names the base
+# and UBUNTU_CODENAME or DEBIAN_CODENAME says which release of it, because its
+# own ID and version are not the base's (Mint 22 is ID=linuxmint VERSION_ID=22).
+# Debian decides only when no Ubuntu release is named.
+hollow_os_base() {
+    hob_f=${1:-${HOLLOW_OS_RELEASE:-/etc/os-release}}
+    HOLLOW_OS_BASE="" HOLLOW_OS_BASE_VER="" HOLLOW_OS_BASE_CODENAME="" HOLLOW_OS_BASE_NAME="" HOLLOW_OS_DERIVED=0
+    hob_id=$(hollow_os_field "$hob_f" ID)
+    case "$hob_id" in
+    ubuntu|debian)
+        HOLLOW_OS_BASE=$hob_id
+        HOLLOW_OS_BASE_VER=$(hollow_os_field "$hob_f" VERSION_ID)
+        HOLLOW_OS_BASE_CODENAME=$(hollow_os_field "$hob_f" VERSION_CODENAME) ;;
+    *)
+        # Words in ID_LIKE may be split by a tab as well as a space.
+        hob_like=" $(hollow_os_field "$hob_f" ID_LIKE | tr '\t' ' ') "
+        hob_uc=$(hollow_os_field "$hob_f" UBUNTU_CODENAME)
+        hob_b="" hob_c=""
+        # Built on Ubuntu, which is Debian-like too: a named Ubuntu release
+        # decides alone, so one this setup does not know is refused, never
+        # judged by the Debian release under it.
+        if [ -n "$hob_uc" ]; then
+            case "$hob_like" in *" ubuntu "*) hob_b=ubuntu hob_c=$hob_uc ;; esac
+        else
+            case "$hob_like" in *" debian "*) hob_b=debian hob_c=$(hollow_os_field "$hob_f" DEBIAN_CODENAME) ;; esac
+        fi
+        hob_v=$(hollow_base_version "$hob_b" "$hob_c")
+        if [ -n "$hob_b" ] && [ -n "$hob_v" ]; then
+            HOLLOW_OS_BASE=$hob_b HOLLOW_OS_BASE_VER=$hob_v HOLLOW_OS_BASE_CODENAME=$hob_c HOLLOW_OS_DERIVED=1
+        fi ;;
+    esac
+    case "$HOLLOW_OS_BASE" in
+    ubuntu) HOLLOW_OS_BASE_NAME="Ubuntu $HOLLOW_OS_BASE_VER" ;;
+    debian) HOLLOW_OS_BASE_NAME="Debian $HOLLOW_OS_BASE_VER" ;;
+    esac
+    return 0
+}
+
+# A derivative's own unattended-upgrades settings name its own origin (Mint's
+# say Linuxmint:wilma-security), which no security update comes from, so the
+# base's security archive is allowed beside them.
+# shellcheck disable=SC2034 # read by harden-host.sh and check-host.sh
+HOLLOW_BASE_SECURITY_FILE=52hollow-base-security
+hollow_base_security_dropin() {
+    echo "// Written by the Hollow relay setup: security updates from the release this system is built on."
+    echo 'Unattended-Upgrade::Origins-Pattern {'
+    case "$1" in
+    ubuntu) echo "    \"origin=Ubuntu,archive=$2-security,label=Ubuntu\";" ;;
+    debian)
+        echo "    \"origin=Debian,codename=$2,label=Debian-Security\";"
+        echo "    \"origin=Debian,codename=$2-security,label=Debian-Security\";" ;;
+    esac
+    echo '};'
+}
+
+# hollow_base_security_served <ubuntu|debian> <codename>: whether an apt source
+# serves that release's security archive. The allowed origin is no use when no
+# source fetches from it (a derivative's mirror list may leave it out).
+hollow_base_security_served() {
+    hbs_p=$(apt-cache policy 2>/dev/null) || return 1
+    case "$1" in
+    ubuntu) printf '%s\n' "$hbs_p" | grep -F "o=Ubuntu,a=$2-security," >/dev/null ;;
+    debian) printf '%s\n' "$hbs_p" | grep -E "o=Debian,a=[^,]*,n=$2(-security)?,l=Debian-Security," >/dev/null ;;
+    *) return 1 ;;
+    esac
+}

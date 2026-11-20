@@ -16,9 +16,11 @@ docker_install() {
     if have docker && docker compose version >/dev/null 2>&1; then return 0; fi
     step "Installing Docker"
     say "  from Docker's own signed apt repository"
+    # Docker publishes for Ubuntu and Debian only, so a derivative takes its base's repository.
     local id codename
-    id=$(kv_get /etc/os-release ID)
-    codename=$(kv_get /etc/os-release VERSION_CODENAME)
+    hollow_os_base
+    id=$HOLLOW_OS_BASE codename=$HOLLOW_OS_BASE_CODENAME
+    [ -n "$id" ] && [ -n "$codename" ] || die "this system names no Ubuntu or Debian release, so I cannot pick Docker's repository for it."
     if [ "$DRY_RUN" = 1 ]; then
         say "  would add download.docker.com/linux/$id ($codename) with its key in /etc/apt/keyrings and install docker-ce with the compose plugin"
         return 0

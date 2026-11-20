@@ -1,0 +1,5 @@
+PRETTY_NAME="Something 9"
+ID=something
+VERSION_ID="9"
+ID_LIKE="ubuntu"
+UBUNTU_CODENAME=warty

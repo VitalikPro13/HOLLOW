@@ -1,0 +1,9 @@
+PRETTY_NAME="LMDE 6 (faye)"
+NAME="LMDE"
+VERSION_ID="6"
+VERSION="6 (faye)"
+VERSION_CODENAME=faye
+ID=linuxmint
+HOME_URL="https://www.linuxmint.com/"
+ID_LIKE=debian
+DEBIAN_CODENAME=bookworm

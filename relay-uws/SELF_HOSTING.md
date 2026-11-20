@@ -81,7 +81,14 @@ The relay always listens on port 443, so the address never carries a port.
 ### Which system
 
 The setup supports **Ubuntu 22.04 or newer** and **Debian 12 or newer**, on
-x86_64 or ARM64 (aarch64). It checks this first and stops on anything else.
+x86_64 or ARM64 (aarch64), and systems built on them: Linux Mint 21 or newer,
+LMDE 6, Pop!_OS 22.04, Zorin OS 17, elementary OS 7 and others that name their
+Ubuntu or Debian release in `/etc/os-release`. It checks this first, says which
+base it found ("Linux Mint 22, based on Ubuntu 24.04"), and stops on anything
+else. On such a system Docker comes from the base's repository and the daily
+security updates from the base's security archive, which one of the system's
+software sources has to serve (the check says when none does). Removing the
+relay takes that update setting back out.
 
 We recommend Debian 12 or 13, because it is lighter. On the same small test
 machine (1 CPU, 2 GB), a fresh Debian 13 used about 80 MB less memory than a

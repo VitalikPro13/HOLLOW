@@ -43,6 +43,7 @@ ip6_class() {
 }
 
 # os_supported <id> <version_id>: Ubuntu 22.04 or newer, Debian 12 or newer.
+# A derivative passes its base here (hollow_os_base in host.sh).
 os_supported() {
     local id=$1 ver=$2 major minor
     major=${ver%%.*}; minor=${ver#*.}; [ "$minor" = "$ver" ] && minor=0
@@ -108,23 +109,21 @@ disk_free_mb() { df -Pm "${1:-/}" | awk 'NR == 2 {print $4}'; }
 # PF_PUBLIC_IP, PF_LOCAL_IP, PF_BEHIND_NAT and PF_PUBLIC_IPV6. Each screen fits
 # an 80x24 terminal for the usual results.
 preflight_run() {
-    local id="" ver="" pretty="" arch mem cpus virt lines=() steps=() stops=() sys_ok=1
+    local pretty="" base="" arch mem cpus virt lines=() steps=() stops=() sys_ok=1
     PF_VERDICT=ok PF_PUBLIC_IP="" PF_LOCAL_IP="" PF_BEHIND_NAT=0 PF_PUBLIC_IPV6=""
-    if [ -r /etc/os-release ]; then
-        id=$(kv_get /etc/os-release ID)
-        ver=$(kv_get /etc/os-release VERSION_ID)
-        pretty=$(kv_get /etc/os-release PRETTY_NAME)
-    fi
+    hollow_os_base
+    pretty=$(hollow_os_field "${HOLLOW_OS_RELEASE:-/etc/os-release}" PRETTY_NAME)
+    [ "$HOLLOW_OS_DERIVED" = 1 ] && base=", based on $HOLLOW_OS_BASE_NAME"
     arch=$(uname -m)
-    if ! os_supported "$id" "$ver"; then
+    if ! os_supported "$HOLLOW_OS_BASE" "$HOLLOW_OS_BASE_VER"; then
         sys_ok=0
-        stops+=("This is ${pretty:-an unknown system}. The setup supports Ubuntu 22.04 or newer and Debian 12 or newer.")
+        stops+=("This is ${pretty:-an unknown system}$base. The setup supports Ubuntu 22.04 or newer and Debian 12 or newer, and systems built on them such as Linux Mint.")
     fi
     if ! arch_supported "$arch"; then
         sys_ok=0
         stops+=("The processor is $arch. The relay runs on x86_64 and aarch64 (ARM64) only.")
     fi
-    [ "$sys_ok" = 1 ] && lines+=("System: $pretty on $arch, which is supported.")
+    [ "$sys_ok" = 1 ] && lines+=("System: $pretty$base on $arch, which is supported.")
     virt=$(systemd-detect-virt 2>/dev/null || true)
     case "$virt" in
     openvz)

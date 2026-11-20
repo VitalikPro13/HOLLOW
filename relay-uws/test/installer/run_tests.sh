@@ -127,6 +127,8 @@ no_ os_supported fedora 40
 yes_ arch_supported x86_64
 yes_ arch_supported aarch64
 no_ arch_supported armv7l
+# shellcheck source=os_release_tests.sh
+. "$T/os_release_tests.sh"
 
 echo "addresses"
 eq "duckdns bare" "$(duckdns_name_norm MyRelay)" myrelay

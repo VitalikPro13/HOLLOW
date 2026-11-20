@@ -1867,11 +1867,9 @@ adopt_cannot_text() {
 }
 
 adopt_main() {
-    local id ver
-    id=$(kv_get /etc/os-release ID)
-    ver=$(kv_get /etc/os-release VERSION_ID)
-    if ! os_supported "$id" "$ver" || ! arch_supported "$(uname -m)"; then
-        ui_msg "A relay is already here" "I found a Hollow relay on this machine, but the setup supports only Ubuntu 22.04 or newer and Debian 12 or newer on x86_64 or ARM64, so I changed nothing."
+    hollow_os_base
+    if ! os_supported "$HOLLOW_OS_BASE" "$HOLLOW_OS_BASE_VER" || ! arch_supported "$(uname -m)"; then
+        ui_msg "A relay is already here" "I found a Hollow relay on this machine, but the setup supports only Ubuntu 22.04 or newer, Debian 12 or newer and systems built on them, on x86_64 or ARM64, so I changed nothing."
         exit 1
     fi
     step "Checking this machine"

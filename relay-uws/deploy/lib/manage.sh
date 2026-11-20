@@ -628,8 +628,14 @@ manage_check() {
 }
 
 manage_uninstall() {
-    local keeps backups=() b
+    local keeps backups=() b base_sec=""
     mapfile -t backups < <(adopt_backups)
+    # A desktop Mint keeps no changed update behaviour once the relay is gone.
+    hollow_os_base
+    if [ "$HOLLOW_OS_DERIVED" = 1 ]; then
+        base_sec="
+- the setting that has unattended-upgrades install $HOLLOW_OS_BASE_NAME's security updates, so updates go back to how $(hollow_os_field "${HOLLOW_OS_RELEASE:-/etc/os-release}" NAME) sets them up"
+    fi
     if [ "$CFG_MODE" = docker ]; then
         keeps="the Docker volumes with the certificate, the report counts and the forwarder's identity, if you choose to keep them"
     else
@@ -642,7 +648,7 @@ manage_uninstall() {
 "This removes:
 - the relay and every service the setup added, their accounts, settings and secrets
 - the relay programs and the setup's own copy in $LIB_DIR
-- the firewall rules for the relay's ports. The firewall stays on, with SSH open.
+- the firewall rules for the relay's ports. The firewall stays on, with SSH open.$base_sec
 
 It keeps:
 - $keeps
@@ -665,6 +671,7 @@ Messages waiting for people who are offline are lost."
     if [ "$UNINSTALL_BACKUPS" = remove ]; then
         for b in "${backups[@]}"; do adopt_backup_erase "$b"; done
     fi
+    base_security_remove
     if [ "$CFG_MODE" = docker ]; then docker_uninstall "$UNINSTALL_KEEP"; else native_uninstall "$UNINSTALL_KEEP"; fi
     say ""
     say "The relay is removed. To set it up again, run install.sh from your copy of the repository."
@@ -674,6 +681,14 @@ Messages waiting for people who are offline are lost."
         for b in "${backups[@]}"; do say "  sudo rm -rf $b"; done
     fi
     exit 0
+}
+
+# Takes back the security-archive setting harden-host.sh adds on a derivative.
+base_security_remove() {
+    local f=$HOLLOW_APT_CONF_D/$HOLLOW_BASE_SECURITY_FILE
+    [ -e "$f" ] || [ -L "$f" ] || return 0
+    run rm -f "$f"
+    say "  removed $f"
 }
 
 uninstall_backup_text() {

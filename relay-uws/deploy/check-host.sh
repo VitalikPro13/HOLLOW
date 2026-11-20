@@ -588,6 +588,26 @@ if command -v fail2ban-client >/dev/null 2>&1; then
     fi
 fi
 
+# check_base_security: on a system built on Ubuntu or Debian (Linux Mint),
+# unattended-upgrades must take the base's security archive, and a software
+# source must serve it, or the packages from the base never get security fixes.
+check_base_security() {
+    local want
+    hollow_os_base
+    [ "$HOLLOW_OS_DERIVED" = 1 ] || return 0
+    want=$(hollow_base_security_dropin "$HOLLOW_OS_BASE" "$HOLLOW_OS_BASE_CODENAME" | sed -n 's/^ *"\(.*\)";$/\1/p' | head -n 1)
+    if apt-config dump Unattended-Upgrade::Origins-Pattern 2>/dev/null | grep -qF "\"$want\""; then
+        ok "security updates come from $HOLLOW_OS_BASE_NAME's archive, which this system is built on"
+    else
+        bad "this system is built on $HOLLOW_OS_BASE_NAME, and unattended-upgrades does not take that archive's security updates (Unattended-Upgrade::Origins-Pattern lacks $want); sudo hollow-relay-setup adds it"
+    fi
+    if hollow_base_security_served "$HOLLOW_OS_BASE" "$HOLLOW_OS_BASE_CODENAME"; then
+        ok "a software source serves $HOLLOW_OS_BASE_NAME's security archive ($HOLLOW_OS_BASE_CODENAME-security)"
+    else
+        bad "no software source serves $HOLLOW_OS_BASE_NAME's security archive ($HOLLOW_OS_BASE_CODENAME-security, apt-cache policy lists none), so the packages from $HOLLOW_OS_BASE_NAME get no security updates; add that archive to the software sources"
+    fi
+}
+
 # Installed is not enough: apt's daily job runs it only when both periodic
 # settings are on (hollow_auto_upgrades in lib/host.sh), and Debian sets neither.
 if command -v unattended-upgrade >/dev/null 2>&1; then
@@ -599,6 +619,12 @@ if command -v unattended-upgrade >/dev/null 2>&1; then
         ok "unattended-upgrades installs security updates every day"
     else
         bad "unattended-upgrades is installed but apt never runs it (APT::Periodic::Update-Package-Lists \"${lists:-unset}\", Unattended-Upgrade \"${upgrade:-unset}\"); sudo dpkg-reconfigure -plow unattended-upgrades turns it on"
+    fi
+    # A derivative's own origin brings no security updates (lib/host.sh).
+    if [ -r "$(dirname "$0")/lib/host.sh" ]; then
+        # shellcheck source=lib/host.sh
+        . "$(dirname "$0")/lib/host.sh"
+        check_base_security
     fi
 fi
 

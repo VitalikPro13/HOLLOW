@@ -1,0 +1,6 @@
+PRETTY_NAME="Both 1"
+ID=both
+VERSION_ID="1"
+ID_LIKE="debian ubuntu"
+UBUNTU_CODENAME=noble
+DEBIAN_CODENAME=trixie
