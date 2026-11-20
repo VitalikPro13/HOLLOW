@@ -33,6 +33,9 @@ struct RosterBook {
         mutable std::optional<roster::Authority> authority;
         // The roster as JSON for a `roster_check` answer, until the roster changes.
         mutable std::optional<std::string> dumped;
+        // New, and unique across records, whenever the held statements or their first
+        // sightings change: a fold taken under one generation still stands under it.
+        uint64_t gen = 0;
     };
 
     static std::string seen_key(const std::string& base, const std::string& device) { return base + "|" + device; }
@@ -42,6 +45,8 @@ struct RosterBook {
         // The held roster changed: owners it no longer counts lose the inbox.
         bool changed = false;
         roster::State state;
+        // The held record's generation after the showing (0 when nothing was folded).
+        uint64_t gen = 0;
     };
 
     size_t budget = MAX_BYTES;
@@ -50,6 +55,7 @@ struct RosterBook {
     // Records the budget let go of since the last `take_evicted`: what was written on their
     // fold's word (sibling marks) goes with them.
     std::vector<roster::Roster> evicted;
+    uint64_t gens = 0;
 
     std::vector<roster::Roster> take_evicted() { return std::exchange(evicted, {}); }
 
@@ -144,6 +150,8 @@ struct RosterBook {
             held.authority.reset();
             held.dumped.reset();
         }
+        if (fresh || out.changed) held.gen = ++gens;
+        out.gen = held.gen;
 
         const size_t weight = record_bytes(master, held);
         records[master] = std::move(held);
@@ -167,6 +175,7 @@ struct RosterBook {
         Held h;
         h.roster = std::move(r);
         h.seen_ms = std::move(seen_ms);
+        h.gen = ++gens;
         const size_t weight = record_bytes(master, h);
         records[master] = std::move(h);
         ledger.put(master, share, weight);

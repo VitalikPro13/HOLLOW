@@ -454,6 +454,10 @@ struct Session {
     // PerSocketData::mailbox_mark of its socket, kept across grace. Never in the snapshot:
     // a restore numbers the buffers afresh, so a session back from one reads it all again.
     uint64_t mailbox_mark = 0;
+    // PerSocketData::pending_identity and pending_gen of its socket, for the socket it
+    // resumes on. Never in the snapshot.
+    std::string pending_identity;
+    uint64_t pending_gen = 0;
     // The nonce it was minted with, its door-proof nonce within this process.
     std::string door_nonce;
     // The per-IP slot it holds while in grace, "" when its socket holds the slot.

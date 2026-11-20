@@ -26,6 +26,7 @@
 #include "fair_share.h"
 #include "session.h"
 #include "offline_index.h"
+#include "online_people.h"
 #include "reports.h"
 #include "roster_book.h"
 #include "measure.h"
@@ -157,6 +158,7 @@ static constexpr int SHARE_KEY_LIFETIME_SECS = 3600;
 // `active` that it is back) come at least this far apart, and a change inside the gap waits
 // for its end: a client toggling cannot make the relay walk its rooms at will (HOL-SEC-164).
 static constexpr int PRESENCE_PASS_MS = 2000;
+static constexpr char INBOX_ROOM_PREFIX[] = "inbox:";
 // After a big pass the gap grows by this much per room walked and per peer in it, so one
 // session's passes hold the relay's loop well under 1% of the time whatever its rooms hold
 // (a peer costs about 1.3 us of a pass, measured with RELAY_LIVE_PROBE=hide).
@@ -190,6 +192,14 @@ struct PerSocketData {
     // Its rooms were told the device left because its session said `inactive`: no list,
     // presence frame or online answer names it, while delivery still reaches it.
     bool hidden = false;
+    // The master whose `inbox:` this socket last became an owner of; it counts only while
+    // that room's `owners` still hold the device (RelayState::people_online).
+    std::string inbox_identity;
+    // The master whose held roster had this device as a pending join (its master signed,
+    // the device consented) when the device last showed it, and that record's generation.
+    // Counting only, never ownership: it stands while the record is unchanged.
+    std::string pending_identity;
+    uint64_t pending_gen = 0;
     // When this socket's next presence pass may run, and whether one waits for it.
     std::chrono::steady_clock::time_point next_presence_pass{};
     bool presence_pass_queued = false;
@@ -360,7 +370,6 @@ struct RelayState {
     std::unordered_map<std::string, std::unordered_set<std::string>> presence_subjects;
     size_t presence_bytes = 0;
     std::unordered_set<SSLWebSocket*> guest_sockets;
-    size_t guest_count = 0;
 
     LicenseState license;
     ReportsState reports;
@@ -560,5 +569,26 @@ struct RelayState {
     // `grace_ends` order. One entry per paused session, gone when it resumes or ends.
     std::set<PresenceDue> long_grace_ends;
 
-    size_t online_users() const { return peer_sockets.size() - guest_count; }
+    // The people /server-stats counts online (#150, online_people.h): identities whose
+    // devices are on screen, by the inbox each device still owns under the roster fold, or
+    // the roster still holding it as a pending join.
+    size_t people_online(const std::string& forwarder) const {
+        online_people::Tally tally(forwarder);
+        std::string room;
+        for (const auto& [peer, ws] : peer_sockets) {
+            const PerSocketData* d = ws->getUserData();
+            const std::string* identity = nullptr;
+            if (!d->inbox_identity.empty()) {
+                room.assign(INBOX_ROOM_PREFIX).append(d->inbox_identity);
+                auto rit = ws_rooms.find(room);
+                if (rit != ws_rooms.end() && rit->second.owners.count(peer)) identity = &d->inbox_identity;
+            }
+            if (!identity && !d->pending_identity.empty()) {
+                const RosterBook::Held* held = roster_book.get(d->pending_identity);
+                if (held && held->gen == d->pending_gen) identity = &d->pending_identity;
+            }
+            tally.add(online_people::Seat{peer, d->is_guest, d->hidden, identity});
+        }
+        return tally.people();
+    }
 };

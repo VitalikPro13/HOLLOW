@@ -342,6 +342,45 @@ int main() {
         check("and not the one it removed", !auth.counts(second.id));
     }
 
+    // A roster for another master folds nowhere, at each layer alone (#150: a pending note
+    // must never merge a device into an identity that did not sign it).
+    {
+        Key m(1), z(2), d(3), q(4);
+        const int64_t now = 1800000000000;
+        roster::Roster other = roster::Roster::named(z.id);
+        other.consents = {{q.id, q.sign(roster::consent_payload(z.id, q.id))}};
+        other.pendings = {{roster::LEGACY_BASE, q.id, z.sign(roster::pending_payload(z.id, roster::LEGACY_BASE, q.id))}};
+        RosterBook book;
+        auto out = book.show(m.id, other, q.id, 3, now, crypto);
+        check("the book takes no record from another master's roster",
+              book.get(m.id) == nullptr && out.gen == 0 && !out.member && out.state.pending.empty());
+        const roster::Roster mine = roster::Roster::named(m.id);
+        check("and a held roster merges nothing of another master's",
+              mine.merged(other.verified(now, crypto), crypto) == mine &&
+                  mine.merged_by_first_sight(other.verified(now, crypto), crypto,
+                                             [](const std::string&, const std::string&) { return std::nullopt; }) ==
+                      mine);
+
+        // The record's generation: new on every change, kept while nothing changes.
+        roster::Roster r = roster::Roster::named(m.id);
+        r.consents = {{d.id, d.sign(roster::consent_payload(m.id, d.id))}};
+        r.legacy = {{d.id, m.sign(roster::legacy_payload(m.id, d.id))}};
+        const uint64_t g1 = book.show(m.id, r, d.id, 3, now, crypto).gen;
+        check("a first record has a generation", g1 != 0 && book.get(m.id)->gen == g1);
+        check("showing it again keeps the generation", book.show(m.id, r, d.id, 3, now, crypto).gen == g1);
+        r.consents.push_back({q.id, q.sign(roster::consent_payload(m.id, q.id))});
+        r.pendings = {{roster::LEGACY_BASE, q.id, m.sign(roster::pending_payload(m.id, roster::LEGACY_BASE, q.id))}};
+        std::sort(r.consents.begin(), r.consents.end());
+        auto asked = book.show(m.id, r, q.id, 3, now, crypto);
+        check("a change gives it a new one, and the asking device is pending",
+              asked.gen != g1 && asked.gen != 0 && asked.state.pending.count(q.id) == 1);
+        roster::Roster z_own = roster::Roster::named(z.id);
+        z_own.consents = {{q.id, q.sign(roster::consent_payload(z.id, q.id))}};
+        z_own.legacy = {{q.id, z.sign(roster::legacy_payload(z.id, q.id))}};
+        const uint64_t gz = book.show(z.id, z_own, q.id, 4, now, crypto).gen;
+        check("another record's generation is its own", gz != 0 && gz != asked.gen && gz != g1);
+    }
+
     // Fair share: a flood of records from one address share evicts only that share's.
     {
         Key m(1), owner(10);

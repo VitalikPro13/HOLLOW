@@ -698,7 +698,6 @@ static bool handle_auth(SSLWebSocket* ws, PerSocketData* data,
         auto now = std::chrono::steady_clock::now();
         data->last_binary_activity = now;
         data->minute_window_start = now;
-        state.guest_count++;
         state.guest_sockets.insert(ws);
     }
 
@@ -812,7 +811,6 @@ static void send_kill_signals(RelayState& state, SSLWebSocket* ws, const std::st
 // only while the relay's fold of every roster shown for M counts its device a
 // member (design ID-1R, roster_book.h). The relay logs nothing about who
 // deposited or read what (feedback_relay_rules).
-static constexpr char INBOX_ROOM_PREFIX[] = "inbox:";
 
 static const RosterCrypto& relay_roster_crypto() {
     static const RosterCrypto c = roster_crypto();
@@ -1110,6 +1108,32 @@ static json members_of(const RelayState& state, const std::string& room_name, co
     return j;
 }
 
+// The identity a pending device counts as in /server-stats (state.h `people_online`),
+// on its socket and its session, which hands it to the socket it resumes on.
+static void note_pending(RelayState& state, PerSocketData* data, const std::string& master, uint64_t gen) {
+    data->pending_identity = master;
+    data->pending_gen = gen;
+    if (session::Session* s = live_session(state, data)) {
+        s->pending_identity = master;
+        s->pending_gen = gen;
+    }
+}
+
+// A changed fold judges the pending notes in the inbox again: a device it still holds
+// pending, or now counts, keeps the identity under the new generation; any other loses it.
+// A noted device outside the room lapses at the count instead (generation mismatch).
+static void renote_pending(RelayState& state, const std::string& room, const std::string& master,
+                           const roster::State& st, uint64_t gen) {
+    auto rit = state.ws_rooms.find(room);
+    if (rit == state.ws_rooms.end()) return;
+    for (const auto& [peer, ws] : rit->second.peers) {
+        PerSocketData* d = ws->getUserData();
+        if (d->pending_identity != master) continue;
+        const bool held = st.pending.count(peer) != 0 || st.is_member(peer);
+        note_pending(state, d, held ? master : std::string(), held ? gen : 0);
+    }
+}
+
 enum class InboxVerdict { NotOwner, Owner, Denied };
 
 // Ownership of an `inbox:{M}` join that shows a roster (design ID-1R): the roster is
@@ -1131,9 +1155,12 @@ static InboxVerdict inbox_owner_by_roster(PerSocketData* data, const std::string
                                                  wall_now_ms(), relay_roster_crypto());
     if (r.changed) {
         drop_inbox_owners(state, room, r.state);
+        renote_pending(state, room, master, r.state, r.gen);
         purge_sibling_marks(state, r.state);
     }
     forget_evicted_marks(state);
+    // Only the fold of a roster for this very master, signed by it, can name the device.
+    if (!r.member && r.state.pending.count(data->peer_id)) note_pending(state, data, master, r.gen);
     // Learned from the fold only, never the roster as shown: a pending join counts once
     // the device itself consented, so nobody can name an innocent device (review D5).
     for (auto& fresh : state.deny.learn_fold(master, r.state.members, r.state.pending)) {
@@ -1275,6 +1302,7 @@ static void handle_join(SSLWebSocket* ws, PerSocketData* data,
     ws_room.peers[data->peer_id] = ws;
     if (owner) {
         ws_room.owners.insert(data->peer_id);
+        data->inbox_identity = room.substr(sizeof(INBOX_ROOM_PREFIX) - 1);
     } else {
         ws_room.owners.erase(data->peer_id);
     }
@@ -3852,6 +3880,8 @@ static void resume_session(RelayState& state, SSLWebSocket* ws, PerSocketData* d
     data->sid = s.sid;
     // What the device was already sent of its mailbox, from the socket it leaves.
     data->mailbox_mark = old ? old->getUserData()->mailbox_mark : s.mailbox_mark;
+    data->pending_identity = s.pending_identity;
+    data->pending_gen = s.pending_gen;
     // Proofs stay bound to the nonce the session was minted with; one back from a
     // snapshot has no door standing left and proves again on this socket's challenge.
     const bool reprove = s.restored;
@@ -3883,6 +3913,7 @@ static void resume_session(RelayState& state, SSLWebSocket* ws, PerSocketData* d
         if (owner && is_inbox_room(room) && !still_owner(state, room, peer)) owner = false;
         if (owner) {
             r.owners.insert(peer);
+            if (is_inbox_room(room)) data->inbox_identity = room.substr(sizeof(INBOX_ROOM_PREFIX) - 1);
         } else {
             r.owners.erase(peer);
         }
@@ -5443,7 +5474,6 @@ void setup_ws_handler(uWS::SSLApp& app, RelayState& state, const Config& config)
             if ((!s || paused) && !data->ip_key.empty()) session_bounds::free_ip_slot(state, data->ip_key);
 
             if (data->is_guest) {
-                if (state.guest_count > 0) state.guest_count--;
                 state.guest_sockets.erase(ws);
             }
 

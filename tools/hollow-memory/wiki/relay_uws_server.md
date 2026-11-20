@@ -313,8 +313,8 @@ and `test_auth_frame.cpp` to the Rust client's `relay_session.rs` tests.
   on screen). `settle_presence` makes others see what the flag asks: on `inactive` every room the
   session holds tells whoever sees the device `peer_left`, on `active` `peer_joined`, and the socket
   records what was told (`PerSocketData::hidden`). While hidden the device is in no `members`
-  (`members_of`, the join answer, `roster_for`), no `discover_peers` or `check_peers` answer, and
-  nothing announces it: a join, a leave (`is_invisible_in_room`), its socket dropping
+  (`members_of`, the join answer, `roster_for`), no `discover_peers` or `check_peers` answer, not
+  in the `/server-stats` people count (`people_online`), and nothing announces it: a join, a leave (`is_invisible_in_room`), its socket dropping
   (`enter_grace`), a resume (`came_back`), a relock, a door grace ending (`sweep_door_grace`), a
   roster dropping its inbox (`drop_inbox_owners`). Delivery is untouched: it stays in `peers` and
   `peer_sockets`, gets every frame live, sends as before, and is never pushed (a hidden live
@@ -588,11 +588,33 @@ Caches `/server-stats` JSON for 5 seconds to avoid re-reading `/proc` on every r
 | `peer_sockets` | `unordered_map<string, SSLWebSocket*>` | peer_id -> WebSocket pointer (for license kicks + online count) |
 | `ip_states` | `unordered_map<string, IpState>` | Per-IP connection tracking (in-memory only, never logged) |
 | `guest_sockets` | `unordered_set<SSLWebSocket*>` | All guest WebSocket pointers (for idle timeout iteration) |
-| `guest_count` | `size_t` | Global guest connection counter |
 | `license` | `LicenseState` | License key validation state |
 | `stats_cache` | `ServerStatsCache` | Cached stats response |
 
-`online_users()` returns `peer_sockets.size() - guest_count` (guests excluded from the count).
+`people_online(forwarder)` (state.h, logic in `online_people.h`, #150) is the `/server-stats`
+`online_users` figure: PEOPLE, never sockets. It walks `peer_sockets` (at most once per 5 s stats
+cache) and skips guests, the configured media forwarder (`--forwarder-peer-id`) and hidden sessions
+(`PerSocketData::hidden`); fetch sockets and sessions in grace are not in `peer_sockets` at all. Each
+remaining device counts under the identity whose `inbox:{M}` it owns, i.e. the roster fold counts it
+(`PerSocketData::inbox_identity`, noted at the owning join and on resume, and re-checked against that
+room's `owners` at count time, so a device the fold dropped stops counting as M at once). A device
+the fold holds as a PENDING join (master-signed `pendings` entry plus its own consent, e.g. a
+restored phone waiting out its 7 days) counts as M too, for counting only, never ownership: its
+inbox join notes M and the held record's generation (`PerSocketData::pending_identity`/`pending_gen`,
+also on the session for a resume); every change to M's held roster bumps `RosterBook::Held::gen`
+(unique across records) and re-judges the notes of devices in the inbox (`renote_pending`); a noted
+device outside the room lapses at the count by generation mismatch and counts as itself until its
+next roster join. Only a roster for that very master folds (`RosterBook::show` refuses another
+master's), so a stranger can merge nobody. A device that owns no inbox and is not pending counts as
+itself; a socket logged in as a bare master key therefore lands on M's own id and never adds a
+second person to M. Traps: a device in the moment between its login and its inbox join counts as its
+own person (one 5 s read at most); a device the fold promotes to member after it joined (a matured
+pending join) keeps its pending note, but one that never noted counts as its own person until its
+next roster join (ownership is judged only on a join or resume, as before #150). With
+`PUBLIC_STATS=off` nothing is counted at all. The count is an informational public
+figure (audit C-RP-12, `PUBLIC_STATS=off` hides it); a stranger can still inflate it with throwaway
+identities. Proven by `test_online_people` and live `RELAY_LIVE_ONLY=people` (run_live.sh variant
+`people`, its own relay naming a forwarder).
 
 ### Backpressure
 
@@ -1375,7 +1397,7 @@ Returns real-time server resource utilization. Cached for 5 seconds.
 }
 ```
 
-`bandwidth_cap_mbps` comes from the fair-share shaper's settings (`HOLLOW_CAKE_MBIT` in `/etc/hollow-relay/cake.env`, `deploy/hollow-cake.service`, 950 on the official box) and is omitted when the shaper is off or unset; the app then falls back to 1000. `online_users` comes from `state.peer_sockets.size() - guest_count` (excludes guest connections).
+`bandwidth_cap_mbps` comes from the fair-share shaper's settings (`HOLLOW_CAKE_MBIT` in `/etc/hollow-relay/cake.env`, `deploy/hollow-cake.service`, 950 on the official box) and is omitted when the shaper is off or unset; the app then falls back to 1000. `online_users` is the number of PEOPLE online (`RelayState::people_online`, see RelayState above): distinct identities with a device on screen, never guests, hidden sessions or the media forwarder.
 
 ### GET /relay-status — Relay status for client bootstrap
 

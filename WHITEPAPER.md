@@ -1235,7 +1235,7 @@ The relay exposes a `/server-stats` endpoint returning real-time operational met
 
 - Memory usage (total/used from `/proc/meminfo`)
 - Network throughput (Mbps, computed from `/proc/net/dev` deltas)
-- Online user count (connected authenticated peers)
+- How many people are online, counting each identity with a device on screen once (guests and the relay's media forwarder are not counted)
 - Bandwidth cap
 - Delivery, send-budget and circuit-breaker counters (§12.5)
 

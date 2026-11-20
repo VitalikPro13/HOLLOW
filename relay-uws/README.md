@@ -18,7 +18,7 @@ The relay is a lightweight message router. It keeps nothing on disk, cannot decr
 - **Offline delivery buffers**: ciphertext for peers who are away, in RAM only, deleted on delivery or expiry.
 - **TURN credential generation**: time-limited HMAC-SHA1 credentials for NAT traversal via coturn (`/turn-credentials`).
 - **Members-only access keys**: an optional gate for self-hosted relays via a `keys.json` file, with 30-second hot-reload and active connection revocation. The official relay keeps it off.
-- **Server stats**: live memory, bandwidth, and online user count via `/server-stats` (reads `/proc` on Linux).
+- **Server stats**: live memory, bandwidth, and how many people are online via `/server-stats` (reads `/proc` on Linux).
 - **Capability advertisement**: `/relay-status` answers `license_required` (an access key is needed to connect), `version` (the relay's version), `turn` (this relay can issue TURN credentials, i.e. `TURN_SECRET` is set) and `forwarder` (a media forwarder is configured). The app reads it before connecting, so it knows what to ask for and what to tell the user is missing.
 
 ## Performance

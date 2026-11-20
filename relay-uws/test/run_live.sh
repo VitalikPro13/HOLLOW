@@ -10,7 +10,7 @@
 #   RELAY_LIVE_JOBS=n         compile at most n objects at once
 #   RELAY_LIVE_VARIANTS="a b" run only these variants (main, deny, exempt, backpressure,
 #                             breaker_shadow, breaker_enforce, oom, batch, shadow_env, window,
-#                             window_total, connected, cgnat); "none" builds only
+#                             window_total, connected, cgnat, people); "none" builds only
 cd "$(dirname "$0")" || exit 1
 # The carrier-NAT cases hold about 600 sockets on each side.
 ulimit -n 8192 2> /dev/null || ulimit -n 4096 2> /dev/null || true
@@ -226,6 +226,10 @@ run_variant() {
     elif [ "$name" = connected ]; then
         only=connected
         limits+=(CONN_LIMIT_IPV4=64 CONNECTED_LIMIT=12)
+    elif [ "$name" = people ]; then
+        # The forwarder BRK_FORWARDER_SEED derives, so the count can leave it out.
+        only=people
+        args=(--forwarder-peer-id 12D3KooWC4T1AXU2s2YBgGJ2FeaYVtsKoHZWJeubnWe9SnuSE7Zb)
     elif [ "$name" = cgnat ]; then
         only=cgnat
         limits=(CONN_RATE_IPV4=6000)
@@ -362,6 +366,8 @@ wanted window && run_variant main window
 wanted window_total && run_variant main window_total
 wanted connected && run_variant main connected
 wanted cgnat && run_variant main cgnat
+# Who /server-stats counts online: identities on screen, never the forwarder (#150).
+wanted people && run_variant main people
 # A 32 MiB send-buffer memory budget and a 5 s stall window: honest traffic passes, effects stay bounded.
 wanted oom && run_variant main oom "" "" "" 33554432
 exit $fail

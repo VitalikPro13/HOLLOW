@@ -6997,6 +6997,7 @@ static void test_denylist() {
 #include "live_rostercheck.inc"
 #include "live_sib_mute.inc"
 #include "live_push_default.inc"
+#include "live_people.inc"
 
 int main(int argc, char** argv) {
     if (argc != 3) {
@@ -7116,6 +7117,14 @@ int main(int argc, char** argv) {
     // =rostercheck: the roster_check query (design ROSTER-CHECK).
     if (only && std::string(only) == "rostercheck") {
         rostercheck_live();
+        SSL_CTX_free(g_ctx);
+        if (failures) printf("%d FAILED\n", failures);
+        return failures ? 1 : 0;
+    }
+    // =people: who /server-stats counts online, against a relay naming a forwarder (#150).
+    if (only && std::string(only) == "people") {
+        test_people_online();
+        test_people_pending();
         SSL_CTX_free(g_ctx);
         if (failures) printf("%d FAILED\n", failures);
         return failures ? 1 : 0;

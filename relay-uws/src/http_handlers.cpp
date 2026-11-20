@@ -127,7 +127,6 @@ static void handle_server_stats(HttpResponse* res, RelayState& state, const Conf
         {"mem_used_kb", mem_used_kb},
         {"rx_mbps", round2(rx_mbps)},
         {"tx_mbps", round2(tx_mbps)},
-        {"online_users", state.online_users()},
         // Delivery diagnostics (non-identifying counters; see DeliveryDiag).
         {"send_backpressure", state.diag.send_backpressure},
         {"send_dropped", state.diag.send_dropped},
@@ -147,6 +146,9 @@ static void handle_server_stats(HttpResponse* res, RelayState& state, const Conf
         {"budget_refused", state.diag.budget_refused},
         {"budget_closed", state.diag.budget_closed}
     };
+
+    // Kept out when the operator hides the public activity, so it is never even counted.
+    if (config.public_stats) resp["online_users"] = state.people_online(config.forwarder_peer_id);
 
     // The fair-share shaper's ceiling, from the settings hollow-cake.service reads; a relay
     // with no shaper names no cap.
