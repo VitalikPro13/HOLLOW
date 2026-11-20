@@ -142,8 +142,10 @@ in YOUR context costs far more than in a runner's.
   and signing steps are proven on a GitHub runner, never on his desktop.
 - Never sleep, hibernate or cut the network of the Windows host, the Mac mini or the VM. Network
   tests act on an emulator, one app's process or a proxy.
-- The Windows host is shared with other agents and with Vitalik: cargo `-j 3`, nextest `-j 6`, one
-  heavy job at a time per builder.
+- Rust runs on whichever machine is less loaded (Vitalik, Nov 20: use both fully):
+  `bash scripts/lease.sh pick rust` prints `pc-build` or `mac-build` (PC on a tie); ask it before
+  EACH Rust job. Both have 2 slots; on the PC cargo and nextest `-j 7`. One heavy job at a time per
+  builder. A `pc-build` lease held by `Vitalik` means he needs the PC: wait.
 - Fleet peers use THROWAWAY identities only, and only your own letters. The machine details and
   commands are in the `hollow-runner` skill and the memory files it names.
 
@@ -152,9 +154,11 @@ in YOUR context costs far more than in a runner's.
 - `CARGO_TARGET_DIR` inside your worktree; `--manifest-path` in background jobs.
 - `HOLLOW_TEST_TMP` is set machine-wide; never `tempfile::` in tests; a test that touches storage
   sets its own data dir.
-- Targeted tests while you work; ONE full `cargo nextest run --lib -j 6` at the end (via a runner)
-  if you changed Rust. The full suite runs on the Windows PC, not the Mac: the mini is shared by
-  every builder and its parallel runs fail with "No buffer space available". Your runner ships the
+- Where Rust runs: targeted tests, harness families, mutation passes and clippy go where
+  `lease.sh pick rust` says (PC: `pc_sync.sh` + the `pc-build` lease, `hollow-runner` "Rust on the
+  PC"; Mac: the `mac-build` lease in your worktree). The FULL suite always runs on the PC: ONE
+  `cargo nextest run --lib -j 7` at the end (via a runner) if you changed Rust, because parallel
+  full runs on the mini fail with "No buffer space available". Your runner ships the
   worktree there itself (`hollow-runner`, "Full Rust suite on the PC"); a Mac failure that passes
   singly is noise, a PC failure is real. Clippy: no new warnings in your code. Never `eprintln!`/`println!` in
   hollow_core.

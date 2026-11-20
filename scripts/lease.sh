@@ -9,6 +9,7 @@
 #   scripts/lease.sh renew <resource> <lease-id> [--ttl MIN]
 #   scripts/lease.sh release <resource> <lease-id>
 #   scripts/lease.sh status
+#   scripts/lease.sh pick rust   (prints pc-build or mac-build: the less loaded one)
 #
 # `run` holds the lease for the command's life (bound to this process, no TTL)
 # and exits with the command's code. `acquire` prints a lease id bound to a TTL
@@ -25,7 +26,9 @@ capacity_of() {
     case "$1" in
         mac-build) echo 2 ;;
         mac-ios-sims|mac-android|mac-desktop-app) echo 1 ;;
-        pc-fleet|pc-build|linux-vm|hollowsrv|vps-relay-tests) echo 1 ;;
+        # The PC idles otherwise: two Rust jobs at `-j 7` each leave it two threads.
+        pc-build) echo 2 ;;
+        pc-fleet|linux-vm|hollowsrv|vps-relay-tests) echo 1 ;;
         *) echo 0 ;;
     esac
 }
@@ -191,6 +194,22 @@ case "$cmd" in
     release)
         r="${1:-}"; id="${2:-}"; check_resource "$r"; [ -n "$id" ] || die "release needs a lease id"
         lock; rm -f "$LEASE_DIR/$r/held/$id"; unlock
+        ;;
+    pick)
+        # Load = (held + queued) per slot; the PC wins a tie, since the Mac is
+        # Vitalik's workstation and also runs every Flutter and Xcode job.
+        [ "${1:-}" = rust ] || die "pick knows one kind: rust"
+        mkdir -p "$LEASE_DIR"
+        lock
+        best=""; best_load=""
+        for r in pc-build mac-build; do
+            reap "$r" 2>/dev/null
+            n=$(( $(find "$LEASE_DIR/$r/held" "$LEASE_DIR/$r/queue" -type f 2>/dev/null | wc -l) ))
+            load=$(( n * 1000 / $(capacity_of "$r") ))
+            if [ -z "$best" ] || [ "$load" -lt "$best_load" ]; then best=$r; best_load=$load; fi
+        done
+        unlock
+        echo "$best"
         ;;
     status)
         mkdir -p "$LEASE_DIR"

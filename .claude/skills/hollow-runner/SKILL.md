@@ -63,7 +63,7 @@ section after the Windows fleet); these rules hold for every command that runs O
 Every job on a shared machine runs inside a lease, taken on the Mac:
 `bash scripts/lease.sh run <resource> --who <your session/track> -- <command>`. Resources:
 `mac-build` (2 slots: cargo builds, nextest, flutter test, Xcode on the mini), `mac-ios-sims`,
-`mac-android`, `mac-desktop-app`, `pc-fleet`, `pc-build` (PC nextest/builds), `linux-vm`,
+`mac-android`, `mac-desktop-app`, `pc-fleet`, `pc-build` (2 slots: every Rust job on the PC), `linux-vm`,
 `hollowsrv`, `vps-relay-tests`. It waits its turn first-come-first-served; waiting is normal, never
 a reason to skip the lease or go around it. A job that must outlive one shell (a background fleet):
 `acquire` (prints an id, `--ttl` minutes, default 60), `renew` while it runs, `release` after.
@@ -117,7 +117,7 @@ a reason to skip the lease or go around it. A job that must outlive one shell (a
 ## Rust tests and the harness (from `rust/hollow_core`)
 
 - Full suite: `cargo nextest run --lib` (about 80 s; plain `cargo test` takes about 950 s). Use
-  `-j 6` on the shared Windows host, and `--profile ci` when asked to mirror CI.
+  `-j 7` on the Windows PC (where Rust runs by default), and `--profile ci` when asked to mirror CI.
 - Harness only: `cargo test --lib test_harness -- --nocapture`, or a nextest filter.
 - Report the summary line verbatim and every failing test's name with its panic lines.
 - A test that fails only on CI: rerun with `HOLLOW_DATA_DIR` pointed at an EMPTY folder.
@@ -222,18 +222,27 @@ a reason to skip the lease or go around it. A job that must outlive one shell (a
   log is `D:\dev\wt\<name>\.team\agent-pc-win.log`.
 - C: on the PC is nearly full (about 13 GB free): builds and worktrees go on D:.
 
-### Full Rust suite on the PC (the default for every full nextest run)
+### Rust on the PC (full suites always; other Rust jobs when `lease.sh pick rust` says `pc-build`)
+Before a targeted, harness, mutation or clippy job run `bash scripts/lease.sh pick rust`: it prints
+the less loaded of `pc-build` and `mac-build` (PC on a tie); on `mac-build` run it in the Mac
+worktree under that lease as usual. Run a PC job inside `bash scripts/lease.sh run pc-build --who <track> -- ssh ... pc "..."` so the lease
+lives exactly as long as the job (2 slots; a slot held by `Vitalik` means wait). A targeted run is
+step 1, then step 3 with `-E "test(/<filter>/)"`. A mutation pass runs ON the PC copy (Python is
+there; the script edits `D:\dev\wt\<name>` files, never the Mac worktree) and restores them; rerun
+`pc_sync.sh` afterwards only if the Mac tree changed meanwhile.
+
+#### Full Rust suite on the PC
 1. `bash scripts/pc_sync.sh <name> <worktree>` (first run creates `D:\dev\wt\<name>`, later runs
    ship only the changes).
 2. First run only, a warm target: `ssh pc "powershell -File D:\dev\wt\<name>\scripts\dev_cache.ps1
    -SeedWorktree D:\dev\wt\<name> -From C:\Users\Jabun\Documents\Coding\HOLLOW"` (reads the main
    checkout, never writes it).
 3. `ssh -o ServerAliveInterval=15 pc "cd D:\dev\wt\<name>\rust\hollow_core; $env:PATH =
-   'C:\Program Files\OpenSSL-Win64\bin;' + $env:PATH; cargo nextest run --lib -j 6 *>
+   'C:\Program Files\OpenSSL-Win64\bin;' + $env:PATH; cargo nextest run --lib -j 7 *>
    D:\dev\wt\<name>\nextest.log"` (without OpenSSL on PATH every test binary dies with
    STATUS_DLL_NOT_FOUND 0xc0000135), then `scp pc:D:/dev/wt/<name>/nextest.log` into your `.team`
-   dir and report from it. The PC is shared: one full suite there at a time; if another is
-   running (`ssh pc "Get-Process cargo-nextest"`), wait for it.
+   dir and report from it. The `pc-build` lease allows two Rust jobs at once at `-j 7` each;
+   never start one outside the lease.
 4. Report the summary line and every failure verbatim. Over ssh the 7 real-keystore tests
    (`keychain_tests::*`, `wipe::tests::a_wipe_*` / `erasing_another_profile_*`,
    `platform_keystore::tests::the_real_keystore_*`, and `platform_keystore::tests::dpapi_round_trip` when DPAPI lacks the interactive profile) fail with `CredWriteW failed`: Credential
