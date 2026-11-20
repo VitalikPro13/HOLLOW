@@ -28172,7 +28172,9 @@ fn harness_fixed_sleep_budget_does_not_grow() {
     // from a refused answer) and one settle on a running holder's DB, whose own catch-up
     // can rewrite the proof a test sets (5.5 s; scan 1247.9 s).
     // 2026-11-19: t18-archive's unopened-channel test added one spawn stagger (1.2 s; scan 1249.2 s).
-    const BUDGET_MS: u64 = 1_249_200;
+    // 2026-11-20: fix152's ask-back tests added three absences, the end of a round of
+    // asks, no ask after it, and no ask back to a stranger (4.5 s; scan 1253.7 s).
+    const BUDGET_MS: u64 = 1_253_700;
 
     let src = include_str!("test_harness.rs");
     // Built from pieces so this scan does not count its own source text.
@@ -43608,7 +43610,8 @@ async fn a_dm_sync_page_continues_past_a_dm_that_arrived_while_paging() {
         .await
         .into_iter()
         .filter_map(|m| match m {
-            super::types::HavenMessage::DmSyncRequest { since_timestamp, .. } if since_timestamp > 0 => Some(since_timestamp),
+            // A next page carries no gap digest; B's ask back of A's ask back (#152) does.
+            super::types::HavenMessage::DmSyncRequest { since_timestamp, gap: None, .. } if since_timestamp > 0 => Some(since_timestamp),
             _ => None,
         })
         .collect();
@@ -70656,3 +70659,467 @@ async fn t15_a_rejoin_without_a_clock_lead_signs_the_0140_ask() {
     assert!(wait_until(20, async || o.mls_members(&server_id).await.contains(&jd)).await, "J's leaf is committed again");
     assert!(wait_until(15, async || m.mls_members(&server_id).await.contains(&jd)).await, "M holds J's leaf");
 }
+
+// fix152-dm-catchup-new-relay
+
+/// Move a node to another relay, as a relay switch does: the app restarts on the same
+/// data root and identity and connects to `to` alone; `from` sees its socket go.
+/// `before_boot` runs between the old process's end and the new one's start.
+async fn move_node_to_relay(
+    from: &MockRelay,
+    to: &MockRelay,
+    node: TestNode,
+    master_tag: u8,
+    device_tag: u8,
+    before_boot: impl FnOnce(),
+) -> TestNode {
+    let device_id = node.device_id.clone();
+    node.crdt_committed().await;
+    from.set_online(&device_id, false);
+    assert!(
+        wait_until(10, async || !from.online_devices().contains(&device_id)).await,
+        "{device_id} must be off its old relay before it moves",
+    );
+    finish_move(to, node, master_tag, device_tag, before_boot).await
+}
+
+/// [`move_node_to_relay`] for a node whose socket on the old relay is already gone.
+async fn finish_move(
+    to: &MockRelay,
+    node: TestNode,
+    master_tag: u8,
+    device_tag: u8,
+    before_boot: impl FnOnce(),
+) -> TestNode {
+    let device_id = node.device_id.clone();
+    let (db_path, tmp) = node.into_storage();
+    assert!(
+        wait_until(30, async || crate::storage::messages::open_connections::count(&db_path) == 0).await,
+        "{device_id}'s stopped node still holds its database",
+    );
+    before_boot();
+    spawn_node_on_db(to, master_tag, device_tag, &db_path, tmp).await
+}
+
+async fn send_dm(from: &TestNode, to_master: &str, text: &str, mid: &str) {
+    from.cmd_tx
+        .send(NodeCommand::SendMessage {
+            peer_id: to_master.to_string(),
+            text: text.to_string(),
+            message_id: mid.to_string(),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+}
+
+fn dm_texts(node: &TestNode, friend_master: &str) -> Vec<String> {
+    node.dm_thread(friend_master).iter().map(|m| m.text.clone()).collect()
+}
+
+/// Two friends' (master, device) tags. Equal tags = a pre-multi-device install;
+/// distinct ones = a fresh install, whose roster each side holds.
+#[derive(Clone, Copy)]
+struct Fix152Cast {
+    a: (u8, u8),
+    b: (u8, u8),
+    /// Relay 2 keeps nothing for an absent device, as once its buffer expired (24 h)
+    /// or overflowed: only a catch-up sync can deliver.
+    no_buffer: bool,
+}
+
+const FIX152_LEGACY: Fix152Cast = Fix152Cast { a: (152, 152), b: (153, 153), no_buffer: false };
+const FIX152_FRESH: Fix152Cast = Fix152Cast { a: (160, 161), b: (162, 163), no_buffer: false };
+const FIX152_SYNC_ONLY: Fix152Cast = Fix152Cast { no_buffer: true, ..FIX152_FRESH };
+
+async fn fix152_spawn(relay: &MockRelay, me: (u8, u8), friend: (u8, u8)) -> TestNode {
+    let friend_master = tag_kp(friend.0).peer_id();
+    if me.0 == me.1 {
+        return spawn_node_with_friends(relay, me.0, me.1, &[&friend_master]).await;
+    }
+    let at = super::roster_book::now_ms() - 60_000;
+    let mine = protected_roster(me.0, &[me.1], at);
+    let theirs = protected_roster(friend.0, &[friend.1], at);
+    let (m, d) = (tag_kp(me.0).peer_id(), tag_kp(me.1).peer_id());
+    spawn_node_staged(relay, tag_kp(me.0), me.1, &[&friend_master], |st| {
+        super::roster_book::merge_for_test(st, &mine, &m, &d);
+        super::roster_book::merge_for_test(st, &theirs, &m, &d);
+    })
+    .await
+}
+
+/// A relay switch restarts the PROCESS: its resolver starts over from the database,
+/// while the friend's process keeps its own (re-read here from the friend's store).
+fn fix152_fresh_process(other: &TestNode) {
+    super::resolver::clear_for_test();
+    super::resolver::warm_from_store(&other.store());
+}
+
+/// Friends A and B on relay 1 with one DM delivered, then A moved to relay 2 and two
+/// DMs sent there while B is still on relay 1. Returns (relay1, relay2, a, b).
+async fn fix152_friends_split_across_relays(cast: Fix152Cast) -> (MockRelay, MockRelay, TestNode, TestNode) {
+    let relay1 = MockRelay::new();
+    let relay2 = MockRelay::new();
+    if cast.no_buffer {
+        relay2.set_offline_cap(0);
+    }
+    let b_master = tag_kp(cast.b.0).peer_id();
+
+    let a = fix152_spawn(&relay1, cast.a, cast.b).await;
+    let mut b = fix152_spawn(&relay1, cast.b, cast.a).await;
+    expect_dm_pair_ready(&relay1, &a, &b, 25).await;
+    send_dm(&a, &b_master, "on-relay-1", "fix152-r1").await;
+    assert!(
+        wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
+            matches!(ev, NetworkEvent::MessageReceived { text, .. } if text == "on-relay-1")
+        })
+        .await,
+        "precondition: a DM on the shared relay arrives",
+    );
+
+    let a = move_node_to_relay(&relay1, &relay2, a, cast.a.0, cast.a.1, || fix152_fresh_process(&b)).await;
+    let a_dev = a.device_id.clone();
+    let dm_room = super::types::dm_room_code(&a.master_id, &b_master);
+    assert!(wait_until(10, async || relay2.room_devices(&dm_room).contains(&a_dev)).await, "A sits in the DM room on relay 2");
+    send_dm(&a, &b_master, "while-apart-1", "fix152-apart-1").await;
+    send_dm(&a, &b_master, "while-apart-2", "fix152-apart-2").await;
+    assert!(
+        wait_until(10, async || dm_texts(&a, &b_master).iter().filter(|t| t.starts_with("while-apart")).count() == 2).await,
+        "precondition: A stored both sends",
+    );
+    (relay1, relay2, a, b)
+}
+
+/// (a) A stays online on relay 2; B joins it later and must catch up on A's sends.
+async fn fix152_case_sender_online(cast: Fix152Cast) {
+    let (relay1, relay2, a, b) = fix152_friends_split_across_relays(cast).await;
+    let a_master = a.master_id.clone();
+
+    let b = move_node_to_relay(&relay1, &relay2, b, cast.b.0, cast.b.1, || fix152_fresh_process(&a)).await;
+    let got = wait_until(30, async || {
+        dm_texts(&b, &a_master).iter().filter(|t| t.starts_with("while-apart")).count() == 2
+    })
+    .await;
+    assert!(got, "B must catch up on A's DMs once both sit on relay 2, got {:?}", dm_texts(&b, &a_master));
+}
+
+/// (b) A goes offline before B arrives on relay 2 and returns later.
+async fn fix152_case_sender_returns(cast: Fix152Cast) {
+    let (relay1, relay2, a, b) = fix152_friends_split_across_relays(cast).await;
+    let a_master = a.master_id.clone();
+    let a_dev = a.device_id.clone();
+
+    relay2.set_online(&a_dev, false);
+    assert!(wait_until(10, async || !relay2.online_devices().contains(&a_dev)).await, "A is off relay 2");
+    let b = move_node_to_relay(&relay1, &relay2, b, cast.b.0, cast.b.1, || fix152_fresh_process(&a)).await;
+    let b_dev = b.device_id.clone();
+    let dm_room = super::types::dm_room_code(&a_master, &b.master_id);
+    assert!(wait_until(10, async || relay2.room_devices(&dm_room).contains(&b_dev)).await, "B sits in the DM room on relay 2");
+    relay2.set_online(&a_dev, true);
+    let got = wait_until(30, async || {
+        dm_texts(&b, &a_master).iter().filter(|t| t.starts_with("while-apart")).count() == 2
+    })
+    .await;
+    assert!(got, "B must catch up on A's DMs once A returns to relay 2, got {:?}", dm_texts(&b, &a_master));
+}
+
+/// (d) A leaves relay 2 for good before B arrives: only relay 2's offline buffer holds
+/// A's sends for B's device, and it hands them over on B's DM-room join.
+async fn fix152_case_buffer_only(cast: Fix152Cast) {
+    let (relay1, relay2, a, b) = fix152_friends_split_across_relays(cast).await;
+    let a_master = a.master_id.clone();
+    let a_dev = a.device_id.clone();
+    let b_dev = b.device_id.clone();
+    assert!(
+        wait_until(10, async || relay2.buffered_count(&b_dev) >= 2).await,
+        "relay 2 must hold A's sends for B's device, holds {}",
+        relay2.buffered_count(&b_dev),
+    );
+    relay2.set_online(&a_dev, false);
+    assert!(wait_until(10, async || !relay2.online_devices().contains(&a_dev)).await, "A is off relay 2");
+    let b = move_node_to_relay(&relay1, &relay2, b, cast.b.0, cast.b.1, || fix152_fresh_process(&a)).await;
+    let got = wait_until(30, async || {
+        dm_texts(&b, &a_master).iter().filter(|t| t.starts_with("while-apart")).count() == 2
+    })
+    .await;
+    assert!(got, "B must get A's DMs from relay 2's buffer, got {:?}", dm_texts(&b, &a_master));
+}
+
+/// (e) A goes back to relay 1, where B stayed the whole time. `silent`: A's socket there
+/// died with no `peer_left`, so B still lists A when A returns.
+async fn fix152_case_sender_comes_back(cast: Fix152Cast, silent: bool) {
+    let relay1 = MockRelay::new();
+    let a_master = tag_kp(cast.a.0).peer_id();
+    let b_master = tag_kp(cast.b.0).peer_id();
+    let a = fix152_spawn(&relay1, cast.a, cast.b).await;
+    let mut b = fix152_spawn(&relay1, cast.b, cast.a).await;
+    expect_dm_pair_ready(&relay1, &a, &b, 25).await;
+    send_dm(&a, &b_master, "on-relay-1", "fix152-r1").await;
+    assert!(
+        wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
+            matches!(ev, NetworkEvent::MessageReceived { text, .. } if text == "on-relay-1")
+        })
+        .await,
+        "precondition: a DM on the shared relay arrives",
+    );
+    let relay2 = MockRelay::new();
+    if cast.no_buffer {
+        relay2.set_offline_cap(0);
+    }
+    let a_dev = a.device_id.clone();
+    let a = if silent {
+        a.crdt_committed().await;
+        relay1.drop_socket_silently(&a_dev);
+        finish_move(&relay2, a, cast.a.0, cast.a.1, || fix152_fresh_process(&b)).await
+    } else {
+        move_node_to_relay(&relay1, &relay2, a, cast.a.0, cast.a.1, || fix152_fresh_process(&b)).await
+    };
+    let dm_room = super::types::dm_room_code(&a.master_id, &b_master);
+    assert!(wait_until(10, async || relay2.room_devices(&dm_room).contains(&a_dev)).await, "A sits in the DM room on relay 2");
+    send_dm(&a, &b_master, "while-apart-1", "fix152-apart-1").await;
+    send_dm(&a, &b_master, "while-apart-2", "fix152-apart-2").await;
+    assert!(
+        wait_until(10, async || dm_texts(&a, &b_master).iter().filter(|t| t.starts_with("while-apart")).count() == 2).await,
+        "precondition: A stored both sends",
+    );
+    let a = move_node_to_relay(&relay2, &relay1, a, cast.a.0, cast.a.1, || fix152_fresh_process(&b)).await;
+    let got = wait_until(15, async || {
+        dm_texts(&b, &a_master).iter().filter(|t| t.starts_with("while-apart")).count() == 2
+    })
+    .await;
+    assert!(got, "B must catch up on what A sent from relay 2 once A is back, got {:?}", dm_texts(&b, &a_master));
+    drop(a);
+}
+
+async fn fix152_case_sender_comes_back_politely(cast: Fix152Cast) {
+    fix152_case_sender_comes_back(cast, false).await
+}
+
+async fn fix152_case_sender_comes_back_after_a_silent_drop(cast: Fix152Cast) {
+    fix152_case_sender_comes_back(cast, true).await
+}
+
+/// (c) Both directions while apart, both stay online on relay 2: each side's sends
+/// arrive within the normal sync time, and live DMs flow afterwards.
+async fn fix152_case_both_ways(cast: Fix152Cast) {
+    let (relay1, relay2, a, b) = fix152_friends_split_across_relays(cast).await;
+    let a_master = a.master_id.clone();
+    let b_master = b.master_id.clone();
+
+    // B writes too while it is still on relay 1, where A no longer is.
+    send_dm(&b, &a_master, "from-b-apart", "fix152-b-apart").await;
+    assert!(
+        wait_until(10, async || dm_texts(&b, &a_master).iter().any(|t| t == "from-b-apart")).await,
+        "precondition: B stored its send",
+    );
+
+    let b = move_node_to_relay(&relay1, &relay2, b, cast.b.0, cast.b.1, || fix152_fresh_process(&a)).await;
+    let got_b = wait_until(12, async || {
+        dm_texts(&b, &a_master).iter().filter(|t| t.starts_with("while-apart")).count() == 2
+    })
+    .await;
+    let got_a = wait_until(12, async || dm_texts(&a, &b_master).iter().any(|t| t == "from-b-apart")).await;
+    assert!(got_b, "B must hold A's DMs within the sync time, got {:?}", dm_texts(&b, &a_master));
+    assert!(got_a, "A must hold B's DM within the sync time, got {:?}", dm_texts(&a, &b_master));
+
+    send_dm(&a, &b_master, "live-after", "fix152-live").await;
+    assert!(
+        wait_until(10, async || dm_texts(&b, &a_master).iter().any(|t| t == "live-after")).await,
+        "a live DM on the shared relay arrives",
+    );
+    send_dm(&b, &a_master, "live-back", "fix152-live-back").await;
+    assert!(
+        wait_until(10, async || dm_texts(&a, &b_master).iter().any(|t| t == "live-back")).await,
+        "a live DM back on the shared relay arrives",
+    );
+}
+
+macro_rules! fix152_test {
+    ($name:ident, $case:ident, $cast:expr) => {
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+        async fn $name() {
+            let _g = test_guard();
+            let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+            unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+            $case($cast).await;
+        }
+    };
+}
+
+fix152_test!(fix152_dm_sent_on_a_new_relay_reaches_a_friend_who_joins_it_later, fix152_case_sender_online, FIX152_FRESH);
+fix152_test!(fix152_dm_sent_on_a_new_relay_reaches_a_friend_when_the_sender_returns, fix152_case_sender_returns, FIX152_FRESH);
+fix152_test!(fix152_dms_sent_apart_on_two_relays_meet_within_sync_time, fix152_case_both_ways, FIX152_FRESH);
+fix152_test!(fix152_legacy_dm_sent_on_a_new_relay_reaches_a_friend_who_joins_it_later, fix152_case_sender_online, FIX152_LEGACY);
+fix152_test!(fix152_legacy_dm_sent_on_a_new_relay_reaches_a_friend_when_the_sender_returns, fix152_case_sender_returns, FIX152_LEGACY);
+fix152_test!(fix152_legacy_dms_sent_apart_on_two_relays_meet_within_sync_time, fix152_case_both_ways, FIX152_LEGACY);
+fix152_test!(fix152_sync_only_dm_sent_on_a_new_relay_reaches_a_friend_who_joins_it_later, fix152_case_sender_online, FIX152_SYNC_ONLY);
+fix152_test!(fix152_sync_only_dm_sent_on_a_new_relay_reaches_a_friend_when_the_sender_returns, fix152_case_sender_returns, FIX152_SYNC_ONLY);
+fix152_test!(fix152_sync_only_dms_sent_apart_on_two_relays_meet_within_sync_time, fix152_case_both_ways, FIX152_SYNC_ONLY);
+fix152_test!(fix152_dm_sent_on_a_new_relay_waits_in_its_buffer_for_a_friend_who_joins_later, fix152_case_buffer_only, FIX152_FRESH);
+fix152_test!(fix152_dm_sent_from_another_relay_reaches_a_friend_when_the_sender_comes_back, fix152_case_sender_comes_back_politely, FIX152_SYNC_ONLY);
+fix152_test!(fix152_dm_sent_from_another_relay_reaches_a_friend_after_the_senders_silent_drop, fix152_case_sender_comes_back_after_a_silent_drop, FIX152_SYNC_ONLY);
+
+/// A leaves relay 1 for relay 2, writes there, and comes back to relay 1 while B's app sat
+/// in the background (`inactive`, presence withheld) or with its socket suspended (grace,
+/// presence not ringed). B hears neither A's leave nor A's return: on B's return its one
+/// `members` per room still lists A, so `is_new` is false and no PeerJoined fires for A.
+async fn fix152r_case_viewer_away(cast: Fix152Cast, suspended: bool) {
+    let relay1 = MockRelay::new();
+    let a_master = tag_kp(cast.a.0).peer_id();
+    let b_master = tag_kp(cast.b.0).peer_id();
+    let a = fix152_spawn(&relay1, cast.a, cast.b).await;
+    let mut b = fix152_spawn(&relay1, cast.b, cast.a).await;
+    expect_dm_pair_ready(&relay1, &a, &b, 25).await;
+    send_dm(&a, &b_master, "on-relay-1", "fix152-r1").await;
+    assert!(
+        wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
+            matches!(ev, NetworkEvent::MessageReceived { text, .. } if text == "on-relay-1")
+        })
+        .await,
+        "precondition: a DM on the shared relay arrives",
+    );
+    let b_dev = b.device_id.clone();
+    if suspended {
+        relay1.suspend(&b_dev);
+    } else {
+        relay1.set_background(&b, true);
+    }
+
+    let relay2 = MockRelay::new();
+    if cast.no_buffer {
+        relay2.set_offline_cap(0);
+    }
+    let a_dev = a.device_id.clone();
+    let a = move_node_to_relay(&relay1, &relay2, a, cast.a.0, cast.a.1, || fix152_fresh_process(&b)).await;
+    let dm_room = super::types::dm_room_code(&a.master_id, &b_master);
+    assert!(wait_until(10, async || relay2.room_devices(&dm_room).contains(&a_dev)).await, "A sits in the DM room on relay 2");
+    send_dm(&a, &b_master, "while-apart-1", "fix152-apart-1").await;
+    send_dm(&a, &b_master, "while-apart-2", "fix152-apart-2").await;
+    assert!(
+        wait_until(10, async || dm_texts(&a, &b_master).iter().filter(|t| t.starts_with("while-apart")).count() == 2).await,
+        "precondition: A stored both sends",
+    );
+    let a = move_node_to_relay(&relay2, &relay1, a, cast.a.0, cast.a.1, || fix152_fresh_process(&b)).await;
+    assert!(wait_until(10, async || relay1.room_devices(&dm_room).contains(&a_dev)).await, "A sits in the DM room on relay 1 again");
+
+    if suspended {
+        relay1.resume(&b_dev);
+    } else {
+        relay1.set_background(&b, false);
+    }
+    let got = wait_until(30, async || {
+        dm_texts(&b, &a_master).iter().filter(|t| t.starts_with("while-apart")).count() == 2
+    })
+    .await;
+    assert!(got, "B must catch up on what A sent from relay 2 once B is back on screen, got {:?}", dm_texts(&b, &a_master));
+    drop(a);
+}
+
+/// The ask back stops. A, back in a fresh session, and B, back from a suspend, ask
+/// each other and ask back; once their rows (so their asks) stop changing, the throttle
+/// stops them: no ask flows while nothing changes. A's fresh ask repeats its old
+/// anchor here (it wrote nothing away), so B need not ask it back at all.
+async fn fix152r_case_ask_back_stops(cast: Fix152Cast) {
+    let relay = MockRelay::new();
+    let b_master = tag_kp(cast.b.0).peer_id();
+    let a = fix152_spawn(&relay, cast.a, cast.b).await;
+    let mut b = fix152_spawn(&relay, cast.b, cast.a).await;
+    expect_dm_pair_ready(&relay, &a, &b, 25).await;
+    send_dm(&a, &b_master, "on-relay-1", "fix152-r1").await;
+    assert!(
+        wait_event(&mut b, std::time::Duration::from_secs(8), |ev| {
+            matches!(ev, NetworkEvent::MessageReceived { text, .. } if text == "on-relay-1")
+        })
+        .await,
+        "precondition: a DM arrives",
+    );
+    let (a_dev, b_dev) = (a.device_id.clone(), b.device_id.clone());
+    relay.suspend(&b_dev);
+    let a = move_node_to_relay(&relay, &relay, a, cast.a.0, cast.a.1, || fix152_fresh_process(&b)).await;
+    let dm_room = super::types::dm_room_code(&a.master_id, &b_master);
+    assert!(wait_until(10, async || relay.room_devices(&dm_room).contains(&a_dev)).await, "A is back in the DM room");
+    let b_before = sync_asks_to(&b, &a_dev).await.0;
+    relay.resume(&b_dev);
+    assert!(
+        wait_until(15, async || sync_asks_to(&a, &b_dev).await.0 > 0).await,
+        "precondition: A, back, asked B",
+    );
+    let asks = async || (sync_asks_to(&a, &b_dev).await.0, sync_asks_to(&b, &a_dev).await.0 - b_before);
+    // ABSENCE (twice): the round has no end event, and asks that keep flowing have none.
+    sleep_ms(1_500).await;
+    let settled = asks().await;
+    sleep_ms(1_500).await;
+    assert_eq!(asks().await, settled, "A and B kept asking each other");
+    assert!(settled.0 <= 3 && settled.1 <= 3, "the round took too many asks: A {}, B {}", settled.0, settled.1);
+}
+
+/// Only a friend is asked back: a stranger sharing a room with us, holding an Olm
+/// session, gets its (empty) answer and no ask of ours.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn fix152r_a_stranger_is_never_asked_back() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let x = spawn_node_with_friends(&relay, 164, 165, &[]).await;
+    let y = spawn_node_with_friends(&relay, 166, 167, &[]).await;
+    for node in [&x, &y] {
+        node.cmd_tx.send(NodeCommand::JoinRoom { room_code: "fix152-lobby".into() }).await.unwrap();
+    }
+    expect_olm_confirmed(&x, &y, 20).await;
+    let before = sync_asks_to(&y, &x.device_id).await.0;
+    let x_before = sync_asks_to(&x, &y.device_id).await.0;
+    for since in [5, 6] {
+        carry_as(&x, &y, super::types::HavenMessage::DmSyncRequest { since_timestamp: since, both_directions: true, gap: None }).await;
+    }
+    assert!(
+        wait_until(15, async || sync_asks_to(&x, &y.device_id).await.0 >= x_before + 2).await,
+        "precondition: X carried its asks",
+    );
+    // ABSENCE: an ask back that must never be sent.
+    sleep_ms(1_500).await;
+    assert_eq!(sync_asks_to(&y, &x.device_id).await.0, before, "Y asked a stranger back");
+}
+
+/// The throttle is per device: two friends asking with the same anchor are each asked
+/// back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn fix152r_each_device_is_asked_back_for_the_same_ask() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (a_m, b_m, c_m) = (tag_kp(168).peer_id(), tag_kp(169).peer_id(), tag_kp(170).peer_id());
+    let a = spawn_node_with_friends(&relay, 168, 168, &[&b_m]).await;
+    let b = spawn_node_with_friends(&relay, 169, 169, &[&a_m, &c_m]).await;
+    let c = spawn_node_with_friends(&relay, 170, 170, &[&b_m]).await;
+    expect_dm_pair_ready(&relay, &a, &b, 25).await;
+    expect_dm_pair_ready(&relay, &c, &b, 25).await;
+    let (to_a, to_c) = (sync_asks_to(&b, &a.device_id).await.0, sync_asks_to(&b, &c.device_id).await.0);
+    let same = super::types::HavenMessage::DmSyncRequest { since_timestamp: 9, both_directions: true, gap: None };
+    carry_as(&a, &b, same.clone()).await;
+    carry_as(&c, &b, same).await;
+    assert!(
+        wait_until(15, async || {
+            sync_asks_to(&b, &a.device_id).await.0 > to_a && sync_asks_to(&b, &c.device_id).await.0 > to_c
+        })
+        .await,
+        "one friend's ask throttled another friend's ask back",
+    );
+}
+
+async fn fix152r_case_viewer_hidden(cast: Fix152Cast) {
+    fix152r_case_viewer_away(cast, false).await
+}
+
+async fn fix152r_case_viewer_suspended(cast: Fix152Cast) {
+    fix152r_case_viewer_away(cast, true).await
+}
+
+fix152_test!(fix152r_dm_sent_from_another_relay_reaches_a_friend_whose_app_was_in_the_background, fix152r_case_viewer_hidden, FIX152_SYNC_ONLY);
+fix152_test!(fix152r_dm_sent_from_another_relay_reaches_a_friend_whose_socket_was_suspended, fix152r_case_viewer_suspended, FIX152_SYNC_ONLY);
+fix152_test!(fix152r_the_dm_ask_back_stops_after_one_round, fix152r_case_ask_back_stops, FIX152_FRESH);

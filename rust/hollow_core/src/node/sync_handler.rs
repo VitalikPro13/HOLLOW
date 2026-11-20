@@ -888,6 +888,38 @@ pub(crate) fn dm_next_page_since(items: &[DmSyncItem], strict: bool) -> Option<i
     (!items.iter().all(served_again)).then_some(since)
 }
 
+/// `channel_sync_sent` key prefix of a DM catch-up ask back we sent (#152).
+pub(crate) const DM_ASKED_BACK: &str = "dm_asked_back:";
+/// One ask back per (device, ask) in this window.
+pub(crate) const DM_ASK_BACK_GAP: Duration = Duration::from_secs(60);
+
+/// Whether to ask `device` back for its DM rows after answering its catch-up ask; records
+/// the ask back when yes. A friend back in a fresh session (a restart, another relay)
+/// only asks, and we may have missed its leave and return (hidden, suspended, a silent
+/// drop), so what it wrote away from us reaches us only through an ask of ours.
+///
+/// Keyed by the device AND its ask (watermark, direction, gap digest): a new session
+/// holding new rows asks with a new anchor and is asked back at once, while two
+/// friends answering each other stop as soon as their rows, and so their anchors,
+/// stop changing.
+pub(crate) fn should_ask_dm_back(
+    asked: &mut HashMap<String, std::time::Instant>,
+    device: &str,
+    since: i64,
+    both_directions: bool,
+    gap: Option<&GapDigest>,
+) -> bool {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (since, both_directions, gap.map(|g| serde_json::to_string(g).unwrap_or_default())).hash(&mut h);
+    let key = format!("{DM_ASKED_BACK}{device}:{:016x}", h.finish());
+    if asked.get(&key).is_some_and(|at| at.elapsed() < DM_ASK_BACK_GAP) {
+        return false;
+    }
+    asked.insert(key, std::time::Instant::now());
+    true
+}
+
 /// How long a page we asked for counts as asked: two overlapping asks bring the same
 /// page twice, and one conversation must not page twice side by side.
 const DM_PAGE_REPEAT_WINDOW: Duration = Duration::from_secs(10);

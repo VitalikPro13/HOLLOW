@@ -6937,7 +6937,13 @@ async fn run_event_loop(
                     vc_signal_rate_tokens.retain(|_, (_, last)| last.elapsed() < stale);
                     decrypt_fail_cooldown.retain(|_, instant| instant.elapsed() < REKEY_COOLDOWN);
                     channel_sync_sent.retain(|key, instant| {
-                        let keep = if key.starts_with(UNREADABLE_GROUP_NOTED) { MLS_BOOTSTRAP_TIMEOUT } else { Duration::from_secs(30) };
+                        let keep = if key.starts_with(UNREADABLE_GROUP_NOTED) {
+                            MLS_BOOTSTRAP_TIMEOUT
+                        } else if key.starts_with(sync_handler::DM_ASKED_BACK) {
+                            sync_handler::DM_ASK_BACK_GAP
+                        } else {
+                            Duration::from_secs(30)
+                        };
                         instant.elapsed() < keep
                     });
                     // Clean up orphaned early-arrival file streams (5 min TTL).
@@ -13219,9 +13225,10 @@ async fn handle_incoming_request_inner(
                 // (stored here as is_mine=0) alongside ours, which are otherwise
                 // stranded when that device is offline.
                 let gap_rows = gap
+                    .as_ref()
                     .map(|g| {
                         store
-                            .get_dm_gap_messages(&convo_peer, &g, !both_directions, 200)
+                            .get_dm_gap_messages(&convo_peer, g, !both_directions, 200)
                             .unwrap_or_default()
                     })
                     .unwrap_or_default();
@@ -13265,6 +13272,21 @@ async fn handle_incoming_request_inner(
                             &MessageEnvelope::DmSyncBatch { messages: items, has_more },
                         ).await;
                     }
+                }
+
+                // Ask a friend back, once per ask of its (#152): it may hold rows we lack,
+                // written while we missed its leave and return, and a fresh session only asks.
+                if store.get_friend_status(&convo_peer).ok().flatten().as_deref() == Some("accepted")
+                    && super::sync_handler::should_ask_dm_back(channel_sync_sent, peer_str, since_timestamp, both_directions, gap.as_ref())
+                {
+                    let multi_device = !super::resolver::devices_for(master_peer_str).is_empty();
+                    let (since, gap) = store.dm_sync_anchor(&convo_peer, multi_device);
+                    hollow_log!("[HOLLOW-SYNC] Asking {peer_str} back for DMs since {since} (both={multi_device})");
+                    super::olm_lane::carry(
+                        ws_cmd_tx, peer_str, None,
+                        &HavenMessage::DmSyncRequest { since_timestamp: since, both_directions: multi_device, gap },
+                        super::olm_lane::NoSession::Drop,
+                    );
                 }
             }
         }
