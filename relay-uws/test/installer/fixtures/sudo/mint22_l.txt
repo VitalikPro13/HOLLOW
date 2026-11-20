@@ -1,0 +1,9 @@
+Matching Defaults entries for hollow-relay on box:
+    env_reset, mail_badpass, secure_path=/usr/local/sbin\:/usr/local/bin\:/usr/sbin\:/usr/bin\:/sbin\:/bin\:/snap/bin, use_pty, pwfeedback
+
+User hollow-relay may run the following commands on box:
+    (root) NOPASSWD: /usr/bin/mintdrivers-remove-live-media
+    (root) NOPASSWD: /usr/bin/mintdrivers-load-broadcom-modules
+    (root) NOPASSWD: /usr/bin/mint-refresh-cache
+    (root) NOPASSWD: /usr/lib/linuxmint/mintUpdate/synaptic-workaround.py
+    (root) NOPASSWD: /usr/lib/linuxmint/mintUpdate/dpkg_lock_check.sh

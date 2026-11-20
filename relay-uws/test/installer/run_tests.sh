@@ -2730,6 +2730,9 @@ in_sub t_summary
 # The fair-share shaper (CAKE).
 # shellcheck source=cake_tests.sh
 . "$T/cake_tests.sh"
+# check-host's sudo check of the service accounts.
+# shellcheck source=host_check_tests.sh
+. "$T/host_check_tests.sh"
 
 if [ "$(id -u)" = 0 ] && [ -r /etc/os-release ]; then
     echo "dry run"

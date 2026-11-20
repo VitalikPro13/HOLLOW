@@ -276,7 +276,7 @@ ENABLE_UNITS=() RESTART_UNITS=()
 turn_apply >/dev/null
 no_ "TURN off: the lock's rule is gone" nft list table inet hollow_turn
 lacks "its ports are given back" "$(reserved)" "49152-65535"
-for f in "$LOCK_BIN" "$LOCK_ENV" "$LOCK_DROPIN" "$UNIT_DIR/hollow-turn-port-lock.service" \
+for f in "$LOCK_BIN" "$LOCK_ENV" "$LOCK_DROPIN" "$LOCK_SYSCTL" "$UNIT_DIR/hollow-turn-port-lock.service" \
          "$UNIT_DIR/hollow-turn-port-lock-refresh.service" "$UNIT_DIR/hollow-turn-port-lock-refresh.timer"; do
     no_ "TURN off: $f is gone" test -e "$f"
 done
@@ -293,6 +293,146 @@ yes_ "TURN on again: coturn runs" systemctl is-active --quiet hollow-coturn
 part=$(turn_part)
 eq "and every TURN check passes" "$(grep FAIL <<<"$part")" ""
 has "with the lock back" "$part" "ok    the TURN port lock loads again every minute"
+# the_port_reservation_holds_from_boot_on (#153): the lock writes it for systemd-sysctl, which
+# runs before any service; a stop (every shutdown runs one) keeps it, TURN off removes it.
+sysf=$LOCK_SYSCTL
+# shellcheck disable=SC2016 # the lock's own default, read as text
+eq "the lock and the setup name one boot file" "$(sed -n 's/^SYSCTL_FILE=${TURN_LOCK_SYSCTL_FILE:-\(.*\)}$/\1/p' "$DEPLOY/turn-port-lock.sh")" "$sysf"
+eq "the lock writes the ports into it" "$(sed -n 's/^net.ipv4.ip_local_reserved_ports = //p' "$sysf")" "49152-65535"
+has "check-host sees it" "$(turn_part)" "ok    49152-65535 stay reserved from boot on, before other services start"
+rm -f "$sysf"
+has "without it check-host fails" "$(turn_part)" "FAIL  after a reboot 49152-65535 is reserved only once the lock loads"
+systemctl start hollow-turn-port-lock-refresh.service
+yes_ "the refresh writes it again" test -f "$sysf"
+printf 'net.ipv4.ip_local_reserved_ports = 1000-1001\n' >/etc/sysctl.d/zzz-box-override.conf
+has "a file after ours that drops the ports fails, named" "$(turn_part)" "/etc/sysctl.d/zzz-box-override.conf sets the reserved ports after"
+rm -f /etc/sysctl.d/zzz-box-override.conf
+# an_operators_own_reservation_survives_boot (#153 review)
+printf 'net.ipv4.ip_local_reserved_ports = 8000-8100\n' >/etc/sysctl.d/10-box-operator.conf
+systemctl start hollow-turn-port-lock-refresh.service
+has "the boot file keeps the operator's range" "$(cat "$sysf")" "= 8000-8100,49152-65535"
+systemctl stop hollow-turn-port-lock
+yes_ "a stop keeps it for the next boot" test -f "$sysf"
+# ephemeral_binds <n>: how many of n UDP sockets bound to port 0 landed in 49152-65535.
+ephemeral_binds() {
+    python3 -I -c '
+import socket, sys
+socks, hits = [], 0
+for _ in range(int(sys.argv[1])):
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.bind(("0.0.0.0", 0))
+    socks.append(s)
+    hits += s.getsockname()[1] >= 49152
+print(hits)' "$1"
+}
+sysctl -q -w net.ipv4.ip_local_reserved_ports=""
+no_ "with nothing reserved, programs' random ports land among TURN's" test "$(ephemeral_binds 300)" = 0
+systemctl restart systemd-sysctl
+has "the boot step alone reserves them again" "$(reserved)" "49152-65535"
+has "with the operator's own range" "$(reserved)" "8000-8100"
+rm -f /etc/sysctl.d/10-box-operator.conf
+eq "and no random port lands there then" "$(ephemeral_binds 300)" 0
+# coturn Requires the lock, so the stop above took it down too.
+systemctl start hollow-turn-port-lock hollow-coturn
+sleep 2
+yes_ "coturn runs again with the lock" systemctl is-active --quiet hollow-coturn
+# wait_udp <port>: until a UDP socket listens on <port> (10 s at most); a loaded box starts
+# python slowly.
+wait_udp() {
+    local _
+    for _ in $(seq 1 50); do
+        ss -Hulnp | grep -q ":$1 " && return 0
+        sleep 0.2
+    done
+    return 1
+}
+# check_host_names_a_stray_listener_and_its_fix (#153): avahi-daemon's shape, one v4 and
+# one v6 socket of a service that bound before the reservation.
+systemd-run --quiet --unit=box-stray -p User=nobody python3 -I -c '
+import socket, time
+a = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+a.bind(("0.0.0.0", 52888))
+try:
+    b = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+    b.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+    b.bind(("::", 54268))
+except OSError:
+    pass
+time.sleep(120)'
+wait_udp 52888
+spid=$(systemctl show -p MainPID --value box-stray)
+part=$(turn_part)
+has "a stray listener is named with its program and pid" "$part" "can reach it: python3 (pid $spid) on 0.0.0.0:52888"
+if ss -Hulnp | grep -q ':54268 '; then has "with its IPv6 socket on the same entry" "$part" "python3 (pid $spid) on 0.0.0.0:52888 and [::]:54268."; fi
+has "with the command that moves it" "$part" "Restarting it moves it out of the reserved ports, unless it is set to use that port: sudo systemctl restart box-stray"
+systemctl stop box-stray
+# a_listeners_own_name_cannot_pass_for_coturn: the name a program gives itself comes first
+# on ss's line, so a pid inside it must never count as the socket's owner.
+cpid=$(pgrep -u hollow-turn -o turnserver)
+setpriv --reuid=65534 --regid=65534 --clear-groups python3 -I -c '
+import ctypes, socket, sys, time
+ctypes.CDLL(None).prctl(15, sys.argv[1].encode(), 0, 0, 0)
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.bind(("0.0.0.0", 52889))
+time.sleep(30)' "\",pid=$cpid," &
+fake=$!
+wait_udp 52889
+has "a program named after coturn's pid is still a stray" "$(turn_part)" " on 0.0.0.0:52889"
+kill "$fake" 2>/dev/null
+wait "$fake" 2>/dev/null
+eq "and with both gone every TURN check passes" "$(grep FAIL <<<"$(turn_part)")" ""
+
+# the_setup_moves_avahi_out_of_the_turn_ports (#153): a stand-in avahi-daemon that took a
+# port among TURN's before the reservation is restarted by the setup, and only then.
+printf '[Service]\nUser=nobody\nExecStart=/usr/bin/python3 -I -c "import os, socket, time; p = int(open(\\"/run/box-avahi-port\\").read()) if os.path.exists(\\"/run/box-avahi-port\\") else 0; s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM); s.bind((\\"0.0.0.0\\", p)); time.sleep(600)"\n' >"$UNIT_DIR/avahi-daemon.service"
+systemctl daemon-reload
+echo 52891 >/run/box-avahi-port
+systemctl start avahi-daemon.service
+wait_udp 52891
+apid=$(systemctl show -p MainPID --value avahi-daemon.service)
+has "the stand-in sits among TURN's ports" "$(turn_part)" "python3 (pid $apid) on 0.0.0.0:52891"
+rm -f /run/box-avahi-port
+out=$(turn_lock_move_avahi 2>&1)
+has "the setup restarts it" "$out" "Restarted avahi-daemon, which held a port among TURN's"
+sleep 1
+no_ "as a new process" test "$(systemctl show -p MainPID --value avahi-daemon.service)" = "$apid"
+eq "on a port outside them, so check-host passes" "$(grep FAIL <<<"$(turn_part)")" ""
+apid=$(systemctl show -p MainPID --value avahi-daemon.service)
+eq "one outside them is left alone" "$(turn_lock_move_avahi 2>&1)" ""
+eq "still the same process" "$(systemctl show -p MainPID --value avahi-daemon.service)" "$apid"
+systemctl stop avahi-daemon.service
+rm -f "$UNIT_DIR/avahi-daemon.service"
+systemctl daemon-reload
+
+echo "check-host: Linux Mint's own sudo rules"
+# mint_stock_sudo_rules_pass_under_no_new_privileges (#153): the files mintupdate 6.1.5.1
+# and mintdrivers 1.8.1 install, word for word.
+acct_part() { bash "$DEPLOY/check-host.sh" 2>&1 | sed -n '/^Service accounts$/,/^Accounts$/p'; }
+printf '# Allow any user to check for new system updates without\n# requiring user authentication.\n\nALL ALL = NOPASSWD:/usr/bin/mint-refresh-cache\nALL ALL = NOPASSWD:/usr/lib/linuxmint/mintUpdate/synaptic-workaround.py\nALL ALL = NOPASSWD:/usr/lib/linuxmint/mintUpdate/dpkg_lock_check.sh\n' >/etc/sudoers.d/mintupdate
+printf '# Allow any user to remove the live media from the APT sources.\n\nALL ALL = NOPASSWD:/usr/bin/mintdrivers-remove-live-media\nALL ALL = NOPASSWD:/usr/bin/mintdrivers-load-broadcom-modules\n' >/etc/sudoers.d/mintdrivers
+printf 'Defaults pwfeedback\n' >/etc/sudoers.d/0pwfeedback
+chmod 0440 /etc/sudoers.d/mintupdate /etc/sudoers.d/mintdrivers /etc/sudoers.d/0pwfeedback
+yes_ "sudo reads them" visudo -cq
+part=$(acct_part)
+has "Mint's tools pass under NoNewPrivileges" "$part" "ok    hollow-coturn runs as hollow-turn, which cannot become root. Linux Mint lets every account run 5 of its own maintenance tools with sudo, which this service's sandbox (NoNewPrivileges) blocks"
+eq "with no account failing" "$(grep FAIL <<<"$part")" ""
+printf 'ALL ALL=(root) NOPASSWD: /usr/bin/true\n' >/etc/sudoers.d/zz-box
+chmod 0440 /etc/sudoers.d/zz-box
+part=$(acct_part)
+has "another rule for every account fails, named" "$part" "FAIL  hollow-coturn runs as hollow-turn, who may use sudo: (root) NOPASSWD: /usr/bin/true (in "
+has "with its file" "$part" "/etc/sudoers.d/zz-box)"
+rm -f /etc/sudoers.d/zz-box
+printf '[Service]\nNoNewPrivileges=no\n' | install -D -m 0644 /dev/stdin "$UNIT_DIR/hollow-coturn.service.d/box-nnp.conf"
+systemctl daemon-reload
+has "without NoNewPrivileges Mint's tools fail too" "$(acct_part)" "hollow-coturn does not set NoNewPrivileges=yes"
+rm -rf "$UNIT_DIR/hollow-coturn.service.d/box-nnp.conf"
+systemctl daemon-reload
+rm -f /etc/sudoers.d/mintupdate /etc/sudoers.d/mintdrivers /etc/sudoers.d/0pwfeedback
+eq "and back without them nothing fails" "$(grep FAIL <<<"$(acct_part)")" ""
+# the_sudo_matrix (#153 review): every scenario through this box's real sudo.
+out=$(bash "$T/sudo_matrix_tests.sh" 2>&1)
+grep -E '^FAIL' <<<"$out"
+has "real sudo judges every scenario as expected" "$out" ", 0 failed"
 
 echo "check-host on a Docker setup"
 FD=$WORK_DIR/fake_docker
@@ -398,7 +538,7 @@ eq "the plain files are kept, the report key never" "$(find "$BACKUP_DIR" -minde
 # uninstall_removes_the_turn_port_lock
 no_ "the uninstall took the TURN port lock's rule" nft list table inet hollow_turn
 lacks "and gave its ports back" "$(sysctl -n net.ipv4.ip_local_reserved_ports)" "49152-65535"
-for f in "$LOCK_BIN" "$LOCK_ENV" "$LOCK_DROPIN" "$UNIT_DIR/hollow-turn-port-lock.service" "$UNIT_DIR/hollow-turn-port-lock-refresh.timer"; do
+for f in "$LOCK_BIN" "$LOCK_ENV" "$LOCK_DROPIN" "$LOCK_SYSCTL" "$UNIT_DIR/hollow-turn-port-lock.service" "$UNIT_DIR/hollow-turn-port-lock-refresh.timer"; do
     no_ "uninstall: $f is gone" test -e "$f"
 done
 yes_ "the certificate's renewal is off" test -e /etc/letsencrypt/renewal/relay.conf.hollow-off

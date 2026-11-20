@@ -13,6 +13,8 @@
 # instead, and the refresh timer puts the lock back within a minute if anything drops it.
 # After a change to an address or a range, edit the file and
 # `sudo systemctl restart hollow-turn-port-lock`.
+# The lock also writes /etc/sysctl.d/zz-hollow-turn-ports.conf, which reserves its ports at
+# boot before other services bind; stopping it leaves that file, so delete it with the lock.
 [Unit]
 Description=Keep TURN to coturn's and the forwarder's ports on this machine
 # In place before coturn relays its first packet.

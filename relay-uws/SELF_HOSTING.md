@@ -763,9 +763,14 @@ TURN may relay only to this machine's own address, but coturn has no setting
 for which ports on it a call may reach. So whenever TURN is on, the setup adds
 the TURN port lock, `deploy/turn-port-lock.sh`. It adds a firewall rule that
 keeps TURN to coturn's relay ports and the forwarder's, and reserves those ports
-so no other program's connections land in them. coturn doesn't start without the
-lock, and a timer loads it again every minute in case anything clears the
-firewall. Keep other services out of ports 49152 to 65535. With the lock in
+from the moment the machine starts, so no other program's connections land in
+them. Ports you reserved yourself stay reserved. coturn doesn't start without the lock, and a timer loads it again every
+minute in case anything clears the firewall. Keep other services out of ports
+49152 to 65535. A program that was already running when you turned TURN on can
+still hold a port there. Desktop systems such as Linux Mint run avahi-daemon,
+which finds devices on the local network, and the setup restarts it so it picks
+another port. For anything else, the host checks name the program and its process
+number, and for a system service the command that restarts it. With the lock in
 place, a Hollow app running on the relay machine itself can't use TURN, because
 coturn's replies to it are dropped, though its direct connections still work.
 The host checks look for the lock.
@@ -814,16 +819,26 @@ carries no message content, only a note that something is waiting, and the app
 then collects the message from the relay itself.
 
 **Android.** Your relay sends wake-ups through UnifiedPush, which needs no
-accounts or keys. Each person installs a UnifiedPush app on their phone,
-[ntfy](https://ntfy.sh) being the common one, then picks it in Hollow under
-Settings > Notifications > Push delivery > Wake-up service. The wake-up is
-encrypted to that phone before it leaves your relay, so the ntfy server only
-sees that some app got a push. People who leave it on Google get no wake-ups on
-your relay, because only the official relay holds Hollow's Google credentials.
+accounts or keys. You don't need an ntfy server of your own. The ntfy app uses
+the public server at ntfy.sh by default. Each person with an Android phone does
+this once:
 
-The push sender only sends to public addresses. If your ntfy server sits on the
-same private network as the relay, the Docker setup can allow it with
-`UNIFIEDPUSH_ALLOW_PRIVATE=1` in the `push` service's environment.
+1. Install [ntfy](https://ntfy.sh) from the Play Store or F-Droid, and open it
+   once.
+2. In Hollow on the phone, go to Settings > Notifications > Push delivery >
+   Wake-up service and tap **ntfy**. This section is only in the Android app.
+
+The wake-up is encrypted to that phone before it leaves your relay, so the ntfy
+server only sees that some app got a push. People who leave Wake-up service on
+Google get no wake-ups on your relay, because only the official relay holds
+Hollow's Google credentials. For the same reason, **Fall back to Google** can't
+wake a phone on your relay when ntfy stops working.
+
+Running your own ntfy server is optional, and ntfy's own guide covers it at
+[docs.ntfy.sh/install](https://docs.ntfy.sh/install/). The push sender only
+sends to public addresses. If your ntfy server sits on the same private network
+as the relay, the Docker setup can allow it with `UNIFIEDPUSH_ALLOW_PRIVATE=1`
+in the `push` service's environment.
 
 **iPhone.** iPhone notifications don't work on a self-hosted relay. Apple only
 delivers notifications signed with the key from Hollow's Apple Developer
@@ -1062,7 +1077,11 @@ sudo bash /usr/local/lib/hollow-relay/installer/deploy/check-host.sh
 ```
 
 (or `sudo bash relay-uws/deploy/check-host.sh` from your clone). Every line
-should say `ok`. SSH password logins that are still on show as a `FAIL`. On a
+should say `ok`. SSH password logins that are still on show as a `FAIL`. Linux
+Mint lets every account run a few of its own maintenance tools with `sudo`. The
+checks accept exactly those, and only for a service whose sandbox keeps it from
+using `sudo` at all, while no `sudo` setting changes what those tools run. Any other `sudo` rule fails, and the line names it and the
+file it comes from. On a
 Docker setup the services aren't under systemd, so the checks cover the machine
 itself, and the containers' limits come from the compose file.
 
@@ -1180,6 +1199,12 @@ complains about, remove the `--no-stdout-log` line from
 `deploy/coturn/coturn-start.sh` (under the full setup, the copy in
 `/usr/local/lib/hollow-relay/installer`), restart coturn, read its log, and put
 the line back.
+
+**Calls fail after the server's public address changed.** coturn and the
+forwarder tell the apps the address the setup saw, and they don't follow a new
+one by themselves, even when DuckDNS or your own dynamic DNS service does. After
+each change of address on a home connection, run `sudo hollow-relay-setup`,
+choose **Change a setting**, then the address.
 
 **SSH password logins stayed on.** The setup turns them off only after a key
 login you confirmed, and the summary says which step didn't happen. Run

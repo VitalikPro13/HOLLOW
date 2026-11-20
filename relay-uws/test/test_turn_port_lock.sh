@@ -93,6 +93,8 @@ sleep 0.5
 
 export TURN_USER=$TURN TURN_PEERS="192.0.2.10 2001:db8::10" TURN_PORTS=49152-65535 \
     FORWARDER_PORTS=40000-40199 FORWARDER_USER=$FWD
+# The boot reservation goes to a sysctl.d of the test's own, never the host's /etc.
+export TURN_LOCK_SYSCTL_DIRS=$work/sysctl.d TURN_LOCK_SYSCTL_FILE=$work/sysctl.d/zz-hollow-turn-ports.conf
 
 echo "turn port lock: before it is loaded"
 reaches $TURN 192.0.2.10 12345
@@ -146,9 +148,42 @@ reserved=$(sysctl -n net.ipv4.ip_local_reserved_ports)
 check "both ranges are reserved from ephemeral ports" \
     "$([[ ",$reserved," == *",40000-40199,"* && ",$reserved," == *",49152-65535,"* ]] && echo 0 || echo 1)"
 
+# the_reservation_holds_from_boot_on (#153)
+check "apply writes the reservation for the next boot" \
+    "$(grep -qx 'net.ipv4.ip_local_reserved_ports = 49152-65535,40000-40199' "$TURN_LOCK_SYSCTL_FILE" && echo 0 || echo 1)"
+
 echo "turn port lock: check"
 bash "$lock" check > "$work/check1" 2>&1
 check "check passes on what apply loaded" $?
+check "and says the ports are reserved from boot on" "$(grep -q 'stay reserved from boot on' "$work/check1" && echo 0 || echo 1)"
+rm -f "$TURN_LOCK_SYSCTL_FILE"
+bash "$lock" check > "$work/check1e" 2>&1
+check "check fails without the boot reservation" \
+    "$([ $? = 1 ] && grep -q 'after a reboot 40000-40199,49152-65535 is reserved only once the lock loads' "$work/check1e" && echo 0 || echo 1)"
+bash "$lock" refresh > /dev/null
+check "a refresh writes it again" "$([ -f "$TURN_LOCK_SYSCTL_FILE" ] && echo 0 || echo 1)"
+check "with no message on a loaded lock" "$([ -z "$(bash "$lock" refresh)" ] && echo 0 || echo 1)"
+# an_operators_own_reservation_survives_boot (#153 review): ranges ours does not cover, in an
+# earlier file and in /etc/sysctl.conf (99-sysctl.conf), stay in what boot keeps.
+printf 'net.ipv4.ip_local_reserved_ports = 8000-8100\n' > "$work/sysctl.d/10-myapp.conf"
+printf 'net.ipv4.ip_local_reserved_ports = 8000-8100,8200-8300\n' > "$work/sysctl.conf"
+ln -s "$work/sysctl.conf" "$work/sysctl.d/99-sysctl.conf"
+bash "$lock" refresh > /dev/null
+check "the boot file joins an operator's ranges to ours" \
+    "$(grep -qx 'net.ipv4.ip_local_reserved_ports = 8000-8100,8200-8300,49152-65535,40000-40199' "$TURN_LOCK_SYSCTL_FILE" && echo 0 || echo 1)"
+check "and check passes with them" "$(bash "$lock" check > "$work/check1h" 2>&1 && echo 0 || echo 1)"
+rm -f "$work/sysctl.d/99-sysctl.conf" "$work/sysctl.conf"
+bash "$lock" refresh > /dev/null
+check "an operator's range they dropped leaves the boot file at the next refresh" \
+    "$(grep -qx 'net.ipv4.ip_local_reserved_ports = 8000-8100,49152-65535,40000-40199' "$TURN_LOCK_SYSCTL_FILE" && echo 0 || echo 1)"
+rm -f "$work/sysctl.d/10-myapp.conf"
+bash "$lock" refresh > /dev/null
+# a_file_after_ours_is_named (#153 review): the one that wins at boot, when it drops ours.
+printf 'net.ipv4.ip_local_reserved_ports = 8000-8100\n' > "$work/sysctl.d/zzz-late.conf"
+bash "$lock" check > "$work/check1f" 2>&1
+check "check fails when a file after ours drops TURN's ports, naming it" \
+    "$([ $? = 1 ] && grep -q "after a reboot 40000-40199,49152-65535 is reserved only once the lock loads.*($work/sysctl.d/zzz-late.conf sets the reserved ports after" "$work/check1f" && echo 0 || echo 1)"
+rm -f "$work/sysctl.d/zzz-late.conf"
 check "check ends with its done line" "$([ "$(tail -n 1 "$work/check1")" = done ] && echo 0 || echo 1)"
 sed 's/priority raw;/priority filter;/' "$lock" > "$work/lock_filter.sh"
 bash "$work/lock_filter.sh" apply > /dev/null
@@ -176,6 +211,23 @@ sleep 0.3
 bash "$lock" check > "$work/check4" 2>&1
 check "check fails on a foreign listener inside coturn's ports" \
     "$([ $? = 1 ] && grep -q '0.0.0.0:51820' "$work/check4" && echo 0 || echo 1)"
+# check_names_a_stray_listener (#153): its program and pid, to restart it by.
+check "and names its program and pid" "$(grep -q "python3 (pid ${pids[-1]}) on 0.0.0.0:51820" "$work/check4" && echo 0 || echo 1)"
+kill "${pids[-1]}"
+# a_listeners_own_name_cannot_pass_for_coturn: ss prints the name a program gives itself
+# before its pid, so a pid written into the name must never count as the socket's owner.
+python3 -I -c '
+import ctypes, socket, sys, time
+ctypes.CDLL(None).prctl(15, sys.argv[1].encode(), 0, 0, 0)
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.bind(("0.0.0.0", 51821))
+time.sleep(30)' "\",pid=${pids[0]}," &
+pids+=($!)
+sleep 0.3
+bash "$lock" check > "$work/check4b" 2>&1
+check "a program named after coturn's pid is still a stray" \
+    "$([ $? = 1 ] && grep -q ' on 0.0.0.0:51821' "$work/check4b" && echo 0 || echo 1)"
+kill "${pids[-1]}"
 
 sysctl -q -w net.ipv4.ip_local_reserved_ports=""
 bash "$lock" check > "$work/check5" 2>&1
@@ -193,6 +245,7 @@ reaches $TURN 192.0.2.10 12345
 check "and TURN reaches every port again" $?
 reserved=$(sysctl -n net.ipv4.ip_local_reserved_ports)
 check "and the reservation is gone" "$([[ $reserved != *49152-65535* ]] && echo 0 || echo 1)"
+check "but not the next boot's, as remove runs at every shutdown" "$([ -f "$TURN_LOCK_SYSCTL_FILE" ] && echo 0 || echo 1)"
 
 if [ "$fail" = 0 ]; then
     echo "pass test_turn_port_lock ($checks checks)"

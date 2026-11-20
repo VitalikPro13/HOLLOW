@@ -28,7 +28,8 @@ total_fail=0
 ssh-keygen -q -t ed25519 -N '' -f "$WORK/key"
 parts=(relay-uws push-sidecar scripts/build_relay_binaries.sh)
 [ -d "$ROOT/rust" ] && parts+=(rust)
-tar -C "$ROOT" --exclude='relay-uws/build' --exclude='*/node_modules' --exclude='.git' \
+# macOS's tar would add ._ files for extended attributes, which the setup's own copy refuses.
+COPYFILE_DISABLE=1 tar -C "$ROOT" --exclude='relay-uws/build' --exclude='*/node_modules' --exclude='.git' \
     --exclude='relay-uws/uWebSockets/fuzzing' --exclude='relay-uws/uSockets/boringssl' \
     --exclude='relay-uws/uSockets/lsquic' --exclude='rust/*/target' -cf "$WORK/src.tar" "${parts[@]}"
 
@@ -90,7 +91,7 @@ adopt_boxes() {
             fi
             image=$dtag opts=(-v /var/lib/docker -v /var/lib/containerd) ;;
         esac
-        start_box "$name" "$image" "${opts[@]}" || { echo "FAIL  the $img box for $sc did not start"; total_fail=1; continue; }
+        start_box "$name" "$image" ${opts[@]+"${opts[@]}"} || { echo "FAIL  the $img box for $sc did not start"; total_fail=1; continue; }
         docker exec -e HOLLOW_INSTALLER_TEST_BOX=1 "$name" bash /src/relay-uws/test/installer/adopt_box_test.sh "$sc" || total_fail=1
         [ "${KEEP:-0}" = 1 ] || docker rm -fv "$name" >/dev/null
     done
@@ -134,7 +135,7 @@ EOF
     dns=()
     [ -n "${BOX_DNS:-}" ] && dns=(--dns "$BOX_DNS")
     docker run -d --name "$name" --privileged --cgroupns=private --tmpfs /run --tmpfs /run/lock \
-        "${dns[@]}" "$tag" >/dev/null || { echo "FAIL  the $img box did not start"; total_fail=1; continue; }
+        ${dns[@]+"${dns[@]}"} "$tag" >/dev/null || { echo "FAIL  the $img box did not start"; total_fail=1; continue; }
     for _ in $(seq 1 30); do
         st=$(docker exec "$name" systemctl is-system-running 2>/dev/null) || true
         case "$st" in running|degraded) break ;; esac

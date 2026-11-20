@@ -1,0 +1,34 @@
+Matching Defaults entries for hollow-relay on box:
+    env_reset, mail_badpass, secure_path=/usr/local/sbin\:/usr/local/bin\:/usr/sbin\:/usr/bin\:/sbin\:/bin\:/snap/bin, use_pty, pwfeedback
+
+User hollow-relay may run the following commands on box:
+
+Sudoers entry:
+    RunAsUsers: root
+    Options: !authenticate
+    Commands:
+	/usr/bin/mintdrivers-remove-live-media
+
+Sudoers entry:
+    RunAsUsers: root
+    Options: !authenticate
+    Commands:
+	/usr/bin/mint-refresh-cache
+
+Sudoers entry:
+    RunAsUsers: root
+    Options: !authenticate
+    Commands:
+	/usr/lib/linuxmint/mintUpdate/synaptic-workaround.py
+
+Sudoers entry:
+    RunAsUsers: root
+    Options: !authenticate
+    Commands:
+	/usr/lib/linuxmint/mintUpdate/dpkg_lock_check.sh
+
+Sudoers entry:
+    RunAsUsers: root
+    Options: !authenticate
+    Commands:
+	/usr/bin/true

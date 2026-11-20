@@ -26,15 +26,213 @@ if [ ${#units[@]} -eq 0 ]; then
     echo "No relay services found under systemd (a Docker setup is checked by its compose file)."
 fi
 
+# Linux Mint's own sudoers.d files let EVERY account run these as root without a password
+# (mintupdate 5.8.8.1 on Mint 21 and 6.1.5.1 on Mint 22: /etc/sudoers.d/mintupdate;
+# mintdrivers 1.8.1 on Mint 22: /etc/sudoers.d/mintdrivers). Each one's source was read, and
+# none runs a command its caller names: mint-refresh-cache updates APT's lists, or with
+# --use-synaptic <window id> starts synaptic with fixed flags; dpkg_lock_check.sh runs fuser
+# on dpkg's lock; synaptic-workaround.py takes only enable|disable and renames root's
+# synaptic.conf; mintdrivers-remove-live-media unmounts /media/mintdrivers and drops its APT
+# source; mintdrivers-load-broadcom-modules swaps the Broadcom wireless modules. They pass
+# only for a unit with NoNewPrivileges=yes, under which sudo cannot raise the service at all.
+MINT_SUDO_TOOLS="/usr/bin/mint-refresh-cache /usr/lib/linuxmint/mintUpdate/dpkg_lock_check.sh
+/usr/lib/linuxmint/mintUpdate/synaptic-workaround.py /usr/bin/mintdrivers-remove-live-media
+/usr/bin/mintdrivers-load-broadcom-modules"
+
+# sudo_rules <`sudo -l -U` output>: the account's rules, one per line, as sudo shows them.
+sudo_rules() { sed -n '/ may run the following commands/,$p' <<<"$1" | sed '1d;s/^[[:space:]]*//;/^$/d'; }
+
+# mint_tool_rule <rule>: true for exactly "(root) NOPASSWD: <one of Mint's tools>".
+mint_tool_rule() {
+    local t
+    for t in $MINT_SUDO_TOOLS; do [ "$1" = "(root) NOPASSWD: $t" ] && return 0; done
+    return 1
+}
+
+# sudo_entry_files <`sudo -ll -U` output> <all|other>: the sudoers files sudo names for the
+# account's rules, every one or only those of rules that are not exactly one of Mint's tools.
+# "?" stands for a rule whose file this sudo does not name (1.9.9 names none), and for any
+# line after the header outside an entry (an LDAP or SSSD role, a format this does not know).
+sudo_entry_files() {
+    awk -v tools="$MINT_SUDO_TOOLS" -v which="$2" '
+    BEGIN { n = split(tools, t, /[ \n]+/); for (i = 1; i <= n; i++) if (t[i] != "") tool[t[i]] = 1 }
+    # Mint-shaped: run as root, no password, one or more of the tools, and nothing else.
+    function flush() {
+        if (inentry && (which == "all" || !mint || !ncmd || !runas || !nopw)) print (file == "" ? "?" : file)
+    }
+    / may run the following commands/ && !inentry { header = 1; next }
+    /^Sudoers entry:/ { flush(); inentry = 1; file = $0; sub(/^Sudoers entry:[ \t]*/, "", file)
+                        mint = 1; ncmd = 0; incmd = 0; runas = 0; nopw = 0; next }
+    /^[ \t]*$/ { next }
+    !inentry { if (header) odd = 1; next }
+    incmd && /^\t/ { c = $0; sub(/^\t+/, "", c); ncmd++; if (!(c in tool)) mint = 0; next }
+    /^    RunAsUsers: / { incmd = 0; if ($0 == "    RunAsUsers: root") runas = 1; else mint = 0; next }
+    /^    Options: / { incmd = 0; if ($0 == "    Options: !authenticate") nopw = 1; else mint = 0; next }
+    /^    Commands:$/ { incmd = 1; next }
+    { mint = 0; incmd = 0 }
+    END { flush(); if (odd || !header) print "?" }' <<<"$1" | sort -u
+}
+
+# sudoers_files <etc dir>: the files sudo reads, /etc/sudoers and sudoers.d but the names
+# it skips (a dot or a trailing ~).
+sudoers_files() {
+    local f
+    echo "$1/sudoers"
+    for f in "$1"/sudoers.d/*; do
+        case ${f##*/} in *.* | *~) continue ;; esac
+        if [ -f "$f" ]; then echo "$f"; fi
+    done
+}
+
+# sudoers_files_for <account> <all|other>: the sudoers files with a rule whose user list
+# names the account, one of its groups or ALL (for a sudo that does not say where a rule
+# came from); with "other", a line that is exactly one of Mint's tools does not count.
+sudoers_files_for() {
+    local who g etc=${SUDOERS_ETC:-/etc} files
+    who=" ALL $1 #$(id -u "$1" 2>/dev/null) "
+    for g in $(id -nG "$1" 2>/dev/null); do who="$who%$g "; done
+    for g in $(id -G "$1" 2>/dev/null); do who="$who%#$g "; done
+    mapfile -t files < <(sudoers_files "$etc")
+    awk -v who="$who" -v tools="$MINT_SUDO_TOOLS" -v which="$2" '
+    BEGIN { n = split(tools, t, /[ \n]+/)
+            for (i = 1; i <= n; i++) if (t[i] != "") { mint["ALL=NOPASSWD:" t[i]] = 1; mint["ALL=(root)NOPASSWD:" t[i]] = 1 } }
+    FNR == 1 { cont = 0 }
+    { buf = cont ? buf $0 : $0 }
+    /\\$/ { sub(/\\$/, "", buf); cont = 1; next }
+    { cont = 0; l = buf; sub(/^[ \t]+/, "", l)
+      if (l == "" || l ~ /^#($|[^0-9])/ || l ~ /^(Defaults|[A-Za-z]+_Alias|@include)/) next
+      split(l, f, /[ \t]+/); rest = substr(l, length(f[1]) + 1); gsub(/[ \t]/, "", rest)
+      if (which == "other" && (rest in mint)) next
+      n = split(f[1], u, ",")
+      for (i = 1; i <= n; i++) if (u[i] != "" && index(who, " " u[i] " ")) { print FILENAME; break } }
+    ' "${files[@]}" 2>/dev/null | sort -u
+}
+
+# risky_default <item>: true for a sudo default that changes what an allowed command runs:
+# the environment it keeps or reads, the PATH its own commands search, its root or directory.
+risky_default() {
+    local v=${1//\\/} stock
+    case "$v" in
+    setenv | '!env_reset' | '!secure_path' | env_keep* | env_check* | env_file* | restricted_env_file* | \
+        runchroot* | runcwd*) return 0 ;;
+    secure_path=*)
+        v=${v#secure_path=}
+        v=${v//\"/}
+        for stock in /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin \
+            /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin; do
+            [ "$v" = "$stock" ] && return 1
+        done
+        return 0 ;;
+    esac
+    return 1
+}
+
+# risky_defaults <`sudo -l -U` output>: "<item><tab><file>" for each risky default that
+# applies to the account. sudo lists the ones that match it; sudo-rs lists none, so then
+# every Defaults line in the sudoers files counts. The file is a guess for sudo's list.
+risky_defaults() {
+    local etc=${SUDOERS_ETC:-/etc} items item f line files
+    mapfile -t files < <(sudoers_files "$etc")
+    if grep -q '^Matching Defaults entries for ' <<<"$1"; then
+        items=$(sed -n '/^Matching Defaults entries for /,/^$/p' <<<"$1" | sed '1d;/^$/d' | tr '\n' ' ')
+        while read -r item; do
+            if [ -z "$item" ] || ! risky_default "$item"; then continue; fi
+            f=$(grep -lE "^[[:space:]]*Defaults.*${item%%[=+-]*}" "${files[@]}" 2>/dev/null | paste -sd' ' -)
+            printf '%s\t%s\n' "$item" "${f:-a sudoers file}"
+        done < <(sed 's/,[[:space:]]*/\n/g;s/^[[:space:]]*//;s/[[:space:]]*$//' <<<"$items")
+    else
+        for f in "${files[@]}"; do
+            while read -r line; do
+                line=${line#Defaults}
+                line=${line#*[[:space:]]}
+                while read -r item; do
+                    if [ -n "$item" ] && risky_default "$item"; then printf '%s\t%s\n' "$item" "$f"; fi
+                done < <(sed 's/,[[:space:]]*/\n/g;s/^[[:space:]]*//;s/[[:space:]]*$//' <<<"$line")
+            done < <(grep -E '^[[:space:]]*Defaults' "$f" 2>/dev/null | sed 's/^[[:space:]]*//')
+        done
+    fi
+}
+
+# account_writes <account> <path>: true when the account may change the path, or create it
+# in the nearest directory that exists.
+account_writes() {
+    local p=$2
+    while [ ! -e "$p" ] && [ "$p" != / ]; do p=${p%/*}; p=${p:-/}; done
+    sudo -u "$1" test -w "$p" 2>/dev/null
+}
+
+# sudo_verdict <unit> <account> <unit's NoNewPrivileges> <`sudo -l -U` output> <`sudo -ll -U` output>:
+# nothing when the account has no sudo rule, "mint <tools>" when every rule is one of Mint's
+# tools under NoNewPrivileges, "unknown <line>" for an answer it cannot read, else
+# "bad <the rules, the files they sit in, and why>".
+sudo_verdict() {
+    local unit=$1 user=$2 nnp=$3 rules others files r which=other defaults="" writes="" t first
+    if ! grep -q ' may run the following commands' <<<"$4"; then
+        grep -q ' is not allowed to run sudo' <<<"$4" && return 0
+        # requiretty, a broken sudoers, an unknown sudo: nothing says the account cannot.
+        first=$(sed -n '/[^[:space:]]/{p;q;}' <<<"$4")
+        echo "unknown ${first:-no output}"
+        return 0
+    fi
+    rules=$(sudo_rules "$4")
+    [ "$nnp" = yes ] || which=all
+    others=$(while read -r r; do
+        if [ -n "$r" ] && { [ "$which" = all ] || ! mint_tool_rule "$r"; }; then echo "$r"; fi
+    done <<<"$rules")
+    # Defaults tied to one command (env_keep and the like) change what a tool does.
+    if grep -q "Command-specific defaults" <<<"$4"; then others="${others:-$rules}"; fi
+    # Both of sudo's views must agree: the long one shows each rule's run-as and options whole.
+    grep -q '^Sudoers entry:' <<<"$5" || others="${others:-$rules}"
+    defaults=$(risky_defaults "$4")
+    for t in $MINT_SUDO_TOOLS; do
+        grep -qxF "(root) NOPASSWD: $t" <<<"$rules" || continue
+        if account_writes "$user" "$t"; then
+            writes="$writes${writes:+, }$t"
+        elif [[ ", $writes, " != *", ${t%/*}, "* ]] && account_writes "$user" "${t%/*}"; then
+            writes="$writes${writes:+, }${t%/*}"
+        fi
+    done
+    files=$(sudo_entry_files "$5" "$which")
+    if [ -z "$others" ] && [ -z "$files" ] && [ -z "$defaults" ] && [ -z "$writes" ] && [ -n "$rules" ]; then
+        echo "mint $(sort -u <<<"${rules//(root) NOPASSWD: /}" | grep -c .)"
+        return 0
+    fi
+    [ -n "$others" ] || others=$rules
+    if [ -z "$files" ] || grep -qx '?' <<<"$files"; then
+        files=$( { grep -vx '?' <<<"$files"; sudoers_files_for "$user" "$which"; } | sed '/^$/d' | sort -u)
+    fi
+    printf 'bad %s (%s)' "$(paste -sd';' - <<<"$others" | sed 's/;/; /g')" \
+        "$(if [ -n "$files" ]; then echo "in $(paste -sd' ' - <<<"$files")"; else echo "sudo -ll -U $user shows where"; fi)"
+    if [ -n "$defaults" ]; then
+        printf ', under the sudo defaults %s, which change what those commands run' \
+            "$(awk -F'\t' '{ printf "%s%s (in %s)", (NR > 1 ? ", " : ""), $1, $2 }' <<<"$defaults")"
+    fi
+    if [ -n "$writes" ]; then printf ', and %s can change %s, so it could replace a tool sudo runs as root' "$user" "$writes"; fi
+    if [ "$nnp" != yes ]; then printf ', and %s does not set NoNewPrivileges=yes, which would keep sudo from raising it' "$unit"; fi
+    echo
+}
+
 echo "Service accounts"
 for u in "${units[@]}"; do
     user=$(systemctl show -p User --value "$u")
+    verdict=""
+    # Without sudo nobody can use it, nor an account that does not exist now (a DynamicUser
+    # unit that is not running). sudo's messages are translated, so they are read in English,
+    # its errors too (requiretty answers with one).
+    if [ -n "$user" ] && [ "$user" != root ] && command -v sudo >/dev/null 2>&1 && id -u "$user" >/dev/null 2>&1; then
+        verdict=$(sudo_verdict "$u" "$user" "$(systemctl show -p NoNewPrivileges --value "$u")" \
+            "$(LC_ALL=C sudo -l -U "$user" 2>&1)" "$(LC_ALL=C sudo -ll -U "$user" 2>/dev/null)")
+    fi
     if [ -z "$user" ] || [ "$user" = root ]; then
         bad "$u runs as root"
-    elif sudo -l -U "$user" 2>/dev/null | grep -q "may run"; then
-        bad "$u runs as $user, who may use sudo"
+    elif [ "${verdict%% *}" = bad ]; then
+        bad "$u runs as $user, who may use sudo: ${verdict#bad }"
+    elif [ "${verdict%% *}" = unknown ]; then
+        bad "$u runs as $user, and sudo -l -U $user gave no answer this check can read (${verdict#unknown }), so it cannot tell whether $user may use sudo"
     elif id -nG "$user" 2>/dev/null | grep -qwE "sudo|admin|wheel|adm|docker|lxd"; then
         bad "$u runs as $user, a member of $(id -nG "$user")"
+    elif [ "${verdict%% *}" = mint ]; then
+        ok "$u runs as $user, which cannot become root. Linux Mint lets every account run ${verdict#mint } of its own maintenance tools with sudo, which this service's sandbox (NoNewPrivileges) blocks"
     else
         ok "$u runs as $user, which cannot become root"
     fi

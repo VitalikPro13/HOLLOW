@@ -1221,6 +1221,7 @@ adopt_paths_lock() {
     echo "$LOCK_BIN"
     echo "$LOCK_ENV"
     echo "$LOCK_DROPIN"
+    echo "$LOCK_SYSCTL"
 }
 
 # Directories and accounts a take over may create, removed again by a rollback.

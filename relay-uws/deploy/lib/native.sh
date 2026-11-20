@@ -1216,6 +1216,8 @@ LOCK_TIMER=hollow-turn-port-lock-refresh.timer
 LOCK_UNITS="hollow-turn-port-lock.service hollow-turn-port-lock-refresh.service hollow-turn-port-lock-refresh.timer"
 LOCK_DROPIN_DIR=$UNIT_DIR/hollow-coturn.service.d
 LOCK_DROPIN=$LOCK_DROPIN_DIR/hollow-port-lock.conf
+# The ports' reservation for every boot, which the lock writes (its SYSCTL_FILE).
+LOCK_SYSCTL=/etc/sysctl.d/zz-hollow-turn-ports.conf
 # coturn-start.sh's --min-port and --max-port.
 TURN_RELAY_PORTS=49152-65535
 
@@ -1279,6 +1281,31 @@ turn_lock_apply() {
     fi
     run systemctl start "$LOCK_TIMER"
     say "  TURN reaches this machine only on ports ${TURN_RELAY_PORTS/-/ to }$( [ "$CFG_FORWARDER" = yes ] && echo " and ${FWD_PORTS/:/ to }")"
+    turn_lock_move_avahi
+}
+
+# avahi-daemon (mDNS discovery, on desktop systems such as Linux Mint) opens two random UDP
+# ports when it starts. One that started before the ports were reserved can hold one among
+# TURN's, where TURN reaches it. Restarting it is harmless (it announces the machine on the
+# local network again a moment later) and puts it on a port outside them; no other
+# program is restarted, check-host names those.
+turn_lock_move_avahi() {
+    local pid line port lo hi r hit=0
+    unit_active avahi-daemon.service || return 0
+    pid=$(systemctl show -p MainPID --value avahi-daemon.service 2>/dev/null)
+    [[ $pid =~ ^[1-9][0-9]*$ ]] || return 0
+    while read -r line; do
+        port=$(awk '{ print $4 }' <<<"$line")
+        port=${port##*:}
+        [[ $port =~ ^[0-9]+$ ]] || continue
+        for r in "$TURN_RELAY_PORTS" $( [ "$CFG_FORWARDER" = yes ] && echo "${FWD_PORTS/:/-}"); do
+            lo=${r%-*} hi=${r#*-}
+            if ((port >= lo && port <= hi)); then hit=1; fi
+        done
+    done < <(ss -Hulnp 2>/dev/null | grep -E ",pid=$pid,fd=[0-9]+\)\)[[:space:]]*$")
+    [ "$hit" = 1 ] || return 0
+    run_ok systemctl restart avahi-daemon.service
+    [ "$DRY_RUN" = 1 ] || say "  Restarted avahi-daemon, which held a port among TURN's"
 }
 
 lock_dropin_remove() {
@@ -1289,7 +1316,7 @@ lock_dropin_remove() {
 
 lock_present() {
     local u
-    [ -e "$LOCK_BIN" ] || [ -e "$LOCK_ENV" ] || [ -e "$LOCK_DROPIN" ] && return 0
+    [ -e "$LOCK_BIN" ] || [ -e "$LOCK_ENV" ] || [ -e "$LOCK_DROPIN" ] || [ -e "$LOCK_SYSCTL" ] && return 0
     for u in $LOCK_UNITS; do [ -e "$UNIT_DIR/$u" ] && return 0; done
     return 1
 }
@@ -1309,7 +1336,7 @@ turn_lock_remove() {
     fi
     lock_dropin_remove
     for u in $LOCK_UNITS; do run rm -f "$UNIT_DIR/$u"; done
-    run rm -f "$LOCK_ENV" "$LOCK_BIN"
+    run rm -f "$LOCK_ENV" "$LOCK_BIN" "$LOCK_SYSCTL"
     run systemctl daemon-reload
 }
 
