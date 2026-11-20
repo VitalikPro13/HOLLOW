@@ -364,6 +364,42 @@ seed_old_report_key() {
     chmod 0600 "$1.key"
 }
 
+# follow_docker_check: the address follower's own unit, in its sandbox, moves a real
+# Docker stack to a new address of this machine (HOL-SEC-214).
+follow_docker_check() {
+    local dir=/usr/local/lib/box-dns new=203.0.113.9 env=/opt/hollow-relay-docker/relay-uws/.env c0 c1 dns_pid
+    install -d -m 0755 "$dir"
+    printf '%s\n' "$new" >"$dir/dns-A"
+    cp /etc/resolv.conf "$W/resolv.conf"
+    setsid python3 -I "$T/fake_dns.py" "$dir" 127.0.0.1 53 >/dev/null 2>&1 &
+    dns_pid=$!
+    echo "nameserver 127.0.0.1" >/etc/resolv.conf
+    ip addr add "$new/32" dev lo
+    c0=$(docker inspect -f '{{.Id}}' hollow-relay-coturn-1 2>/dev/null)
+    systemctl start hollow-address-follow.service
+    eq "the follower's own unit runs to the end against a real Docker" "$(systemctl show -p Result --value hollow-address-follow.service)" success
+    [ "$(systemctl show -p Result --value hollow-address-follow.service)" = success ] || journalctl -u hollow-address-follow --no-pager | tail -n 20
+    eq "the stack's settings take this machine's new address" "$(sed -n 's/^PUBLIC_IP=//p' "$env")" "$new"
+    c1=$(docker inspect -f '{{.Id}}' hollow-relay-coturn-1 2>/dev/null)
+    no_ "coturn's container is recreated" test "$c1" = "$c0"
+    has "with the new address" "$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' hollow-relay-coturn-1 2>/dev/null)" "PUBLIC_IP=$new"
+    eq "and runs" "$(docker inspect -f '{{.State.Status}}' hollow-relay-coturn-1 2>/dev/null)" running
+    has "the lock lets TURN reach it" "$(sed -n 's/^TURN_PEERS=//p' /etc/hollow-relay/turn-port-lock.env)" "$new"
+    eq "the setup's answer stays" "$(sed -n 's/^public_ip=//p' /etc/hollow-relay/install.conf)" 203.0.113.7
+    ip addr del "$new/32" dev lo
+    kill "$dns_pid" 2>/dev/null
+    cat "$W/resolv.conf" >/etc/resolv.conf
+}
+
+# follower_gone: a take over put back leaves no address follower behind.
+follower_gone() {
+    has "the take over had set up the address follower" "$(flat "$W/setup.out")" "Following a new address of $HOST"
+    no_ "its timer is gone" test -e /etc/systemd/system/hollow-address-follow.timer
+    no_ "and its service" test -e /etc/systemd/system/hollow-address-follow.service
+    no_ "and it runs no more" systemctl is-active --quiet hollow-address-follow.timer
+    no_ "and its account is gone" getent passwd hollow-addr
+}
+
 # check-host on the result: the TURN port lock in place, no report key on the disk.
 check_host_after() {
     local c part
@@ -613,6 +649,8 @@ rollback)
     done
     no_ "the account hollow-turn is gone" getent passwd hollow-turn
     no_ "and hollow-relay" getent passwd hollow-relay
+    # adopt_rollback_removes_the_follower
+    follower_gone
     eq "coturn runs as before" "$(unit_user hollow-coturn)" hollow
     yes_ "and runs" systemctl is-active --quiet hollow-coturn
     # The processes, not only their units: each runs the old setup again.
@@ -886,6 +924,8 @@ EOF
         yes_ "within 75 seconds" test $(($(date +%s) - renewed)) -le 75
         eq "without a restart" "$(docker inspect -f '{{.State.Pid}} {{.RestartCount}}' hollow-relay-coturn-1 2>/dev/null)" "$turn_pid 0"
         check_host_after
+        # the_follower_follows_a_real_docker_stack_under_its_unit
+        follow_docker_check
     else
         no_ "the setup failed" test "$rc" = 0
         has "and said it put the old relay back" "$out" "The old relay runs again, as it did before."
@@ -900,6 +940,7 @@ EOF
         eq "the old volume keeps its counts" "$(sha "$data/reports.json")" "$REPORTS_SHA"
         no_ "the port lock the take over added is gone" test -e /etc/systemd/system/hollow-turn-port-lock.service
         no_ "with its rule" nft list table inet hollow_turn
+        follower_gone
     fi
     ;;
 

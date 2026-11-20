@@ -29,10 +29,11 @@ valid_domain() {
     [[ "$d" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]([a-z0-9-]{0,61}[a-z0-9])?$ ]]
 }
 
-# duckdns_update <name> <token> <ip or empty>: prints OK or KO. The URL goes to
-# the download program on stdin, so the token never shows in ps.
+# duckdns_update <name> <token> <ip or empty>: prints OK or KO, and after OK the
+# address DuckDNS recorded on the next line. The URL goes to the download program on
+# stdin, so the token never shows in ps.
 duckdns_update() {
-    printf 'https://www.duckdns.org/update?domains=%s&token=%s&ip=%s\n' "$1" "$2" "$3" |
+    printf 'https://www.duckdns.org/update?domains=%s&token=%s&ip=%s&verbose=true\n' "$1" "$2" "$3" |
         net_get - 20 || printf 'FAILED'
 }
 
@@ -77,12 +78,14 @@ duckdns_check_token() {
 }
 
 # Points the DuckDNS name at this machine, after the plan screen, and waits
-# until public DNS shows it.
+# until DNS shows it. Without a pinned address that is the address DuckDNS saw the
+# update come from, which may differ from the setup's answer once the line got a
+# new one (the address follower moves TURN there).
 duckdns_point_now() {
-    local name=${CFG_HOST%.duckdns.org} resp
+    local name=${CFG_HOST%.duckdns.org} resp want=$CFG_PUBLIC_IP seen
     step "Pointing $CFG_HOST at ${CFG_DUCKDNS_IP:-this machine}"
     if [ "$DRY_RUN" = 1 ]; then
-        say "  would update $CFG_HOST to ${CFG_DUCKDNS_IP:-the address DuckDNS sees} and wait for public DNS to show $CFG_PUBLIC_IP"
+        say "  would update $CFG_HOST to ${CFG_DUCKDNS_IP:-the address DuckDNS sees} and wait for DNS to show it"
         return 0
     fi
     resp=$(duckdns_update "$name" "$CFG_DUCKDNS_TOKEN" "$CFG_DUCKDNS_IP")
@@ -90,25 +93,27 @@ duckdns_point_now() {
     OK*) ;;
     *) die "DuckDNS refused the update for $CFG_HOST. Check the token and the subdomain on your DuckDNS page, then run the setup again." ;;
     esac
-    if dns_points_at "$CFG_HOST" "$CFG_PUBLIC_IP" 180; then
+    seen=$(printf '%s\n' "$resp" | sed -n 2p)
+    if [ -z "$CFG_DUCKDNS_IP" ] && [ "$(ip4_class "$seen")" = public ]; then want=$seen; fi
+    if dns_points_at "$CFG_HOST" "$want" 180; then
         say "  it does"
+        [ "$want" = "$CFG_PUBLIC_IP" ] || say "  DuckDNS sees this machine at $want, not $CFG_PUBLIC_IP. TURN and the forwarder move there once it proves to be this machine."
         return 0
     fi
-    die "$CFG_HOST still points at ${DNS_SEEN:-nothing} after three minutes, not $CFG_PUBLIC_IP. DuckDNS took the update, so public DNS may just be slow. Wait a few minutes and run the setup again."
+    die "$CFG_HOST still points at ${DNS_SEEN:-nothing} after three minutes, not $want. DuckDNS took the update, so DNS may just be slow. Wait a few minutes and run the setup again."
 }
 
-# The A records of <name>, one per line, from public DNS-over-HTTPS resolvers
-# rather than this machine's cache, which may hold an old answer.
+# The A records of <name>, one per line, from this machine's DNS servers asked as
+# DNS (deploy/address-probe.py): never /etc/hosts, where Debian and Ubuntu name the
+# machine itself, and never a cache that may hold an old answer.
 dns_a() {
-    local name=$1 url out
-    for url in "https://cloudflare-dns.com/dns-query?name=$name&type=A" "https://dns.google/resolve?name=$name&type=A"; do
-        out=$(net_get -H 'accept: application/dns-json' "$url" 8) || continue
-        # Only type 1 (A) answers; a CNAME on the way is followed by the resolver.
-        printf '%s' "$out" | grep -oE '"type": ?1, ?"TTL": ?[0-9]+, ?"data": ?"[0-9.]+"' |
-            sed -E 's/.*"data": ?"([0-9.]+)"/\1/'
-        return 0
+    local out a
+    out=$(timeout 12 python3 -I "$DEPLOY/address-probe.py" dns "$1" A 2>/dev/null) || return 0
+    [ "$(head -n 1 <<<"$out")" = rcode=0 ] || return 0
+    tail -n +2 <<<"$out" | head -n 64 | while read -r a; do
+        [ "$(ip4_class "$a")" = invalid ] || printf '%s\n' "$a"
     done
-    getent ahostsv4 "$name" 2>/dev/null | awk '{print $1}' | sort -u
+    return 0
 }
 
 # dns_points_at <name> <ip> <wait seconds>: waits for the name to resolve to the

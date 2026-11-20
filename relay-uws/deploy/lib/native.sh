@@ -864,7 +864,47 @@ duckdns_remove() {
         run_ok systemctl disable --now hollow-duckdns.timer
     fi
     run rm -f "$UNIT_DIR/hollow-duckdns.service" "$UNIT_DIR/hollow-duckdns.timer"
-    run rm -rf "$DDNS_ETC"
+    run rm -rf "$DDNS_ETC" /run/hollow-duckdns
+}
+
+# ---------------------------------------------------------------- the address follower
+
+# A new public address that the relay's name points at, once proven to be this machine,
+# reaches coturn, the TURN port lock and the forwarder (deploy/address-follow.sh,
+# HOL-SEC-214). Both setups, after conf_save: it reads install.conf.
+FOLLOW_UNITS="hollow-address-follow.service hollow-address-follow.timer"
+FOLLOW_TIMER=hollow-address-follow.timer
+FOLLOW_USER=hollow-addr
+
+follow_apply() {
+    local u
+    if ! bash "$DEPLOY/address-follow.sh" wanted "$CFG_ADDRESS" "${CFG_TURN:-no}" "${CFG_FORWARDER:-no}" \
+        "${CFG_PUBLIC_IP:-}" "${CFG_PUBLIC_IP_FIXED:-no}"; then
+        follow_remove
+        return 0
+    fi
+    step "Following a new address of $CFG_HOST"
+    # Its lookups and its TURN proof (deploy/address-probe.py).
+    apt_install python3 || die "python3, which the address follower needs, could not be installed."
+    ensure_account "$FOLLOW_USER"
+    for u in $FOLLOW_UNITS; do put_file "$UNIT_DIR/$u" 0644 root root <"$DEPLOY/$u"; done
+    run systemctl daemon-reload
+    run systemctl enable --quiet --now "$FOLLOW_TIMER"
+    say "  when $CFG_HOST points at a new address that proves to be this machine, TURN and the forwarder take it within minutes"
+}
+
+follow_remove() {
+    local u gone=0
+    if unit_exists "$FOLLOW_TIMER"; then run_ok systemctl disable --now "$FOLLOW_TIMER"; fi
+    for u in $FOLLOW_UNITS; do
+        [ -e "$UNIT_DIR/$u" ] || continue
+        run rm -f "$UNIT_DIR/$u"
+        gone=1
+    done
+    [ "$gone" = 1 ] && run systemctl daemon-reload
+    if getent passwd "$FOLLOW_USER" >/dev/null; then run_ok userdel "$FOLLOW_USER"; fi
+    if getent group "$FOLLOW_USER" >/dev/null; then run_ok groupdel "$FOLLOW_USER"; fi
+    return 0
 }
 
 # ---------------------------------------------------------------- certificate
@@ -1053,7 +1093,7 @@ resolver_allow() {
 
 render_forwarder_toml() {
     sed -e "s|^relay_domain = .*|relay_domain = \"$CFG_HOST\"|" \
-        -e "s|^public_ip = .*|public_ip = \"$CFG_PUBLIC_IP\"|" \
+        -e "s|^public_ip = .*|public_ip = \"$(turn_public_ip)\"|" \
         -e '/^# install.sh writes this file/d' \
         "$DEPLOY/forwarder.toml.example"
 }
@@ -1162,8 +1202,8 @@ relay_settings() {
 render_turn_env() {
     echo "# Written by install.sh. Root only."
     printf 'TURN_SECRET=%s\n' "$TURN_SECRET_VALUE"
-    printf 'PUBLIC_IP=%s\n' "$CFG_PUBLIC_IP"
-    printf 'PUBLIC_IPV6=%s\n' "$CFG_PUBLIC_IPV6"
+    printf 'PUBLIC_IP=%s\n' "$(turn_public_ip)"
+    printf 'PUBLIC_IPV6=%s\n' "$(turn_public_ipv6)"
     # The unit's sandbox refuses the capability call ip(8) makes, so coturn
     # cannot look its own address up behind NAT.
     printf 'LOCAL_IP=%s\n' "${PF_LOCAL_IP:-}"
@@ -1225,12 +1265,14 @@ TURN_RELAY_PORTS=49152-65535
 # finds the lock and coturn disagree: the public IPv4 (this machine's own when
 # none is set), this machine's own one behind NAT, and the public IPv6.
 turn_lock_peers() {
-    local own=${PF_LOCAL_IP:-} ip
+    local own=${PF_LOCAL_IP:-} ip v6
     [ -n "$own" ] || own=$(local_ipv4)
-    ip=${CFG_PUBLIC_IP:-$own}
+    ip=$(turn_public_ip)
+    v6=$(turn_public_ipv6)
+    ip=${ip:-$own}
     printf '%s' "$ip"
     if [ -n "$own" ] && [ "$own" != "$ip" ]; then printf ' %s' "$own"; fi
-    if [ -n "${CFG_PUBLIC_IPV6:-}" ]; then printf ' %s' "$CFG_PUBLIC_IPV6"; fi
+    if [ -n "$v6" ]; then printf ' %s' "$v6"; fi
     return 0
 }
 
@@ -1731,6 +1773,7 @@ native_apply() {
         run_ok systemctl try-restart hollow-coturn
     fi
     conf_save
+    follow_apply
     step "Checking the relay answers"
     wait_for_relay || die "the relay did not answer on 127.0.0.1. See: journalctl -u hollow-relay -e"
     if [ "$DRY_RUN" = 0 ]; then
@@ -1750,6 +1793,7 @@ native_uninstall() {
         unit_exists "$u" && run_ok systemctl disable --now "$u"
         run rm -f "$UNIT_DIR/$u" "$UNIT_DIR/$u.service"
     done
+    follow_remove
     turn_lock_remove
     cake_remove
     run systemctl daemon-reload

@@ -91,7 +91,7 @@ compose_turn_user() {
 }
 
 # The .env lines the setup writes; every other line is the operator's.
-DOCKER_ENV_KEYS="RELAY_HOST DUCKDNS_TOKEN DUCKDNS_IP TURN_SECRET COMPOSE_PROFILES PUBLIC_IP PUBLIC_IPV6 LOCAL_IP
+DOCKER_ENV_KEYS="RELAY_HOST DUCKDNS_TOKEN DUCKDNS_IP DUCKDNS_SEEN_DIR TURN_SECRET COMPOSE_PROFILES PUBLIC_IP PUBLIC_IPV6 LOCAL_IP
 HOLLOW_MEM_LIMIT OWN_CERT_DIR SESSION_GRACE_SECS HOLLOW_CONN_RATE_EXEMPT CERTBOT_STAGING FORWARDER_PEER_ID
 FWD_LICENSE_KEY PUBLIC_STATS HOLLOW_CAKE HOLLOW_CAKE_MBIT $LIMIT_KEYS"
 
@@ -122,10 +122,11 @@ docker_env() {
         printf 'RELAY_HOST=%s\n' "$CFG_HOST"
         printf 'DUCKDNS_TOKEN=%s\n' "$CFG_DUCKDNS_TOKEN"
         printf 'DUCKDNS_IP=%s\n' "$CFG_DUCKDNS_IP"
+        if [ "${CFG_ADDRESS:-}" = duckdns ]; then echo "DUCKDNS_SEEN_DIR=/run/hollow-duckdns"; else echo "DUCKDNS_SEEN_DIR="; fi
         printf 'TURN_SECRET=%s\n' "$turn_secret"
         printf 'COMPOSE_PROFILES=%s\n' "${profiles[*]}"
-        printf 'PUBLIC_IP=%s\n' "$CFG_PUBLIC_IP"
-        printf 'PUBLIC_IPV6=%s\n' "$CFG_PUBLIC_IPV6"
+        printf 'PUBLIC_IP=%s\n' "$(turn_public_ip)"
+        printf 'PUBLIC_IPV6=%s\n' "$(turn_public_ipv6)"
         printf 'LOCAL_IP=%s\n' "${PF_LOCAL_IP:-}"
         printf 'HOLLOW_MEM_LIMIT=%sm\n' "$(mem_mb)"
         printf 'OWN_CERT_DIR=%s\n' "$own"
@@ -207,6 +208,7 @@ docker_apply() {
     if [ "$DRY_RUN" = 1 ]; then
         say "  would run docker compose up -d --build (profiles: turn=$CFG_TURN forwarder=$CFG_FORWARDER)"
         conf_save
+        follow_apply
         return 0
     fi
     step "Building and starting the containers"
@@ -256,6 +258,7 @@ docker_apply() {
         run_ok compose rm -sf forwarder
     fi
     conf_save
+    follow_apply
     step "Checking the relay answers"
     wait_for_relay || die "the relay did not answer on 127.0.0.1. See: docker compose -p $COMPOSE_PROJECT logs relay"
     say "  /health: $(local_get /health)"
@@ -274,6 +277,7 @@ docker_uninstall() {
             run_logged compose --profile turn --profile forwarder down -v --remove-orphans || true
         fi
     fi
+    follow_remove
     turn_lock_remove
     cake_remove
     if [ "$(systemctl show -p LoadState --value coturn 2>/dev/null)" = masked ]; then run_ok systemctl unmask coturn; fi

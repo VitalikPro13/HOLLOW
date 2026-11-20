@@ -1144,6 +1144,8 @@ adopt_public_ip() {
     [ -n "$OLD_DUCKDNS_IP" ] && CFG_DUCKDNS_IP=$OLD_DUCKDNS_IP
     [ "$CFG_PUBLIC_IP_FIXED" = yes ] && [ -z "$CFG_DUCKDNS_IP" ] && CFG_DUCKDNS_IP=$CFG_PUBLIC_IP
     [ -n "$OLD_PUBLIC_IPV6" ] && CFG_PUBLIC_IPV6=$OLD_PUBLIC_IPV6
+    # shellcheck disable=SC2034 # read by conf_save and the renderers
+    CFG_TURN_PUBLIC_IP="" CFG_TURN_PUBLIC_IPV6=""
     return 0
 }
 
@@ -1199,6 +1201,7 @@ adopt_paths_native() {
     echo /var/lib/hollow-relay/reports.json
     echo /var/lib/hollow-relay/reports.json.key
     adopt_paths_lock
+    adopt_paths_follow
     if [ -n "$OLD_FWD_DATA" ]; then echo "$OLD_FWD_DATA/forwarder.key"; echo "$OLD_FWD_DATA/forwarder.db"; fi
     echo /var/lib/hollow-forwarder/forwarder.key
     echo /var/lib/hollow-forwarder/forwarder.db
@@ -1212,6 +1215,7 @@ adopt_paths_docker() {
     [ -n "$OLD_BOOT_UNIT" ] && adopt_prop "$OLD_BOOT_UNIT" FragmentPath && echo
     echo "$CONF_FILE"
     adopt_paths_lock
+    adopt_paths_follow
 }
 
 # The TURN port lock both setups add (turn_lock_apply in native.sh).
@@ -1224,9 +1228,15 @@ adopt_paths_lock() {
     echo "$LOCK_SYSCTL"
 }
 
+# The address follower both setups add (follow_apply in native.sh).
+adopt_paths_follow() {
+    local u
+    for u in $FOLLOW_UNITS; do echo "$UNIT_DIR/$u"; done
+}
+
 # Directories and accounts a take over may create, removed again by a rollback.
 ADOPT_DIRS="/etc/systemd/system/hollow-coturn.service.d /etc/hollow-relay /var/lib/hollow-relay /etc/hollow-turn /etc/hollow-push /etc/hollow-forwarder /etc/hollow-duckdns /opt/hollow-push /var/lib/hollow-forwarder /usr/local/lib/hollow-relay /usr/local/lib/hollow-relay/installer /opt/hollow-relay-docker"
-ADOPT_ACCOUNTS="hollow-relay hollow-turn hollow-push hollow-fwd hollow-ddns hollow-build"
+ADOPT_ACCOUNTS="hollow-relay hollow-turn hollow-push hollow-fwd hollow-ddns hollow-build hollow-addr"
 ADOPT_LINKS="/usr/local/sbin/hollow-relay-setup"
 
 # adopt_backup <path...>: copies each into $ADOPT_BACKUP and records how to
@@ -1390,6 +1400,9 @@ adopt_rollback() {
         systemctl disable --now "$LOCK_TIMER" "$LOCK_UNIT" >/dev/null 2>&1
         [ -x "$LOCK_BIN" ] && env TURN_PORTS="$(kv_get "$LOCK_ENV" TURN_PORTS)" \
             FORWARDER_PORTS="$(kv_get "$LOCK_ENV" FORWARDER_PORTS)" "$LOCK_BIN" remove >/dev/null 2>&1
+    fi
+    if grep -qx "absent - - - $UNIT_DIR/$FOLLOW_TIMER" "$ADOPT_BACKUP/manifest" 2>/dev/null; then
+        systemctl disable --now "$FOLLOW_TIMER" >/dev/null 2>&1
     fi
     if [ "$ADOPT_KIND" = docker ]; then
         if [ -f "$STACK_DIR/docker-compose.yml" ]; then

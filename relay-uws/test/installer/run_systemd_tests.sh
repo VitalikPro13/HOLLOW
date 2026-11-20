@@ -1,7 +1,8 @@
 #!/bin/bash
 # The installer under a real systemd: one throwaway systemd container per
-# image runs run_tests.sh and systemd_box_test.sh, and then this side checks
-# that a new SSH login still gets through the box's firewall. Needs Docker;
+# image runs run_tests.sh, systemd_box_test.sh and address_follow_box_test.sh,
+# and then this side checks that a new SSH login still gets through the box's
+# firewall. Needs Docker;
 # changes nothing on this machine but its own containers and images.
 #
 #   bash relay-uws/test/installer/run_systemd_tests.sh [image ...]
@@ -151,6 +152,8 @@ EOF
     echo "--- systemd_box_test.sh"
     docker exec -e HOLLOW_INSTALLER_TEST_BOX=1 -e BOX_BUILD_RELAY="${BOX_BUILD_RELAY:-1}" "$name" \
         bash /src/relay-uws/test/installer/systemd_box_test.sh || total_fail=1
+    echo "--- address_follow_box_test.sh"
+    docker exec -e HOLLOW_INSTALLER_TEST_BOX=1 "$name" bash /src/relay-uws/test/installer/address_follow_box_test.sh || total_fail=1
 
     echo "--- from outside the box"
     ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$name")

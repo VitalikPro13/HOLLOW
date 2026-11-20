@@ -12,6 +12,12 @@ User=hollow-ddns
 Group=hollow-ddns
 EnvironmentFile=/etc/hollow-duckdns/duckdns.env
 Environment=DUCKDNS_ONCE=1
+# Where DuckDNS saw the update come from, for hollow-address-follow: in RAM,
+# readable by root, which the follower runs as.
+Environment=DUCKDNS_SEEN_DIR=/run/hollow-duckdns
+RuntimeDirectory=hollow-duckdns
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
 # As root, before the sandbox: puts the setup's copy back if an update of it
 # was cut short, so the script below is there.
 ExecStartPre=-+/usr/local/sbin/hollow-relay-setup --repair

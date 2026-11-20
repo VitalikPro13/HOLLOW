@@ -4,7 +4,7 @@
 # uninstall). Sourced by install.sh.
 
 CONF_FILE=/etc/hollow-relay/install.conf
-CONF_KEYS="mode binaries address host duckdns_name public_ip public_ip_fixed public_ipv6 staging
+CONF_KEYS="mode binaries address host duckdns_name public_ip public_ip_fixed public_ipv6 turn_public_ip turn_public_ipv6 staging
 turn push forwarder members_only member_keys grace_secs public_stats cake cake_mbit cake_dev
 conn_limit_ipv4 conn_limit_ipv6 conn_rate_ipv4 conn_rate_ipv6 login_window_per_block login_window_total
 connected_limit breaker_mode"
@@ -31,6 +31,8 @@ conf_load() {
     done
     CFG_DUCKDNS_IP=""
     [ "$CFG_PUBLIC_IP_FIXED" = yes ] && CFG_DUCKDNS_IP=$CFG_PUBLIC_IP
+    if [ "$(ip4_class "${CFG_TURN_PUBLIC_IP:-x}")" = invalid ]; then CFG_TURN_PUBLIC_IP="" CFG_TURN_PUBLIC_IPV6=""; fi
+    [ "$(ip6_class "${CFG_TURN_PUBLIC_IPV6:-x}")" != invalid ] || CFG_TURN_PUBLIC_IPV6=""
     if [ "$CFG_MODE" = docker ]; then
         CFG_DUCKDNS_TOKEN=$(kv_get "$STACK_DIR/.env" DUCKDNS_TOKEN)
     else
@@ -51,6 +53,12 @@ conf_load() {
         limit_ok "$k" "${!v}" || printf -v "$v" '%s' ""
     done
 }
+
+# The public addresses TURN and the forwarder use: the address follower's once it moved
+# them (deploy/address-follow.sh, HOL-SEC-214), else the setup's answer. DuckDNS and the
+# setup's own checks keep using the answer.
+turn_public_ip() { if [ -n "${CFG_TURN_PUBLIC_IP:-}" ]; then printf '%s' "$CFG_TURN_PUBLIC_IP"; else printf '%s' "${CFG_PUBLIC_IP:-}"; fi; }
+turn_public_ipv6() { if [ -n "${CFG_TURN_PUBLIC_IP:-}" ]; then printf '%s' "${CFG_TURN_PUBLIC_IPV6:-}"; else printf '%s' "${CFG_PUBLIC_IPV6:-}"; fi; }
 
 svc_state() {
     local s

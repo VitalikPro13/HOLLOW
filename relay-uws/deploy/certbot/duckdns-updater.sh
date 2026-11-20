@@ -23,11 +23,26 @@ if [ -z "${DUCKDNS_TOKEN:-}" ]; then
     exit 0
 fi
 
+# The address DuckDNS saw the update come from (its verbose answer's second line),
+# kept in RAM for the address follower as evidence that this machine moved
+# (deploy/address-follow.sh, HOL-SEC-214). Only while DuckDNS records that address,
+# not one DUCKDNS_IP pins.
+note_seen() {
+    [ -n "${DUCKDNS_SEEN_DIR:-}" ] && [ -d "$DUCKDNS_SEEN_DIR" ] || return 0
+    seen=$(printf '%s\n' "$1" | sed -n 2p)
+    if [ -n "${DUCKDNS_IP:-}" ] || ! printf '%s\n' "$seen" | grep -Eq '^[0-9]{1,3}(\.[0-9]{1,3}){3}$'; then
+        rm -f "$DUCKDNS_SEEN_DIR/seen" || true
+        return 0
+    fi
+    { printf '%s\n' "$seen" >"$DUCKDNS_SEEN_DIR/seen.new" && chmod 0644 "$DUCKDNS_SEEN_DIR/seen.new" &&
+        mv -f "$DUCKDNS_SEEN_DIR/seen.new" "$DUCKDNS_SEEN_DIR/seen"; } || rm -f "$DUCKDNS_SEEN_DIR/seen.new" || true
+}
+
 name=${RELAY_HOST%.duckdns.org}
 while :; do
-    resp=$(http_get "https://www.duckdns.org/update?domains=$name&token=$DUCKDNS_TOKEN&ip=${DUCKDNS_IP:-}" || echo FAILED)
+    resp=$(http_get "https://www.duckdns.org/update?domains=$name&token=$DUCKDNS_TOKEN&ip=${DUCKDNS_IP:-}&verbose=true" || echo FAILED)
     case "$resp" in
-    OK*) ok=1 ;;
+    OK*) ok=1; note_seen "$resp" ;;
     *) ok=0; echo "DuckDNS update failed. Check DUCKDNS_TOKEN and the subdomain name." >&2 ;;
     esac
     if [ "${DUCKDNS_ONCE:-}" = 1 ]; then

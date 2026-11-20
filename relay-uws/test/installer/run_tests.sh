@@ -1546,7 +1546,7 @@ t_duckdns() {
     CFG_HOST=myrelay.duckdns.org CFG_DUCKDNS_TOKEN=a1b2c3d4-0000-1111-2222-333344445555 CFG_DUCKDNS_IP="" CFG_PUBLIC_IP=203.0.113.7 DRY_RUN=0
     duckdns_setup >/dev/null
     has "the apply step points the name" "$(cat "$FAKE_CURL_CFG")" "update?domains=myrelay&token="
-    has "at the address DuckDNS sees" "$(cat "$FAKE_CURL_CFG")" "&ip=\""
+    has "at the address DuckDNS sees" "$(cat "$FAKE_CURL_CFG")" "&ip=&verbose=true\""
 }
 in_sub t_duckdns
 lacks "the token question never moves the record" "$(sed -n '/^ask_duckdns()/,/^}/p' "$DEPLOY/lib/questions.sh")" "duckdns_update"

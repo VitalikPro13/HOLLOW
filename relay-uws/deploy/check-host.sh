@@ -678,6 +678,23 @@ for pid in $turn_pids; do
     fi
 done
 
+# The public address TURN and the forwarder use against where the relay's name points, and
+# the follower that keeps them together (deploy/address-follow.sh, HOL-SEC-214).
+if [ -r /etc/hollow-relay/install.conf ]; then
+    echo "Public address"
+    follow_out=$(bash "$(dirname "$0")/address-follow.sh" check 2>&1)
+    while read -r line; do
+        case "$line" in
+            "ok "*) ok "${line#ok    }" ;;
+            "FAIL "*) bad "${line#FAIL  }" ;;
+            "skip "*) echo "  $line" ;;
+            done) ;;
+            ?*) bad "$line" ;;
+        esac
+    done <<<"$follow_out"
+    [ "$(tail -n 1 <<<"$follow_out")" = "done" ] || bad "the public address check stopped before its end"
+fi
+
 if command -v docker >/dev/null 2>&1; then
     hollow_cids=$(docker ps -q --filter label=com.docker.compose.service 2>/dev/null | while read -r c; do
         docker inspect -f '{{index .Config.Labels "com.docker.compose.project.config_files"}} {{.ID}}' "$c" 2>/dev/null

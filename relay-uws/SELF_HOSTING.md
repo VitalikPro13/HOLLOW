@@ -64,17 +64,54 @@ three choices. The setup asks which one you want.
 offers and add a subdomain. You get a name like `myrelay.duckdns.org` and a
 token, a long code at the top of the page. The setup keeps the name pointing at
 your server, so if the server ever gets a new IP address, nobody has to type
-anything new. The certificate comes through DNS, so port 80 stays closed.
+anything new, and calls follow it too (see [A new address](#a-new-address)). The
+certificate comes through DNS, so port 80 stays closed.
 
 **The server's bare IP address.** Nothing to sign up for. Port 80 has to stay
 open, because that is how Let's Encrypt checks an IP address. The certificate
-lasts six days and renews on its own. If the server's address ever changes,
-every member has to type the new one by hand.
+lasts six days and renews on its own. A bare IP address only works if your
+provider gives you a fixed address. If it changes, use DuckDNS or your own domain,
+because every member would have to type the new address by hand.
 
 **A domain you own.** Point the domain's A record at your server before you run
-the setup. Port 80 has to stay open for the certificate.
+the setup. Port 80 has to stay open for the certificate. If your router or a
+dynamic DNS service keeps the record current, calls follow a new address too.
 
 The relay always listens on port 443, so the address never carries a port.
+
+### A new address
+
+TURN (for calls) and the media forwarder tell the apps the server's public
+address. With a DuckDNS name or your own domain, the setup checks every five
+minutes where the name points. It asks the server's own DNS servers, never
+`/etc/hosts` and never a public resolver. When the name points somewhere new,
+TURN and the forwarder move there once the new address proves to be this
+server: the setup connects to it, and the far end has to answer with your
+relay's own certificate key and with your TURN server's secret. A DNS answer
+alone never moves them, so a forged one cannot send TURN traffic to someone
+else's machine.
+
+Some home routers can't connect from inside the network to their own public
+address, so the check can't run from the server. Then the setup takes nothing
+new. It stops using the old address, which someone else may have by then, only
+when every check for half an hour agrees: the server no longer has the old
+address, your relay no longer answers there, DNS keeps naming the same new
+address, and for a DuckDNS name DuckDNS itself saw the server at that address.
+From then on calls that need TURN fail until you confirm the new address: run
+`sudo hollow-relay-setup`, choose **Change a setting**, then the address. The
+setup's check names both addresses (see [Check it](#check-it)).
+
+If your router or a Pi-hole answers your relay's name with a LAN address for
+machines at home, the setup ignores those answers and changes nothing, even
+after the public address changes. Then confirm a new address yourself the same
+way.
+
+The setup manages these addresses itself, in `turn.env`, `turn-port-lock.env`,
+`forwarder.toml` and the Docker setup's `.env`, so it puts back any hand edit of
+them within five minutes. To set an address, use **Change a setting**.
+
+A relay only your home network uses, at a LAN address you typed, isn't
+followed. Give that machine a fixed address in your router instead.
 
 ## Prepare a server
 
@@ -674,6 +711,12 @@ one. `FORWARDER_PORTS` stays empty until you add the forwarder in step 9, then
 coturn from starting without the lock. After you change an address or a range,
 run `sudo systemctl restart hollow-turn-port-lock`.
 
+Addresses set by hand stay as you set them. If the server's public address
+changes, edit `turn.env`, `turn-port-lock.env` and `forwarder.toml` again and
+restart coturn, the lock and the forwarder. The setup can take over a relay set
+up by hand (see [Already running a relay?](#already-running-a-relay)), and then
+it follows a new address for you.
+
 **8. Push for Android.** The push sender needs Node.js 22 or newer, from
 [NodeSource](https://github.com/nodesource/distributions) or
 [nodejs.org](https://nodejs.org), since the distribution packages are usually
@@ -1068,8 +1111,8 @@ tells the app what this relay offers:
 If both answer without a certificate warning, your relay is live.
 
 On the server, the host checks look at each service's account, who can read its
-secrets, how tight its sandbox is, whether anything could reach the disk, and
-SSH. They change nothing. The setup runs them at the end and from
+secrets, how tight its sandbox is, whether anything could reach the disk, whether
+TURN and the forwarder use the address your relay's name points at, and SSH. They change nothing. The setup runs them at the end and from
 **Check the machine again**. To run them yourself:
 
 ```bash
@@ -1200,11 +1243,19 @@ complains about, remove the `--no-stdout-log` line from
 `/usr/local/lib/hollow-relay/installer`), restart coturn, read its log, and put
 the line back.
 
-**Calls fail after the server's public address changed.** coturn and the
-forwarder tell the apps the address the setup saw, and they don't follow a new
-one by themselves, even when DuckDNS or your own dynamic DNS service does. After
-each change of address on a home connection, run `sudo hollow-relay-setup`,
-choose **Change a setting**, then the address.
+**Calls fail after the server's public address changed.** With a DuckDNS name or
+your own domain, TURN and the forwarder follow a new address within minutes, once
+it proves to be this server (see [A new address](#a-new-address)). If they don't,
+run `sudo bash /usr/local/lib/hollow-relay/installer/deploy/check-host.sh` and
+read its **Public address** lines, which name the address TURN uses and where
+your name points. `sudo journalctl -u hollow-address-follow` says why a new
+address wasn't taken. The usual reasons: a router that can't connect to its own
+public address from inside, a router or Pi-hole that answers your name with a
+LAN address, or a name that points at a proxy in front of the server rather than
+at the server itself. Then run `sudo hollow-relay-setup`, choose
+**Change a setting**, then the address. With a bare IP address nothing follows,
+so members have to type the new address. If you set up Docker by hand, put the
+new address in `PUBLIC_IP` in `.env` and run `docker compose up -d`.
 
 **SSH password logins stayed on.** The setup turns them off only after a key
 login you confirmed, and the summary says which step didn't happen. Run
@@ -1241,7 +1292,7 @@ own firewall in front of the server, open them there too.
 | Report counts and their key | `/var/lib/hollow-relay/` |
 | The forwarder's identity | `/var/lib/hollow-forwarder/` |
 | The push sender | `/opt/hollow-push/` |
-| Services | `hollow-relay`, `hollow-coturn`, `hollow-push`, `hollow-forwarder`, `hollow-duckdns.timer` |
+| Services | `hollow-relay`, `hollow-coturn`, `hollow-push`, `hollow-forwarder`, `hollow-duckdns.timer`, `hollow-address-follow.timer` |
 | The Docker setup | `/opt/hollow-relay-docker`, compose project `hollow-relay` |
 
 Every file that holds a secret can be read by root alone, or by root and the one

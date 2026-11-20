@@ -1,0 +1,54 @@
+# Follows a new public address of this machine into coturn's settings, the TURN
+# port lock's and the media forwarder's, once the address proves to be this
+# machine (deploy/address-follow.sh says how). For a relay set up by install.sh
+# with a DuckDNS name or a domain; run every five minutes by
+# hollow-address-follow.timer.
+# As root, because those settings are root's and the services restart; the
+# sandbox keeps it to them, and its lookups and handshakes run as hollow-addr.
+# check-host.sh checks these lines.
+[Unit]
+Description=Follow the Hollow relay's public address
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# As root, before the sandbox: puts the setup's copy back if an update of it
+# was cut short, so the script below is there.
+ExecStartPre=-+/usr/local/sbin/hollow-relay-setup --repair
+ExecStart=/bin/bash /usr/local/lib/hollow-relay/installer/deploy/address-follow.sh run
+SyslogIdentifier=hollow-address
+TimeoutStartSec=5min
+# Its stamps (the last change, an address it could not prove) stay in RAM.
+RuntimeDirectory=hollow-address
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+UMask=0077
+LimitCORE=0
+MemorySwapMax=0
+
+CapabilityBoundingSet=CAP_CHOWN CAP_SETUID CAP_SETGID
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=-/etc/hollow-relay -/etc/hollow-turn -/etc/hollow-forwarder -/opt/hollow-relay-docker/relay-uws
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateIPC=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+RemoveIPC=yes
+InaccessiblePaths=-/etc/letsencrypt -/etc/hollow-push -/etc/hollow-duckdns -/var/lib/hollow-relay -/var/lib/hollow-forwarder -/etc/turnserver.conf

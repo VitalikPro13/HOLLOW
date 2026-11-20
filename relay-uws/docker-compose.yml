@@ -52,6 +52,9 @@ services:
     env_file: .env
     volumes:
       - ./deploy/certbot:/hooks:ro
+      # Where DuckDNS saw the update come from, for the setup's address follower:
+      # the host's RAM when .env sets DUCKDNS_SEEN_DIR, else an unused volume.
+      - ${DUCKDNS_SEEN_DIR:-duckdns-seen}:/run/hollow-duckdns
     logging:
       driver: journald
       options:
@@ -234,3 +237,4 @@ volumes:
   certs:
   data:
   fwd-data:
+  duckdns-seen:

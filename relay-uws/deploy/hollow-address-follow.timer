@@ -1,0 +1,9 @@
+[Unit]
+Description=Follow the Hollow relay's public address every five minutes
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=5min
+
+[Install]
+WantedBy=timers.target

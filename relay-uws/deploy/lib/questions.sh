@@ -84,6 +84,9 @@ ask_public_ip() {
     fi
     CFG_DUCKDNS_IP=""
     [ "$CFG_PUBLIC_IP_FIXED" = yes ] && CFG_DUCKDNS_IP=$CFG_PUBLIC_IP
+    # A new answer replaces whatever the address follower moved TURN to.
+    # shellcheck disable=SC2034 # read by conf_save and the renderers
+    CFG_TURN_PUBLIC_IP="" CFG_TURN_PUBLIC_IPV6=""
     return 0
 }
 
@@ -134,7 +137,9 @@ For a domain you own, point its A record at $CFG_PUBLIC_IP first. Port 80 has to
     case "$CFG_ADDRESS" in
     duckdns) ask_duckdns ;;
     ip)
-        ask_valid ip "The IP address" "The relay's address will be this IPv4 address. Press Enter to use the one the internet sees." \
+        ask_valid ip "The IP address" "The relay's address will be this IPv4 address. Press Enter to use the one the internet sees.
+
+A bare IP address only works if your provider gives you a fixed address. If it changes, use DuckDNS or your own domain." \
             "$CFG_PUBLIC_IP" is_public_ip4 "Let's Encrypt certifies only a public IPv4 address, not a private one such as 192.168.1.20."
         CFG_HOST=$UI_REPLY ;;
     domain)
