@@ -10,6 +10,35 @@ final relayDeniedServersProvider =
 final serverRelayDeniedProvider = Provider.family<bool, String>((ref, serverId) =>
     ref.watch(relayDeniedServersProvider).contains(serverId.toLowerCase()));
 
+/// Where a server lives when it is not the relay we are on (HOL-SEC-211).
+typedef ServerElsewhere = ({String relay, bool owned});
+
+/// Servers that live on another relay, by lowercase id. Nothing for them is
+/// sent from here until the person switches.
+final relayElsewhereServersProvider =
+    StateProvider<Map<String, ServerElsewhere>>(
+        (ref) => const <String, ServerElsewhere>{});
+
+/// Where [serverId] lives when it is not on our relay, else null.
+final serverElsewhereProvider =
+    Provider.family<ServerElsewhere?, String>((ref, serverId) =>
+        ref.watch(relayElsewhereServersProvider)[serverId.toLowerCase()]);
+
+/// Where a server on another relay keeps its composer.
+const String kServerElsewhereText = 'This server lives on another relay.';
+
+/// The same for a server the person owns, whose own device is elsewhere.
+const String kOwnServerElsewhereText =
+    'Your server lives on another relay. Switch back to use it.';
+
+/// Why a voice room in such a server does not open.
+const String kVoiceElsewhereText =
+    'This server lives on another relay. Switch relays to join its voice rooms.';
+
+/// Under the relay switch in Settings, for a person who owns servers.
+String ownedServersStayText(String current) =>
+    'Servers you own stay on $current. You can\'t use them until you switch back.';
+
 /// The relay refuses our login: `account_denied` or `network_denied`, null when
 /// it does not (or we do not know yet).
 final relayLoginDenialProvider = StateProvider<String?>((ref) => null);

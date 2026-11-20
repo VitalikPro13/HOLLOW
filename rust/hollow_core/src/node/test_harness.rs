@@ -329,6 +329,8 @@ fn cmd_kind(cmd: &WsCommand) -> &'static str {
 
 #[derive(Default)]
 struct RelayInner {
+    /// The domain this relay serves, which its nodes dial and ring control names.
+    domain: String,
     /// device_peer_id -> connection (event sink + online flag).
     conns: HashMap<String, Conn>,
     /// device_peer_id -> its session; none for a device that dropped without one.
@@ -763,6 +765,11 @@ impl MockRelay {
     /// Knows the key of every `seed_bytes` identity a test can mint, so a frame put on
     /// the wire as one of them is sealed by it, as that peer itself would seal it.
     pub(crate) fn new() -> Self {
+        Self::serving(super::ws_client::HARNESS_RELAY_DOMAIN)
+    }
+
+    /// A relay of its own at `domain`, which a test runs beside another.
+    pub(crate) fn serving(domain: &str) -> Self {
         let keys = (0..=u8::MAX)
             .map(|tag| {
                 let kp = NativeKeypair::from_secret_bytes(&seed_bytes(tag));
@@ -771,6 +778,7 @@ impl MockRelay {
             .collect();
         Self {
             inner: Arc::new(Mutex::new(RelayInner {
+                domain: domain.to_string(),
                 keys,
                 ring_cap: 4096,
                 relay_idle: std::time::Duration::from_secs(45),
@@ -778,6 +786,11 @@ impl MockRelay {
                 ..RelayInner::default()
             })),
         }
+    }
+
+    /// The domain this relay serves.
+    pub(crate) fn domain(&self) -> String {
+        self.inner.lock().unwrap().domain.clone()
     }
 
     /// Register a freshly-spawned node: take ownership of its outbound command
@@ -1882,7 +1895,7 @@ impl RelayInner {
                     .cloned()
                     .unwrap_or_default();
                 let now_ms = wall_now_ms();
-                if !super::ring_auth::relay_accepts(super::ws_client::HARNESS_RELAY_DOMAIN, &room_code, &auth, retention_secs, clear, &channels, &chain, now_ms) {
+                if !super::ring_auth::relay_accepts(&inner.domain, &room_code, &auth, retention_secs, clear, &channels, &chain, now_ms) {
                     return;
                 }
                 if clear {
@@ -4246,6 +4259,7 @@ async fn spawn_node_staged(
         false,
         db_path.clone(),
         passphrase.clone(),
+        relay.domain(),
     )
     .await
     .expect("spawn_node_mock");
@@ -4321,6 +4335,7 @@ async fn spawn_node_on_db(
         false,
         db_path.clone(),
         passphrase.clone(),
+        relay.domain(),
     )
     .await
     .expect("spawn_node_mock");
@@ -4369,6 +4384,23 @@ async fn restart_node_with(
     device_tag: u8,
     stage: impl FnOnce(&str, &str),
 ) -> TestNode {
+    restart_node_across(relay, relay, node, master_tag, device_tag, stage).await
+}
+
+/// The same device starts again dialling another relay: a person who changed the relay
+/// in Settings, with the same identity and data.
+async fn move_node(from: &MockRelay, to: &MockRelay, node: TestNode, master_tag: u8, device_tag: u8) -> TestNode {
+    restart_node_across(from, to, node, master_tag, device_tag, |_, _| {}).await
+}
+
+async fn restart_node_across(
+    relay: &MockRelay,
+    to: &MockRelay,
+    node: TestNode,
+    master_tag: u8,
+    device_tag: u8,
+    stage: impl FnOnce(&str, &str),
+) -> TestNode {
     let device_id = node.device_id.clone();
     let passphrase = node.passphrase.clone();
     // The new loop reads what the old one's actors were still writing.
@@ -4388,7 +4420,7 @@ async fn restart_node_with(
         crate::storage::messages::open_connections::count(&db_path),
     );
     stage(&db_path, &passphrase);
-    spawn_node_on_db(relay, master_tag, device_tag, &db_path, tmp).await
+    spawn_node_on_db(to, master_tag, device_tag, &db_path, tmp).await
 }
 
 /// Drain a node's events until `pred` returns true or the timeout elapses.
@@ -28174,7 +28206,9 @@ fn harness_fixed_sleep_budget_does_not_grow() {
     // 2026-11-19: t18-archive's unopened-channel test added one spawn stagger (1.2 s; scan 1249.2 s).
     // 2026-11-20: fix152's ask-back tests added three absences, the end of a round of
     // asks, no ask after it, and no ask back to a stranger (4.5 s; scan 1253.7 s).
-    const BUDGET_MS: u64 = 1_253_700;
+    // 2026-11-20: i151 added two absence proofs, an owner's kick that never reaches another
+    // relay and a home an owner's second start never names again (4.5 s; scan 1258.2 s).
+    const BUDGET_MS: u64 = 1_258_200;
 
     let src = include_str!("test_harness.rs");
     // Built from pieces so this scan does not count its own source text.
@@ -71123,3 +71157,304 @@ async fn fix152r_case_viewer_suspended(cast: Fix152Cast) {
 fix152_test!(fix152r_dm_sent_from_another_relay_reaches_a_friend_whose_app_was_in_the_background, fix152r_case_viewer_hidden, FIX152_SYNC_ONLY);
 fix152_test!(fix152r_dm_sent_from_another_relay_reaches_a_friend_whose_socket_was_suspended, fix152r_case_viewer_suspended, FIX152_SYNC_ONLY);
 fix152_test!(fix152r_the_dm_ask_back_stops_after_one_round, fix152r_case_ask_back_stops, FIX152_FRESH);
+
+// i151-home-relay
+
+/// Two relays side by side, as a self-hosted relay and the official one.
+fn two_relays() -> (MockRelay, MockRelay) {
+    (MockRelay::serving("relay.a.test"), MockRelay::serving("relay.b.test"))
+}
+
+/// Owner O and member M share a server on `home`, with M's leaf seated.
+async fn owner_and_member_on(home: &MockRelay, o_tag: u8, m_tag: u8) -> (TestNode, TestNode, String) {
+    let (om, mm) = (keys(o_tag).peer_id(), keys(m_tag).peer_id());
+    let mut o = spawn_node_with_friends(home, o_tag, o_tag, &[&mm]).await;
+    let mut m = spawn_node_with_friends(home, m_tag, m_tag, &[&om]).await;
+    expect_dm_pair_ready(home, &o, &m, 15).await;
+    let server_id = create_server_and_wait(&mut o, "Home Server").await;
+    m.cmd_tx.send(join_cmd(&server_id)).await.unwrap();
+    assert!(expect_joined(&mut m, &server_id, 15).await, "M joins on the home relay");
+    let md = m.device_id.clone();
+    assert!(wait_until(20, async || o.mls_members(&server_id).await.contains(&md)).await, "M's leaf is seated");
+    assert!(wait_until(20, async || m.mls_members(&server_id).await.contains(&md)).await, "M holds the group");
+    (o, m, server_id)
+}
+
+async fn send_channel(node: &TestNode, server_id: &str, channel: &str, text: &str) {
+    node.cmd_tx
+        .send(NodeCommand::SendChannelMessage {
+            server_id: server_id.to_string(),
+            channel_id: channel.to_string(),
+            text: text.to_string(),
+            message_id: format!("i151-{text}"),
+            reply_to_mid: None,
+            link_preview: None,
+        })
+        .await
+        .unwrap();
+}
+
+async fn expect_channel_text(node: &mut TestNode, text: &str, secs: u64) -> bool {
+    wait_event(node, std::time::Duration::from_secs(secs), |ev| {
+        matches!(ev, NetworkEvent::ChannelMessageReceived { text: t, .. } if t == text)
+    })
+    .await
+}
+
+/// Owners name no home relay while it lives, as a server from before 0.14.2.
+struct NoHomeStamp;
+
+impl NoHomeStamp {
+    fn on() -> Self {
+        super::home_relay::STAMP_OFF.store(true, std::sync::atomic::Ordering::Relaxed);
+        NoHomeStamp
+    }
+}
+
+impl Drop for NoHomeStamp {
+    fn drop(&mut self) {
+        super::home_relay::STAMP_OFF.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Relay `to` takes a lock put for `owner`'s servers: anyone may show it the owner's
+/// roster, which every co-member holds (a relay of one's own needs not even that).
+fn show_roster_to(to: &MockRelay, owner: &TestNode) {
+    let roster = super::roster_book::own_roster(&owner.master_id, &owner.db_path, &owner.passphrase).expect("the owner's roster");
+    let (shower, _seen) = to.attach_raw(&keys(154).peer_id());
+    shower.send(WsCommand::JoinInbox { room_code: format!("inbox:{}", owner.master_id), roster }).unwrap();
+}
+
+async fn expect_elsewhere(node: &mut TestNode, server_id: &str, home: &str, secs: u64) -> bool {
+    wait_event(node, std::time::Duration::from_secs(secs), |ev| {
+        matches!(ev, NetworkEvent::ServerElsewhere { server_id: sid, relay: Some(r), .. } if sid == server_id && r == home)
+    })
+    .await
+}
+
+/// #151 on a server whose owner named no home (one from before 0.14.2): a member that
+/// moves to another relay puts the lock there, admits a stranger, seats it in MLS and
+/// talks with it out of the owner's reach, as before. Its admission reaches the owner's
+/// fold once it is back; the owner's kick never reaches the other relay.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn i151_a_server_with_no_home_relay_behaves_as_before() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let _legacy = NoHomeStamp::on();
+    let (a, b) = two_relays();
+    let (mut o, m, server_id) = owner_and_member_on(&a, 151, 152).await;
+    assert_eq!(o.live_server_state(&server_id).await.unwrap().home_relay(), None, "precondition: no home relay");
+    let general = general_channel_of(&server_id);
+
+    let mut m = move_node(&a, &b, m, 152, 152).await;
+    show_roster_to(&b, &o);
+    assert!(wait_until(20, async || !b.lock_chain(&server_id, &o.master_id).is_empty()).await, "M puts the lock on relay B");
+
+    let mut s = spawn_node_on(&b, 153, 153).await;
+    s.cmd_tx.send(join_cmd(&server_id)).await.unwrap();
+    assert!(expect_joined(&mut s, &server_id, 25).await, "S joins on relay B");
+    let sm = s.master_id.clone();
+    let mm = m.master_id.clone();
+    assert!(
+        wait_until(10, async || m.live_server_state(&server_id).await.is_some_and(|st| st.op_log.iter().any(|op| {
+            op.author == mm && matches!(&op.payload, crate::crdt::operations::CrdtPayload::MemberAdded { peer_id, .. } if *peer_id == sm)
+        })))
+        .await,
+        "M admits S",
+    );
+    let sd = s.device_id.clone();
+    assert!(wait_until(25, async || m.mls_members(&server_id).await.contains(&sd)).await, "M seats S in MLS");
+    drain_events(&mut s);
+    drain_events(&mut m);
+    send_channel(&m, &server_id, &general, "from-m").await;
+    assert!(expect_channel_text(&mut s, "from-m", 10).await, "M reaches S");
+    send_channel(&s, &server_id, &general, "from-s").await;
+    assert!(expect_channel_text(&mut m, "from-s", 10).await, "S reaches M");
+
+    let m = move_node(&b, &a, m, 152, 152).await;
+    assert!(
+        wait_until(30, async || o.live_server_state(&server_id).await.is_some_and(|st| st.is_member(&sm))).await,
+        "back on A, M's admission of S lands in the owner's fold",
+    );
+    drain_events(&mut o);
+    o.cmd_tx.send(NodeCommand::KickMember { server_id: server_id.clone(), peer_id: sm.clone() }).await.unwrap();
+    assert!(wait_until(15, async || m.live_server_state(&server_id).await.is_some_and(|st| !st.is_member(&sm))).await, "M hears the kick on A");
+    // ABSENCE: nothing carries the kick to relay B.
+    sleep_ms(2000).await;
+    assert!(
+        s.live_server_state(&server_id).await.is_some_and(|st| st.is_member(&sm) && st.is_member(&mm)),
+        "S on relay B never hears the owner's kick",
+    );
+}
+
+/// A new server names its owner's relay as its home, and a member that moves to another
+/// relay sends nothing for it there: no lock put, no room, no answer to a joiner. It
+/// is told where the server lives, and back home it takes part again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn i151_a_member_on_another_relay_serves_nothing_for_the_server() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let (a, b) = two_relays();
+    let (mut o, m, server_id) = owner_and_member_on(&a, 155, 156).await;
+    assert_eq!(o.live_server_state(&server_id).await.unwrap().home_relay().as_deref(), Some("relay.a.test"), "the server's home is A");
+    assert!(
+        wait_until(10, async || m.live_server_state(&server_id).await.is_some_and(|st| st.home_relay().as_deref() == Some("relay.a.test"))).await,
+        "M holds it",
+    );
+    let general = general_channel_of(&server_id);
+
+    b.watch_scopes();
+    let mut m = move_node(&a, &b, m, 156, 156).await;
+    assert!(expect_elsewhere(&mut m, &server_id, "relay.a.test", 15).await, "M is told the server lives on A");
+    expect_relay_drained(&b, &m, "told").await;
+    let named = t14_room_commands(&b, &m.device_id, 0, &server_id);
+    let all: Vec<_> = b.commands_since(&m.device_id, 0).into_iter().map(|(k, r, src)| format!("{k}:{r:?}:{src:?}")).collect();
+    assert!(named.iter().all(|kind| *kind == "leave"), "M only ever left the server's room on relay B, got {named:?} in {all:?}");
+    show_roster_to(&b, &o);
+    let mut s = spawn_node_on(&b, 157, 157).await;
+    s.cmd_tx.send(join_cmd(&server_id)).await.unwrap();
+    assert!(!expect_joined(&mut s, &server_id, 15).await, "nobody admits S on relay B");
+    assert!(b.lock_chain(&server_id, &o.master_id).is_empty(), "M put no lock on relay B");
+    assert!(!b.room_devices(&server_id).contains(&m.device_id), "M is not in the server's room on relay B");
+    send_channel(&m, &server_id, &general, "on-b").await;
+    expect_relay_drained(&b, &m, "i151").await;
+    let left = t14_room_commands(&b, &m.device_id, 0, &server_id).len();
+    assert_eq!(b.scoped(&m.device_id, &server_id), left, "nothing else of M's on relay B names the server");
+
+    let mut m = move_node(&b, &a, m, 156, 156).await;
+    drain_events(&mut o);
+    send_channel(&m, &server_id, &general, "home-again").await;
+    assert!(expect_channel_text(&mut o, "home-again", 15).await, "back on A, M takes part again");
+    drain_events(&mut m);
+
+    // The owner's own device on another relay is told it is its server.
+    let mut o = move_node(&a, &b, o, 155, 155).await;
+    assert!(
+        wait_event(&mut o, std::time::Duration::from_secs(15), |ev| {
+            matches!(ev, NetworkEvent::ServerElsewhere { server_id: sid, relay: Some(r), owned: true } if *sid == server_id && r == "relay.a.test")
+        })
+        .await,
+        "the owner on relay B is told its server lives on A",
+    );
+}
+
+/// A joiner answered on a relay that is not the server's home (by a member with an old
+/// or modified client) stops at the home it learns from the answer: from then on it
+/// sends nothing for the server there, and is told where the server lives.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn i151_a_joiner_answered_on_another_relay_stops_at_the_home_it_learns() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let (a, b) = two_relays();
+    let (o, m, server_id) = owner_and_member_on(&a, 158, 159).await;
+    let general = general_channel_of(&server_id);
+    let m = move_node(&a, &b, m, 159, 159).await;
+    // What M's old client would do on B: show the owner's roster and put the lock.
+    show_roster_to(&b, &o);
+    let chain = a.lock_chain(&server_id, &o.master_id);
+    assert!(wait_until(10, async || b.put_lock(&server_id, &o.master_id, &chain)).await, "relay B takes the lock");
+
+    let mut s = spawn_node_on(&b, 160, 160).await;
+    s.cmd_tx.send(join_cmd(&server_id)).await.unwrap();
+    let mut ops = o.store().load_ops_for_server(&server_id, None).unwrap();
+    ops.push(forge_crdt_op(&server_id, &m.master_id, crate::crdt::operations::CrdtPayload::MemberAdded {
+        peer_id: s.master_id.clone(), display_name: "s".into(), follow: None,
+        ask: join_ask(&server_id, 1, &s.master_kp),
+    }, 1, Some(&m.master_kp)));
+    let sealed = sealed_to_joiner(&b, &s, &server_id, &m.device_id, &sync_response(&server_id, &ops)).await;
+    b.watch_scopes();
+    let mark = b.log_mark();
+    b.inject(&server_id, &m.device_id, &s.device_id, sealed);
+    assert!(expect_elsewhere(&mut s, &server_id, "relay.a.test", 15).await, "S learns the server lives on A");
+    assert!(
+        wait_until(10, async || !b.room_devices(&server_id).contains(&s.device_id)).await,
+        "S leaves the server's room on relay B",
+    );
+    send_channel(&s, &server_id, &general, "from-s").await;
+    expect_relay_drained(&b, &s, "i151").await;
+    let named = t14_room_commands(&b, &s.device_id, mark, &server_id);
+    assert!(named.iter().all(|kind| *kind == "leave"), "from the answer on, S only left the room, got {named:?}");
+    // The lock read that judges the answer goes before S learns anything from it.
+    let all: Vec<&'static str> = b.commands_since(&s.device_id, mark).into_iter().map(|(k, _, _)| k).collect();
+    let reads = all.iter().take_while(|k| **k != "leave").filter(|k| **k == "lock_get").count();
+    assert_eq!(b.scoped(&s.device_id, &server_id), named.len() + reads, "nothing else of S's on relay B names the server: {all:?}");
+    drop(m);
+}
+
+/// Only the owner names a server's home: a member's (here an admin's) op naming
+/// another relay counts for nothing, live or in a sync answer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn i151_only_the_owner_names_the_home_relay() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let (a, _b) = two_relays();
+    let (mut o, m, server_id) = owner_and_member_on(&a, 161, 162).await;
+    o.cmd_tx
+        .send(NodeCommand::ChangeRole { server_id: server_id.clone(), peer_id: m.master_id.clone(), new_role: "admin".to_string() })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(15, async || m.live_server_state(&server_id).await.is_some_and(|s| s.get_role(&m.master_id) == crate::crdt::operations::MemberRole::Admin)).await,
+        "M is an admin",
+    );
+    let m_master = m.master_id.clone();
+    let barrier = async |o: &mut TestNode| {
+        carry_as(&m, o, super::types::HavenMessage::TypingIndicator { server_id: String::new(), channel_id: o.master_id.clone() }).await;
+        assert!(
+            wait_event(o, std::time::Duration::from_secs(15), |ev| matches!(ev, NetworkEvent::TypingStarted { peer_id, .. } if *peer_id == m_master)).await,
+            "the barrier arrives",
+        );
+        o.crdt_committed().await;
+    };
+    let rehome = |ahead: u64| forge_crdt_op(&server_id, &m.master_id, crate::crdt::operations::CrdtPayload::ServerSettingChanged {
+        key: crate::crdt::server_state::HOME_RELAY_KEY.to_string(), value: "relay.b.test".to_string(),
+    }, ahead, Some(&m.master_kp));
+    carry_as(&m, &o, crdt_broadcast(&server_id, &rehome(1))).await;
+    barrier(&mut o).await;
+    assert_eq!(o.live_server_state(&server_id).await.unwrap().home_relay().as_deref(), Some("relay.a.test"), "live: an admin moves nothing");
+    carry_as(&m, &o, sync_response(&server_id, &[rehome(2)])).await;
+    barrier(&mut o).await;
+    assert_eq!(o.live_server_state(&server_id).await.unwrap().home_relay().as_deref(), Some("relay.a.test"), "backfill: an admin moves nothing");
+    assert!(
+        !o.store().load_ops_for_server(&server_id, None).unwrap().iter().any(|op| op.author == m.master_id
+            && matches!(&op.payload, crate::crdt::operations::CrdtPayload::ServerSettingChanged { key, .. } if key == crate::crdt::server_state::HOME_RELAY_KEY)),
+        "and none of it is stored",
+    );
+}
+
+/// An owner names the home of a server that has none (one from before 0.14.2) on its
+/// first start once caught up, and every member holds it; nothing in 0.14.2 moves it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn i151_the_owner_names_a_missing_home_once() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let (a, _b) = two_relays();
+    let legacy = NoHomeStamp::on();
+    let (o, m, server_id) = owner_and_member_on(&a, 163, 164).await;
+    assert_eq!(o.live_server_state(&server_id).await.unwrap().home_relay(), None, "precondition: no home relay");
+    drop(legacy);
+    // The owner's first start on 0.14.2.
+    let o = restart_node(&a, o, 163, 163).await;
+    assert!(
+        wait_until(20, async || m.live_server_state(&server_id).await.is_some_and(|st| st.home_relay().as_deref() == Some("relay.a.test"))).await,
+        "the owner names A and M hears it",
+    );
+    let stamps = |o: &TestNode| o.store().load_ops_for_server(&server_id, None).unwrap().iter().filter(|op| {
+        matches!(&op.payload, crate::crdt::operations::CrdtPayload::ServerSettingChanged { key, .. } if key == crate::crdt::server_state::HOME_RELAY_KEY)
+    }).count();
+    assert_eq!(stamps(&o), 1, "named once");
+    let o = restart_node(&a, o, 163, 163).await;
+    // ABSENCE: a second start names nothing again (one batch tick is 2 s).
+    sleep_ms(2500).await;
+    assert_eq!(stamps(&o), 1, "and never again");
+}

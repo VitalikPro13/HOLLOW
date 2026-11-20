@@ -657,7 +657,7 @@ pub(crate) async fn spawn_node(
     };
 
     let loop_device = device_keypair.clone();
-    let handle = tokio::spawn(super::relay_denial::with_denials(super::ws_client::with_relay_domain(ring_domain, super::olm_lane::with_carry_book(super::door_room::with_heard_routes(super::join_stash::with_join_stash(super::lock_keeper::with_loop_device(loop_device, Box::pin(run_event_loop(
+    let handle = tokio::spawn(super::relay_denial::with_denials(super::ws_client::with_relay_domain(super::ws_client::DialedRelay { auth: ring_domain, home: super::home_relay::canonical(&relay_domain).unwrap_or_default() }, super::olm_lane::with_carry_book(super::door_room::with_heard_routes(super::join_stash::with_join_stash(super::lock_keeper::with_loop_device(loop_device, Box::pin(run_event_loop(
         event_tx, cmd_rx, cmd_tx, olm, crypto_store, crdt_store,
         bundle_keypair, device_keypair, ws_cmd_tx, ws_event_rx, master_peer_id.clone(), device_peer_id,
         initial_invisible, db_path, db_passphrase,
@@ -689,6 +689,7 @@ pub(crate) async fn spawn_node_mock(
     initial_invisible: bool,
     db_path: String,
     db_passphrase: String,
+    relay_domain: String,
 ) -> Result<(
     String,
     tokio::task::JoinHandle<()>,
@@ -709,7 +710,7 @@ pub(crate) async fn spawn_node_mock(
     let away = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let metered = db_path.clone();
     let loop_device = device_keypair.clone();
-    let handle = tokio::spawn(super::ws_client::with_test_away(away.clone(), super::relay_denial::with_denials(super::ws_client::with_relay_domain(super::ws_client::HARNESS_RELAY_DOMAIN.to_string(), super::olm_lane::with_carry_book(super::door_room::with_heard_routes(super::join_stash::with_join_stash(super::lock_keeper::with_loop_device(loop_device, crate::storage::store_pool::meter::OnLoop::new(Box::pin(run_event_loop(
+    let handle = tokio::spawn(super::ws_client::with_test_away(away.clone(), super::relay_denial::with_denials(super::ws_client::with_relay_domain(super::ws_client::DialedRelay { home: super::home_relay::canonical(&relay_domain).unwrap_or_default(), auth: relay_domain }, super::olm_lane::with_carry_book(super::door_room::with_heard_routes(super::join_stash::with_join_stash(super::lock_keeper::with_loop_device(loop_device, crate::storage::store_pool::meter::OnLoop::new(Box::pin(run_event_loop(
         event_tx, cmd_rx, cmd_tx, olm, crypto_store, crdt_store,
         bundle_keypair, device_keypair, ws_cmd_tx, ws_event_rx, master_peer_id.clone(), device_peer_id,
         initial_invisible, db_path, db_passphrase,
@@ -1045,6 +1046,10 @@ async fn run_event_loop(
     let (mut server_states, server_rows_read, unreadable_servers) = load_server_states(
         &db_path, &db_passphrase, &local_peer_str, &device_peer_id, &bundle_keypair, &device_keypair, &crdt_store, &ws_cmd_tx,
     );
+    // Before anything else is sent for them: servers that live on another relay.
+    for event in super::home_relay::sync(&server_states, &local_peer_str, &mut None, &ws_cmd_tx) {
+        let _ = event_tx.send(event).await;
+    }
 
     // Ops an older build skipped: read again from what we kept, or fetched again whole.
     // It writes on its own connection, so the canonicalize saves above land first.
@@ -1147,6 +1152,9 @@ async fn run_event_loop(
             None
         }
     };
+    if let Some(m) = mls.as_mut() {
+        m.set_frozen(denials.rooms());
+    }
     // Create MLS identity if none exists: this device's key signs, and the leaf
     // credential carries the master's certificate for the device.
     if mls.is_none() {
@@ -1567,6 +1575,10 @@ async fn run_event_loop(
                 &server_states, &mut voice_channel_participants, &mut voice_channel_gossip_mode,
                 &gossip_overlays, &event_tx, &local_peer_str, &device_peer_id,
             ).await;
+        }
+        // A server that lives on another relay sends nothing here, from this turn on.
+        for event in super::home_relay::sync(&server_states, &local_peer_str, &mut mls, &ws_cmd_tx) {
+            let _ = event_tx.send(event).await;
         }
         // A door that just reached our state proves itself to the relay before
         // anything else goes out.
@@ -6367,6 +6379,11 @@ async fn run_event_loop(
                     &mut gossip_overlays, &event_tx, &local_peer_str, &device_peer_id, &crypto_store, &crdt_store,
                     &join_hold, &pending_server_joins, &crdt_resync,
                 );
+                sync_handler::author_home_relays(
+                    &mut server_states, &mut mls, &ws_cmd_tx, &ws_room_peers,
+                    &mut gossip_overlays, &event_tx, &local_peer_str, &device_peer_id, &crypto_store, &crdt_store,
+                    &join_hold, &pending_server_joins, &crdt_resync,
+                );
                 // The join lock: made, moved, put back, compacted and granted where due.
                 let keys = super::lock_keeper::LockKeys { master: &master_keypair, device: &device_keypair };
                 let leaves = |s: &str| super::lock_keeper::server_leaves(mls.as_ref(), s);
@@ -8311,10 +8328,14 @@ fn load_server_states(
                                 crdt_store.save_state_snapshot(server_id.clone(), &state);
                                 hollow_log!("[HOLLOW-MULTIDEV] Canonicalized device-keyed members → master for server {server_id}");
                             }
+                            // One that lives on another relay is never joined here (`home_relay`).
+                            let away = super::home_relay::elsewhere(&state).is_some();
                             server_states.insert(server_id.clone(), state);
-                            let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
-                                room_code: server_id,
-                            });
+                            if !away {
+                                let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom {
+                                    room_code: server_id,
+                                });
+                            }
                         }
                         Err(e) => {
                             hollow_log!("Failed to deserialize server {}: {}", server_id, e);
@@ -9491,6 +9512,13 @@ async fn handle_sync_response(
 
                     crdt_store.save_state_snapshot(server_id.clone(), state);
 
+                    // A server that lives on another relay: this join ends here, and
+                    // nothing for it leaves through this relay from now on.
+                    if pending_server_joins.contains_key(&server_id)
+                        && let Some(event) = super::home_relay::settle(&server_id, state, local_peer_str, mls, ws_cmd_tx)
+                    {
+                        let _ = event_tx.send(event).await;
+                    }
                     if let Some(completed) = pending_server_joins.remove(&server_id) {
                         // A member again: a leave of ours from before must never land.
                         leave_book.drop_pending(&server_id);
@@ -16807,7 +16835,7 @@ async fn handle_incoming_request_inner(
                 return;
             }
             let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) else { return };
-            let ours = super::ws_client::relay_domain().unwrap_or_default();
+            let ours = super::ws_client::relay_home().unwrap_or_default();
             let friend = super::resolver::resolve(peer_str);
             for entry in super::shared_servers::accepted(&store, db_path, peer_str, &servers) {
                 crdt_resync.union.friend_named(&entry.server_id, &friend, &entry.members);

@@ -326,6 +326,33 @@ Fleet (`scripts/fleet.ps1` + `fleet_relay_switch.ps1` as the base): a Windows in
 
 An owner-authored CRDT op `ServerRelayChanged { domain, hlc }` (signed like every op; `op_allowed` = owner only). Members that ingest it rewrite their binding and rejoin. The old relay keeps the room until every member has left. The topic rings on the old relay are not carried over (they are availability, never truth). Not in this epic; listed so the binding table is designed with a single-writer op in mind.
 
+### 13.1 What 0.14.2 already does (HOL-SEC-211, issue #151)
+
+Every server names its home relay in the owner-only setting `home_relay` (`ServerSettingChanged`, canonical `host[:port]`, read only when the anchor owner's own op wrote it). It is set once (at creation, or by the owner's first 0.14.2 start) and nothing moves it. A device on any other relay marks the server `Elsewhere` and sends nothing scoped to it there. So the move op above is the existing setting written a second time by the owner; what is missing is everything that makes that safe.
+
+### 13.2 What a safe move MUST do
+
+A one-relay client cannot move a server safely: the members still on the old relay never hear the move, and a member offline at the move comes back to the old relay believing it is home. The 0.14.2 review (HOL-SEC-211, track sec-0142) built a move and broke it both ways. A move ships only with all of this:
+
+1. **Owner only, from a deliberate action only.** The owner chooses "Move this server to relay X" for that server. Never as a side effect of switching the app's relay, of opening an invite, or of following a shared server; never at start.
+2. **Reachability first.** The owner's client connects to the target relay and proves it can sign in, join the room and put the join lock there before writing anything.
+3. **The move op is written to the server's `0x07` topic ring on the OLD relay** (so members offline at the move get it from the availability cache) and confirmed sent (the relay's ack) before anything switches. The owner keeps a presence on the old relay until then.
+4. **Elsewhere members keep a listen-only presence** on the server's room on the old relay for owner-signed `home_relay` ops only, and hand the newest one to members who come back there (a returning member must learn the move before it serves anything).
+5. **The owner re-broadcasts its newest home op** on every start and every room join, on the home relay and (while it holds a presence there) on the previous one.
+6. **Members offline at the move never serve on the old relay**: a member back on a relay judges no join ask, sends no Welcome, KeyPackage answer or commit, and puts no lock until it has heard the newest home op (from the ring, a sibling, or a co-member) or a catch-up with the owner's view, the same "caught up before judging" rule as `join_hold`.
+7. **The actor rule stays**: a home value counts only when the anchor owner's own op wrote it (`reg.hlc().actor == anchor_owner`); a 0.14.1 owner's checkpoint carrying an admin's value and a legacy join snapshot read as no home.
+8. **Two owner devices on two relays** never ping-pong: only the deliberate move writes, the newest by HLC wins, and the other owner device then shows the server as elsewhere like any member.
+9. **Members follow by choice**: a member that hears the move gets the one relay switch dialog, never an automatic switch.
+
+### 13.3 Acceptance tests
+
+From the review's crate copy (`.team/review/src/rust/hollow_core/src/node/test_harness.rs` in the sec-0142 worktree), to be ported when the move is built and both must pass:
+
+- `review_i151_a_member_left_behind_hears_the_owner_come_back`: the owner moves to B and back to A; M never left A and must hear that the server lives on A again.
+- `review_i151_a_member_offline_at_the_move_serves_nothing_on_the_old_relay`: M is offline at the move; back on A it must learn the move before it can admit a joiner there.
+
+Plus the existing 0.14.2 set, which must stay green: `i151_*`, `review_a_0141_owner_checkpoint_carries_no_admin_home_relay`, `a_snapshots_home_relay_counts_only_from_the_owner`.
+
 ---
 
 ## 14. Reconciling HOLLOW_PLAN.md

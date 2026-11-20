@@ -744,6 +744,11 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
           : kServerDeniedText);
       return;
     }
+    // The server lives on another relay: nothing for it is sent from here.
+    if (ref.read(serverElsewhereProvider(serverId)) != null) {
+      _showInfoToast(kVoiceElsewhereText);
+      return;
+    }
     final elsewhere = ref.read(callElsewhereProvider);
     if (elsewhere != null) {
       _showInfoToast(callElsewhereReason(elsewhere));

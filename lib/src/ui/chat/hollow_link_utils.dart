@@ -16,17 +16,21 @@ String webServerInviteLink(String serverId,
     '$hollowWebJoinBase#server=$serverId${_keyParam(key)}${_ownerParam(owner)}${_relayParam(relay, '&')}';
 
 /// The invite link to a server we hold, with its join key, pinning its owner
-/// when its id cannot.
+/// when its id cannot. It names the relay the server's owner says it lives on,
+/// [relay] (ours) only when the owner has not said (#151).
 String serverInviteLinkFor(String serverId, {required String relay}) {
   String? owner;
   String? key;
+  String? home;
   try {
     owner = crdt_api.serverInviteOwner(serverId: serverId);
     key = crdt_api.serverInviteKey(serverId: serverId);
+    home = crdt_api.serverHomeRelay(serverId: serverId);
   } catch (_) {
     // No Rust library (a widget test): the link goes out without them.
   }
-  return webServerInviteLink(serverId, relay: relay, owner: owner, key: key);
+  return webServerInviteLink(serverId,
+      relay: home ?? relay, owner: owner, key: key);
 }
 
 String _ownerParam(String? owner) =>
@@ -78,8 +82,9 @@ final _hostLabelRegex = RegExp(r'^[a-z0-9]([a-z0-9-]*[a-z0-9])?$');
 final _ipv6InnerRegex = RegExp(r'^[0-9a-f:.]+$');
 
 /// Reduces anything a self-hoster might paste or stamp into an invite to the
-/// bare `host` or `host:port` the relay URLs are built from, or null when it is
-/// not a host at all.
+/// bare `host` or `host:port` (`:443` dropped) the relay URLs are built from, or
+/// null when it is not a host at all. Gives what Rust's `home_relay::canonical`
+/// gives for the same input (shared vectors in both test suites).
 ///
 /// Everything downstream (the setting, the link param, the dialog text) holds
 /// this one shape, so a link and a setting typed differently still compare
@@ -137,6 +142,9 @@ String? normalizeRelayHost(String input) {
     if (digits.isEmpty || digits.length > 5) return null;
     final value = int.tryParse(digits);
     if (value == null || value < 1 || value > 65535) return null;
+    // The default port names the same relay as none: one spelling, as Rust's
+    // `home_relay::canonical` gives it.
+    if (digits == '443') port = '';
   }
   return '$host$port';
 }

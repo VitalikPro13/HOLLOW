@@ -80,6 +80,10 @@ impl VoiceChat {
 /// "false" is on.
 pub const VOICE_TEXT_CHAT_KEY: &str = "voice_text_chat";
 
+/// The setting naming the relay a server lives on (`node::home_relay`), owner-only. A
+/// setting rather than a new op: a 0.14.1 replica folds it like any other.
+pub const HOME_RELAY_KEY: &str = "home_relay";
+
 /// An item in the channel layout — category header, channel reference, or separator.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -2088,6 +2092,19 @@ impl ServerState {
         self.join_secrets_retired.truncate(JOIN_SECRETS_RETIRED);
     }
 
+    /// The relay the owner says this server lives on, in `home_relay::canonical` form;
+    /// none for a server whose owner has not said (before 0.14.2). Only a value the
+    /// anchor owner's own op wrote counts: a 0.14.1 owner folds an admin's like any
+    /// setting and its checkpoint carries it, and a legacy join snapshot is unsigned.
+    pub fn home_relay(&self) -> Option<String> {
+        let reg = self.settings.get(HOME_RELAY_KEY)?;
+        if Some(&reg.hlc().actor) != self.anchor_owner().as_ref() {
+            return None;
+        }
+        let value = reg.read().clone();
+        crate::node::home_relay::canonical(&value).filter(|c| *c == value)
+    }
+
     /// The public half of the join secret, as invite links carry it.
     pub fn join_public_text(&self) -> Option<String> {
         let secret = self.join_secret()?;
@@ -2318,6 +2335,9 @@ impl ServerState {
             // The same permission as a voice channel's own override.
             VOICE_TEXT_CHAT_KEY => {
                 perms & Permission::MANAGE_CHANNELS != 0 && matches!(value, "true" | "false")
+            }
+            HOME_RELAY_KEY => {
+                *role == MemberRole::Owner && crate::node::home_relay::canonical(value).as_deref() == Some(value)
             }
             _ => perms & Permission::MANAGE_SERVER != 0,
         }
@@ -3007,6 +3027,23 @@ mod tests {
     /// The shared ingest permission matrix (`op_allowed`), one allowed and one denied
     /// probe per payload arm, driven as a pure function. The regression guard for BOTH
     /// remote-op ingest paths, which call this exact method.
+    /// A join snapshot is the responder's word: a home relay in it counts only when the
+    /// owner's own op wrote it (HOL-SEC-211).
+    #[test]
+    fn a_snapshots_home_relay_counts_only_from_the_owner() {
+        let s = test_state("s1".into(), "S".into(), "owner".into());
+        let with_home = |actor: &str| {
+            let mut snap = s.clone();
+            let at = HlcTimestamp { physical_ms: 1, counter: 0, actor: actor.into() };
+            snap.settings.insert(HOME_RELAY_KEY.into(), AdminLwwReg::new("relay.example.org".into(), at, 0));
+            let json = serde_json::to_string(&snap).unwrap();
+            serde_json::from_str::<ServerState>(&json).unwrap()
+        };
+        assert_eq!(with_home("owner").home_relay().as_deref(), Some("relay.example.org"));
+        assert_eq!(with_home("admin").home_relay(), None, "a value no op of the owner's wrote");
+        assert_eq!(with_home("").home_relay(), None);
+    }
+
     #[test]
     fn op_allowed_ingest_matrix() {
         let mut s = test_state("s1".into(), "S".into(), "owner".into());
@@ -3069,6 +3106,13 @@ mod tests {
             ("admin", CrdtPayload::JoinKeySet { secret: JoinSecret("ab".repeat(32)) }, false),
             ("owner", CrdtPayload::JoinKeySet { secret: JoinSecret("ab".repeat(31)) }, false),
             ("owner", CrdtPayload::JoinKeySet { secret: JoinSecret("zz".repeat(32)) }, false),
+            // The home relay (#151): the Owner only, and only in its one canonical form.
+            ("owner", CrdtPayload::ServerSettingChanged { key: HOME_RELAY_KEY.into(), value: "relay.example.org".into() }, true),
+            ("owner", CrdtPayload::ServerSettingChanged { key: HOME_RELAY_KEY.into(), value: "relay.example.org:8443".into() }, true),
+            ("admin", CrdtPayload::ServerSettingChanged { key: HOME_RELAY_KEY.into(), value: "relay.example.org".into() }, false),
+            ("owner", CrdtPayload::ServerSettingChanged { key: HOME_RELAY_KEY.into(), value: "Relay.Example.org".into() }, false),
+            ("owner", CrdtPayload::ServerSettingChanged { key: HOME_RELAY_KEY.into(), value: "relay.example.org:443".into() }, false),
+            ("owner", CrdtPayload::ServerSettingChanged { key: HOME_RELAY_KEY.into(), value: "wss://relay.example.org/ws".into() }, false),
             // MemberRemoved: voluntary self-leave always; kicks need KICK_MEMBERS + outrank.
             ("alice", CrdtPayload::MemberRemoved { peer_id: "alice".into(), seen: None }, true),
             ("alice", CrdtPayload::MemberRemoved { peer_id: "bob".into(), seen: None }, false),

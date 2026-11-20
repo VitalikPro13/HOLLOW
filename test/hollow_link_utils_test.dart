@@ -438,6 +438,36 @@ void main() {
     });
   });
 
+  // The same vectors as Rust's `home_relay::tests::the_same_form_dart_gives`:
+  // a server's home relay is compared in both languages.
+  group('normalizeRelayHost agrees with Rust', () {
+    const vectors = <String, String?>{
+      'relay.anonlisten.com': 'relay.anonlisten.com',
+      '  WSS://Relay.AnonListen.com/ws/ ': 'relay.anonlisten.com',
+      'https://relay.anonlisten.com:443': 'relay.anonlisten.com',
+      'relay.example.org:443': 'relay.example.org',
+      'myrelay.duckdns.org:8443': 'myrelay.duckdns.org:8443',
+      'HTTP://MyRelay.DuckDNS.org:8443/': 'myrelay.duckdns.org:8443',
+      '[::1]:8443': '[::1]:8443',
+      '[::1]:443': '[::1]',
+      '[2001:DB8::1]': '[2001:db8::1]',
+      '10.0.0.2': '10.0.0.2',
+      'relay.example.org.': null,
+      '': null,
+      '::1': null,
+      'host:0': null,
+      'host:99999': null,
+      'host:': null,
+      'bad_host': null,
+      '-bad.host': null,
+      'a..b': null,
+      'host/path': null,
+    };
+    for (final MapEntry(:key, :value) in vectors.entries) {
+      test('"$key"', () => expect(normalizeRelayHost(key), value));
+    }
+  });
+
   group('normalizeRelayHost', () {
     test('plain hostname', () {
       expect(normalizeRelayHost('relay.anonlisten.com'), 'relay.anonlisten.com');

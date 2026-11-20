@@ -210,6 +210,15 @@ Future<String> getMyRole({required String serverId}) =>
 String? serverInviteOwner({required String serverId}) =>
     RustLib.instance.api.crateApiCrdtServerInviteOwner(serverId: serverId);
 
+/// The relay this server's owner says it lives on, which an invite to it names. `None`
+/// for a server whose owner has not said yet: the invite names our own relay.
+String? serverHomeRelay({required String serverId}) =>
+    RustLib.instance.api.crateApiCrdtServerHomeRelay(serverId: serverId);
+
+/// How many live servers this identity owns: a relay switch leaves them on the relay
+/// they live on (HOL-SEC-211), which the person is told before switching.
+int ownedServerCount() => RustLib.instance.api.crateApiCrdtOwnedServerCount();
+
 /// The join key an invite link to this server must carry (`key=`): the public half
 /// of the key every request to join is sealed to. `None` until the owner has set one.
 String? serverInviteKey({required String serverId}) =>

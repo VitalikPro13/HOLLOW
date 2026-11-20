@@ -1912,6 +1912,17 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute>
               serverId: widget.serverId!, meeting: _isConference, touch: true),
         );
       }
+      final elsewhere = ref.watch(serverElsewhereProvider(widget.serverId!));
+      if (elsewhere != null) {
+        return SafeArea(
+          top: false,
+          child: RelayElsewhereNotice(
+              serverId: widget.serverId!,
+              relay: elsewhere.relay,
+              owned: elsewhere.owned,
+              touch: true),
+        );
+      }
       if (!canPost || muteText != null || removed != null) {
         return _buildBlockedBanner(hollow, removed ?? muteText);
       }

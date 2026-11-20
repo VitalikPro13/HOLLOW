@@ -423,6 +423,43 @@ pub(crate) fn author_missing_join_keys(
     }
 }
 
+/// Name the home relay (`home_relay`) of every live server we own that has none: the
+/// relay we dial, by the same device and moment that sets a missing join key.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn author_home_relays(
+    server_states: &mut ServerStates,
+    mls: &mut Option<MlsManager>,
+    ws_cmd_tx: &WsCmdTx,
+    ws_room_peers: &WsRoomPeers,
+    gossip_overlays: &mut GossipOverlays,
+    event_tx: &EventTx,
+    local_peer_str: &str,
+    device_peer_id: &str,
+    crypto_store: &CryptoStore,
+    crdt_store: &CrdtStore,
+    caught_up: &super::join_hold::JoinHold,
+    pending_server_joins: &HashMap<String, PendingJoin>,
+    crdt_resync: &super::crdt_resync::CrdtResync,
+) {
+    let due: Vec<(String, String)> = server_states
+        .iter()
+        .filter(|(_, s)| !s.is_deleted() && s.current_owner().as_deref() == Some(local_peer_str))
+        .filter_map(|(id, s)| super::home_relay::missing_home(s).map(|home| (id.clone(), home)))
+        .filter(|(id, _)| {
+            sets_missing_join_key(id, caught_up, pending_server_joins, crdt_resync, server_states, ws_room_peers, local_peer_str, device_peer_id)
+        })
+        .collect();
+    for (server_id, home) in due {
+        let Some(state) = server_states.get_mut(&server_id) else { continue };
+        let payload = CrdtPayload::ServerSettingChanged { key: crate::crdt::server_state::HOME_RELAY_KEY.to_string(), value: home.clone() };
+        let Some(op) = author_op(state, crdt_store, &server_id, payload) else { continue };
+        hollow_log!("[HOLLOW-CRDT] {server_id} lives on {home}");
+        broadcast_op_mls_first(
+            mls, ws_cmd_tx, ws_room_peers, gossip_overlays, event_tx, state, local_peer_str, &server_id, &op, crypto_store,
+        );
+    }
+}
+
 /// Whether this device sets a server's missing join key now. A second key is an invite
 /// reset, so only a device that knows none exists sets one: the lowest of the owner's
 /// devices the relay shows us in the room, with no join or whole-log fetch under way,
@@ -1173,6 +1210,11 @@ pub(crate) async fn handle_create_server(
         if let Some(secret) = super::sealed_box::new_secret() {
             let secret = crate::crdt::operations::JoinSecret(hex::encode(secret.as_slice()));
             let _ = author_op(state, crdt_store, &server_id, CrdtPayload::JoinKeySet { secret });
+        }
+        // And names the relay the server lives on.
+        if let Some(home) = super::home_relay::missing_home(state) {
+            let key = crate::crdt::server_state::HOME_RELAY_KEY.to_string();
+            let _ = author_op(state, crdt_store, &server_id, CrdtPayload::ServerSettingChanged { key, value: home });
         }
     }
     if let Some(mls_mgr) = mls {

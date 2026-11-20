@@ -64,6 +64,7 @@ pub(crate) mod recovery_pool;
 pub(crate) mod fleet_relay_guard;
 pub(crate) mod relay_clock;
 pub(crate) mod relay_denial;
+pub(crate) mod home_relay;
 pub(crate) mod unsent_ops;
 pub(crate) mod relay_pace;
 pub(crate) mod relay_session;
