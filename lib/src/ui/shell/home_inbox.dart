@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/name_color_provider.dart';
 import 'package:hollow/src/core/message_preview.dart';
 import 'package:hollow/src/core/providers/avatar_provider.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
@@ -1155,6 +1156,9 @@ class _HomeConversationsState extends ConsumerState<HomeConversations> {
                 leading: homeConversationLeading(c,
                     size: _kRowAvatar, ring: hollow.opaqueBackground),
                 title: c.title,
+                titlePaint: c.peerId == null
+                    ? null
+                    : ref.chosenNamePaintOf(c.peerId!, hollow),
                 detail: c.detail,
                 preview: c.preview,
                 fromMe: c.fromMe,

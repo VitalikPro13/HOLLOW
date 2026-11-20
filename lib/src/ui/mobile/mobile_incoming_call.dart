@@ -6,6 +6,7 @@ import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/components/name_text.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/app.dart' show hollowNavigatorKey;
 import 'package:hollow/src/ui/call/call_actions.dart' show dmCallLeavesNote;
@@ -194,13 +195,13 @@ class _MobileIncomingCallOverlayState
                                   size: MobileCallMetrics.incomingAvatar,
                                 ),
                                 const SizedBox(height: HollowSpacing.lg),
-                                Text(
+                                NameText(
                                   _name,
+                                  paint: ref.namePaint(_master, hollow),
                                   maxLines: 2,
                                   overflow: TextOverflow.ellipsis,
                                   textAlign: TextAlign.center,
-                                  style: HollowTypography.display.copyWith(
-                                      color: ref.namePaint(_master, hollow).color),
+                                  style: HollowTypography.display,
                                 ),
                                 const SizedBox(height: HollowSpacing.xs),
                                 Text(

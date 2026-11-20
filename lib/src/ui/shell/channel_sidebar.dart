@@ -1,5 +1,7 @@
 import 'dart:math' as math;
 
+import 'package:hollow/src/ui/components/name_text.dart';
+import 'package:hollow/src/core/color_utils.dart';
 import 'package:hollow/src/ui/components/hollow_count_badge.dart';
 import 'package:hollow/src/ui/components/hollow_divider.dart';
 import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
@@ -1092,11 +1094,11 @@ class _PendingRequestTile extends ConsumerWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(
+                  NameText(
                     name,
-                    style: HollowTypography.label.copyWith(
-                      color: hollow.textPrimary,
-                    ),
+                    paint: ref.chosenNamePaintOf(peerId, hollow) ??
+                        NamePaint([hollow.textPrimary]),
+                    style: HollowTypography.label,
                     overflow: TextOverflow.ellipsis,
                   ),
                   Text(
@@ -1570,13 +1572,15 @@ class _VoiceParticipantRow extends ConsumerWidget {
             ),
             const SizedBox(width: HollowSpacing.sm),
             Expanded(
-              child: Text(
+              child: NameText(
                 name,
-                style: HollowTypography.label.copyWith(
-                  color: speaking && !isMuted
-                      ? hollow.textPrimary
-                      : hollow.textSecondary,
-                ),
+                paint: ref.chosenNamePaintOf(master, hollow) ??
+                    NamePaint([
+                      speaking && !isMuted
+                          ? hollow.textPrimary
+                          : hollow.textSecondary
+                    ]),
+                style: HollowTypography.label,
                 overflow: TextOverflow.ellipsis,
               ),
             ),

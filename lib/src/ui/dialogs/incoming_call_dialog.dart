@@ -213,11 +213,9 @@ class _IncomingCallOverlayState extends ConsumerState<IncomingCallOverlay>
                                 PeerNameText(
                                   name: _cachedDisplayName,
                                   peerId: _cachedMaster,
-                                  style: HollowTypography.subheading.copyWith(
-                                    color: ref
-                                        .namePaint(_cachedMaster, hollow)
-                                        .color,
-                                  ),
+                                  paint: ref.namePaint(_cachedMaster, hollow),
+                                  style: HollowTypography.subheading
+                                      .copyWith(color: hollow.textPrimary),
                                 ),
                                 Text(
                                   kind,

@@ -116,12 +116,13 @@ final _chosenCache = <String, NamePaint?>{};
 /// colour (pass '' when custom colours are switched off, or for a surface that
 /// shows only hashed colours); without one this is [nameColorFor].
 ///
-/// A chosen colour keeps its saturation, and its lightness moves until every
-/// stop clears the same floor as [nameColorFor] (7:1 on every dark surface,
-/// 5:1 on every light one). Unless [self] (the viewer's own name), a stop whose
-/// hue sits within [kNameAccentBand] of the accent turns to the nearest edge
-/// of the band first, and a blend between two stops that would pass through
-/// the band steps across it instead: only your own name may wear the accent.
+/// A chosen colour keeps its hue and saturation, and its lightness moves only
+/// until every stop clears [kChosenNameContrast] on every surface (a selected
+/// row takes [namePaintOnSelected] on top). Unless
+/// [self] (the viewer's own name), a stop whose hue sits within
+/// [kNameAccentBand] of the accent turns to the nearest edge of the band
+/// first, and a blend between two stops that would pass through the band
+/// steps across it instead: only your own name may wear the accent.
 NamePaint namePaintFor(String identity, HollowTheme hollow,
     {String field = '', bool self = false}) {
   if (field.isNotEmpty) {
@@ -148,14 +149,13 @@ NamePaint? _chosenPaint(HollowTheme hollow, String field, bool self) {
   if (_chosenCache.containsKey(key)) return _chosenCache[key];
   final picked = nameColorStops(field);
   if (picked == null) return _chosenCache[key] = null;
-  final dark = Contrast.relativeLuminance(hollow.background) < 0.5;
   final accentHue = HSLColor.fromColor(hollow.accent).hue;
   final stops = [
     for (final stop in picked)
-      _readable(self ? stop : _outsideAccentBand(stop, accentHue), hollow, dark),
+      _readableChosen(self ? stop : _outsideAccentBand(stop, accentHue), hollow),
   ];
   return _chosenCache[key] =
-      self ? NamePaint(stops) : _skipAccentBand(stops, accentHue, hollow, dark);
+      self ? NamePaint(stops) : _skipAccentBand(stops, accentHue, hollow);
 }
 
 /// Hue of [c] relative to the accent, -180..180.
@@ -169,7 +169,7 @@ double _accentGap(Color c, double accentHue) =>
 /// their midpoint. Going the long way round instead would paint hues nobody
 /// picked, and one colour for the pair would drop a stop they did pick.
 NamePaint _skipAccentBand(
-    List<Color> stops, double accentHue, HollowTheme hollow, bool dark) {
+    List<Color> stops, double accentHue, HollowTheme hollow) {
   if (stops.length < 2) return NamePaint(stops);
   final drawn = <Color>[];
   final at = <double>[];
@@ -188,7 +188,7 @@ NamePaint _skipAccentBand(
       final edge = HSLColor.fromColor(stop)
           .withHue((accentHue + side * kNameAccentBand + 360) % 360)
           .toColor();
-      drawn.add(_readable(edge, hollow, dark));
+      drawn.add(_readableChosen(edge, hollow));
       at.add(mid);
     }
     skipped = true;
@@ -206,18 +206,53 @@ Color _outsideAccentBand(Color c, double accentHue) {
   return hsl.withHue((accentHue + side * kNameAccentBand + 360) % 360).toColor();
 }
 
+/// The contrast a chosen name colour clears on every surface a name sits on,
+/// selected fills included: the design language's floor for all text. The
+/// hashed colours sit higher so they read as pastels; a chosen colour held
+/// that high loses its tone (red goes pink).
+const double kChosenNameContrast = 4.5;
+
+List<Color> _surfaces(HollowTheme hollow) => [
+      hollow.surface,
+      hollow.background,
+      hollow.elevated,
+      hollow.overlay,
+      hollow.hover,
+    ];
+
+/// A selected row or chip on each surface: the accent-muted fill laid over it.
+List<Color> selectedNameSurfaces(HollowTheme hollow) => [
+      for (final s in _surfaces(hollow)) Color.alphaBlend(hollow.accentMuted, s)
+    ];
+
+final _selectedCache = <(NamePaint, int, int), NamePaint>{};
+
+/// [paint] for a name on a selected row or chip, lifted until it clears
+/// [kChosenNameContrast] on [selectedNameSurfaces] too. Only there: a red
+/// clearing a teal-tinted fill turns pink, and everywhere else it stays red.
+NamePaint namePaintOnSelected(NamePaint paint, HollowTheme hollow) {
+  final key = (paint, hollow.accentMuted.toARGB32(), hollow.background.toARGB32());
+  final hit = _selectedCache[key];
+  if (hit != null) return hit;
+  final fills = selectedNameSurfaces(hollow);
+  Color lift(Color c) => Contrast.ensureContrastOnAll(c, fills,
+      targetRatio: kChosenNameContrast);
+  final stops = [for (final c in paint.stops) lift(c)];
+  final drawn = paint._drawn;
+  final lifted = drawn == null
+      ? NamePaint(stops)
+      : NamePaint._skipping(stops, [for (final c in drawn) lift(c)], paint._at!);
+  if (_selectedCache.length >= 256) _selectedCache.clear();
+  return _selectedCache[key] = lifted;
+}
+
 Color _readable(Color c, HollowTheme hollow, bool dark) =>
-    Contrast.ensureContrastOnAll(
-      c,
-      [
-        hollow.surface,
-        hollow.background,
-        hollow.elevated,
-        hollow.overlay,
-        hollow.hover,
-      ],
-      targetRatio: dark ? 7.0 : 5.0,
-    );
+    Contrast.ensureContrastOnAll(c, _surfaces(hollow),
+        targetRatio: dark ? 7.0 : 5.0);
+
+Color _readableChosen(Color c, HollowTheme hollow) =>
+    Contrast.ensureContrastOnAll(c, _surfaces(hollow),
+        targetRatio: kChosenNameContrast);
 
 Color _nameColor(
     String identity, HollowTheme hollow, double accentHue, bool dark) {

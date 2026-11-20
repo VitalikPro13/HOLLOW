@@ -7,6 +7,7 @@ import 'package:hollow/src/theme/hollow_colors.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/components/name_text.dart';
 import 'package:hollow/src/ui/call/call_stage_data.dart';
 import 'package:hollow/src/ui/call/call_theme.dart';
 import 'package:hollow/src/ui/call/speaking_ring.dart';
@@ -235,8 +236,8 @@ class CallPersonTile extends ConsumerWidget {
 
   /// Name plus the mute and deafen marks, in the person's colour.
   Widget _nameRow(TextStyle style, HollowTheme palette, String field) {
-    final color =
-        callNameColor(palette,
+    final paint =
+        callNamePaint(palette,
             isSelf: person.isSelf,
             master: person.master,
             field: field);
@@ -244,11 +245,12 @@ class CallPersonTile extends ConsumerWidget {
       mainAxisSize: MainAxisSize.min,
       children: [
         Flexible(
-          child: Text(
+          child: NameText(
             person.name,
+            paint: paint,
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
-            style: style.copyWith(color: color),
+            style: style,
           ),
         ),
         if (person.muted) ...[

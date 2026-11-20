@@ -1389,6 +1389,9 @@ class ChatHeaderBar extends StatelessWidget {
 
   /// The person a DM's [title] names, so an id fallback keeps its ending.
   final String? titlePeerId;
+
+  /// That person's chosen name colour, null = the neutral title.
+  final NamePaint? titlePaint;
   final String? subtitle;
   final List<Widget> badges;
   final Widget? status;
@@ -1399,6 +1402,7 @@ class ChatHeaderBar extends StatelessWidget {
     required this.leading,
     required this.title,
     this.titlePeerId,
+    this.titlePaint,
     this.subtitle,
     this.badges = const [],
     this.status,
@@ -1435,16 +1439,17 @@ class ChatHeaderBar extends StatelessWidget {
                         PeerNameText(
                           name: title,
                           peerId: peerId,
+                          paint: titlePaint,
                           style: HollowTypography.subheading
                               .copyWith(color: hollow.textPrimary),
                         )
                       else
-                        Text(
+                        NameText(
                           title,
+                          paint: titlePaint ?? NamePaint([hollow.textPrimary]),
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
-                          style: HollowTypography.subheading
-                              .copyWith(color: hollow.textPrimary),
+                          style: HollowTypography.subheading,
                         ),
                       if (subtitle != null && subtitle.isNotEmpty)
                         Text(
@@ -1958,11 +1963,16 @@ Set<String> typingMastersFor(WidgetRef ref, Set<String> typingPeers) {
       .toSet();
 }
 
-/// Who is typing: up to three names, then "Several people are typing".
+/// Who is typing: up to three names, each in its name colour, then "Several
+/// people are typing".
 class TypingIndicatorBar extends StatelessWidget {
   final List<String> names;
 
-  const TypingIndicatorBar({super.key, required this.names});
+  /// The paint of each of [names], in order; missing ones are drawn neutral.
+  final List<NamePaint> paints;
+
+  const TypingIndicatorBar(
+      {super.key, required this.names, this.paints = const []});
 
   /// The label's height; [TypingIndicatorHost] lets 8 px of it cross the seam.
   static const double height = 20;
@@ -1970,17 +1980,35 @@ class TypingIndicatorBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
+    final style = HollowTypography.caption.copyWith(
+      color: hollow.textSecondary,
+      fontStyle: FontStyle.italic,
+    );
+    (String, NamePaint) named(int i) => (
+          names[i],
+          i < paints.length ? paints[i] : NamePaint([hollow.textSecondary]),
+        );
 
-    final String text;
-    if (names.length == 1) {
-      text = '${names[0]} is typing';
-    } else if (names.length == 2) {
-      text = '${names[0]} and ${names[1]} are typing';
-    } else if (names.length == 3) {
-      text = '${names[0]}, ${names[1]}, and ${names[2]} are typing';
-    } else {
-      text = 'Several people are typing';
-    }
+    final Widget label = switch (names.length) {
+      1 => NameLine(
+          name: names[0], paint: named(0).$2, rest: ' is typing', style: style),
+      2 => NameLine.several(
+          names: [named(0), named(1)],
+          joins: const [' and '],
+          rest: ' are typing',
+          style: style),
+      3 => NameLine.several(
+          names: [named(0), named(1), named(2)],
+          joins: const [', ', ', and '],
+          rest: ' are typing',
+          style: style),
+      _ => Text(
+          'Several people are typing',
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: style,
+        ),
+    };
 
     return Container(
       height: height,
@@ -1994,17 +2022,7 @@ class TypingIndicatorBar extends StatelessWidget {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Flexible(
-            child: Text(
-              text,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: HollowTypography.caption.copyWith(
-                color: hollow.textSecondary,
-                fontStyle: FontStyle.italic,
-              ),
-            ),
-          ),
+          Flexible(child: label),
           const SizedBox(width: HollowSpacing.xs),
           TypingDots(color: hollow.textSecondary),
         ],
@@ -2021,11 +2039,15 @@ class TypingIndicatorBar extends StatelessWidget {
 /// short of the composer field; it starts on the message text's edge.
 class TypingIndicatorHost extends StatefulWidget {
   final List<String> names;
+
+  /// The paint of each of [names] ([TypingIndicatorBar.paints]).
+  final List<NamePaint> paints;
   final Widget child;
 
   const TypingIndicatorHost({
     super.key,
     required this.names,
+    this.paints = const [],
     required this.child,
   });
 
@@ -2037,11 +2059,15 @@ class _TypingIndicatorHostState extends State<TypingIndicatorHost> {
   // Kept through the fade-out, then dropped so the dots stop watching the
   // shared ticker.
   List<String>? _shown;
+  List<NamePaint> _shownPaints = const [];
 
   @override
   void initState() {
     super.initState();
-    if (widget.names.isNotEmpty) _shown = widget.names;
+    if (widget.names.isNotEmpty) {
+      _shown = widget.names;
+      _shownPaints = widget.paints;
+    }
   }
 
   @override
@@ -2049,6 +2075,7 @@ class _TypingIndicatorHostState extends State<TypingIndicatorHost> {
     super.didUpdateWidget(oldWidget);
     if (widget.names.isNotEmpty) {
       _shown = widget.names;
+      _shownPaints = widget.paints;
     } else if (HollowDurations.animationsDisabled) {
       _shown = null;
     }
@@ -2080,7 +2107,7 @@ class _TypingIndicatorHostState extends State<TypingIndicatorHost> {
                   },
                   child: shown == null
                       ? const SizedBox.shrink()
-                      : TypingIndicatorBar(names: shown),
+                      : TypingIndicatorBar(names: shown, paints: _shownPaints),
                 ),
               ),
             ),

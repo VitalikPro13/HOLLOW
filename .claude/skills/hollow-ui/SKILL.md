@@ -95,6 +95,12 @@ times for chips alone. Do not invent a 47th. Reach for the component.
   exists is exactly the bug this guards. A solid red behind a label is
   `errorFill` with `textOnError`, never `error` (too light for white ink).
 - Never colour alone: pair it with shape, an icon or a word.
+- **Name colours.** A colour a person chose clears 4.5:1 on every surface
+  their name sits on, a selected row's or chip's accent-muted fill included
+  (`namePaintOnSelected` lifts it there, and only there); the hashed colours
+  clear 7:1 on dark and 5:1 on light. A pick must still look like the pick:
+  hue and saturation kept, lightness moved only as far as that surface needs
+  (`kChosenNameContrast`, `test/name_colors_test.dart`).
 
 ## Spacing and gaps
 
@@ -247,7 +253,7 @@ conversation row) · `HollowTextLink` (a link inside prose, on the text's edge) 
 tooltip and screen-reader name, `size` 32 desktop / 44 touch, `selected` is a
 grey fill never the accent, siblings `xs` apart). A person's name in a chat is
 `ref.personNamePaint(master, hollow, isSelf:)` drawn by `NameText` (the person's chosen colour or gradient, turned out of the accent band unless it is yours, else the hashed `nameColorFor`), yours your chosen colour else `accentText`; panels and people lists
-stay neutral, except a CHOSEN colour on the member list (online rows) and the profile name. Chat surfaces reuse `MessageRow`, `ChatHeaderBar`,
+stay neutral unless the person CHOSE a colour, which shows on every name label (`ref.chosenNamePaintOf`; `HollowListRow`/`ConversationRow` take `titlePaint`, `PeerNameText` a `paint`, a name leading a sentence is `NameLine`). Never read a paint down to `.color` for a name (guard `test/name_paint_guard_test.dart`). Chat surfaces reuse `MessageRow`, `ChatHeaderBar`,
 `ChatComposerRow`, `showExpressionPicker` (design language 4.5), never a copy.
 List times go through `conversationTimeLabel()`, never `M/D`,
 in the interface face (a written date in mono reads as a typewriter).

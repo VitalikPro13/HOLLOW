@@ -255,7 +255,7 @@ class _ProfileIdentityColumnState extends ConsumerState<ProfileIdentityColumn> {
             children: [
               NameText(
                 primaryName,
-                paint: (isBlocked ? null : ref.chosenNamePaintOf(master, hollow)) ??
+                paint: ref.chosenNamePaintOf(master, hollow) ??
                     NamePaint([hollow.textPrimary]),
                 style: _compact
                     ? HollowTypography.subheading

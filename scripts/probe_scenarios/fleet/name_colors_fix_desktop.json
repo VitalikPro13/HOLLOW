@@ -1,0 +1,729 @@
+{
+ "_": [
+  "#140/#149/#142 fix round: selected rows (friend chip, Archive row), a long and a duplicate name,",
+  "a narrow window, the typing line and the retuned editor swatches, dark and light, on peers e and f.",
+  "run (Mac mini): FLEET_BACKEND=macos pwsh scripts/fleet.ps1 -Scenario name_colors_fix_desktop -Peers e,f"
+ ],
+ "peers": [
+  "e",
+  "f"
+ ],
+ "steps": [
+  {
+   "peer": "all",
+   "op": "wait_for",
+   "provider": "connection",
+   "equals": "connected",
+   "timeout_ms": 120000
+  },
+  {
+   "peer": "e",
+   "op": "capture",
+   "from": "provider",
+   "key": "peerId",
+   "as": "PEER_E"
+  },
+  {
+   "peer": "f",
+   "op": "tap",
+   "target": "semantics:Add friend",
+   "index": 0
+  },
+  {
+   "peer": "f",
+   "op": "tap",
+   "target": "type:_FriendsManager > text:Add friend",
+   "index": 0
+  },
+  {
+   "peer": "f",
+   "op": "enter_text",
+   "target": "hint:Paste an ID, or type a nickname",
+   "value": "${PEER_E}"
+  },
+  {
+   "peer": "f",
+   "op": "tap",
+   "target": "text:Send request",
+   "index": 0
+  },
+  {
+   "peer": "e",
+   "op": "tap",
+   "target": "semantics:Add friend",
+   "index": 0
+  },
+  {
+   "peer": "e",
+   "op": "tap",
+   "target": "text:Requests",
+   "index": 0
+  },
+  {
+   "peer": "e",
+   "op": "wait_for",
+   "target": "semantics:Accept friend request",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "e",
+   "op": "tap",
+   "target": "semantics:Accept friend request",
+   "index": 0
+  },
+  {
+   "peer": "e",
+   "op": "log",
+   "message": "the accepted friend must reach the UI on BOTH sides, not just the friends table"
+  },
+  {
+   "peer": "e",
+   "op": "wait_for",
+   "target": "text:probe-f",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "f",
+   "op": "wait_for",
+   "target": "text:probe-e",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "e",
+   "op": "tap",
+   "target": "type:_FriendsManager > semantics:Close",
+   "index": 0
+  },
+  {
+   "peer": "e",
+   "op": "wait_for",
+   "gone": "type:_FriendsManager",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "e",
+   "op": "tap",
+   "target": "semantics:probe-f"
+  },
+  {
+   "peer": "e",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "e",
+   "op": "enter_text",
+   "target": "field",
+   "value": "dm from e ${RUN}"
+  },
+  {
+   "peer": "e",
+   "op": "key",
+   "value": "enter"
+  },
+  {
+   "peer": "f",
+   "op": "wait_for",
+   "target": "text:dm from e ${RUN}",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "f",
+   "op": "tap",
+   "target": "type:_FriendsManager > semantics:Close",
+   "index": 0
+  },
+  {
+   "peer": "f",
+   "op": "wait_for",
+   "gone": "type:_FriendsManager",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "f",
+   "op": "tap",
+   "target": "semantics:probe-e"
+  },
+  {
+   "peer": "f",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "f",
+   "op": "enter_text",
+   "target": "field",
+   "value": "dm from f ${RUN}"
+  },
+  {
+   "peer": "f",
+   "op": "key",
+   "value": "enter"
+  },
+  {
+   "peer": "e",
+   "op": "wait_for",
+   "target": "text:dm from f ${RUN}",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "e",
+   "op": "log",
+   "message": "one row per message: the optimistic write and the one that arrives must reconcile"
+  },
+  {
+   "peer": "e",
+   "op": "expect_count",
+   "target": "text:dm from e ${RUN}",
+   "value": 1
+  },
+  {
+   "peer": "f",
+   "op": "expect_count",
+   "target": "text:dm from f ${RUN}",
+   "value": 1
+  },
+  {
+   "peer": "e",
+   "op": "log",
+   "message": "e takes a long name and the preset red; the editor shows the retuned swatches"
+  },
+  {
+   "peer": "e",
+   "op": "tap",
+   "target": "semantics:Settings",
+   "index": 0
+  },
+  {
+   "peer": "e",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "e",
+   "op": "tap",
+   "target": "text:Profile",
+   "index": 0
+  },
+  {
+   "peer": "e",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "e",
+   "op": "enter_text",
+   "target": "hint:Enter a display name",
+   "value": "Alexandrina Wilhelmina Lovelace-Byron of Ockham"
+  },
+  {
+   "peer": "e",
+   "op": "wait",
+   "ms": 300
+  },
+  {
+   "peer": "e",
+   "op": "reveal",
+   "target": "text:Name colour"
+  },
+  {
+   "peer": "e",
+   "op": "tap",
+   "target": "semantics:Use this colour",
+   "index": 0
+  },
+  {
+   "peer": "e",
+   "op": "wait",
+   "ms": 500
+  },
+  {
+   "peer": "e",
+   "op": "reveal",
+   "target": "text:Name colour"
+  },
+  {
+   "peer": "e",
+   "op": "shot",
+   "name": "nf-e-editor-dark"
+  },
+  {
+   "peer": "e",
+   "op": "theme",
+   "value": "light"
+  },
+  {
+   "peer": "e",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "e",
+   "op": "shot",
+   "name": "nf-e-editor-light"
+  },
+  {
+   "peer": "e",
+   "op": "theme",
+   "value": "dark"
+  },
+  {
+   "peer": "e",
+   "op": "wait",
+   "ms": 500
+  },
+  {
+   "peer": "e",
+   "op": "tap",
+   "target": "text:Save",
+   "index": 0
+  },
+  {
+   "peer": "e",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "e",
+   "op": "key",
+   "value": "escape"
+  },
+  {
+   "peer": "e",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "e",
+   "op": "enter_text",
+   "target": "field",
+   "value": "long from e ${RUN}"
+  },
+  {
+   "peer": "e",
+   "op": "key",
+   "value": "enter"
+  },
+  {
+   "peer": "f",
+   "op": "wait_for",
+   "target": "text:long from e ${RUN}",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "f",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "f",
+   "op": "log",
+   "message": "f: the DM is open, so e's friend chip is SELECTED"
+  },
+  {
+   "peer": "f",
+   "op": "shot",
+   "name": "nf-f-selected-dark"
+  },
+  {
+   "peer": "f",
+   "op": "theme",
+   "value": "light"
+  },
+  {
+   "peer": "f",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "f",
+   "op": "shot",
+   "name": "nf-f-selected-light"
+  },
+  {
+   "peer": "f",
+   "op": "theme",
+   "value": "dark"
+  },
+  {
+   "peer": "f",
+   "op": "wait",
+   "ms": 500
+  },
+  {
+   "peer": "e",
+   "op": "log",
+   "message": "e types without sending: f sees the typing line in e's colour"
+  },
+  {
+   "peer": "e",
+   "op": "enter_text",
+   "target": "field",
+   "value": "typing dark ${RUN}"
+  },
+  {
+   "peer": "f",
+   "op": "wait",
+   "ms": 1200
+  },
+  {
+   "peer": "f",
+   "op": "shot",
+   "name": "nf-f-typing-dark"
+  },
+  {
+   "peer": "f",
+   "op": "theme",
+   "value": "light"
+  },
+  {
+   "peer": "f",
+   "op": "wait",
+   "ms": 500
+  },
+  {
+   "peer": "e",
+   "op": "enter_text",
+   "target": "field",
+   "value": "typing light ${RUN}"
+  },
+  {
+   "peer": "f",
+   "op": "wait",
+   "ms": 1200
+  },
+  {
+   "peer": "f",
+   "op": "shot",
+   "name": "nf-f-typing-light"
+  },
+  {
+   "peer": "f",
+   "op": "theme",
+   "value": "dark"
+  },
+  {
+   "peer": "f",
+   "op": "wait",
+   "ms": 500
+  },
+  {
+   "peer": "e",
+   "op": "enter_text",
+   "target": "field",
+   "value": ""
+  },
+  {
+   "peer": "e",
+   "op": "log",
+   "message": "e adds a second colour; f shoots the long gradient name in a narrow window"
+  },
+  {
+   "peer": "e",
+   "op": "tap",
+   "target": "semantics:Settings",
+   "index": 0
+  },
+  {
+   "peer": "e",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "e",
+   "op": "tap",
+   "target": "text:Profile",
+   "index": 0
+  },
+  {
+   "peer": "e",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "e",
+   "op": "reveal",
+   "target": "text:Name colour"
+  },
+  {
+   "peer": "e",
+   "op": "tap",
+   "target": "semantics:Add a colour",
+   "index": 0
+  },
+  {
+   "peer": "e",
+   "op": "wait",
+   "ms": 500
+  },
+  {
+   "peer": "e",
+   "op": "tap",
+   "target": "text:Save",
+   "index": 0
+  },
+  {
+   "peer": "e",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "e",
+   "op": "key",
+   "value": "escape"
+  },
+  {
+   "peer": "e",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "e",
+   "op": "enter_text",
+   "target": "field",
+   "value": "gradient from e ${RUN}"
+  },
+  {
+   "peer": "e",
+   "op": "key",
+   "value": "enter"
+  },
+  {
+   "peer": "f",
+   "op": "wait_for",
+   "target": "text:gradient from e ${RUN}",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "f",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "f",
+   "op": "view",
+   "width": 760,
+   "height": 640
+  },
+  {
+   "peer": "f",
+   "op": "wait",
+   "ms": 1200
+  },
+  {
+   "peer": "f",
+   "op": "shot",
+   "name": "nf-f-narrow-dark"
+  },
+  {
+   "peer": "f",
+   "op": "theme",
+   "value": "light"
+  },
+  {
+   "peer": "f",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "f",
+   "op": "shot",
+   "name": "nf-f-narrow-light"
+  },
+  {
+   "peer": "f",
+   "op": "theme",
+   "value": "dark"
+  },
+  {
+   "peer": "f",
+   "op": "wait",
+   "ms": 500
+  },
+  {
+   "peer": "f",
+   "op": "view",
+   "reset": true
+  },
+  {
+   "peer": "f",
+   "op": "wait",
+   "ms": 1000
+  },
+  {
+   "peer": "f",
+   "op": "log",
+   "message": "f takes the same long name as e: two people, one name"
+  },
+  {
+   "peer": "f",
+   "op": "tap",
+   "target": "semantics:Settings",
+   "index": 0
+  },
+  {
+   "peer": "f",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "f",
+   "op": "tap",
+   "target": "text:Profile",
+   "index": 0
+  },
+  {
+   "peer": "f",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "f",
+   "op": "enter_text",
+   "target": "hint:Enter a display name",
+   "value": "Alexandrina Wilhelmina Lovelace-Byron of Ockham"
+  },
+  {
+   "peer": "f",
+   "op": "wait",
+   "ms": 300
+  },
+  {
+   "peer": "f",
+   "op": "tap",
+   "target": "text:Save",
+   "index": 0
+  },
+  {
+   "peer": "f",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "f",
+   "op": "key",
+   "value": "escape"
+  },
+  {
+   "peer": "f",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "f",
+   "op": "enter_text",
+   "target": "field",
+   "value": "dup from f ${RUN}"
+  },
+  {
+   "peer": "f",
+   "op": "key",
+   "value": "enter"
+  },
+  {
+   "peer": "e",
+   "op": "wait_for",
+   "target": "text:dup from f ${RUN}",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "e",
+   "op": "wait",
+   "ms": 2500
+  },
+  {
+   "peer": "e",
+   "op": "shot",
+   "name": "nf-e-duplicate-dark"
+  },
+  {
+   "peer": "e",
+   "op": "theme",
+   "value": "light"
+  },
+  {
+   "peer": "e",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "e",
+   "op": "shot",
+   "name": "nf-e-duplicate-light"
+  },
+  {
+   "peer": "e",
+   "op": "theme",
+   "value": "dark"
+  },
+  {
+   "peer": "e",
+   "op": "wait",
+   "ms": 500
+  },
+  {
+   "peer": "f",
+   "op": "log",
+   "message": "f: a selected HollowListRow, the Archive's conversation row"
+  },
+  {
+   "peer": "f",
+   "op": "tap",
+   "target": "semantics:Archive",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "f",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "f",
+   "op": "tap",
+   "target": "type:ArchiveConversationList > text:Alexandrina Wilhelmina Lovelace-",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "f",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "f",
+   "op": "shot",
+   "name": "nf-f-archive-selected-dark"
+  },
+  {
+   "peer": "f",
+   "op": "theme",
+   "value": "light"
+  },
+  {
+   "peer": "f",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "f",
+   "op": "shot",
+   "name": "nf-f-archive-selected-light"
+  },
+  {
+   "peer": "f",
+   "op": "theme",
+   "value": "dark"
+  },
+  {
+   "peer": "f",
+   "op": "wait",
+   "ms": 500
+  },
+  {
+   "peer": "all",
+   "op": "dump",
+   "name": "converged"
+  }
+ ]
+}

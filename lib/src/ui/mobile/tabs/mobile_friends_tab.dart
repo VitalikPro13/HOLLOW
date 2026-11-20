@@ -1,5 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/name_color_provider.dart';
+import 'package:hollow/src/ui/components/name_text.dart';
+import 'package:hollow/src/core/color_utils.dart';
 import 'package:hollow/src/core/providers/link_down_provider.dart';
 import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
@@ -368,11 +371,13 @@ class _FriendRow extends ConsumerWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(name,
-                    style: HollowTypography.bodyTouch.copyWith(
-                      color:
-                          isOnline ? hollow.textPrimary : hollow.textSecondary,
-                    ),
+                NameText(name,
+                    // Like the member list: a chosen colour while online.
+                    paint: (isOnline ? ref.chosenNamePaintOf(peerId, hollow) : null) ??
+                        NamePaint([
+                          isOnline ? hollow.textPrimary : hollow.textSecondary
+                        ]),
+                    style: HollowTypography.bodyTouch,
                     maxLines: 1, overflow: TextOverflow.ellipsis),
                 if (line != null)
                   Text(line,
@@ -537,11 +542,16 @@ class _PendingRowState extends ConsumerState<_PendingRow> {
     final info = Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(chosen ?? shortPeerLabel(displayId),
-            style: (chosen != null
-                    ? HollowTypography.bodyTouch
-                    : HollowTypography.mono)
-                .copyWith(color: hollow.textPrimary),
+        NameText(chosen ?? shortPeerLabel(displayId),
+            // As on the desktop's Requests tab: a chosen colour goes with a
+            // chosen name, never with an id.
+            paint: (chosen == null
+                    ? null
+                    : ref.chosenNamePaintOf(displayId, hollow)) ??
+                NamePaint([hollow.textPrimary]),
+            style: chosen != null
+                ? HollowTypography.bodyTouch
+                : HollowTypography.mono,
             maxLines: 1, overflow: TextOverflow.ellipsis),
         Text(
             widget.isIncoming

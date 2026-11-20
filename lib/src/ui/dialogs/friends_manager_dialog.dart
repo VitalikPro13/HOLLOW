@@ -4,6 +4,8 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/color_utils.dart';
+import 'package:hollow/src/core/providers/name_color_provider.dart';
 import 'package:hollow/src/core/providers/link_down_provider.dart';
 import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
@@ -690,6 +692,11 @@ class _FriendRowState extends ConsumerState<_FriendRow> {
         ring: _hovered ? hollow.elevated : hollow.overlay,
       ),
       title: name,
+      // Like the member list and the phone's Friends tab: a chosen colour
+      // while online, a quieter neutral while away.
+      titlePaint: online
+          ? ref.chosenNamePaintOf(peerId, hollow)
+          : NamePaint([hollow.textSecondary]),
       subtitle: line,
       // Hidden, never removed: the buttons stay in the focus order, and a Tab
       // onto one is what shows them.
@@ -777,6 +784,9 @@ class _RequestsTabState extends ConsumerState<_RequestsTab> {
       return HollowListRow(
         leading: HollowAvatar(peerId: displayId, size: 32),
         title: chosen ?? shortPeerLabel(displayId),
+        titlePaint: chosen == null
+            ? null
+            : ref.chosenNamePaintOf(displayId, HollowTheme.of(context)),
         subtitle: incoming ? receivedRequestLabel(at) : sentRequestLabel(at),
         trailing: Row(
           mainAxisSize: MainAxisSize.min,

@@ -7,6 +7,7 @@ import 'package:hollow/src/core/services/link_resilience.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/components/name_text.dart';
 import 'package:hollow/src/ui/call/call_actions.dart';
 import 'package:hollow/src/ui/call/call_person_tile.dart';
 import 'package:hollow/src/ui/call/call_route.dart';
@@ -239,25 +240,17 @@ class _InlineShareOffer extends ConsumerWidget {
         children: [
           Icon(LucideIcons.monitor, size: 14, color: hollow.textTertiary),
           const SizedBox(width: HollowSpacing.sm),
-          Text.rich(
-            TextSpan(children: [
-              TextSpan(
-                text: share.name,
-                style: TextStyle(
-                  color: callNameColor(hollow,
-                      isSelf: false,
-                      master: share.master,
-                      field: ref.watch(shownNameColorProvider(share.master))),
-                  fontWeight: FontWeight.w500,
-                ),
-              ),
-              const TextSpan(text: ' is sharing their screen'),
-            ]),
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
+          Flexible(child: NameLine(
+            name: share.name,
+            paint: callNamePaint(hollow,
+                isSelf: false,
+                master: share.master,
+                field: ref.watch(shownNameColorProvider(share.master))),
+            rest: ' is sharing their screen',
+            nameStyle: const TextStyle(fontWeight: FontWeight.w500),
             style:
                 HollowTypography.bodySmall.copyWith(color: hollow.textSecondary),
-          ),
+          )),
           const SizedBox(width: HollowSpacing.sm),
           HollowButton.outline(
             compact: true,

@@ -1,12 +1,16 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hollow/src/core/services/win32_clipboard.dart';
+import 'package:hollow/src/theme/hollow_theme_data.dart';
 import 'package:hollow/src/ui/chat/chat_input_shortcuts.dart';
+import 'package:hollow/src/ui/chat/clipboard_paste.dart';
 import 'package:hollow/src/ui/components/snapshot_paste.dart';
+import 'package:super_clipboard/super_clipboard.dart';
 
 /// Issue #101: a dictation app (Handy) puts its transcript on the clipboard,
 /// presses Ctrl+V and puts the old clipboard back about 160 ms later. The
@@ -22,8 +26,14 @@ void main() {
     savedReader = pasteSnapshotReader;
   });
 
+  final savedOffer = clipboardOfferReader;
+  final savedKind = pastedPathKind;
+  final savedSize = pastedFileSize;
   tearDown(() {
     pasteSnapshotReader = savedReader;
+    clipboardOfferReader = savedOffer;
+    pastedPathKind = savedKind;
+    pastedFileSize = savedSize;
   });
 
   /// The engine's read fails the way it does while another process holds
@@ -202,36 +212,54 @@ void main() {
     }, skip: !Platform.isWindows);
   });
 
-  group('chat composer Ctrl+V', () {
-    Future<TextEditingController> pumpComposer(
-      WidgetTester tester, {
-      void Function(String path, String name)? onPasteImage,
-    }) async {
-      final controller = TextEditingController();
-      final focusNode = FocusNode();
-      addTearDown(focusNode.dispose);
-      await tester.pumpWidget(MaterialApp(
-        actions: hollowAppActions(),
-        home: Scaffold(
-          body: Focus(
-            onKeyEvent: (_, event) => handleChatInputKey(
-              event,
-              controller,
-              focusNode,
-              () {},
-              onPasteImage: onPasteImage,
-            ),
-            child: TextField(
-              controller: controller,
-              focusNode: focusNode,
-              autofocus: true,
-            ),
+  Future<TextEditingController> pumpComposer(
+    WidgetTester tester, {
+    void Function(List<PastedFile> files)? onPasteFiles,
+  }) async {
+    final controller = TextEditingController();
+    final focusNode = FocusNode();
+    addTearDown(focusNode.dispose);
+    await tester.pumpWidget(MaterialApp(
+      theme: HollowThemeData.dark(),
+      actions: hollowAppActions(),
+      home: Scaffold(
+        body: Focus(
+          onKeyEvent: (_, event) => handleChatInputKey(
+            event,
+            controller,
+            focusNode,
+            () {},
+            onPasteFiles: onPasteFiles,
+          ),
+          child: TextField(
+            controller: controller,
+            focusNode: focusNode,
+            autofocus: true,
           ),
         ),
-      ));
-      await tester.pump();
-      return controller;
-    }
+      ),
+    ));
+    await tester.pump();
+    return controller;
+  }
+
+  /// One clipboard read for the composer's own paste path.
+  void useOffer(
+      {List<String> files = const [],
+      List<SimpleFileFormat> images = const [],
+      String? text}) {
+    clipboardOfferReader = () async => ClipboardOffer(
+          filePaths: files,
+          imageFormats: images,
+          readImage: (_) async => null,
+          readText: () async => text,
+        );
+    pastedPathKind = (p) async =>
+        p.endsWith('folder') ? PastedPathKind.folder : PastedPathKind.file;
+    pastedFileSize = (_) async => 1;
+  }
+
+  group('chat composer Ctrl+V', () {
 
     testWidgets('text-only clipboard: the text lands and no image read starts',
         (tester) async {
@@ -243,7 +271,8 @@ void main() {
       };
       final images = <String>[];
       final controller =
-          await pumpComposer(tester, onPasteImage: (p, n) => images.add(n));
+          await pumpComposer(tester,
+              onPasteFiles: (files) => images.addAll(files.map((f) => f.name)));
 
       await pressCtrlV(tester);
 
@@ -263,6 +292,115 @@ void main() {
 
       expect(controller.text, isEmpty);
       expect(engineReads, isEmpty);
+    });
+
+    // #142: Explorer and ShareX's "Copy file to clipboard" put CF_HDROP there;
+    // the file is the paste, never the text beside it.
+    testWidgets('Windows: copied files take the paste, not their names',
+        (tester) async {
+      engineClipboardBusy(tester);
+      pasteSnapshotReader = (_) => const ClipboardSnapshot(
+          text: r'C:\clips\clip.mp4', hasFiles: true);
+      useOffer(files: [r'C:\clips\clip.mp4'], text: r'C:\clips\clip.mp4');
+      final staged = <String>[];
+      final controller = await pumpComposer(tester,
+          onPasteFiles: (files) => staged.addAll(files.map((f) => f.name)));
+
+      await pressCtrlV(tester);
+      await tester.pump();
+
+      expect(staged, ['clip.mp4']);
+      expect(controller.text, isEmpty);
+    });
+  });
+
+  group('Mac composer Cmd+V (#142)', () {
+    setUp(() => pasteSnapshotReader = null);
+
+    /// A test on a Mac: the override is set back before the binding checks.
+    void macTest(String name, Future<void> Function(WidgetTester) body) =>
+        testWidgets(name, (tester) async {
+          debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+          try {
+            await body(tester);
+          } finally {
+            debugDefaultTargetPlatformOverride = null;
+          }
+        });
+
+    Future<void> pressMetaV(WidgetTester tester,
+        {LogicalKeyboardKey modifier = LogicalKeyboardKey.metaLeft}) async {
+      await tester.sendKeyDownEvent(modifier);
+      await tester.sendKeyEvent(LogicalKeyboardKey.keyV);
+      await tester.sendKeyUpEvent(modifier);
+      await tester.pump();
+      await tester.pump();
+    }
+
+    macTest('text alone lands once, through the one read',
+        (tester) async {
+      engineClipboardHolds(tester, 'from the engine');
+      useOffer(text: 'hello');
+      final staged = <String>[];
+      final controller = await pumpComposer(tester,
+          onPasteFiles: (files) => staged.addAll(files.map((f) => f.name)));
+
+      await pressMetaV(tester);
+
+      expect(controller.text, 'hello');
+      expect(engineReads, isEmpty, reason: "the engine's paste never ran");
+      expect(staged, isEmpty);
+    });
+
+    macTest('a file copied in Finder is staged, never its name as text',
+        (tester) async {
+      engineClipboardHolds(tester, 'photo.png');
+      useOffer(
+          files: ['/Users/a/Desktop/photo.png'],
+          images: [Formats.tiff],
+          text: 'photo.png');
+      final staged = <String>[];
+      final controller = await pumpComposer(tester,
+          onPasteFiles: (files) => staged.addAll(files.map((f) => f.name)));
+
+      await pressMetaV(tester);
+
+      expect(staged, ['photo.png']);
+      expect(controller.text, isEmpty);
+      expect(engineReads, isEmpty);
+    });
+
+    macTest('a copied folder says it cannot be sent', (tester) async {
+      engineClipboardHolds(tester, 'Holiday');
+      useOffer(
+          files: ['/Users/a/Desktop/Holiday-folder'],
+          images: [Formats.tiff],
+          text: 'Holiday');
+      final staged = <String>[];
+      final controller = await pumpComposer(tester,
+          onPasteFiles: (files) => staged.addAll(files.map((f) => f.name)));
+
+      await pressMetaV(tester);
+
+      expect(find.text("Folders can't be sent"), findsOneWidget);
+      expect(staged, isEmpty);
+      expect(controller.text, isEmpty);
+      await tester.pump(const Duration(seconds: 5));
+    });
+
+    macTest('Ctrl+V on a Mac is not a paste', (tester) async {
+      engineClipboardHolds(tester, 'nope');
+      var reads = 0;
+      clipboardOfferReader = () async {
+        reads++;
+        return null;
+      };
+      final controller = await pumpComposer(tester, onPasteFiles: (_) {});
+
+      await pressMetaV(tester, modifier: LogicalKeyboardKey.controlLeft);
+
+      expect(reads, 0);
+      expect(controller.text, isEmpty);
     });
   });
 }

@@ -16,7 +16,20 @@ guard catches the breakage, this page says why. Mobile-only UI rules are in
   text's own foreground shader, no `ShaderMask`), never a raw `nameColorFor` at a new site:
   that skips the person's chosen colour (#140), the accent-band turn for everyone but you
   (`self:`) and the viewer's "Show custom name colours" switch. Moved from CLAUDE.md
-  (0.14 docs pass).
+  (0.14 docs pass). A CHOSEN colour shows on every name label (neutral surfaces take
+  `ref.chosenNamePaintOf`, `titlePaint` on `HollowListRow`/`ConversationRow`, `paint` on
+  `PeerNameText`, `NameLine` for "Ada is sharing"); a paint read down to `.color` drops a
+  gradient (`test/name_paint_guard_test.dart`, one-colour allowlist: rings, stream overlay).
+  Trap (#149): a name inside a `SelectionArea` (every chat row) is composited, and a shader
+  painted in the layer's space clamped to its LAST stop; `NameText` gives such a name its own
+  `OffsetLayer` at its origin. The shader is set at LAYOUT from the paragraph's own line boxes
+  (an ellipsized name ends on its last stop, a wrapped one spans its widest line), by
+  re-setting the child paragraph's span after every rebuild (`test/widget/name_text_paint_test.dart`).
+  A name on a selected row or chip goes through `namePaintOnSelected` (the accent-muted fill
+  needs a lighter colour; there only, so a red stays red elsewhere). `shownNameColorProvider`
+  collapses device ids and is empty for a blocked master: never re-check a block per site.
+  `NameLine` (one name or `.several`) shortens the names first, never spills, and reads as one
+  sentence to a screen reader; the typing line and "is speaking" use it.
 - `HollowCheckbox` (0.14, Vitalik 11-14: our own component, Material `Checkbox` stays
   guarded) is ONLY for an agreement that gates one action (the shop's right-to-cancel box
   before Buy); the whole sentence is the target, `footer` holds the explaining links. A
@@ -255,6 +268,20 @@ guard catches the breakage, this page says why. Mobile-only UI rules are in
   because Material shifts an Apple caret 2 px into the last glyph with no parameter to
   undo it (Vitalik judged the iOS fix better too, 10-19). Raw `TextField`s are banned
   for visible inputs; `test/widget/hollow_caret_test.dart`.
+- Composer paste (#142, `chat/clipboard_paste.dart`): Cmd+V on macOS and iPad, Ctrl+V
+  elsewhere (`isPasteChord`). Copied FILES (Explorer, ShareX "Copy file to clipboard" = CF_HDROP
+  only, Finder, Nautilus) are the WHOLE paste: staged as themselves, any type, all of them,
+  under their own names; the text beside them (Finder's file name, Nautilus's path) and the
+  image bytes (Finder's ICON, also for a folder) are never pasted. Folders are left out with a
+  toast ("Folders can't be sent"). Only with no file listed are image bytes read (PNG first;
+  ShareX "Copy image" = CF_DIB + registered "PNG"; a bare DIB is offered as PNG by
+  super_native), and the text still lands. Windows decides during the key event
+  (`ClipboardSnapshot.hasFiles`, #101); elsewhere the composer takes the key and ONE read
+  decides, pasting the text itself. `planPaste` is the pure decision
+  (`test/clipboard_paste_test.dart`, composer `test/widget/snapshot_paste_test.dart`). A
+  clipboard read that never starts answers null and one that stalls gives up after 15 s
+  (`readClipboardFile`). Pasted image bytes go to the data root's temp through `AtRest.write`
+  (sealed, emptied at launch), and the paste path never stats a file on the UI thread.
 - AltGr = Ctrl+Alt on Windows: a hand-rolled `isControlPressed` needs
   `&& !isAltPressed` (else AZERTY @/€ are swallowed); `SingleActivator` is immune.
   `feedback_altgr_ctrl_alt_shortcuts`.

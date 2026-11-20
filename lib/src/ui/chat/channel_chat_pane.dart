@@ -85,6 +85,7 @@ import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:hollow/src/core/services/attachment_export.dart';
 import 'package:hollow/src/ui/chat/server_recovery_notices.dart';
+import 'package:hollow/src/core/color_utils.dart';
 import 'package:hollow/src/core/providers/name_color_provider.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
@@ -970,8 +971,11 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane>
     _scrollToBottom();
   }
 
-  void _stageClipboardImage(String path, String name) {
-    unawaited(_stageFiles([StagedAttachment.fromPath(path, name: name)]));
+  void _stagePastedFiles(List<PastedFile> files) {
+    unawaited(_stageFiles([
+      for (final f in files)
+        StagedAttachment(path: f.path, name: f.name, sizeBytes: f.size)
+    ]));
   }
 
   /// Adds files to the composer's album. A media-only channel keeps only
@@ -1389,6 +1393,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane>
 
     final typingPeers =
         ref.watch(typingProvider.select((t) => t[_stateKey])) ?? {};
+    final (typingNames, typingPaints) = _typingNames(typingPeers);
 
     // A voice room with its text chat off (#107) shows none of its history.
     if (!ref.watch(channelChatOpenProvider(
@@ -1425,7 +1430,8 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane>
             _buildMessageArea(hollow, messages, allMessages),
 
             TypingIndicatorHost(
-              names: _typingNames(typingPeers),
+              names: typingNames,
+              paints: typingPaints,
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -2410,18 +2416,20 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane>
   /// the master-keyed name lookup hits and one person shows once; our own
   /// identity is excluded so a sibling never reads as "you are typing" (see
   /// [typingMastersFor]).
-  List<String> _typingNames(Set<String> typingPeers) {
-    if (typingPeers.isEmpty) return const [];
-    final masters = typingMastersFor(ref, typingPeers);
+  (List<String>, List<NamePaint>) _typingNames(Set<String> typingPeers) {
+    if (typingPeers.isEmpty) return (const [], const []);
+    final masters = typingMastersFor(ref, typingPeers).toList();
     final nicknames = ref.watch(serverNicknamesProvider(widget.serverId));
     final profiles = ref.watch(profileProvider);
-    return masters
-          .map((master) => serverDisplayNameFor(
-                profiles,
-                master,
-                nickname: nicknames[master] ?? '',
-              ))
-          .toList();
+    final hollow = HollowTheme.of(context);
+    return (
+      [
+        for (final master in masters)
+          serverDisplayNameFor(profiles, master,
+              nickname: nicknames[master] ?? ''),
+      ],
+      [for (final master in masters) ref.namePaint(master, hollow)],
+    );
   }
 
   Widget _buildReplyPreviewBar() {
@@ -2569,7 +2577,7 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane>
     if (emoteResult == KeyEventResult.handled) return emoteResult;
     return handleChatInputKey(
       event, _controller, _focusNode, _handleSend,
-      onPasteImage: _stageClipboardImage,
+      onPasteFiles: _stagePastedFiles,
       formatBindings: ref.read(appShortcutsProvider).valueOrNull,
       onEditLast: _editNewestOwn,
     );

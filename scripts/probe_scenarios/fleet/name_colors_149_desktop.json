@@ -1,0 +1,544 @@
+{
+  "_": [
+    "#140 + #149 on two desktop peers, e and f: e picks the preset red, then a red to yellow gradient;",
+    "f shoots the DM (message header, DM header, friend chip or list) and its Home / Chats list in dark and light,",
+    "e shoots the editor preview and its own name. Friend steps copied from name_colors_desktop.json.",
+    "run (Mac mini): FLEET_BACKEND=macos pwsh scripts/fleet.ps1 -Scenario name_colors_149_desktop -Peers e,f"
+  ],
+  "peers": [
+    "e",
+    "f"
+  ],
+  "steps": [
+    {
+      "peer": "all",
+      "op": "wait_for",
+      "provider": "connection",
+      "equals": "connected",
+      "timeout_ms": 120000
+    },
+    {
+      "peer": "e",
+      "op": "capture",
+      "from": "provider",
+      "key": "peerId",
+      "as": "PEER_E"
+    },
+    {
+      "peer": "f",
+      "op": "tap",
+      "target": "semantics:Add friend",
+      "index": 0
+    },
+    {
+      "peer": "f",
+      "op": "tap",
+      "target": "type:_FriendsManager > text:Add friend",
+      "index": 0
+    },
+    {
+      "peer": "f",
+      "op": "enter_text",
+      "target": "hint:Paste an ID, or type a nickname",
+      "value": "${PEER_E}"
+    },
+    {
+      "peer": "f",
+      "op": "tap",
+      "target": "text:Send request",
+      "index": 0
+    },
+    {
+      "peer": "e",
+      "op": "tap",
+      "target": "semantics:Add friend",
+      "index": 0
+    },
+    {
+      "peer": "e",
+      "op": "tap",
+      "target": "text:Requests",
+      "index": 0
+    },
+    {
+      "peer": "e",
+      "op": "wait_for",
+      "target": "semantics:Accept friend request",
+      "timeout_ms": 60000
+    },
+    {
+      "peer": "e",
+      "op": "tap",
+      "target": "semantics:Accept friend request",
+      "index": 0
+    },
+    {
+      "peer": "e",
+      "op": "log",
+      "message": "the accepted friend must reach the UI on BOTH sides, not just the friends table"
+    },
+    {
+      "peer": "e",
+      "op": "wait_for",
+      "target": "text:probe-f",
+      "timeout_ms": 60000
+    },
+    {
+      "peer": "f",
+      "op": "wait_for",
+      "target": "text:probe-e",
+      "timeout_ms": 60000
+    },
+    {
+      "peer": "e",
+      "op": "tap",
+      "target": "type:_FriendsManager > semantics:Close",
+      "index": 0
+    },
+    {
+      "peer": "e",
+      "op": "wait_for",
+      "gone": "type:_FriendsManager",
+      "timeout_ms": 10000
+    },
+    {
+      "peer": "e",
+      "op": "tap",
+      "target": "semantics:probe-f"
+    },
+    {
+      "peer": "e",
+      "op": "wait",
+      "ms": 1500
+    },
+    {
+      "peer": "e",
+      "op": "enter_text",
+      "target": "field",
+      "value": "dm from e ${RUN}"
+    },
+    {
+      "peer": "e",
+      "op": "key",
+      "value": "enter"
+    },
+    {
+      "peer": "f",
+      "op": "wait_for",
+      "target": "text:dm from e ${RUN}",
+      "timeout_ms": 60000
+    },
+    {
+      "peer": "f",
+      "op": "tap",
+      "target": "type:_FriendsManager > semantics:Close",
+      "index": 0
+    },
+    {
+      "peer": "f",
+      "op": "wait_for",
+      "gone": "type:_FriendsManager",
+      "timeout_ms": 10000
+    },
+    {
+      "peer": "f",
+      "op": "tap",
+      "target": "semantics:probe-e"
+    },
+    {
+      "peer": "f",
+      "op": "wait",
+      "ms": 1500
+    },
+    {
+      "peer": "f",
+      "op": "enter_text",
+      "target": "field",
+      "value": "dm from f ${RUN}"
+    },
+    {
+      "peer": "f",
+      "op": "key",
+      "value": "enter"
+    },
+    {
+      "peer": "e",
+      "op": "wait_for",
+      "target": "text:dm from f ${RUN}",
+      "timeout_ms": 60000
+    },
+    {
+      "peer": "e",
+      "op": "log",
+      "message": "one row per message: the optimistic write and the one that arrives must reconcile"
+    },
+    {
+      "peer": "e",
+      "op": "expect_count",
+      "target": "text:dm from e ${RUN}",
+      "value": 1
+    },
+    {
+      "peer": "f",
+      "op": "expect_count",
+      "target": "text:dm from f ${RUN}",
+      "value": 1
+    },
+    {
+      "peer": "e",
+      "op": "log",
+      "message": "#140: e picks the preset red (the swatch the reporter used) and saves"
+    },
+    {
+      "peer": "e",
+      "op": "tap",
+      "target": "semantics:Settings",
+      "index": 0
+    },
+    {
+      "peer": "e",
+      "op": "wait",
+      "ms": 800
+    },
+    {
+      "peer": "e",
+      "op": "tap",
+      "target": "text:Profile",
+      "index": 0
+    },
+    {
+      "peer": "e",
+      "op": "wait",
+      "ms": 800
+    },
+    {
+      "peer": "e",
+      "op": "reveal",
+      "target": "text:Name colour"
+    },
+    {
+      "peer": "e",
+      "op": "tap",
+      "target": "semantics:Use this colour",
+      "index": 0
+    },
+    {
+      "peer": "e",
+      "op": "wait",
+      "ms": 500
+    },
+    {
+      "peer": "e",
+      "op": "reveal",
+      "target": "text:Name colour"
+    },
+    {
+      "peer": "e",
+      "op": "shot",
+      "name": "nc149-e-editor-red-dark"
+    },
+    {
+      "peer": "e",
+      "op": "theme",
+      "value": "light"
+    },
+    {
+      "peer": "e",
+      "op": "wait",
+      "ms": 800
+    },
+    {
+      "peer": "e",
+      "op": "shot",
+      "name": "nc149-e-editor-red-light"
+    },
+    {
+      "peer": "e",
+      "op": "theme",
+      "value": "dark"
+    },
+    {
+      "peer": "e",
+      "op": "wait",
+      "ms": 500
+    },
+    {
+      "peer": "e",
+      "op": "tap",
+      "target": "text:Save",
+      "index": 0
+    },
+    {
+      "peer": "e",
+      "op": "wait",
+      "ms": 1500
+    },
+    {
+      "peer": "e",
+      "op": "key",
+      "value": "escape"
+    },
+    {
+      "peer": "e",
+      "op": "wait",
+      "ms": 800
+    },
+    {
+      "peer": "e",
+      "op": "enter_text",
+      "target": "field",
+      "value": "red from e ${RUN}"
+    },
+    {
+      "peer": "e",
+      "op": "key",
+      "value": "enter"
+    },
+    {
+      "peer": "f",
+      "op": "wait_for",
+      "target": "text:red from e ${RUN}",
+      "timeout_ms": 60000
+    },
+    {
+      "peer": "f",
+      "op": "wait",
+      "ms": 1500
+    },
+    {
+      "peer": "f",
+      "op": "shot",
+      "name": "nc149-f-red-dark"
+    },
+    {
+      "peer": "f",
+      "op": "theme",
+      "value": "light"
+    },
+    {
+      "peer": "f",
+      "op": "wait",
+      "ms": 800
+    },
+    {
+      "peer": "f",
+      "op": "shot",
+      "name": "nc149-f-red-light"
+    },
+    {
+      "peer": "f",
+      "op": "theme",
+      "value": "dark"
+    },
+    {
+      "peer": "f",
+      "op": "wait",
+      "ms": 500
+    },
+    {
+      "peer": "e",
+      "op": "log",
+      "message": "#149: e adds a second colour (a red to yellow gradient) and saves"
+    },
+    {
+      "peer": "e",
+      "op": "tap",
+      "target": "semantics:Settings",
+      "index": 0
+    },
+    {
+      "peer": "e",
+      "op": "wait",
+      "ms": 800
+    },
+    {
+      "peer": "e",
+      "op": "tap",
+      "target": "text:Profile",
+      "index": 0
+    },
+    {
+      "peer": "e",
+      "op": "wait",
+      "ms": 800
+    },
+    {
+      "peer": "e",
+      "op": "reveal",
+      "target": "text:Name colour"
+    },
+    {
+      "peer": "e",
+      "op": "tap",
+      "target": "semantics:Add a colour",
+      "index": 0
+    },
+    {
+      "peer": "e",
+      "op": "wait",
+      "ms": 500
+    },
+    {
+      "peer": "e",
+      "op": "tap",
+      "target": "text:Save",
+      "index": 0
+    },
+    {
+      "peer": "e",
+      "op": "wait",
+      "ms": 1500
+    },
+    {
+      "peer": "e",
+      "op": "key",
+      "value": "escape"
+    },
+    {
+      "peer": "e",
+      "op": "wait",
+      "ms": 800
+    },
+    {
+      "peer": "e",
+      "op": "enter_text",
+      "target": "field",
+      "value": "gradient from e ${RUN}"
+    },
+    {
+      "peer": "e",
+      "op": "key",
+      "value": "enter"
+    },
+    {
+      "peer": "f",
+      "op": "wait_for",
+      "target": "text:gradient from e ${RUN}",
+      "timeout_ms": 60000
+    },
+    {
+      "peer": "f",
+      "op": "wait",
+      "ms": 1500
+    },
+    {
+      "peer": "f",
+      "op": "shot",
+      "name": "nc149-f-gradient-dark"
+    },
+    {
+      "peer": "f",
+      "op": "theme",
+      "value": "light"
+    },
+    {
+      "peer": "f",
+      "op": "wait",
+      "ms": 800
+    },
+    {
+      "peer": "f",
+      "op": "shot",
+      "name": "nc149-f-gradient-light"
+    },
+    {
+      "peer": "f",
+      "op": "theme",
+      "value": "dark"
+    },
+    {
+      "peer": "f",
+      "op": "wait",
+      "ms": 500
+    },
+    {
+      "peer": "e",
+      "op": "wait",
+      "ms": 1000
+    },
+    {
+      "peer": "e",
+      "op": "shot",
+      "name": "nc149-e-own-gradient-dark"
+    },
+    {
+      "peer": "e",
+      "op": "theme",
+      "value": "light"
+    },
+    {
+      "peer": "e",
+      "op": "wait",
+      "ms": 800
+    },
+    {
+      "peer": "e",
+      "op": "shot",
+      "name": "nc149-e-own-gradient-light"
+    },
+    {
+      "peer": "e",
+      "op": "theme",
+      "value": "dark"
+    },
+    {
+      "peer": "f",
+      "op": "tap",
+      "target": "semantics:Home",
+      "index": 0,
+      "soft": true
+    },
+    {
+      "peer": "f",
+      "op": "wait",
+      "ms": 1500
+    },
+    {
+      "peer": "f",
+      "op": "wait",
+      "ms": 1500
+    },
+    {
+      "peer": "f",
+      "op": "shot",
+      "name": "nc149-f-home-dark"
+    },
+    {
+      "peer": "f",
+      "op": "theme",
+      "value": "light"
+    },
+    {
+      "peer": "f",
+      "op": "wait",
+      "ms": 800
+    },
+    {
+      "peer": "f",
+      "op": "shot",
+      "name": "nc149-f-home-light"
+    },
+    {
+      "peer": "f",
+      "op": "theme",
+      "value": "dark"
+    },
+    {
+      "peer": "f",
+      "op": "wait",
+      "ms": 500
+    },
+    {
+      "peer": "all",
+      "op": "dump",
+      "name": "converged"
+    }
+  ],
+  "cleanup": [
+    {
+      "peer": "all",
+      "op": "log",
+      "message": "fixture data directories are restored per run; nothing to undo"
+    }
+  ]
+}

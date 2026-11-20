@@ -117,7 +117,7 @@ void main() {
         file.writeAsBytesSync(data.buffer.asUint8List());
       } catch (_) {}
     });
-    expect(find.text('probe-b is typing'), findsOneWidget);
+    expect(find.bySemanticsLabel('probe-b is typing'), findsOneWidget);
     // Unmount so the typing dots release the shared ticker.
     await tester.pumpWidget(const SizedBox());
   }

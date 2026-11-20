@@ -98,7 +98,7 @@ void main() {
     expect(find.byType(TypingIndicatorBar), findsNothing,
         reason: 'nothing shows while nobody types');
     final typing = await layoutWith(const ['probe-b']);
-    expect(find.text('probe-b is typing'), findsOneWidget);
+    expect(find.bySemanticsLabel('probe-b is typing'), findsOneWidget);
     expect(typing, idle);
 
     // The label sits on the seam, mostly over the list's bottom padding.

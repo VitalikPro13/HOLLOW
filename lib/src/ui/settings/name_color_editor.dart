@@ -16,14 +16,18 @@ import 'package:hollow/src/ui/settings/settings_shared.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Hues of the preset swatches. Each theme moves a stop's lightness until it
-/// reads, so only the hue and saturation of a pick survive everywhere.
+/// reads, so only the hue and saturation of a pick survive everywhere: these
+/// are the hues that still read as themselves at 4.5:1 on dark and on light
+/// (a warmer amber, since a yellow that dark turns olive on light).
 const List<double> kNameColorPresetHues = [
-  0, 25, 45, 95, 150, 185, 210, 250, 280, 320,
+  0, 20, 40, 95, 150, 185, 210, 250, 280, 320,
 ];
 
-/// A pick from a hue: saturated and mid-light, the theme does the rest.
+/// A pick from a hue: saturated and mid-light, the theme does the rest. A
+/// fuller saturation keeps a lifted red red and a darkened orange orange,
+/// where a paler one drifts to pink and brown.
 Color nameColorFromHue(double hue) =>
-    HSLColor.fromAHSL(1.0, hue % 360, 0.8, 0.55).toColor();
+    HSLColor.fromAHSL(1.0, hue % 360, 0.9, 0.55).toColor();
 
 /// Settings > Profile > Name colour (#140): one colour, or two or three for a
 /// gradient across the name, with the name previewed on a dark and a light
@@ -199,8 +203,8 @@ class _NameColorEditorState extends ConsumerState<NameColorEditor> {
   }
 }
 
-/// [name] as everyone on [theme] sees it: the canvas of that theme, the name in
-/// the paint it gets there.
+/// [name] as everyone else on [theme] sees it: the canvas of that theme, the
+/// name in the paint it gets there, a pick in the accent band turned as theirs is.
 class NameColorPreview extends StatelessWidget {
   final String name;
   final String peerId;
@@ -235,7 +239,7 @@ class NameColorPreview extends StatelessWidget {
         children: [
           NameText(
             name,
-            paint: namePaintFor(peerId, theme, field: field, self: true),
+            paint: namePaintFor(peerId, theme, field: field),
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
             style: HollowTypography.body.copyWith(fontWeight: FontWeight.w600),

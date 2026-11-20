@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:hollow/src/ui/components/name_text.dart';
+import 'package:hollow/src/core/color_utils.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -15,6 +17,9 @@ import 'package:hollow/src/ui/components/status_dot.dart';
 class ConversationRow extends StatelessWidget {
   final Widget leading;
   final String title;
+
+  /// The person's chosen name colour when [title] is their name.
+  final NamePaint? titlePaint;
 
   /// Quiet text after the title, such as the server a channel belongs to.
   final String? detail;
@@ -43,6 +48,7 @@ class ConversationRow extends StatelessWidget {
     super.key,
     required this.leading,
     required this.title,
+    this.titlePaint,
     required this.preview,
     required this.onTap,
     this.onLongPress,
@@ -91,12 +97,12 @@ class ConversationRow extends StatelessWidget {
                     textBaseline: TextBaseline.alphabetic,
                     children: [
                       Flexible(
-                        child: Text(
+                        child: NameText(
                           title,
+                          paint: titlePaint ?? NamePaint([hollow.textPrimary]),
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: titleStyle.copyWith(
-                            color: hollow.textPrimary,
                             fontWeight:
                                 _hot ? FontWeight.w600 : FontWeight.w500,
                           ),

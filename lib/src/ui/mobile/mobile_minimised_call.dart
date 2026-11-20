@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/sibling_call_provider.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
+import 'package:hollow/src/core/color_utils.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/speaking_provider.dart';
@@ -90,6 +91,9 @@ class _CallBarRow extends StatelessWidget {
 
   /// The person a DM call's [title] names, so an id fallback keeps its ending.
   final String? titlePeerId;
+
+  /// Their chosen name colour, null = the neutral title.
+  final NamePaint? titlePaint;
   final Widget subtitle;
   final String openLabel;
   final VoidCallback onOpen;
@@ -100,6 +104,7 @@ class _CallBarRow extends StatelessWidget {
     required this.leading,
     required this.title,
     this.titlePeerId,
+    this.titlePaint,
     required this.subtitle,
     required this.openLabel,
     required this.onOpen,
@@ -134,6 +139,7 @@ class _CallBarRow extends StatelessWidget {
                           PeerNameText(
                             name: title,
                             peerId: peerId,
+                            paint: titlePaint,
                             style: HollowTypography.label
                                 .copyWith(color: hollow.textPrimary),
                           )
@@ -200,6 +206,7 @@ class _DmCallBar extends ConsumerWidget {
       ),
       title: name,
       titlePeerId: master,
+      titlePaint: ref.chosenNamePaintOf(master, hollow),
       subtitle: subtitle,
       openLabel: 'Open the call with $name',
       onOpen: () =>

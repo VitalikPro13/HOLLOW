@@ -1,21 +1,24 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:flutter/foundation.dart' show defaultTargetPlatform;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:hollow/src/core/hollow_data_dir.dart';
 import 'package:hollow/src/core/providers/app_shortcuts_provider.dart';
 import 'package:hollow/src/core/services/hotkeys/hotkey_binding.dart';
 import 'package:super_clipboard/super_clipboard.dart';
 import 'package:hollow/src/core/services/at_rest.dart';
+import 'package:hollow/src/ui/chat/clipboard_paste.dart';
+import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/ime_keys.dart';
 import 'package:hollow/src/ui/components/snapshot_paste.dart';
 
+export 'package:hollow/src/ui/chat/clipboard_paste.dart' show PastedFile;
 export 'package:hollow/src/ui/components/ime_keys.dart';
 
 /// Handles keyboard shortcuts for the chat input field.
 ///
-/// Send, newline and image paste are fixed; the formatting shortcuts are
+/// Send, newline and paste are fixed; the formatting shortcuts are
 /// rebindable and [formatBindings] carries the live map, null meaning the
 /// defaults. [onEditLast] opens the edit of the newest message we can edit
 /// and says whether there was one (#103).
@@ -24,7 +27,7 @@ KeyEventResult handleChatInputKey(
   TextEditingController controller,
   FocusNode focusNode,
   VoidCallback onSend, {
-  void Function(String path, String name)? onPasteImage,
+  void Function(List<PastedFile> files)? onPasteFiles,
   Map<AppShortcut, HotkeyBinding>? formatBindings,
   bool Function()? onEditLast,
 }) {
@@ -47,9 +50,7 @@ KeyEventResult handleChatInputKey(
     return _handleEnterKey(controller, onSend, isShift);
   }
 
-  if (isCtrl && !isShift && event.logicalKey == LogicalKeyboardKey.keyV) {
-    return _handlePasteKey(focusNode, onPasteImage);
-  }
+  if (isPasteChord(event)) return _handlePasteKey(focusNode, onPasteFiles);
 
   final formatted = _handleFormattingKey(
       event, controller, formatBindings ?? kAppShortcutDefaults);
@@ -92,26 +93,64 @@ VoidCallback? editNewestAction<T>(
   return null;
 }
 
-/// Text and image come from ONE clipboard read (#101): an image read started
-/// on a text-only clipboard used to race the text read, and a dictation app
-/// restores the clipboard right after its Ctrl+V.
+/// Paste: Cmd+V on a Mac or an iPad, Ctrl+V elsewhere. AltGr is Ctrl+Alt on
+/// Windows, so a held Alt is a layout character, never a paste.
+bool isPasteChord(KeyEvent event) {
+  if (event.logicalKey != LogicalKeyboardKey.keyV) return false;
+  final hk = HardwareKeyboard.instance;
+  if (hk.isShiftPressed || hk.isAltPressed) return false;
+  final apple = defaultTargetPlatform == TargetPlatform.macOS ||
+      defaultTargetPlatform == TargetPlatform.iOS;
+  return apple
+      ? hk.isMetaPressed && !hk.isControlPressed
+      : hk.isControlPressed && !hk.isMetaPressed;
+}
+
+/// Text, files and image come from ONE clipboard read (#101, #142). On
+/// Windows the read happens during the key event (a dictation app restores
+/// the clipboard right after its Ctrl+V). Elsewhere the key is taken and one
+/// read decides: copied files are the whole paste (Finder puts the file name
+/// and Nautilus the path in the text beside them), else an image and the
+/// text, else the text alone.
 KeyEventResult _handlePasteKey(
   FocusNode focusNode,
-  void Function(String path, String name)? onPasteImage,
+  void Function(List<PastedFile> files)? onPasteFiles,
 ) {
   final state =
       focusNode.context?.findAncestorStateOfType<EditableTextState>();
-  final onImage =
-      onPasteImage == null ? null : () => _tryPasteImage(onPasteImage);
-  if (state != null &&
-      pasteFromClipboard(state, SelectionChangedCause.keyboard,
-          onImage: onImage)) {
+  if (onPasteFiles == null) {
+    return state != null &&
+            pasteFromClipboard(state, SelectionChangedCause.keyboard)
+        ? KeyEventResult.handled
+        : KeyEventResult.ignored;
+  }
+  void notice(String text) {
+    final context = focusNode.context;
+    if (context != null && context.mounted) {
+      HollowToast.show(context, text, type: HollowToastType.info);
+    }
+  }
+
+  void readFiles() => unawaited(
+      pasteFromSystemClipboard(onFiles: onPasteFiles, onNotice: notice));
+  if (state == null) {
+    readFiles();
+    return KeyEventResult.ignored;
+  }
+  if (pasteFromClipboard(state, SelectionChangedCause.keyboard,
+      onImage: readFiles, onFiles: readFiles)) {
     return KeyEventResult.handled;
   }
-  onImage?.call();
-  // Ignored, so the engine's text paste still runs when the async image read
-  // finds nothing.
-  return KeyEventResult.ignored;
+  unawaited(pasteFromSystemClipboard(
+    onFiles: onPasteFiles,
+    onNotice: notice,
+    onText: (text) {
+      if (state.mounted) {
+        pasteIntoEditable(state, text, SelectionChangedCause.keyboard);
+      }
+    },
+  ));
+  return KeyEventResult.handled;
 }
 
 KeyEventResult _handleEnterKey(
@@ -156,75 +195,6 @@ KeyEventResult _handleFormattingKey(
     }
   }
   return KeyEventResult.ignored;
-}
-
-/// Reads an image from the system clipboard, saving it to a temp file and
-/// calling [onPasteImage].
-Future<void> _tryPasteImage(
-  void Function(String path, String name) onPasteImage,
-) async {
-  final clipboard = SystemClipboard.instance;
-  if (clipboard == null) return;
-
-  final reader = await clipboard.read();
-
-  // Priority order.
-  for (final format in [Formats.png, Formats.jpeg, Formats.gif, Formats.bmp, Formats.webp]) {
-    if (!reader.canProvide(format)) continue;
-    if (await _pasteImageForFormat(reader, format, onPasteImage)) return;
-  }
-}
-
-/// Reads clipboard bytes for [format] into a temp file and calls
-/// [onPasteImage]. True when an image was pasted.
-Future<bool> _pasteImageForFormat(
-  ClipboardReader reader,
-  SimpleFileFormat format,
-  void Function(String path, String name) onPasteImage,
-) async {
-  final bytes = await _readClipboardImageBytes(reader, format);
-  if (bytes == null || bytes.isEmpty) return false;
-
-  final ext = _extensionForFormat(format);
-
-  // The data root's temp, never the OS one: emptied at every launch and by a
-  // wipe, where a copy in the shared temp dir outlived both.
-  final sep = Platform.pathSeparator;
-  final tempDir = Directory('$hollowDataDir${sep}temp');
-  await tempDir.create(recursive: true);
-  final timestamp = DateTime.now().millisecondsSinceEpoch;
-  final fileName = 'clipboard_$timestamp.$ext';
-  final tempFile = File('${tempDir.path}$sep$fileName');
-  await tempFile.writeAsBytes(bytes);
-
-  onPasteImage(tempFile.path, fileName);
-  return true;
-}
-
-Future<Uint8List?> _readClipboardImageBytes(
-  ClipboardReader reader,
-  SimpleFileFormat format,
-) {
-  final completer = Completer<Uint8List?>();
-  reader.getFile(format, (file) async {
-    final bytes = await file.readAll();
-    completer.complete(bytes);
-  }, onError: (_) {
-    if (!completer.isCompleted) completer.complete(null);
-  });
-  return completer.future;
-}
-
-String _extensionForFormat(SimpleFileFormat format) {
-  return format == Formats.png
-      ? 'png'
-      : format == Formats.jpeg
-          ? 'jpg'
-          : format == Formats.gif
-              ? 'gif'
-              : format == Formats.bmp
-                  ? 'bmp'
-                  : 'webp';
 }
 
 /// Whether this platform has a clipboard that takes image bytes at all, so a

@@ -116,6 +116,7 @@ import 'package:hollow/src/ui/components/hollow_sheet.dart';
 import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:hollow/src/ui/chat/server_recovery_notices.dart';
 import 'package:hollow/src/ui/components/wallpaper_backdrop.dart';
+import 'package:hollow/src/core/color_utils.dart';
 import 'package:hollow/src/core/providers/name_color_provider.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
@@ -3190,6 +3191,9 @@ class _MobileChatHeader extends ConsumerWidget {
                           child: PeerNameText(
                             name: title,
                             peerId: peerId!,
+                            paint: ref.chosenNamePaintOf(
+                                ref.watch(deviceLinkProvider).identityOf(peerId!),
+                                hollow),
                             style: HollowTypography.subheading
                                 .copyWith(color: hollow.textPrimary),
                           ),
@@ -3473,11 +3477,16 @@ class _TypingBar extends ConsumerWidget {
         ? const <String>{}
         : typingMastersFor(ref, typingPeers);
     final profiles = ref.watch(profileProvider);
-    final names = masters
-        .map((master) => displayNameFor(profiles, master))
-        .toSet()
-        .toList();
-    return TypingIndicatorHost(names: names, child: child);
+    final hollow = HollowTheme.of(context);
+    final names = <String>[];
+    final paints = <NamePaint>[];
+    for (final master in masters) {
+      final name = displayNameFor(profiles, master);
+      if (names.contains(name)) continue;
+      names.add(name);
+      paints.add(ref.namePaint(master, hollow));
+    }
+    return TypingIndicatorHost(names: names, paints: paints, child: child);
   }
 }
 

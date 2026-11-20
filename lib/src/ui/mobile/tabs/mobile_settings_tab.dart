@@ -1,3 +1,6 @@
+import 'package:hollow/src/core/providers/name_color_provider.dart';
+import 'package:hollow/src/ui/components/name_text.dart';
+import 'package:hollow/src/core/color_utils.dart';
 import 'package:hollow/src/core/friendly_error.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -166,10 +169,14 @@ class _IdentityRow extends ConsumerWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
+                NameText(
                   myName.isEmpty ? 'Profile' : myName,
-                  style: HollowTypography.subheading
-                      .copyWith(color: hollow.textPrimary),
+                  paint: (myName.isEmpty
+                          ? null
+                          : ref.chosenNamePaintOf(
+                              ref.watch(ownNameMasterProvider), hollow)) ??
+                      NamePaint([hollow.textPrimary]),
+                  style: HollowTypography.subheading,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                 ),

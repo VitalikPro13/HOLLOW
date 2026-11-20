@@ -1,7 +1,9 @@
 ﻿import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/color_utils.dart';
 import 'package:hollow/src/core/message_preview.dart';
 import 'package:hollow/src/core/models/chat_message.dart';
+import 'package:hollow/src/core/providers/name_color_provider.dart';
 import 'package:hollow/src/core/providers/notification_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
@@ -11,6 +13,7 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/name_text.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:hollow/src/ui/components/support_glyph.dart';
 import 'package:hollow/src/ui/shell/user_context_menu.dart';
@@ -99,15 +102,21 @@ class PeerCard extends ConsumerWidget {
                     Row(
                       children: [
                         Flexible(
-                          child: Text(
+                          child: NameText(
                             peerName,
+                            paint: switch (
+                                ref.chosenNamePaintOf(peerId, hollow)) {
+                              final p? when isSelected =>
+                                namePaintOnSelected(p, hollow),
+                              final p? => p,
+                              null => NamePaint([hollow.textPrimary]),
+                            },
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: HollowTypography.label.copyWith(
                               fontWeight: isSelected || hasUnread
                                   ? FontWeight.w600
                                   : FontWeight.w400,
-                              color: hollow.textPrimary,
                             ),
                           ),
                         ),

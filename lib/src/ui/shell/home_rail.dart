@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/name_color_provider.dart';
 import 'package:hollow/src/core/providers/link_down_provider.dart';
 import 'package:hollow/src/core/changelog.dart';
 import 'package:hollow/src/core/friendly_error.dart';
@@ -454,6 +455,7 @@ class _ActiveNow extends ConsumerWidget {
                 ring: hollow.surface,
               ),
               title: displayNameFor(profiles, id),
+              titlePaint: ref.chosenNamePaintOf(id, hollow),
               subtitle: _statusLine(profiles[id]?.status, inVoice[id]),
               onTap: () => openDmConversation(ref, id),
             ),

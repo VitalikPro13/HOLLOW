@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/dm_navigation.dart';
 import 'package:hollow/src/core/providers/friends_provider.dart';
+import 'package:hollow/src/core/providers/name_color_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -132,6 +133,11 @@ class _NewMessageDialogState extends ConsumerState<_NewMessageDialog> {
                               ring: hollow.overlay,
                             ),
                             title: displayNameFor(profiles, id),
+                            // Like the member list: a chosen colour while
+                            // online.
+                            titlePaint: isOnline
+                                ? ref.chosenNamePaintOf(id, hollow)
+                                : null,
                             subtitle: status.isNotEmpty ? status : null,
                             onTap: () => _open(id),
                           );

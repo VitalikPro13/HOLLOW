@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/name_color_provider.dart';
 import 'package:hollow/src/core/providers/event_provider.dart' show showEventToast;
 import 'package:hollow/src/core/providers/relay_denial_provider.dart';
 import 'package:hollow/src/ui/components/hollow_divider.dart';
@@ -722,6 +723,7 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
           touch: true,
           leading: homeConversationLeading(c, size: _kAvatar, ring: hollow.opaqueBackground),
           title: c.title,
+          titlePaint: ref.chosenNamePaintOf(c.peerId!, hollow),
           preview: c.preview,
           fromMe: c.fromMe,
           time: c.at == null ? null : conversationTimeLabel(c.at!),

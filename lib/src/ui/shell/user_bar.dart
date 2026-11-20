@@ -1,4 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:hollow/src/core/providers/name_color_provider.dart';
+import 'package:hollow/src/ui/components/name_text.dart';
+import 'package:hollow/src/core/color_utils.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -175,10 +178,12 @@ class UserBar extends ConsumerWidget {
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
+                    NameText(
                       myDisplayName,
-                      style: HollowTypography.label
-                          .copyWith(color: hollow.textPrimary),
+                      paint: ref.chosenNamePaintOf(
+                              ref.watch(ownNameMasterProvider), hollow) ??
+                          NamePaint([hollow.textPrimary]),
+                      style: HollowTypography.label,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                     ),

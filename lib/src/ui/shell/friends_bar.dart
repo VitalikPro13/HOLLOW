@@ -2,6 +2,8 @@ import 'dart:io' show Platform;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/color_utils.dart';
+import 'package:hollow/src/core/providers/name_color_provider.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/dm_navigation.dart';
@@ -330,6 +332,10 @@ class _FriendChip extends ConsumerWidget { // design-ignore: an avatar tab in th
             child: PeerNameText(
               name: name,
               peerId: peerId,
+              paint: switch (ref.chosenNamePaintOf(peerId, hollow)) {
+                final p? when selected => namePaintOnSelected(p, hollow),
+                final p => p,
+              },
               style: HollowTypography.label.copyWith(
                 color: selected
                     ? hollow.accentText

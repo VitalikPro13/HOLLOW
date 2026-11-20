@@ -8,10 +8,16 @@ class ClipboardSnapshot {
   /// Null when the clipboard carries no text.
   final String? text;
 
-  /// True when an image, or a file the image paste can read, is on offer.
+  /// True when image bytes are on offer.
   final bool hasImage;
 
-  const ClipboardSnapshot({this.text, this.hasImage = false});
+  /// True when copied files are on offer (CF_HDROP: Explorer, ShareX "Copy
+  /// file to clipboard"): they, not the text or bytes beside them, are the
+  /// paste.
+  final bool hasFiles;
+
+  const ClipboardSnapshot(
+      {this.text, this.hasImage = false, this.hasFiles = false});
 }
 
 /// Reads the Windows clipboard synchronously, trying the open [attempts]
@@ -64,7 +70,7 @@ class _Win32Clipboard {
         _unlock = _kernel32.lookupFunction<Int32 Function(IntPtr),
             int Function(int)>('GlobalUnlock'),
         _imageFormats = [
-          _cfBitmap, _cfTiff, _cfDib, _cfHdrop, _cfDibV5,
+          _cfBitmap, _cfTiff, _cfDib, _cfDibV5,
           ..._registeredImageFormats.map(_registerFormat),
         ].where((f) => f != 0).toList();
 
@@ -93,6 +99,7 @@ class _Win32Clipboard {
       return ClipboardSnapshot(
         text: _text(),
         hasImage: _imageFormats.any((f) => _available(f) != 0),
+        hasFiles: _available(_cfHdrop) != 0,
       );
     } finally {
       _close();

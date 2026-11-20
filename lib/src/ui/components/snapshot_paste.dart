@@ -26,19 +26,22 @@ const Duration _laterTick = Duration(milliseconds: 2);
 /// as another program lets go of the clipboard (#101): a dictation app puts
 /// its text there, presses Ctrl+V and restores the clipboard a moment later.
 /// False when this platform has no such read and the engine's paste should
-/// run. [onImage] hears of an image on offer; the text still lands.
+/// run. [onImage] hears of an image on offer; the text still lands. [onFiles]
+/// hears of copied files, which are then the whole paste: the text beside them
+/// is only their names.
 bool pasteFromClipboard(
   EditableTextState state,
   SelectionChangedCause cause, {
   VoidCallback? onImage,
+  VoidCallback? onFiles,
 }) {
   final read = pasteSnapshotReader;
   if (read == null) return false;
   final snapshot = read(_keyEventAttempts);
   if (snapshot != null) {
-    _apply(state, snapshot, cause, onImage);
+    _apply(state, snapshot, cause, onImage, onFiles);
   } else {
-    unawaited(_pasteWhenFree(state, cause, onImage, read));
+    unawaited(_pasteWhenFree(state, cause, onImage, onFiles, read));
   }
   return true;
 }
@@ -47,6 +50,7 @@ Future<void> _pasteWhenFree(
   EditableTextState state,
   SelectionChangedCause cause,
   VoidCallback? onImage,
+  VoidCallback? onFiles,
   ClipboardSnapshot? Function(int attempts) read,
 ) async {
   for (var tick = 0; tick < _laterTicks; tick++) {
@@ -54,7 +58,7 @@ Future<void> _pasteWhenFree(
     if (!state.mounted) return;
     final snapshot = read(1);
     if (snapshot != null) {
-      _apply(state, snapshot, cause, onImage);
+      _apply(state, snapshot, cause, onImage, onFiles);
       return;
     }
   }
@@ -65,7 +69,12 @@ void _apply(
   ClipboardSnapshot snapshot,
   SelectionChangedCause cause,
   VoidCallback? onImage,
+  VoidCallback? onFiles,
 ) {
+  if (snapshot.hasFiles && onFiles != null) {
+    onFiles();
+    return;
+  }
   if (snapshot.hasImage) onImage?.call();
   final text = snapshot.text;
   if (text != null && text.isNotEmpty) pasteIntoEditable(state, text, cause);

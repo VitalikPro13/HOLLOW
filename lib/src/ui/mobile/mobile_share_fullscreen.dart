@@ -8,6 +8,7 @@ import 'package:hollow/src/theme/hollow_colors.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/components/name_text.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/call/call_stage.dart';
 import 'package:hollow/src/ui/call/call_stage_data.dart';
@@ -167,17 +168,16 @@ class _MobileShareFullscreenState extends ConsumerState<MobileShareFullscreen>
                         const SizedBox(width: HollowSpacing.sm),
                         Flexible(
                           child: CallMediaLabel(
-                            child: Text(
+                            child: NameText(
                               "${share.name}'s screen",
+                              paint: callNamePaint(media,
+                                  isSelf: false,
+                                  master: share.master,
+                                  field: ref.watch(
+                                      shownNameColorProvider(share.master))),
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
-                              style: HollowTypography.label.copyWith(
-                                color: callNameColor(media,
-                                    isSelf: false,
-                                    master: share.master,
-                                    field: ref.watch(
-                                        shownNameColorProvider(share.master))),
-                              ),
+                              style: HollowTypography.label,
                             ),
                           ),
                         ),

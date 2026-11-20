@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
+import 'package:hollow/src/ui/components/name_text.dart';
+import 'package:hollow/src/core/color_utils.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -20,6 +22,9 @@ class HollowListRow extends StatelessWidget {
   final Widget? leading;
 
   final String title;
+
+  /// A person's chosen name colour for a [title] that is their name.
+  final NamePaint? titlePaint;
   final String? subtitle;
 
   /// A badge, a count, a ghost action.
@@ -59,6 +64,7 @@ class HollowListRow extends StatelessWidget {
   const HollowListRow({
     super.key,
     required this.title,
+    this.titlePaint,
     this.leading,
     this.subtitle,
     this.trailing,
@@ -109,15 +115,19 @@ class HollowListRow extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Text(
+                  NameText(
                     title,
-                    style: (touch
-                            ? HollowTypography.bodyTouch
-                                .copyWith(fontWeight: FontWeight.w500)
-                            : HollowTypography.label)
-                        .copyWith(
-                      color: selected ? hollow.accentText : hollow.textPrimary,
-                    ),
+                    paint: titlePaint == null
+                        ? NamePaint([
+                            selected ? hollow.accentText : hollow.textPrimary
+                          ])
+                        : selected
+                            ? namePaintOnSelected(titlePaint!, hollow)
+                            : titlePaint!,
+                    style: touch
+                        ? HollowTypography.bodyTouch
+                            .copyWith(fontWeight: FontWeight.w500)
+                        : HollowTypography.label,
                     overflow: wrap ? null : TextOverflow.ellipsis,
                   ),
                   if (subtitle != null)

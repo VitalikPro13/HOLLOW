@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hollow/src/core/color_utils.dart';
 import 'package:hollow/src/theme/contrast.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
+import 'package:hollow/src/ui/settings/name_color_editor.dart';
 
 List<Color> _surfaces(HollowTheme t) =>
     [t.background, t.surface, t.elevated, t.overlay, t.hover];
@@ -140,6 +141,110 @@ void main() {
       expect(chosenNamePaint(t, ''), isNull);
     });
 
+    // #140, Rong-Yao: a picked #C92222 showed as #F49D9D (pink) on dark.
+    test('a picked red stays red on dark and exact on light', () {
+      const red = Color(0xffc92222); // design-ignore: the reporter's pick
+      final field = nameColorField([red]);
+      final dark = HollowTheme.dark();
+      final shown = namePaintFor('x', dark, field: field).color;
+      final hsl = HSLColor.fromColor(shown);
+      final picked = HSLColor.fromColor(red);
+      expect(_hueGap(hsl.hue, picked.hue), lessThan(1));
+      expect((hsl.saturation - picked.saturation).abs(), lessThan(0.02));
+      // Lifted only as far as the floor needs, nowhere near the pink.
+      final worst = _surfaces(dark)
+          .map((bg) => Contrast.ratio(shown, bg))
+          .reduce((a, b) => a < b ? a : b);
+      expect(worst, inInclusiveRange(kChosenNameContrast, kChosenNameContrast + 0.1));
+      expect(hsl.lightness, lessThan(0.67));
+      expect(shown, isNot(const Color(0xfff49d9d))); // design-ignore: the reported pink
+      // The swatch they picked was the preset red of 0.14.1, which became
+      // exactly #F49D9D on dark at the old floor and #C71616 on light.
+      final preset = nameColorField([const Color(0xffe83030)]); // design-ignore: the 0.14.1 preset red
+      final presetDark = namePaintFor('x', dark, field: preset).color;
+      expect(presetDark, isNot(const Color(0xfff49d9d))); // design-ignore: the reported pink
+      expect(HSLColor.fromColor(presetDark).lightness, lessThan(0.7));
+      expect(_hueGap(HSLColor.fromColor(presetDark).hue, 0), lessThan(1));
+      final light = HollowTheme.light();
+      expect(namePaintFor('x', light, field: field).color, red);
+      expect(namePaintFor('x', light, field: field, self: true).color, red);
+    });
+
+    // A selected row lays the accent-muted fill under the name. Lifting every
+    // chosen colour for that fill would turn a red pink everywhere, so only
+    // the selected row lifts it, and only as far as that fill needs.
+    test('a picked red is lifted on a selected row only', () {
+      const red = Color(0xffc92222); // design-ignore: the reporter's pick
+      for (final t in [HollowTheme.dark(), HollowTheme.light()]) {
+        final plain = namePaintFor('x', t, field: nameColorField([red]));
+        final selected = namePaintOnSelected(plain, t);
+        final worst = selectedNameSurfaces(t)
+            .map((bg) => Contrast.ratio(selected.color, bg))
+            .reduce((a, b) => a < b ? a : b);
+        expect(worst, inInclusiveRange(kChosenNameContrast, kChosenNameContrast + 0.1));
+        final hsl = HSLColor.fromColor(selected.color);
+        expect(_hueGap(hsl.hue, 0), lessThan(1));
+        expect((hsl.saturation - HSLColor.fromColor(red).saturation).abs(),
+            lessThan(0.02));
+      }
+      // Off the selected row the red keeps the plain floor's tone: the lift
+      // never reaches the chat.
+      final dark = HollowTheme.dark();
+      final chat = namePaintFor('x', dark, field: nameColorField([red])).color;
+      expect(HSLColor.fromColor(chat).lightness, lessThan(0.67));
+    });
+
+    // Reviewer case (UI review, Nov 20): every hue the editor offers, on the
+    // selected fill over each surface.
+    for (final (label, t) in [
+      ('dark', HollowTheme.dark()),
+      ('light', HollowTheme.light()),
+      ('dark, accent 0', HollowTheme.darkWithHue(0)),
+      ('light, accent 200', HollowTheme.lightWithHue(200)),
+    ]) {
+      test('a chosen name on a selected row clears 4.5:1 on the fill ($label)',
+          () {
+        for (var h = 0.0; h < 360; h += 5) {
+          for (final self in [false, true]) {
+            final shown = namePaintOnSelected(
+                namePaintFor('x', t,
+                    field: nameColorField([nameColorFromHue(h)]), self: self),
+                t);
+            for (final stop in shown.gradientColors) {
+              for (final bg in selectedNameSurfaces(t)) {
+                expect(Contrast.ratio(stop, bg),
+                    greaterThanOrEqualTo(kChosenNameContrast - 0.01),
+                    reason: 'hue $h self $self: $stop on $bg');
+              }
+            }
+          }
+        }
+      });
+    }
+
+    test('each preset swatch still looks like itself on both themes', () {
+      for (final t in [HollowTheme.dark(), HollowTheme.light()]) {
+        final shown = <HSLColor>[];
+        for (final h in kNameColorPresetHues) {
+          final pick = nameColorFromHue(h);
+          final c = HSLColor.fromColor(
+              namePaintFor('x', t, field: nameColorField([pick]), self: true)
+                  .color);
+          expect(_hueGap(c.hue, h), lessThan(2), reason: 'hue $h');
+          expect(c.saturation, greaterThanOrEqualTo(0.85), reason: 'hue $h');
+          // Neither washed out to a pastel nor sunk to a near-black.
+          expect(c.lightness, inInclusiveRange(0.22, 0.75), reason: 'hue $h');
+          shown.add(c);
+        }
+        // Ten swatches, ten different hues as drawn.
+        for (var i = 0; i < shown.length; i++) {
+          for (var j = i + 1; j < shown.length; j++) {
+            expect(_hueGap(shown[i].hue, shown[j].hue), greaterThan(15));
+          }
+        }
+      }
+    });
+
     final hues = [for (var h = 0.0; h < 360; h += 15) h];
     for (final dark in [true, false]) {
       for (final accent in [null, 0.0, 200.0]) {
@@ -151,7 +256,7 @@ void main() {
         final label = '${dark ? 'dark' : 'light'}, accent ${accent ?? 'default'}';
 
         test('every chosen stop clears the name floor ($label)', () {
-          final min = dark ? 7.0 : 5.0;
+          const min = kChosenNameContrast;
           final picks = [
             for (final h in hues) HSLColor.fromAHSL(1, h, 0.8, 0.55).toColor(),
             const Color(0xff000000), // design-ignore: worst-case pick

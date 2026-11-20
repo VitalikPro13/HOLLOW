@@ -10,15 +10,20 @@ library;
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hollow/src/core/color_utils.dart';
+import 'package:hollow/src/core/providers/blocked_users_provider.dart';
+import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/name_color_provider.dart';
 import 'package:hollow/src/core/providers/profile_draft_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
+import 'package:hollow/src/theme/contrast.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_theme_data.dart';
+import 'package:hollow/src/ui/components/hollow_list_row.dart';
 import 'package:hollow/src/ui/components/name_text.dart';
 import 'package:hollow/src/ui/settings/name_color_editor.dart';
 
@@ -69,6 +74,12 @@ class _Profiles extends ProfileNotifier {
   }) async {
     sentNameColors.add(nameColor);
   }
+}
+
+class _Links extends DeviceLinkNotifier {
+  @override
+  DeviceLinkState build() =>
+      const DeviceLinkState(links: {'device-of-friend': kFriendPeerId1});
 }
 
 class _NameColorsOff extends ShowNameColorsNotifier {
@@ -161,14 +172,65 @@ void main() {
 
     await pump(gradient);
     expect(find.byType(ShaderMask), findsNothing, reason: 'no layer per name');
-    final shaded = tester.widget<Text>(find.text('Ada'));
-    expect(shaded.style?.foreground?.shader, isNotNull);
-    expect(shaded.style?.color, isNull);
+    final shaded =
+        tester.renderObject<RenderParagraph>(find.text('Ada')).text.style;
+    expect(shaded?.foreground?.shader, isNotNull);
+    expect(shaded?.color, isNull);
 
     await pump('1:ff3344');
     final text = tester.widget<Text>(find.text('Ada'));
     expect(text.style?.foreground, isNull);
     expect(text.style?.color, namePaintFor(friend, t, field: '1:ff3344').color);
+  });
+
+  test("a blocked person's chosen colour shows nowhere", () {
+    const device = 'device-of-friend';
+    final c = ProviderContainer(
+      overrides: hollowTestOverrides(extra: [
+        profileProvider.overrideWith(() => _Profiles({friend: gradient})),
+        deviceLinkProvider.overrideWith(_Links.new),
+      ]),
+    );
+    addTearDown(c.dispose);
+    expect(c.read(shownNameColorProvider(device)), gradient,
+        reason: 'a device id reads its master\'s colour');
+    c.read(blockedUsersProvider.notifier).state = {friend};
+    expect(c.read(shownNameColorProvider(friend)), '');
+    expect(c.read(shownNameColorProvider(device)), '');
+    final t = HollowTheme.dark();
+    expect(
+        namePaintFor(friend, t, field: c.read(shownNameColorProvider(friend))),
+        NamePaint([nameColorFor(friend, t)]),
+        reason: 'in a chat they keep only the hashed colour');
+  });
+
+  testWidgets('a selected row lifts a chosen name over its fill',
+      (tester) async {
+    for (final (t, data) in [
+      (HollowTheme.dark(), HollowThemeData.dark()),
+      (HollowTheme.light(), HollowThemeData.light()),
+    ]) {
+      final chosen = namePaintFor(friend, t, field: '1:c92222');
+      Future<Color?> drawn({required bool selected}) async {
+        await tester.pumpWidget(MaterialApp(
+          theme: data,
+          home: Scaffold(
+            body: HollowListRow(
+                title: 'Ada', titlePaint: chosen, selected: selected),
+          ),
+        ));
+        return tester.widget<Text>(find.text('Ada')).style?.color;
+      }
+
+      expect(await drawn(selected: false), chosen.color);
+      final lifted = await drawn(selected: true);
+      final theme = HollowTheme.of(tester.element(find.text('Ada')));
+      expect(lifted, namePaintOnSelected(chosen, theme).color);
+      for (final bg in selectedNameSurfaces(theme)) {
+        expect(Contrast.ratio(lifted!, bg),
+            greaterThanOrEqualTo(kChosenNameContrast - 0.01));
+      }
+    }
   });
 
   testWidgets('the editor picks, adds, removes and clears into the draft',
@@ -195,8 +257,8 @@ void main() {
 
     String? field() => c.read(profileDraftProvider).effectiveNameColor;
     int gradients() => tester
-        .widgetList<Text>(find.byType(Text))
-        .where((t) => t.style?.foreground?.shader != null)
+        .renderObjectList<RenderParagraph>(find.byType(RichText))
+        .where((p) => p.text.style?.foreground?.shader != null)
         .length;
     expect(field(), isNull);
     expect(find.bySemanticsLabel('Add a colour'), findsNothing,
@@ -227,6 +289,33 @@ void main() {
     await tester.pump();
     expect(field(), '', reason: 'back to the usual colour');
     expect(gradients(), 0);
+  });
+
+  testWidgets('the preview shows the name as everyone else sees it',
+      (tester) async {
+    // A teal pick sits in the default accent band, so others see it turned.
+    for (final field in ['1:00bfa6', '1:c92222']) {
+      for (final t in [HollowTheme.dark(), HollowTheme.light()]) {
+        await tester.pumpWidget(MaterialApp(
+          theme: HollowThemeData.dark(),
+          home: Scaffold(
+            body: NameColorPreview(
+                name: 'Ada',
+                peerId: kLocalPeerId,
+                field: field,
+                theme: t,
+                caption: 'On dark',
+                radius: 8),
+          ),
+        ));
+        final text = tester.widget<Text>(find.text('Ada'));
+        expect(text.style?.color, namePaintFor(kLocalPeerId, t, field: field).color,
+            reason: field);
+      }
+    }
+    expect(namePaintFor(kLocalPeerId, HollowTheme.light(), field: '1:00bfa6').color,
+        isNot(namePaintFor(kLocalPeerId, HollowTheme.light(), field: '1:00bfa6', self: true).color),
+        reason: 'the case this pins: others see a turned colour');
   });
 
   test('saving the draft sends the field, and only when it changed', () async {

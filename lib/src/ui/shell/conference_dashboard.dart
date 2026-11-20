@@ -3,6 +3,8 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/ui/components/name_text.dart';
+import 'package:hollow/src/core/color_utils.dart';
 import 'package:hollow/src/core/providers/link_down_provider.dart';
 import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/providers/conference_provider.dart';
@@ -1127,10 +1129,11 @@ class _ParticipantRow extends ConsumerWidget {
           ),
           const SizedBox(width: HollowSpacing.sm),
           Expanded(
-            child: Text(
+            child: NameText(
               name,
-              style:
-                  HollowTypography.label.copyWith(color: hollow.textPrimary),
+              paint: ref.chosenNamePaintOf(master, hollow) ??
+                  NamePaint([hollow.textPrimary]),
+              style: HollowTypography.label,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
             ),

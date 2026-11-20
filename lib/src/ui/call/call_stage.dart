@@ -10,6 +10,7 @@ import 'package:hollow/src/theme/hollow_colors.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/components/name_text.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/call/call_person_tile.dart';
 import 'package:hollow/src/ui/call/call_stage_bar.dart';
@@ -579,20 +580,13 @@ class _SpeakingLine extends ConsumerWidget {
     final verb = talking.length > 1
         ? ' and others are speaking'
         : (first.isSelf ? ' are speaking' : ' is speaking');
-    return Text.rich(
-      TextSpan(children: [
-        TextSpan(
-          text: first.name,
-          style: TextStyle(
-              color: callNameColor(hollow,
-                  isSelf: first.isSelf,
-                  master: first.master,
-                  field: ref.watch(shownNameColorProvider(first.master)))),
-        ),
-        TextSpan(text: verb),
-      ]),
-      maxLines: 1,
-      overflow: TextOverflow.ellipsis,
+    return NameLine(
+      name: first.name,
+      paint: callNamePaint(hollow,
+          isSelf: first.isSelf,
+          master: first.master,
+          field: ref.watch(shownNameColorProvider(first.master))),
+      rest: verb,
       style: HollowTypography.label.copyWith(color: hollow.textSecondary),
     );
   }

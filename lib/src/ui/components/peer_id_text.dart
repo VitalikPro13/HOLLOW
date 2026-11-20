@@ -1,6 +1,8 @@
 import 'package:flutter/rendering.dart';
 import 'package:flutter/widgets.dart';
+import 'package:hollow/src/core/color_utils.dart';
 import 'package:hollow/src/core/peer_id_label.dart';
+import 'package:hollow/src/ui/components/name_text.dart';
 
 /// A peer id on one line that always keeps its ending: the whole id when it
 /// fits the width, else as much of its start and ending as fits around an
@@ -172,14 +174,26 @@ class PeerNameText extends StatelessWidget {
     required this.name,
     required this.peerId,
     this.style,
+    this.paint,
   });
 
   final String name;
   final String peerId;
   final TextStyle? style;
 
+  /// The person's name paint; an id fallback keeps [style] (an id is no name).
+  final NamePaint? paint;
+
   @override
-  Widget build(BuildContext context) => name == shortPeerLabel(peerId)
-      ? PeerIdText(peerId, style: style)
-      : Text(name, style: style, maxLines: 1, overflow: TextOverflow.ellipsis);
+  Widget build(BuildContext context) {
+    if (name == shortPeerLabel(peerId)) return PeerIdText(peerId, style: style);
+    final paint = this.paint;
+    return paint == null
+        ? Text(name, style: style, maxLines: 1, overflow: TextOverflow.ellipsis)
+        : NameText(name,
+            paint: paint,
+            style: style ?? const TextStyle(),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis);
+  }
 }

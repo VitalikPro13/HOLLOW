@@ -16,6 +16,7 @@ import 'package:hollow/src/theme/hollow_colors.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
+import 'package:hollow/src/ui/components/name_text.dart';
 import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/call/call_actions.dart';
 import 'package:hollow/src/ui/call/call_person_tile.dart';
@@ -568,18 +569,16 @@ class MobileCallFace extends ConsumerWidget {
                       const SizedBox(width: HollowSpacing.xs),
                     ],
                     Flexible(
-                      child: Text(
+                      child: NameText(
                         person.name,
+                        paint: callNamePaint(hollow,
+                            isSelf: person.isSelf,
+                            master: person.master,
+                            field: ref.watch(
+                                shownNameColorProvider(person.master))),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
-                        style: (nameStyle ?? HollowTypography.bodySmall)
-                            .copyWith(
-                          color: callNameColor(hollow,
-                              isSelf: person.isSelf,
-                              master: person.master,
-                              field: ref.watch(
-                                  shownNameColorProvider(person.master))),
-                        ),
+                        style: nameStyle ?? HollowTypography.bodySmall,
                       ),
                     ),
                   ],
@@ -707,21 +706,13 @@ class MobileShareOffer extends ConsumerWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  Text.rich(
-                    TextSpan(children: [
-                      TextSpan(
-                        text: share.name,
-                        style: TextStyle(
-                            color: callNameColor(hollow,
-                                isSelf: false,
-                                master: share.master,
-                                field: ref.watch(
-                                    shownNameColorProvider(share.master)))),
-                      ),
-                      const TextSpan(text: ' is sharing'),
-                    ]),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
+                  NameLine(
+                    name: share.name,
+                    paint: callNamePaint(hollow,
+                        isSelf: false,
+                        master: share.master,
+                        field: ref.watch(shownNameColorProvider(share.master))),
+                    rest: ' is sharing',
                     style: HollowTypography.label
                         .copyWith(color: hollow.textPrimary),
                   ),

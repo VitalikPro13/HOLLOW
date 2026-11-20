@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/color_utils.dart';
+import 'package:hollow/src/core/providers/blocked_users_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
@@ -43,10 +44,16 @@ class ShowNameColorsNotifier extends Notifier<bool> {
   }
 }
 
-/// The name colour field this device shows for [master]: theirs, or '' when it
-/// has none or custom colours are switched off. Pass the MASTER id.
-final shownNameColorProvider = Provider.family<String, String>((ref, master) {
+/// The name colour field this device shows for [peerId] (a master, or any
+/// device of one): theirs, or '' when they have none, custom colours are
+/// switched off, or we blocked them (a block takes their words off every
+/// surface, and a colour they chose is theirs too).
+final shownNameColorProvider = Provider.family<String, String>((ref, peerId) {
   if (!ref.watch(showNameColorsProvider)) return '';
+  final master = ref.watch(deviceLinkProvider).identityOf(peerId);
+  if (ref.watch(blockedUsersProvider.select((b) => b.contains(master)))) {
+    return '';
+  }
   return ref.watch(profileProvider.select((p) => p[master]?.nameColor ?? ''));
 });
 
@@ -59,7 +66,8 @@ final ownNameMasterProvider = Provider<String>((ref) => ref
 extension NamePaintRef on WidgetRef {
   bool _isOwn(String master) {
     final own = watch(ownNameMasterProvider);
-    return own.isNotEmpty && master == own;
+    return own.isNotEmpty &&
+        watch(deviceLinkProvider).identityOf(master) == own;
   }
 
   /// How [master]'s name is painted here: their chosen colour when this device

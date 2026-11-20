@@ -83,6 +83,7 @@ import 'package:hollow/src/ui/chat/chat_pane_shared.dart';
 import 'package:hollow/src/ui/chat/dm_profile_panel.dart';
 import 'package:hollow/src/ui/chat/expression_picker.dart';
 import 'package:hollow/src/core/services/attachment_export.dart';
+import 'package:hollow/src/core/color_utils.dart';
 import 'package:hollow/src/core/providers/name_color_provider.dart';
 
 // The twins' shared building blocks live in chat_pane_shared.dart, re-exported
@@ -541,8 +542,11 @@ class _ChatPaneState extends ConsumerState<ChatPane>
     _scrollToBottom();
   }
 
-  void _stageClipboardImage(String path, String name) {
-    unawaited(_stageFiles([StagedAttachment.fromPath(path, name: name)]));
+  void _stagePastedFiles(List<PastedFile> files) {
+    unawaited(_stageFiles([
+      for (final f in files)
+        StagedAttachment(path: f.path, name: f.name, sizeBytes: f.size)
+    ]));
   }
 
   /// Adds files to the composer's album. Over 34 MB they are offered as
@@ -951,6 +955,10 @@ class _ChatPaneState extends ConsumerState<ChatPane>
             ),
       title: isSavedMessages ? 'Saved messages' : (hasNick ? localNick : realName),
       titlePeerId: isSavedMessages || hasNick ? null : widget.peerId,
+      titlePaint: isSavedMessages
+          ? null
+          : ref.chosenNamePaintOf(
+              ref.watch(deviceLinkProvider).identityOf(widget.peerId), hollow),
       // A blocked person's status is their words too.
       subtitle: isSavedMessages
           ? null
@@ -1187,6 +1195,7 @@ class _ChatPaneState extends ConsumerState<ChatPane>
 
       TypingIndicatorHost(
         names: _typingNames(typingPeers),
+        paints: _typingPaints(typingPeers, hollow),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1853,6 +1862,14 @@ class _ChatPaneState extends ConsumerState<ChatPane>
           ref.watch(profileProvider.select((p) => p[pid])), pid))
       .toList();
 
+  List<NamePaint> _typingPaints(Set<String> typingPeers, HollowTheme hollow) {
+    final links = ref.watch(deviceLinkProvider);
+    return [
+      for (final pid in typingPeers)
+        ref.namePaint(links.identityOf(pid), hollow),
+    ];
+  }
+
   Widget _buildInputBar(HollowTheme hollow) {
     return chatInputBarShell(
       hollow,
@@ -1887,7 +1904,7 @@ class _ChatPaneState extends ConsumerState<ChatPane>
         if (r == KeyEventResult.handled) return r;
         return handleChatInputKey(
           event, _controller, _focusNode, _handleSend,
-          onPasteImage: _stageClipboardImage,
+          onPasteFiles: _stagePastedFiles,
           formatBindings: ref.read(appShortcutsProvider).valueOrNull,
           onEditLast: _editNewestOwn,
         );

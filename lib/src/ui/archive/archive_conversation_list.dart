@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/providers/name_color_provider.dart';
 import 'package:hollow/src/core/models/archive_conversation.dart';
 import 'package:hollow/src/core/providers/archive_provider.dart';
 import 'package:hollow/src/core/providers/hidden_archive_dm_provider.dart';
@@ -272,6 +273,8 @@ class _DmRow extends ConsumerWidget {
       onOpen: (anchor) => _menu(context, ref, anchor),
       child: HollowListRow(
         title: name,
+        titlePaint:
+            isSaved ? null : ref.chosenNamePaintOf(entry.peerId, hollow),
         selected: selected,
         leading: isSaved
             ? const SavedMessagesAvatar(size: 24)

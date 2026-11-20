@@ -19,6 +19,7 @@ import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:hollow/src/ui/components/hollow_tooltip.dart';
+import 'package:hollow/src/ui/components/name_text.dart';
 import 'package:hollow/src/ui/components/share_quality_chip.dart';
 import 'package:hollow/src/core/providers/name_color_provider.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -89,19 +90,13 @@ class ShareTile extends ConsumerWidget {
   }
 
   Widget _offer(HollowTheme hollow, String field) {
-    final color =
-        callNameColor(hollow,
-            isSelf: false,
-            master: share.master,
-            field: field);
-    final who = Text.rich(
-      TextSpan(children: [
-        TextSpan(text: share.name, style: TextStyle(color: color)),
-        const TextSpan(text: ' is sharing'),
-      ]),
-      maxLines: 1,
-      overflow: TextOverflow.ellipsis,
-      textAlign: TextAlign.center,
+    final who = NameLine(
+      name: share.name,
+      paint: callNamePaint(hollow,
+          isSelf: false,
+          master: share.master,
+          field: field),
+      rest: ' is sharing',
       style: (_large
               ? HollowTypography.label
               : HollowTypography.caption.copyWith(fontWeight: FontWeight.w500))
@@ -165,11 +160,12 @@ class ShareTile extends ConsumerWidget {
     final media = callMediaTheme(hollow);
     final renderer = share.renderer;
     final title = share.isMine ? 'Your screen' : "${share.name}'s screen";
-    final titleColor =
-        callNameColor(media,
+    final titlePaint =
+        callNamePaint(media,
             isSelf: share.isMine,
             master: share.master,
             field: ref.watch(shownNameColorProvider(share.master)));
+    final titleColor = titlePaint.color;
     final children = <Widget>[
       if (renderer != null)
         RepaintBoundary(
@@ -209,12 +205,13 @@ class ShareTile extends ConsumerWidget {
                 Icon(LucideIcons.monitor, size: 14, color: titleColor),
                 const SizedBox(width: HollowSpacing.xs),
                 Flexible(
-                  child: Text(
+                  child: NameText(
                     share.isMine ? 'Your screen' : share.name,
+                    paint: titlePaint,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: HollowTypography.caption.copyWith(
-                        color: titleColor, fontWeight: FontWeight.w500),
+                    style: HollowTypography.caption
+                        .copyWith(fontWeight: FontWeight.w500),
                   ),
                 ),
               ],
@@ -261,11 +258,11 @@ class ShareTile extends ConsumerWidget {
                         mainAxisSize: MainAxisSize.min,
                         children: [
                           Flexible(
-                            child: Text(title,
+                            child: NameText(title,
+                                paint: titlePaint,
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
-                                style: HollowTypography.label
-                                    .copyWith(color: titleColor)),
+                                style: HollowTypography.label),
                           ),
                           if (share.quality != null || renderer != null) ...[
                             const SizedBox(width: HollowSpacing.sm),
