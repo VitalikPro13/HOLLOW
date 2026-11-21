@@ -158,4 +158,31 @@ void main() {
     expect(find.textContaining('added a new device'), findsNothing,
         reason: 'a device removed since is not a new device');
   });
+
+  // HOL-SEC-215: a device the recovery phrase added names no device of ours,
+  // and the way out is the phrase's own removal under Security.
+  testWidgets('a device the phrase added says so and points to Security',
+      (tester) async {
+    const own = verification_api.SecurityAlertFfi(
+      alertId: 'own_device_added:me:$_added:phrase',
+      peerId: 'me',
+      kind: SecurityAlertKind.ownDeviceAdded,
+      detail: '$_added:$kAddedByPhrase',
+      createdAt: 0,
+    );
+    await _pump(tester, const HomeAttention(), extra: [
+      securityAlertsProvider.overrideWith(() => _Alerts(const [own])),
+      deviceKindProvider.overrideWith(_Kinds.new),
+    ]);
+    expect(find.text('A device was added with your recovery phrase'), findsOneWidget);
+    expect(
+        find.text("If that wasn't you, someone else has your recovery phrase. "
+            'Go to Settings, under Security, and use Remove devices with your '
+            'recovery phrase.'),
+        findsOneWidget);
+    expect(find.textContaining('phrase added a device'), findsNothing,
+        reason: 'the phrase is not a device to name');
+    expect(find.text('Review'), findsOneWidget);
+    expect(find.text('Dismiss'), findsOneWidget);
+  });
 }

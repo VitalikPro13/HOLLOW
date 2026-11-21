@@ -71,6 +71,7 @@ import 'package:hollow/src/ui/shell/voice_room_switch.dart';
 import 'package:hollow/src/core/providers/relay_domain_provider.dart';
 import 'package:hollow/src/ui/components/hollow_sheet.dart';
 import 'package:hollow/src/ui/components/hollow_spinner.dart';
+import 'package:hollow/src/ui/shell/home_restore_card.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:flutter/services.dart';
 
@@ -118,6 +119,10 @@ class _MobileHomeActions extends HomeActions {
   @override
   void openDevices(BuildContext context) =>
       openMobileSettingsPage(context, SettingsCategory.devices);
+
+  @override
+  void openSecurity(BuildContext context) =>
+      openMobileSettingsPage(context, SettingsCategory.security);
 }
 
 const _actions = _MobileHomeActions();
@@ -587,6 +592,7 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
                           ),
                         ],
                         const HomeAttention(actions: _actions),
+                        const HomeRestoreCard(touch: true),
                         if (showSetup)
                           HomeSetupChecklist(
                             actions: _actions,

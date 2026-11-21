@@ -16,6 +16,7 @@ import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/dialogs/new_message_dialog.dart';
 import 'package:hollow/src/ui/shell/home_inbox.dart';
 import 'package:hollow/src/ui/shell/home_rail.dart';
+import 'package:hollow/src/ui/shell/home_restore_card.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// Home in Dock mode: an inbox, and one side panel for what is happening now.
@@ -166,6 +167,7 @@ class _HomeMainState extends ConsumerState<_HomeMain> {
                           crossAxisAlignment: CrossAxisAlignment.stretch,
                           children: [
                             const HomeAttention(),
+                            const HomeRestoreCard(),
                             if (showSetup) const HomeSetupChecklist(),
                             const SizedBox(height: HollowSpacing.xl),
                           ],

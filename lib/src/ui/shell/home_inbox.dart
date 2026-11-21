@@ -80,6 +80,7 @@ abstract class HomeActions {
   void editProfile(BuildContext context);
   void openNotificationSettings(BuildContext context);
   void openDevices(BuildContext context);
+  void openSecurity(BuildContext context);
 }
 
 class DesktopHomeActions extends HomeActions {
@@ -117,6 +118,11 @@ class DesktopHomeActions extends HomeActions {
   void openDevices(BuildContext context) => openSettings(
       ProviderScope.containerOf(context, listen: false).read,
       category: SettingsCategory.devices);
+
+  @override
+  void openSecurity(BuildContext context) => openSettings(
+      ProviderScope.containerOf(context, listen: false).read,
+      category: SettingsCategory.security);
 }
 
 // ---------------------------------------------------------------------------
@@ -136,6 +142,9 @@ class _AttentionItem {
   /// Toast text when an action throws.
   final String failure;
 
+  /// The body says what to do, so it is never cut short.
+  final bool wholeBody;
+
   const _AttentionItem({
     required this.id,
     required this.leading,
@@ -146,6 +155,7 @@ class _AttentionItem {
     required this.failure,
     this.secondaryLabel,
     this.onSecondary,
+    this.wholeBody = false,
   });
 }
 
@@ -284,7 +294,26 @@ class _HomeAttentionState extends ConsumerState<HomeAttention> {
         deviceGivenName(id, labels: labels, kinds: kinds) ?? shortPeerLabel(id);
     return [
       for (final a in alerts)
-        if (ownDeviceAddedDetail(a) case final added?)
+        if (ownDeviceAddedDetail(a) case final added? when added.byPhrase)
+          // HOL-SEC-215: another machine typed the phrase. Only the phrase's
+          // own removal undoes that, so the item points there.
+          _AttentionItem(
+            id: 'own-device:${a.alertId}',
+            leading: _GlyphTile(LucideIcons.keyRound, size: _leadingSize),
+            title: 'A device was added with your recovery phrase',
+            body: "If that wasn't you, someone else has your recovery phrase. "
+                'Go to Settings, under Security, and use Remove devices with '
+                'your recovery phrase.',
+            secondaryLabel: 'Dismiss',
+            onSecondary: () => ref
+                .read(securityAlertsProvider.notifier)
+                .acknowledge(a.alertId),
+            primaryLabel: 'Review',
+            onPrimary: () async => widget.actions.openSecurity(context),
+            failure: "Couldn't update the alert",
+            wholeBody: true,
+          )
+        else if (ownDeviceAddedDetail(a) case final added?)
           _AttentionItem(
             id: 'own-device:${a.alertId}',
             leading:
@@ -512,8 +541,8 @@ class _AttentionRowState extends State<_AttentionRow> {
         ),
         Text(
           item.body,
-          maxLines: 2,
-          overflow: TextOverflow.ellipsis,
+          maxLines: item.wholeBody ? null : 2,
+          overflow: item.wholeBody ? null : TextOverflow.ellipsis,
           style: (touch ? HollowTypography.body : HollowTypography.bodySmall)
               .copyWith(color: hollow.textSecondary),
         ),
