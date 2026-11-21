@@ -667,19 +667,33 @@ pub(crate) fn with_test_away<F: Future>(away: Arc<AtomicBool>, event_loop: F) ->
     TEST_AWAY.scope(away, event_loop)
 }
 
+/// The relay a node loop dials, by the two names it goes by.
+#[derive(Clone)]
+pub(crate) struct DialedRelay {
+    /// `relay_auth_domain`: the host ring control and login name.
+    pub(crate) auth: String,
+    /// `home_relay::canonical`: what a server's home relay is compared with.
+    pub(crate) home: String,
+}
+
 tokio::task_local! {
-    /// The relay this node's socket dials (`relay_auth_domain`), which ring control names.
-    static RELAY_DOMAIN: String;
+    /// The relay this node's socket dials.
+    static RELAY_DOMAIN: DialedRelay;
 }
 
 /// Run a node's event loop knowing the relay it dials.
-pub(crate) fn with_relay_domain<F: Future>(domain: String, event_loop: F) -> impl Future<Output = F::Output> {
-    RELAY_DOMAIN.scope(domain, event_loop)
+pub(crate) fn with_relay_domain<F: Future>(relay: DialedRelay, event_loop: F) -> impl Future<Output = F::Output> {
+    RELAY_DOMAIN.scope(relay, event_loop)
 }
 
 /// The relay this node dials, outside a node's event loop none.
 pub(crate) fn relay_domain() -> Option<String> {
-    RELAY_DOMAIN.try_with(|d| d.clone()).ok().filter(|d| !d.is_empty())
+    RELAY_DOMAIN.try_with(|d| d.auth.clone()).ok().filter(|d| !d.is_empty())
+}
+
+/// This node loop's relay in `home_relay::canonical` form, outside a loop none.
+pub(crate) fn relay_home() -> Option<String> {
+    RELAY_DOMAIN.try_with(|d| d.home.clone()).ok().filter(|d| !d.is_empty())
 }
 
 /// The relay every harness node dials.

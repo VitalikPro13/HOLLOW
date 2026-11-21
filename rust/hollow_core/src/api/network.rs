@@ -518,6 +518,9 @@ pub enum NetworkEvent {
     ServerUnavailable { server_id: String },
     /// This relay carries the server or meeting again.
     ServerAvailable { server_id: String },
+    /// The server lives on `relay`, not the relay we are on: it opens read-only until
+    /// the person switches. `None` once it lives on ours again; `owned` = we own it.
+    ServerElsewhere { server_id: String, relay: Option<String>, owned: bool },
     /// This relay refuses our account (`account_denied`) or our network (`network_denied`).
     RelayDenied { kind: String },
     // -- Twitch verification events --
@@ -1410,6 +1413,7 @@ fn to_ffi_event(event: node::NetworkEvent) -> NetworkEvent {
         }
         node::NetworkEvent::ServerUnavailable { server_id } => NetworkEvent::ServerUnavailable { server_id },
         node::NetworkEvent::ServerAvailable { server_id } => NetworkEvent::ServerAvailable { server_id },
+        node::NetworkEvent::ServerElsewhere { server_id, relay, owned } => NetworkEvent::ServerElsewhere { server_id, relay, owned },
         node::NetworkEvent::RelayDenied { kind } => NetworkEvent::RelayDenied { kind },
         node::NetworkEvent::TwitchJoinRejected { server_id, reason } => {
             hollow_log!("[HOLLOW] Twitch join rejected for {server_id}: {reason}");

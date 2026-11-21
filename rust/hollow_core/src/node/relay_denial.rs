@@ -66,6 +66,9 @@ enum Mark {
     /// A join is out asking whether the refusal still holds: the join and the lock read
     /// may leave, nothing else does.
     Probing,
+    /// The server's owner-signed home is another relay (`home_relay`): never probed, and
+    /// only a home that names this relay again ends it.
+    Elsewhere,
 }
 
 /// The most rooms named after a server ([`Denials::alias`]) kept; past it the map
@@ -78,6 +81,8 @@ pub(crate) struct Denials {
     rooms: Arc<Mutex<HashMap<String, Mark>>>,
     /// Rooms that carry one server's traffic under another name (a recovery pool's).
     aliases: Arc<Mutex<HashMap<String, String>>>,
+    /// The relay each `Elsewhere` server lives on, as last told to Dart.
+    homes: Arc<Mutex<HashMap<String, String>>>,
 }
 
 tokio::task_local! {
@@ -131,8 +136,41 @@ impl Denials {
     /// Mark `room` refused; true the first time (a probe answered again counts too).
     pub(crate) fn deny(&self, room: &str, now: Instant) -> bool {
         let mut rooms = self.lock();
+        if rooms.get(&room_key(room)) == Some(&Mark::Elsewhere) {
+            return false;
+        }
         let previous = rooms.insert(room_key(room), Mark::Denied { retry_at: retry_at(now) });
         !matches!(previous, Some(Mark::Denied { .. }))
+    }
+
+    fn homes(&self) -> std::sync::MutexGuard<'_, HashMap<String, String>> {
+        self.homes.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Mark a server whose home is `relay`, another relay; true when the mark is new or
+    /// names another relay than before.
+    pub(crate) fn mark_elsewhere(&self, server: &str, relay: &str) -> bool {
+        let key = room_key(server);
+        let was = self.lock().insert(key.clone(), Mark::Elsewhere);
+        let told = self.homes().insert(key, relay.to_string());
+        was != Some(Mark::Elsewhere) || told.as_deref() != Some(relay)
+    }
+
+    /// The server's home is this relay again; true when that ends a mark.
+    pub(crate) fn clear_elsewhere(&self, server: &str) -> bool {
+        let mut rooms = self.lock();
+        let key = room_key(server);
+        self.homes().remove(&key);
+        if rooms.get(&key) != Some(&Mark::Elsewhere) {
+            return false;
+        }
+        rooms.remove(&key).is_some()
+    }
+
+    /// Every server marked as living on another relay, with the relay last told.
+    pub(crate) fn elsewhere(&self) -> HashMap<String, String> {
+        let rooms = self.lock();
+        self.homes().iter().filter(|(k, _)| rooms.get(*k) == Some(&Mark::Elsewhere)).map(|(k, v)| (k.clone(), v.clone())).collect()
     }
 
     /// Whether `id` (a room, a server id or a subgroup key) is refused or being probed.

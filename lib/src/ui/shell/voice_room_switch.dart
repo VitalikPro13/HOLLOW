@@ -49,6 +49,11 @@ Future<bool> confirmVoiceRoomSwitch(
         kind: 'relay_denied_voice', id: serverId.toLowerCase());
     return false;
   }
+  if (ref.read(serverElsewhereProvider(serverId)) != null) {
+    showEventToast(kVoiceElsewhereText,
+        kind: 'relay_elsewhere_voice', id: serverId.toLowerCase());
+    return false;
+  }
   final vc = ref.read(voiceChannelProvider);
   final leaves = voiceSwitchLeavesPeople(
     vc,

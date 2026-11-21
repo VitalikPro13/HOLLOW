@@ -2492,6 +2492,13 @@ class _ChannelChatPaneState extends ConsumerState<ChannelChatPane>
       return RelayDeniedNotice(
           serverId: widget.serverId, meeting: _isConference);
     }
+    final elsewhere = ref.watch(serverElsewhereProvider(widget.serverId));
+    if (elsewhere != null) {
+      return RelayElsewhereNotice(
+          serverId: widget.serverId,
+          relay: elsewhere.relay,
+          owned: elsewhere.owned);
+    }
     if (!canPost || mute != null || removed != null) {
       return Container(
         padding: const EdgeInsets.symmetric(

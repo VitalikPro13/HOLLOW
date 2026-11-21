@@ -8,10 +8,12 @@ import 'package:hollow/src/core/app_relaunch.dart';
 import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/core/providers/gif_provider.dart';
 import 'package:hollow/src/core/providers/link_preview_settings_provider.dart';
+import 'package:hollow/src/core/providers/relay_denial_provider.dart';
 import 'package:hollow/src/core/providers/relay_domain_provider.dart';
 import 'package:hollow/src/core/providers/relay_stats_provider.dart';
 import 'package:hollow/src/core/providers/relay_status_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
+import 'package:hollow/src/rust/api/crdt.dart' as crdt_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -81,6 +83,15 @@ class _RelaySettingsSectionState extends ConsumerState<RelaySettingsSection> {
   /// The relay this process is connected to; a change needs a restart.
   late final String _activeRelay = ref.read(relayDomainProvider);
   late String _selectedRelay = _activeRelay;
+
+  /// Servers this identity owns: they stay on the relay they live on.
+  late final int _ownedServers = () {
+    try {
+      return crdt_api.ownedServerCount();
+    } catch (_) {
+      return 0; // No Rust library (a widget test).
+    }
+  }();
   bool _open = false;
   bool _adding = false;
   bool _switching = false;
@@ -220,6 +231,8 @@ class _RelaySettingsSectionState extends ConsumerState<RelaySettingsSection> {
                   // A phone app cannot start itself again, so it closes.
                   child: Text(_phone ? 'Switch and close' : 'Switch and restart'),
                 ),
+                if (_ownedServers > 0)
+                  SettingsNote(ownedServersStayText(_activeRelay)),
                 if (_phone)
                   const SettingsNote(
                       'Open Hollow again to connect to the new relay.'),

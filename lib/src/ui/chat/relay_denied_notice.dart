@@ -11,6 +11,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_list_row.dart';
+import 'package:hollow/src/ui/dialogs/relay_switch_dialog.dart';
 import 'package:hollow/src/ui/server_settings/server_settings_catalog.dart';
 import 'package:hollow/src/ui/settings/about_section.dart';
 import 'package:hollow/src/ui/settings/settings_kit.dart';
@@ -21,6 +22,10 @@ import 'package:lucide_icons_flutter/lucide_icons.dart';
 const double _actionsBesideFrom = 900;
 
 const double _kIcon = 16;
+
+/// Narrower than this (at text scale 1), the elsewhere notice's button goes
+/// under its words.
+const double _elsewhereActionBesideFrom = 480;
 
 /// The most of the screen's height the notice takes before it scrolls.
 const double _maxHeightShare = 0.45;
@@ -220,6 +225,110 @@ class _RelayDeniedNoticeState extends ConsumerState<RelayDeniedNotice> {
                 if (wide) ...[
                   const SizedBox(width: HollowSpacing.lg),
                   row,
+                ],
+              ],
+            );
+          }),
+        ),
+      ),
+    );
+  }
+}
+
+/// Where a server that lives on another relay keeps its composer (HOL-SEC-211):
+/// where it lives and the one way there. History stays readable above it;
+/// nothing here sends.
+class RelayElsewhereNotice extends ConsumerWidget {
+  final String serverId;
+
+  /// The relay the server lives on.
+  final String relay;
+
+  /// The person owns it: their own device is on the wrong relay.
+  final bool owned;
+
+  /// Phone sizing.
+  final bool touch;
+
+  const RelayElsewhereNotice({
+    super.key,
+    required this.serverId,
+    required this.relay,
+    this.owned = false,
+    this.touch = false,
+  });
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final hollow = HollowTheme.of(context);
+    final scaler = MediaQuery.textScalerOf(context);
+    final text = (touch ? HollowTypography.body : HollowTypography.bodySmall)
+        .copyWith(color: hollow.textPrimary);
+    final firstLine = scaler.scale(text.fontSize!) * text.height!;
+    return Semantics(
+      container: true,
+      liveRegion: true,
+      child: Container(
+        key: const ValueKey('relay-elsewhere-notice'),
+        width: double.infinity,
+        constraints: BoxConstraints(
+          maxHeight: MediaQuery.sizeOf(context).height * _maxHeightShare,
+        ),
+        decoration: BoxDecoration(
+          color: hollow.noticeSurface(hollow.warning),
+          border: Border(top: BorderSide(color: hollow.border)),
+        ),
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.symmetric(
+            horizontal: HollowSpacing.lg,
+            vertical: HollowSpacing.md,
+          ),
+          child: LayoutBuilder(builder: (context, box) {
+            // Wide, the button sits on the trailing edge; narrow, under the words.
+            final wide = box.maxWidth >= scaler.scale(_elsewhereActionBesideFrom);
+            final button = HollowButton.outline(
+              compact: true,
+              touch: touch,
+              onPressed: () => RelaySwitch.ofRef(ref)
+                  .switchToServerRelay(context, serverId, relay),
+              child: const Text('Switch relay'),
+            );
+            final words = Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(owned ? kOwnServerElsewhereText : kServerElsewhereText,
+                    style: text),
+                const SizedBox(height: HollowSpacing.xxs),
+                Text(relay,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: HollowTypography.monoSmall
+                        .copyWith(color: hollow.textTertiary)),
+                if (!wide) ...[
+                  const SizedBox(height: HollowSpacing.sm),
+                  button,
+                ],
+              ],
+            );
+            return Row(
+              crossAxisAlignment:
+                  wide ? CrossAxisAlignment.center : CrossAxisAlignment.start,
+              children: [
+                SizedBox(
+                  height: wide ? null : firstLine,
+                  child: Center(
+                    widthFactor: 1,
+                    heightFactor: wide ? 1 : null,
+                    child: Icon(LucideIcons.arrowLeftRight,
+                        size: scaler.scale(_kIcon), color: hollow.warning),
+                  ),
+                ),
+                const SizedBox(width: HollowSpacing.sm),
+                Expanded(child: words),
+                if (wide) ...[
+                  const SizedBox(width: HollowSpacing.lg),
+                  button,
                 ],
               ],
             );

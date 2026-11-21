@@ -109,7 +109,8 @@ pub(crate) fn entries<'a>(states: impl IntoIterator<Item = &'a ServerState>, mas
             server_id: s.server_id.clone(),
             owner: (!crate::crdt::anchor::is_genesis_id(&s.server_id)).then(|| s.anchor_owner()).flatten().unwrap_or_default(),
             join_key: s.join_public_text().unwrap_or_default(),
-            relay: relay.to_string(),
+            // Where the server lives, which a friend's join must reach (`home_relay`).
+            relay: s.home_relay().unwrap_or_else(|| relay.to_string()),
             members: super::standing::rank_masters(s, s.members.keys().cloned()).into_iter().take(MAX_MEMBERS).collect(),
         })
         .collect()
@@ -149,7 +150,7 @@ pub(crate) fn answer<'a>(
     if !may_answer(local_device, asker, Instant::now()) {
         return None;
     }
-    let relay = super::ws_client::relay_domain().unwrap_or_default();
+    let relay = super::ws_client::relay_home().unwrap_or_default();
     Some(frames(entries(states, &master, &relay)))
 }
 

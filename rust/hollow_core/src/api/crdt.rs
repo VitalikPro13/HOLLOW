@@ -797,6 +797,32 @@ pub fn server_invite_owner(server_id: String) -> Option<String> {
         .and_then(|row| row.owner_pin)
 }
 
+/// The relay this server's owner says it lives on, which an invite to it names. `None`
+/// for a server whose owner has not said yet: the invite names our own relay.
+#[frb(sync)]
+pub fn server_home_relay(server_id: String) -> Option<String> {
+    let store_guard = super::storage::get_store().lock().ok()?;
+    let store = store_guard.as_ref()?;
+    let json = store.load_server_state(&server_id).ok().flatten()?;
+    serde_json::from_str::<crate::crdt::server_state::ServerState>(&json).ok()?.home_relay()
+}
+
+/// How many live servers this identity owns: a relay switch leaves them on the relay
+/// they live on (HOL-SEC-211), which the person is told before switching.
+#[frb(sync)]
+pub fn owned_server_count() -> u32 {
+    let Some(me) = super::network::get_local_peer_id() else { return 0 };
+    let Ok(store_guard) = super::storage::get_store().lock() else { return 0 };
+    let Some(store) = store_guard.as_ref() else { return 0 };
+    store
+        .load_all_servers()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|(_, json)| serde_json::from_str::<crate::crdt::server_state::ServerState>(&json).ok())
+        .filter(|s| !s.is_deleted() && s.current_owner().as_deref() == Some(me.as_str()))
+        .count() as u32
+}
+
 /// The join key an invite link to this server must carry (`key=`): the public half
 /// of the key every request to join is sealed to. `None` until the owner has set one.
 #[frb(sync)]

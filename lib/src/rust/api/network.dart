@@ -2517,6 +2517,14 @@ sealed class NetworkEvent with _$NetworkEvent {
   const factory NetworkEvent.serverAvailable({required String serverId}) =
       NetworkEvent_ServerAvailable;
 
+  /// The server lives on `relay`, not the relay we are on: it opens read-only until
+  /// the person switches. `None` once it lives on ours again; `owned` = we own it.
+  const factory NetworkEvent.serverElsewhere({
+    required String serverId,
+    String? relay,
+    required bool owned,
+  }) = NetworkEvent_ServerElsewhere;
+
   /// This relay refuses our account (`account_denied`) or our network (`network_denied`).
   const factory NetworkEvent.relayDenied({required String kind}) =
       NetworkEvent_RelayDenied;

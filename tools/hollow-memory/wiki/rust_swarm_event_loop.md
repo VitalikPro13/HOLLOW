@@ -316,6 +316,25 @@ ops. A server or meeting left, given up or deleted while refused is forgotten (a
 on the lift). `RelayDenied { kind }` (our login or network) only reaches Dart as
 `NetworkEvent::RelayDenied`; ws_client itself holds the 6 h jittered retry. Harness `t14_deny_*`.
 
+### A server's home relay (0.14.2, HOL-SEC-211, `node/home_relay.rs`)
+A server names the relay it lives on in the owner-only setting `home_relay` (canonical
+`host[:port]`, port only when not 443; `home_relay::canonical` and Dart's
+`normalizeRelayHost` share test vectors). `ServerState::home_relay()` counts it only when
+the anchor owner's own op wrote it (register actor), else no home. The loop's relay
+comes from `ws_client::relay_home()` (task-local `DialedRelay { auth, home }`; `auth` is
+the host ring control signs, `home` the canonical form). `home_relay::sync` runs right
+after `load_server_states` (which never joins an elsewhere room) and on every loop turn:
+a server whose home is not ours gets the `Denials` mark `Elsewhere`, so the sealing stage
+drops everything scoped to it exactly as for an operator refusal (room join, lock
+get/put, frames, carries), ws_client leaves and refuses the room, its MLS groups freeze,
+and `NetworkEvent::ServerElsewhere { relay, owned }` goes to Dart whenever the relay
+changes (`relay: None` when it lives here again). `home_relay::settle` does the same for
+a pending join the moment its answer folds, before completion sends anything. Unlike a
+refusal, `Elsewhere` is never probed, never lifted by the relay, and `deny` never
+overrides it. The owner names a missing home once: at creation, or on the batch tick
+behind `sets_missing_join_key`. Nothing moves a home in 0.14.2 (MULTI_RELAY_CLIENT_PLAN
+§13). Harness `i151_*` (two `MockRelay::serving` relays, `move_node`).
+
 ### WsEvent::RelayRosterCheck / RosterChecked (0.14, `node/roster_check.rs`)
 Whether the relay answers `roster_check`, then its answers. The book is RAM only, one per node loop
 (a restarted loop starts empty), every table bounded by our own asks: an answer stands `FRESH`

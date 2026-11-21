@@ -6,11 +6,13 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hollow/src/core/providers/relay_denial_provider.dart';
 import 'package:hollow/src/core/providers/relay_domain_provider.dart';
 import 'package:hollow/src/core/providers/relay_status_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/theme/hollow_theme_data.dart';
 import 'package:hollow/src/ui/chat/hollow_link_card.dart';
+import 'package:hollow/src/ui/chat/relay_denied_notice.dart';
 import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
 import 'package:hollow/src/ui/components/relay_no_turn_chip.dart';
 import 'package:hollow/src/ui/dialogs/no_turn_dialog.dart';
@@ -218,6 +220,64 @@ void main() {
           linkOf('hollow://join?server=abc123&relay=$other')),
     );
     await capture(tester, 'relay_switch_narrow');
+  });
+
+  testWidgets('relay switch dialog: a server we hold lives elsewhere',
+      (tester) async {
+    await pumpDialogHost(
+      tester,
+      extra: overrides(),
+      onOpen: (context, ref) => RelaySwitch.ofRef(ref)
+          .switchToServerRelay(context, 'abc123', other),
+    );
+    expect(find.text('This server lives on another relay'), findsOneWidget);
+    expect(find.textContaining('finishes this join'), findsNothing);
+    expect(find.textContaining('friends on '), findsOneWidget);
+    expect(find.text('Switch and restart'), findsOneWidget);
+    await capture(tester, 'relay_switch_elsewhere');
+  });
+
+  Future<void> pumpElsewhereNotice(WidgetTester tester, Size size, bool touch,
+      {bool owned = false, double scale = 1.0, String relay = other}) async {
+    await pumpHost(
+      tester,
+      MediaQuery(
+        data: MediaQueryData(
+            size: size, textScaler: TextScaler.linear(scale)),
+        child: Align(
+          alignment: Alignment.bottomCenter,
+          child: RelayElsewhereNotice(
+              serverId: 'abc123', relay: relay, owned: owned, touch: touch),
+        ),
+      ),
+      size: size,
+      extra: overrides(),
+    );
+  }
+
+  testWidgets('a server on another relay keeps its composer as one notice',
+      (tester) async {
+    await pumpElsewhereNotice(tester, const Size(900, 200), false);
+    expect(find.text(kServerElsewhereText), findsOneWidget);
+    expect(find.text(other), findsOneWidget);
+    await capture(tester, 'relay_elsewhere_notice_desktop');
+    await pumpElsewhereNotice(tester, const Size(900, 200), false, owned: true);
+    expect(find.text(kOwnServerElsewhereText), findsOneWidget);
+    await capture(tester, 'relay_elsewhere_notice_owner_desktop');
+  });
+
+  testWidgets('the notice at 320 px and text scale 2.0 opens the switch',
+      (tester) async {
+    await pumpElsewhereNotice(tester, const Size(320, 640), true,
+        scale: 2.0,
+        relay: 'a-very-long-self-hosted-relay-name.example-dynamic-dns.org:8443');
+    expect(tester.takeException(), isNull);
+    await capture(tester, 'relay_elsewhere_notice_phone_320_x2');
+    await tester.ensureVisible(find.text('Switch relay'));
+    await tester.tap(find.text('Switch relay'));
+    await tester.pumpAndSettle();
+    expect(find.text('This server lives on another relay'), findsOneWidget);
+    await capture(tester, 'relay_switch_elsewhere_phone_320_x2');
   });
 
   testWidgets('a link on our own relay never asks', (tester) async {

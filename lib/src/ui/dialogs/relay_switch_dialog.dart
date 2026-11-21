@@ -39,9 +39,9 @@ class RelaySwitch {
     await showHollowDialog<void>(
       context: context,
       builder: (dialogContext) => _RelaySwitchDialog(
-        link: link,
         target: target,
         current: current,
+        title: _titleFor(link.type),
         onSwitch: () async {
           await storage_api.saveSetting(
               key: kPendingInviteAfterSwitchKey, value: link.fullUrl);
@@ -52,6 +52,27 @@ class RelaySwitch {
       ),
     );
     return false;
+  }
+
+  /// A server we hold that lives on [target], another relay (HOL-SEC-211): the
+  /// same one dialog an invite opens, and nothing to finish after the restart.
+  Future<void> switchToServerRelay(
+      BuildContext context, String serverId, String target) async {
+    final current = _read(relayDomainProvider);
+    await showHollowDialog<void>(
+      context: context,
+      builder: (dialogContext) => _RelaySwitchDialog(
+        target: target,
+        current: current,
+        title: _titleFor(HollowLinkType.serverInvite),
+        held: true,
+        onSwitch: () async {
+          await _read(relayDomainProvider.notifier).setDomain(target);
+          await _read(savedRelayListProvider.notifier).addRelay(target);
+          await exitForRelaySwitch();
+        },
+      ),
+    );
   }
 }
 
@@ -92,13 +113,17 @@ String _titleFor(HollowLinkType type) => switch (type) {
 
 class _RelaySwitchDialog extends StatefulWidget {
   const _RelaySwitchDialog({
-    required this.link,
     required this.target,
     required this.current,
+    required this.title,
     required this.onSwitch,
+    this.held = false,
   });
 
-  final HollowLink link;
+  final String title;
+
+  /// A server we already hold: nothing to finish after the restart.
+  final bool held;
   final String target;
   final String current;
   final Future<void> Function() onSwitch;
@@ -127,7 +152,7 @@ class _RelaySwitchDialogState extends State<_RelaySwitchDialog>
     final host = HollowTypography.mono.copyWith(color: hollow.textPrimary);
 
     return HollowDialog(
-      title: _titleFor(widget.link.type),
+      title: widget.title,
       width: 420,
       busy: actionRunning,
       error: actionError,
@@ -137,10 +162,13 @@ class _RelaySwitchDialogState extends State<_RelaySwitchDialog>
           TextSpan(text: widget.target, style: host),
           const TextSpan(text: '. You are connected to '),
           TextSpan(text: widget.current, style: host),
+          const TextSpan(
+              text: '. Switching restarts Hollow, and your servers and '
+                  'friends on '),
+          TextSpan(text: widget.current, style: host),
           TextSpan(
-            text: '. Switching restarts Hollow, and your servers and '
-                'friends there go quiet until you switch back. '
-                '${_isMobile ? 'Reopen Hollow to finish joining.' : 'Hollow '
+            text: ' go quiet until you switch back.'
+                '${widget.held ? '' : _isMobile ? ' Reopen Hollow to finish joining.' : ' Hollow '
                     'finishes this join after the restart.'}',
           ),
         ]),

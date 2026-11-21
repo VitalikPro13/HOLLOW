@@ -679,6 +679,9 @@ pub(crate) enum NetworkEvent {
     ServerUnavailable { server_id: String },
     /// This relay carries it again.
     ServerAvailable { server_id: String },
+    /// The server's owner says it lives on `relay`, not the relay we dial: nothing for it
+    /// leaves here (`home_relay`). `None` once it lives on ours again; `owned` = ours.
+    ServerElsewhere { server_id: String, relay: Option<String>, owned: bool },
     /// This relay refuses our login (`account_denied`) or our network (`network_denied`).
     RelayDenied { kind: String },
     // -- Twitch verification events --

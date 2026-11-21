@@ -6207,4 +6207,32 @@ mod tests {
         assert!(out.rebuilt);
         assert_eq!(out.delta(&owner.server_id).and_then(|d| d.base), Some(hex::encode(cp.content_hash())), "the delta names the base");
     }
+
+    /// REVIEW HOL-SEC-211: a 0.14.1 owner device folds an admin's `home_relay` (MANAGE_SERVER
+    /// there) and its checkpoint carries it; a 0.14.2 replica must not take a home the owner
+    /// never named.
+    #[test]
+    fn review_a_0141_owner_checkpoint_carries_no_admin_home_relay() {
+        use crate::crdt::server_state::HOME_RELAY_KEY;
+        let (mut owner, founding) = founded(1);
+        let sid = owner.server_id.clone();
+        let t = founding.hlc.physical_ms;
+        let base = vec![
+            op_at(1, &sid, t + 1, add(&sid, 2)),
+            op_at(1, &sid, t + 2, P::RoleChanged { peer_id: id(2), role: MemberRole::Admin, priority: 2 }),
+        ];
+        owner.ingest_remote(&base);
+        assert_eq!(owner.get_role(&id(2)), MemberRole::Admin, "precondition: 2 is an admin");
+        let evil = op_at(2, &sid, t + 3, P::ServerSettingChanged { key: HOME_RELAY_KEY.into(), value: "evil.example".into() });
+        // 0.14.2 refuses it live.
+        assert!(!owner.op_allowed(&evil), "precondition: 0.14.2 refuses the admin's op");
+        // What a 0.14.1 owner's fold does with it: an ordinary MANAGE_SERVER setting.
+        let prio = MemberRole::Admin.priority();
+        owner.settings.insert(HOME_RELAY_KEY.into(), crate::crdt::admin_lww::AdminLwwReg::new("evil.example".into(), evil.hlc.clone(), prio));
+        let cp = checkpoint(&mut owner);
+        let mut r = joiner(&sid, 9);
+        r.ingest_remote(&[founding.clone(), cp.clone()]);
+        r.ingest_remote(std::slice::from_ref(&evil));
+        assert_eq!(r.home_relay(), None, "a 0.14.2 replica took the admin's home relay from a 0.14.1 owner's checkpoint");
+    }
 }

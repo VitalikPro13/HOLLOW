@@ -1948,6 +1948,21 @@ class EventStreamNotifier extends Notifier<bool> {
         final stillDenied = ref.read(relayDeniedServersProvider.notifier);
         stillDenied.state = {...stillDenied.state}..remove(serverId.toLowerCase());
 
+      case NetworkEvent_ServerElsewhere(
+          :final serverId,
+          :final relay,
+          :final owned
+        ):
+        final elsewhere = ref.read(relayElsewhereServersProvider.notifier);
+        final next = {...elsewhere.state};
+        if (relay == null) {
+          next.remove(serverId.toLowerCase());
+        } else {
+          next[serverId.toLowerCase()] = (relay: relay, owned: owned);
+          leaveRefusedVoice(ref, serverId);
+        }
+        elsewhere.state = next;
+
       case NetworkEvent_RelayDenied(:final kind):
         ref.read(relayLoginDenialProvider.notifier).state = kind;
 

@@ -329,6 +329,11 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
           kind: 'relay_denied_voice', id: serverId.toLowerCase());
       return;
     }
+    if (ref.read(serverElsewhereProvider(serverId)) != null) {
+      showEventToast(kVoiceElsewhereText,
+          kind: 'relay_elsewhere_voice', id: serverId.toLowerCase());
+      return;
+    }
     final vcState = ref.read(voiceChannelProvider);
     final callState = ref.read(callProvider);
 
