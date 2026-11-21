@@ -462,8 +462,21 @@ phone (thread `server:channel`); same generic alert body.
 Channel wake joins the SERVER room (fetch=true, invisible), parses 0x06 replays
 + live 0x05/0x08 frames, decrypts `MlsChannelMessage` via
 `MlsManager::from_persisted(signer, cred, storage, &[server_id])`, inserts
-channel rows (dedup `channel_message_exists`), persists MLS state after the loop
-(single-writer-safe — same heartbeat/FETCH_ACTIVE guards as Olm).
+channel rows (dedup `channel_message_exists`). **It saves the reads of stored posts
+ONLY (HOL-SEC-249, 0.14.2):** the copy that decrypted every frame (to learn what it
+was) is dropped unsaved; `save_posts_read` reloads the group from disk, decrypts again
+just the posts whose row was stored (`PostRead`) and saves that (single-writer-safe,
+same heartbeat/FETCH_ACTIVE guards as Olm). Every other frame it read (an edit, a
+deletion, a reaction, a hint, a CRDT op, a file header) keeps its message key for the
+app, which reads the SAME ciphertext from the channel's ring or its resumed session;
+before, the save spent those keys and the app's copy never opened. No commit is
+processed, so no epoch moves and no past epoch is captured (`mls_past` rules hold).
+Reach today: topic frames (`0x08`, where edits/deletes/reactions ride) go only to
+sockets SUBSCRIBED to the topic (relay `Cast::reaches`), and the fetch socket never
+subscribes, so what it meets live are `0x05` room broadcasts (hints, MLS CRDT ops,
+channel file headers) whose copy waits in an iOS grace session's ring. Harness
+`sec249_the_app_still_reads_its_ring_copies_after_a_channel_wake` feeds it an edit, a
+reaction, a post and a deletion and checks the app opens the ring's copies.
 `PublicChannelMessage` plaintext is verified-by-signature and inserted directly
 (sender = relay-attested frame author). **Stale MLS epoch (missed a commit while
 offline) = graceful**: decrypt fails → content-free banner → app self-heals via

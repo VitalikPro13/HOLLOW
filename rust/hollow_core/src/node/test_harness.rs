@@ -45113,7 +45113,7 @@ async fn push_fetch_reads(relay: &MockRelay, from: &TestNode, to: &TestNode, fet
         data.extend_from_slice(format!("{}\0{}\0", frame.room, from.device_id).as_bytes());
         data.extend_from_slice(&frame.frame);
         super::fetch::handle_binary_frame(
-            &data, &mut super::fetch::Wake::dm(&from.master_id), &mut fetch.0, &mut None, &mut false, &fetch.1, &to.db_path, &to.passphrase,
+            &data, &mut super::fetch::Wake::dm(&from.master_id), &mut fetch.0, &mut None, &mut Vec::new(), &fetch.1, &to.db_path, &to.passphrase,
             &to.device_id, &to.master_id, &mut read,
         );
     }
@@ -71424,4 +71424,156 @@ async fn sec248_a_removed_device_cannot_end_a_friendship_by_a_reject() {
         "a reject from O's counted device must end the accepted friendship",
     );
     drop(s);
+}
+
+// sec249-channel-wake
+// HOL-SEC-249: a channel wake decrypted every MLS frame it met and saved the group
+// state, spending the message key of each edit, deletion and reaction it does not
+// show; the app's copy of that same ciphertext (the channel's ring, a resumed session)
+// then no longer opened. The fetch now saves only the reads of posts it stored.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn sec249_the_app_still_reads_its_ring_copies_after_a_channel_wake() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    const O_TAG: u8 = 235;
+    const J_TAG: u8 = 236;
+    let (o_master, j_master) = (tag_kp(O_TAG).peer_id(), tag_kp(J_TAG).peer_id());
+    let mut o = spawn_node_with_friends(&relay, O_TAG, O_TAG, &[&j_master]).await;
+    let mut j = spawn_node_with_friends(&relay, J_TAG, J_TAG, &[&o_master]).await;
+    expect_dm_pair_ready(&relay, &o, &j, 20).await;
+    let server_id = create_server_and_wait(&mut o, "Wake Server").await;
+    let general = general_channel_of(&server_id);
+    j.cmd_tx
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&server_id) })
+        .await
+        .unwrap();
+    assert!(wait_until(30, async || j.mls_members(&server_id).await.len() == 2).await, "J joins the server's MLS group");
+    g13w3_post(&o, &server_id, &general, "s249-0", "to be deleted").await;
+    assert!(g13w3_got_post(&mut j, "to be deleted").await);
+    g13w3_post(&o, &server_id, &general, "s249-1", "to be edited").await;
+    assert!(g13w3_got_post(&mut j, "to be edited").await);
+
+    // J's app is away; O edits, reacts, posts and deletes. Each change rides the
+    // channel's ring alone; the post also gets J's offline copy.
+    relay.set_online(&j.device_id, false);
+    assert!(wait_until(10, async || !relay.online_devices().contains(&j.device_id)).await);
+    relay.set_recording(&o.device_id, true);
+    let ops = [
+        NodeCommand::EditChannelMessage { server_id: server_id.clone(), channel_id: general.clone(), message_id: "s249-1".into(), new_text: "edited while away".into() },
+        NodeCommand::AddChannelReaction { server_id: server_id.clone(), channel_id: general.clone(), message_id: "s249-1".into(), emoji: "👍".into() },
+        NodeCommand::SendChannelMessage { server_id: server_id.clone(), channel_id: general.clone(), text: "posted while away".into(), message_id: "s249-2".into(), reply_to_mid: None, link_preview: None },
+        NodeCommand::DeleteChannelMessage { server_id: server_id.clone(), channel_id: general.clone(), message_id: "s249-0".into() },
+    ];
+    for op in ops {
+        o.cmd_tx.send(op).await.unwrap();
+    }
+    let mls_frames = || {
+        relay
+            .recorded_frames(&o.device_id)
+            .into_iter()
+            .filter(|f| matches!(recorded_message(f), Ok(super::types::HavenMessage::MlsChannelMessage { server_id: s, .. }) if s == server_id))
+            .collect::<Vec<_>>()
+    };
+    // Edit, reaction, post, its hint, deletion (and the post's offline copy).
+    assert!(wait_until(15, async || mls_frames().len() >= 5).await, "O never sent its four changes");
+    let frames = mls_frames();
+    // O goes too, so nothing but the ring can bring J the changes.
+    relay.set_online(&o.device_id, false);
+    assert!(wait_until(10, async || !relay.online_devices().contains(&o.device_id)).await);
+
+    // J's push fetch is handed every frame as if live while its socket was in the room:
+    // the post's hint by the room broadcast it rode (0x05, the route a fetch meets
+    // live), the rest by the channel's topic.
+    let (sid, o_dev) = (server_id.clone(), o.device_id.clone());
+    let (j_dev, j_mst) = (j.device_id.clone(), j.master_id.clone());
+    let mut hint_frame = None;
+    let mut j = restart_node_with(&relay, j, J_TAG, J_TAG, |db_path, passphrase| {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let store = crate::storage::MessageStore::open(db_path, passphrase).unwrap();
+                let mut olm = OlmManager::load(&store).unwrap().expect("J's Olm account");
+                let mut mls = crate::crypto::MlsManager::load_from(&store, std::slice::from_ref(&sid)).unwrap();
+                assert!(mls.is_some(), "precondition: J's fetch holds the group");
+                let crypto_store = CryptoStore::open(db_path.to_string(), passphrase.to_string()).unwrap();
+                let ciphertext = |f: &[u8]| match recorded_message(f) {
+                    Ok(super::types::HavenMessage::MlsChannelMessage { body, .. }) => OlmManager::decode_base64(&body).ok(),
+                    _ => None,
+                };
+                // A RAM-only copy of J's group tells which frame is the hint.
+                let mut probe = crate::crypto::MlsManager::load_from(&store, std::slice::from_ref(&sid)).unwrap().expect("J's group");
+                let hint_at = frames
+                    .iter()
+                    .position(|f| {
+                        ciphertext(f)
+                            .and_then(|ct| probe.decrypt(&sid, &ct).ok())
+                            .and_then(|(plain, _)| serde_json::from_slice::<super::types::MessageEnvelope>(&plain).ok())
+                            .is_some_and(|e| matches!(e, super::types::MessageEnvelope::ChannelHint { .. }))
+                    })
+                    .expect("O's post sent its hint");
+                let mut posts = Vec::new();
+                let mut shown = Vec::new();
+                let mut wake = super::fetch::Wake::channel(&sid);
+                for (i, frame) in frames.iter().enumerate() {
+                    let mut data = if i == hint_at {
+                        [&[0x05u8][..], format!("{sid}\0{o_dev}\0").as_bytes()].concat()
+                    } else {
+                        [&[0x08u8][..], format!("{sid}\0topic\0{o_dev}\0").as_bytes()].concat()
+                    };
+                    data.extend_from_slice(frame);
+                    super::fetch::handle_binary_frame(
+                        &data, &mut wake, &mut olm, &mut mls, &mut posts, &crypto_store, db_path, passphrase, &j_dev, &j_mst, &mut shown,
+                    );
+                }
+                assert_eq!(shown.len(), 1, "the fetch shows the one post");
+                // The fetch read the broadcast: its reading copy holds that key spent.
+                let hint_ct = ciphertext(&frames[hint_at]).expect("the hint's ciphertext");
+                assert!(
+                    mls.as_mut().expect("the fetch's group").decrypt(&sid, &hint_ct).is_err(),
+                    "the fetch never read the hint it met as a 0x05 broadcast",
+                );
+                hint_frame = Some(frames[hint_at].clone());
+                super::fetch::save_posts_read(&mut mls, &posts, &crypto_store, db_path, passphrase);
+                assert!(crypto_store.flushed(std::time::Duration::from_secs(10)).await, "the fetch's save never landed");
+                // On disk: the post's key is spent, every other frame's key is not.
+                let after = crate::storage::MessageStore::open(db_path, passphrase).unwrap();
+                let mut copy = crate::crypto::MlsManager::load_from(&after, std::slice::from_ref(&sid)).unwrap().expect("J's group");
+                let spent = frames
+                    .iter()
+                    .filter_map(|f| ciphertext(f))
+                    .filter(|ct| copy.decrypt(&sid, ct).is_err())
+                    .count();
+                assert_eq!(spent, 1, "the fetch saved the reads of frames it does not show");
+            })
+        });
+    })
+    .await;
+
+    let mid = |m: &str| vec![m.to_string()];
+    assert!(
+        wait_until(20, async || j.channel_messages(&server_id, &general).iter().any(|m| m.text == "edited while away")).await,
+        "the edit the fetch read no longer opened from the ring",
+    );
+    // The hint's other copy reaches the app as an iOS grace session's ring replays it.
+    let hint_frame = hint_frame.expect("the stage ran");
+    relay.inject_raw(&server_id, &o.device_id, &j.device_id, hint_frame);
+    assert!(
+        wait_event(&mut j, std::time::Duration::from_secs(20), |ev| {
+            matches!(ev, NetworkEvent::ChannelNotificationHint { message_id, .. } if message_id == "s249-2")
+        })
+        .await,
+        "the hint the fetch read as a 0x05 broadcast no longer opened from the app's copy",
+    );
+    assert!(
+        wait_until(10, async || j.store().load_reactions_for_messages(&mid("s249-1")).ok().and_then(|r| r.get("s249-1").cloned()).is_some_and(|r| r.iter().any(|(e, _, _)| e == "👍"))).await,
+        "the reaction the fetch read no longer opened from the ring",
+    );
+    assert!(
+        wait_until(10, async || j.store().deleted_message_ids(&mid("s249-0")).is_ok_and(|d| !d.is_empty())).await,
+        "the deletion the fetch read no longer opened from the ring",
+    );
+    assert!(j.channel_messages(&server_id, &general).iter().any(|m| m.text == "posted while away"), "the fetch stored the post");
+    drop(o);
 }

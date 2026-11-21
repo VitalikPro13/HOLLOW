@@ -135,7 +135,7 @@ pub(crate) async fn run_fetch(
         .map_err(|e| format!("Failed to join room: {e}"))?;
 
     hollow_log!("[HOLLOW-FETCH] Joined room, waiting for messages (timeout: {}s)", timeout.as_secs());
-    let mut mls_dirty = false;
+    let mut posts_stored = Vec::new();
 
     let mut messages: Vec<FetchedDm> = Vec::new();
     let deadline = tokio::time::Instant::now() + timeout;
@@ -162,7 +162,7 @@ pub(crate) async fn run_fetch(
             }
             Message::Binary(data) => {
                 handle_binary_frame(
-                    &data, &mut wake, olm, mls, &mut mls_dirty, crypto_store, db_path,
+                    &data, &mut wake, olm, mls, &mut posts_stored, crypto_store, db_path,
                     db_passphrase, peer_id, local_master, &mut messages,
                 );
             }
@@ -176,14 +176,9 @@ pub(crate) async fn run_fetch(
 
     let _ = write.close().await;
 
-    // Persist advanced MLS ratchet state (channel wake). Single-writer-safe:
-    // the fetch only runs when the full node is NOT running (Android guard /
-    // iOS app-active heartbeat), mirroring the Olm session persistence above.
-    if mls_dirty {
-        if let Some(mls_mgr) = mls.as_ref() {
-            persist_mls_state(mls_mgr, crypto_store);
-        }
-    }
+    // Single-writer-safe: the fetch only runs when the full node is NOT running
+    // (Android guard / iOS app-active heartbeat).
+    save_posts_read(mls, &posts_stored, crypto_store, db_path, db_passphrase);
 
     let mut merged = merge_fetched_messages(messages);
     if server_room.is_some() {
@@ -378,7 +373,7 @@ pub(crate) fn handle_binary_frame(
     wake: &mut Wake,
     olm: &mut OlmManager,
     mls: &mut Option<MlsManager>,
-    mls_dirty: &mut bool,
+    posts_stored: &mut Vec<PostRead>,
     crypto_store: &CryptoStore,
     db_path: &str,
     db_passphrase: &str,
@@ -423,7 +418,7 @@ pub(crate) fn handle_binary_frame(
     if let Some((from, room, frame, payload, sealed_at)) = payload {
         if let Some(sid) = wake.server.clone() {
             if let Some(entry) = try_process_channel_msg(
-                &from, &payload, mls, mls_dirty, db_path, db_passphrase, local_master,
+                &from, &payload, mls, posts_stored, db_path, db_passphrase, local_master,
             ) {
                 messages.push(entry);
             } else if data[0] == 0x06
@@ -614,7 +609,7 @@ fn try_process_channel_msg(
     from: &str,
     data: &str,
     mls: &mut Option<MlsManager>,
-    mls_dirty: &mut bool,
+    posts_stored: &mut Vec<PostRead>,
     db_path: &str,
     db_passphrase: &str,
     local_master: &str,
@@ -645,7 +640,6 @@ fn try_process_channel_msg(
                     return None;
                 }
             };
-            *mls_dirty = true;
             let envelope_str = String::from_utf8_lossy(&plaintext);
             let envelope = serde_json::from_str::<MessageEnvelope>(&envelope_str).ok()?;
             let state = stored_server_state(db_path, db_passphrase, &server_id);
@@ -701,6 +695,11 @@ fn try_process_channel_msg(
                         file_id.as_deref(), order_us, album.as_deref(), link_preview.as_ref(), dev.as_deref(),
                     ) == Some(ChannelInsert::Cleared) {
                         return None;
+                    }
+                    if mid.as_deref().is_some_and(|mid| {
+                        crate::storage::MessageStore::lease(db_path, db_passphrase).is_ok_and(|s| s.channel_message_exists(mid))
+                    }) {
+                        posts_stored.push(PostRead { group: group_key, ciphertext });
                     }
                     let mentions_me = fetched_post_mentions(
                         state.as_ref()?, local_master, &text, reply_to.as_deref(), db_path, db_passphrase,
@@ -788,6 +787,49 @@ fn try_process_channel_msg(
         }
         _ => None,
     }
+}
+
+/// An MLS post the fetch stored: the one kind of frame whose read it saves.
+pub(crate) struct PostRead {
+    group: String,
+    ciphertext: Vec<u8>,
+}
+
+/// Save what the fetch read of the group state: only the posts it stored (HOL-SEC-249).
+/// `mls` decrypted every frame to see what it was, so its state is dropped unsaved and
+/// a copy fresh from disk reads the stored posts again and is saved. Any other frame's
+/// message key stays unspent for the app, which reads the same ciphertext from the
+/// channel's ring or its resumed session: no epoch moves and nothing is merged, so no
+/// past epoch is kept either. A post's key is spent once its row is stored, as before.
+pub(crate) fn save_posts_read(
+    mls: &mut Option<MlsManager>,
+    posts: &[PostRead],
+    crypto_store: &CryptoStore,
+    db_path: &str,
+    db_passphrase: &str,
+) {
+    let Some(read) = mls.take() else { return };
+    if posts.is_empty() {
+        return;
+    }
+    let groups = read.group_ids();
+    drop(read);
+    let saved = crate::storage::MessageStore::lease(db_path, db_passphrase)
+        .and_then(|store| MlsManager::load_from(&store, &groups));
+    let mut saved = match saved {
+        Ok(Some(saved)) => saved,
+        Ok(None) => return,
+        Err(e) => {
+            hollow_log!("[HOLLOW-FETCH] Could not reload the MLS state to save the posts read: {e}");
+            return;
+        }
+    };
+    for post in posts {
+        if let Err(e) = saved.decrypt(&post.group, &post.ciphertext) {
+            hollow_log!("[HOLLOW-FETCH] A stored post did not read again in {}: {e}", post.group);
+        }
+    }
+    persist_mls_state(&saved, crypto_store);
 }
 
 /// Whether a push wake's sender may be named in a content-free fallback banner.
@@ -2072,7 +2114,7 @@ mod tests {
 
         let crypto_store = CryptoStore::open(path.clone(), pass.clone()).unwrap();
         let mut messages = Vec::new();
-        handle_binary_frame(&data, &mut Wake::dm(&b), &mut alice_olm, &mut None, &mut false, &crypto_store, &path, &pass, &a, &a, &mut messages);
+        handle_binary_frame(&data, &mut Wake::dm(&b), &mut alice_olm, &mut None, &mut Vec::new(), &crypto_store, &path, &pass, &a, &a, &mut messages);
         assert_eq!(messages.len(), 1, "the DM must open");
         let store = crate::storage::MessageStore::open(&path, &pass).unwrap();
         let mut marks = Vec::new();
@@ -2217,7 +2259,7 @@ mod tests {
         let (path, pass, a, a_dev) = (push.path.clone(), push.pass.clone(), push.a.clone(), push.a_dev.clone());
         let mut wake = server_room.map_or_else(|| Wake::dm(&push.bm.peer_id()), Wake::channel);
         handle_binary_frame(
-            &data, &mut wake, &mut push.alice_olm, &mut None, &mut false, &crypto_store, &path, &pass, &a_dev, &a,
+            &data, &mut wake, &mut push.alice_olm, &mut None, &mut Vec::new(), &crypto_store, &path, &pass, &a_dev, &a,
             &mut Vec::new(),
         );
         sealed
@@ -2434,7 +2476,7 @@ mod tests {
         data.extend_from_slice(&crate::node::frame_auth::seal(&push.b1, room, &push.a_dev, &body));
         let (path, pass, a, a_dev) = (push.path.clone(), push.pass.clone(), push.a.clone(), push.a_dev.clone());
         handle_binary_frame(
-            &data, &mut Wake::dm(&push.bm.peer_id()), &mut push.alice_olm, &mut None, &mut false, &crypto_store,
+            &data, &mut Wake::dm(&push.bm.peer_id()), &mut push.alice_olm, &mut None, &mut Vec::new(), &crypto_store,
             &path, &pass, &a_dev, &a, &mut Vec::new(),
         );
         assert!(crypto_store.flushed(Duration::from_secs(10)).await);
@@ -2885,7 +2927,7 @@ mod tests {
             })
             .unwrap();
             let mut mls = None;
-            let _ = try_process_channel_msg(&a, &frame, &mut mls, &mut false, &path, &pass, &m);
+            let _ = try_process_channel_msg(&a, &frame, &mut mls, &mut Vec::new(), &path, &pass, &m);
             store.channel_message_exists(mid)
         };
         assert!(posted("srv-a-t08", "a-t08-server"), "the same public post in a server is stored");
@@ -2921,7 +2963,7 @@ mod tests {
                 file_meta: None, dev: crate::node::post_proof::sign(&device, &version),
             })
             .unwrap();
-            let _ = try_process_channel_msg(&a, &frame, &mut None, &mut false, &path, &pass, &m);
+            let _ = try_process_channel_msg(&a, &frame, &mut None, &mut Vec::new(), &path, &pass, &m);
             assert!(store.channel_message_exists(mid), "the fetch stores the post");
             store.channel_post_proofs(&[mid]).get(mid).map(|d| d.device.clone())
         };
