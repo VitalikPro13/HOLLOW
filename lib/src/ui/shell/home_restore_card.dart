@@ -6,6 +6,7 @@ import 'package:hollow/src/core/providers/friends_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/services/phrase_restore.dart';
 import 'package:hollow/src/rust/api/identity.dart' as identity_api;
+import 'package:hollow/src/rust/api/recovery.dart' as recovery_api;
 import 'package:hollow/src/rust/api/roster.dart' as roster_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
@@ -78,6 +79,18 @@ final restoreCardProvider =
   );
 });
 
+/// Whether "Type my phrase again" did not run at this launch: Rust says it once,
+/// so it is read once per run of the app.
+final setAsideFailedProvider = FutureProvider<bool>(
+    (ref) => recovery_api.takeSetAsideFailure().catchError((_) => false));
+
+/// The card's line after a set-aside that did not run: try again while the
+/// card still offers it, else why it no longer can.
+@visibleForTesting
+String setAsideFailureLine({required bool maySetAside}) => maySetAside
+    ? "Hollow couldn't set this identity aside. Try again."
+    : kSetAsideRefusedText;
+
 /// The lines of the card, by branch.
 @visibleForTesting
 List<String> restoreCardLines(PhraseRestoreBranch branch,
@@ -124,6 +137,8 @@ class HomeRestoreCard extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final state = ref.watch(restoreCardProvider).valueOrNull;
     if (state == null) return const SizedBox.shrink();
+    final setAsideFailed =
+        ref.watch(setAsideFailedProvider).valueOrNull ?? false;
     final hollow = HollowTheme.of(context);
     final lines = restoreCardLines(state.branch, noWait: state.noWait);
     final text = (touch ? HollowTypography.body : HollowTypography.bodySmall)
@@ -146,6 +161,11 @@ class HomeRestoreCard extends ConsumerWidget {
                   .copyWith(
                       color: hollow.textPrimary, fontWeight: FontWeight.w500),
             ),
+            if (setAsideFailed) ...[
+              const SizedBox(height: HollowSpacing.sm),
+              Text(setAsideFailureLine(maySetAside: state.maySetAside),
+                  style: text.copyWith(color: hollow.error)),
+            ],
             for (final line in lines) ...[
               const SizedBox(height: HollowSpacing.sm),
               Text(line, style: text),
@@ -229,9 +249,7 @@ Future<void> showSetAsideDialog(BuildContext context, WidgetRef ref) async {
             .maySetAsideThisIdentity()
             .catchError((_) => true);
         ref.invalidate(restoreCardProvider);
-        throw FriendlyException(allowed
-            ? "Hollow couldn't set this identity aside. Try again."
-            : kSetAsideRefusedText);
+        throw FriendlyException(setAsideFailureLine(maySetAside: allowed));
       }
       await relaunchAfterSetAside();
     },

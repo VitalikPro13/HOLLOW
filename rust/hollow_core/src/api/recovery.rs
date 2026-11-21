@@ -47,7 +47,12 @@ const RELINK_WELCOME: &str = "relink_welcome";
 const SET_ASIDE_MARK: &str = "set_aside.pending";
 /// Welcome's note that an identity was set aside, as `RELINK_WELCOME` is a relink's.
 const SET_ASIDE_WELCOME: &str = "set_aside_welcome";
-/// Kept folders a phrase is probed against, newest names last.
+/// Home's note that a set-aside the person asked for did not run.
+const SET_ASIDE_FAILED: &str = "set_aside_failed";
+/// A set-aside mark runs only at the launch right after it: the relaunch follows at once,
+/// and a mark any older could fire after the identity has met someone.
+const SET_ASIDE_FRESH_MS: i64 = 10 * 60 * 1000;
+/// Kept folders a phrase is probed against, the newest first.
 const KEPT_PROBE_MAX: usize = 16;
 const WIPE_MARKER: &str = "pending_wipe.marker";
 /// Device-level files: the logs say what happened to this device, whatever it holds.
@@ -80,6 +85,7 @@ fn stays_on_relink(name: &str) -> bool {
         || name == RELINK_WELCOME
         || name == SET_ASIDE_MARK
         || name == SET_ASIDE_WELCOME
+        || name == SET_ASIDE_FAILED
         || name == RELINK_ORIGIN
         || name == WIPE_MARKER
 }
@@ -723,6 +729,9 @@ struct SetAsideMark {
     digest: String,
     #[serde(default)]
     relay: Option<String>,
+    /// When the person asked; a mark without one never runs.
+    #[serde(default)]
+    at_ms: i64,
 }
 
 /// What Welcome reads after a set-aside.
@@ -749,38 +758,61 @@ fn write_set_aside_welcome(root: &Path, target: &Path) {
 /// set aside at the next launch, bound to its key so a mark left behind moves nothing,
 /// with the relay this profile used. Nothing moves while this process holds the
 /// identity open.
-pub(crate) fn mark_set_aside_at(root: &Path, relay: Option<String>) -> Result<(), String> {
+pub(crate) fn mark_set_aside_at(root: &Path, relay: Option<String>, now: i64) -> Result<(), String> {
     let digest = hex::encode(set_aside_digest(root).ok_or(IDENTITY_NOT_READY)?);
-    let json = serde_json::to_vec(&SetAsideMark { digest, relay }).map_err(|e| e.to_string())?;
+    let json = serde_json::to_vec(&SetAsideMark { digest, relay, at_ms: now }).map_err(|e| e.to_string())?;
     write_synced(&root.join(SET_ASIDE_MARK), &json).map_err(|e| format!("Failed to mark the identity to set aside: {e}"))
 }
 
 /// At launch: moves a marked identity whole into a `<root>-old-<day>` folder marked as
 /// set aside, as a relink does, so nothing of it is erased. A mark for another key is
-/// dropped; one met while a wipe or another step is unfinished waits for a later start.
+/// dropped. The mark runs at the launch right after it or never: one older than
+/// [`SET_ASIDE_FRESH_MS`], or met while a wipe or another step is unfinished, or whose
+/// move fails, is dropped and leaves Home's note that it did not run.
 pub(crate) fn settle_set_aside_at(root: &Path, now: i64) {
     use subtle::ConstantTimeEq;
     let mark = root.join(SET_ASIDE_MARK);
     if !present(&mark) {
         return;
     }
-    let marked = read_mark(root).and_then(|m| hex::decode(m.digest).ok()).unwrap_or_default();
+    let read = read_mark(root);
+    let marked = read.as_ref().and_then(|m| hex::decode(&m.digest).ok()).unwrap_or_default();
     let ours = set_aside_digest(root).is_some_and(|d| marked.len() == d.len() && bool::from(d.ct_eq(marked.as_slice())));
     if !ours {
         hollow_log!("[HOLLOW-REPAIR] A set-aside mark names another identity key; nothing moved");
         let _ = std::fs::remove_file(&mark);
         return;
     }
-    if not_ready(root) {
-        return;
-    }
-    match move_identity_aside(root, now, true) {
-        Ok(_) => {
-            let _ = std::fs::remove_file(&mark);
-            hollow_log!("[HOLLOW-REPAIR] Set the identity aside; this profile starts at Welcome");
+    let fresh = read.is_some_and(|m| m.at_ms > 0 && now.abs_diff(m.at_ms) <= SET_ASIDE_FRESH_MS as u64);
+    let failed = if !fresh {
+        Some("its mark is from an earlier launch".to_string())
+    } else if not_ready(root) {
+        Some("another step is unfinished".to_string())
+    } else {
+        move_identity_aside(root, now, true).err()
+    };
+    let _ = std::fs::remove_file(&mark);
+    match failed {
+        None => hollow_log!("[HOLLOW-REPAIR] Set the identity aside; this profile starts at Welcome"),
+        Some(why) => {
+            hollow_log!("[HOLLOW-REPAIR] The identity was not set aside ({why}); the mark is dropped");
+            if let Err(e) = write_synced(&root.join(SET_ASIDE_FAILED), b"") {
+                hollow_log!("[HOLLOW-REPAIR] Home's note of the failed set-aside could not be written: {e}");
+            }
         }
-        Err(e) => hollow_log!("[HOLLOW-REPAIR] The identity could not be set aside yet: {e}"),
     }
+}
+
+/// Whether a set-aside the person asked for did not run, said once.
+pub(crate) fn take_set_aside_failure_at(root: &Path) -> bool {
+    let note = root.join(SET_ASIDE_FAILED);
+    present(&note) && std::fs::remove_file(&note).is_ok()
+}
+
+/// Whether "Type my phrase again" did not run at this launch, said once: Home shows it.
+#[frb]
+pub fn take_set_aside_failure() -> Result<bool, String> {
+    Ok(take_set_aside_failure_at(&crate::identity::data_dir()?))
 }
 
 /// What old data kept beside a profile says about a typed phrase (6.1).
@@ -798,14 +830,33 @@ pub(crate) enum KeptCheck {
 /// or changing anything. A folder set aside by "Type my phrase again" never warns.
 pub(crate) fn check_kept_at(root: &Path, db_key: &str) -> KeptCheck {
     let mut kept = kept_aside(root);
-    kept.sort();
-    for dir in kept.iter().filter(|d| present(&d.join("messages.db"))).take(KEPT_PROBE_MAX) {
-        if probe(&dir.join("messages.db"), db_key, true) == Probe::Opens {
-            return KeptCheck::Match(dir.clone());
+    // Newest first: past the cap, the folder a person most likely means still answers.
+    kept.sort_by_cached_key(|d| std::cmp::Reverse(kept_order(d)));
+    let mut probed = 0;
+    let mut unopened = false;
+    for dir in &kept {
+        let identity = present(&dir.join("identity.key")) && !origin_of(dir).is_some_and(|o| o.set_aside);
+        if probed < KEPT_PROBE_MAX && present(&dir.join("messages.db")) {
+            probed += 1;
+            if probe(&dir.join("messages.db"), db_key, true) == Probe::Opens {
+                return KeptCheck::Match(dir.clone());
+            }
+        } else if identity {
+            // A kept identity never opened might be this phrase's: no typo warning.
+            unopened = true;
         }
     }
     let typo = kept.iter().any(|d| present(&d.join("identity.key")) && !origin_of(d).is_some_and(|o| o.set_aside));
-    if typo { KeptCheck::NoneOpens } else { KeptCheck::Clear }
+    if typo && !unopened { KeptCheck::NoneOpens } else { KeptCheck::Clear }
+}
+
+/// A kept folder's place in time from its name, `...-old-<day>[-n]`: the day, then n
+/// (an unnumbered folder is that day's first).
+fn kept_order(dir: &Path) -> (String, u32) {
+    let name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let tail = name.rsplit_once("-old-").map_or("", |(_, t)| t);
+    let (day, n) = tail.split_at(tail.len().min(10));
+    (day.to_string(), n.strip_prefix('-').and_then(|n| n.parse().ok()).unwrap_or(1))
 }
 
 /// The kept folder of a relink this profile has not shown Welcome for yet.
@@ -1745,6 +1796,35 @@ mod tests {
         assert_eq!(check_kept_at(&root, &pass_of(0x56)), KeptCheck::NoneOpens);
     }
 
+    /// Review finding 3: past the probe cap, the newest kept folders are the ones
+    /// probed, so the folder a person most likely means always answers.
+    #[test]
+    fn the_kept_check_probes_the_newest_folder_past_sixteen() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let root = tmp.path().join("data");
+        std::fs::create_dir_all(&root).unwrap();
+        for day in 1..=16u8 {
+            kept_from_root(&root, &format!("2025-09-{day:02}"), 0x10 + day, "old", false);
+        }
+        let newest = kept_from_root(&root, "2025-10-30", 0x60, "ours", false);
+        assert_eq!(check_kept_at(&root, &pass_of(0x60)), KeptCheck::Match(newest), "the newest kept folder was never probed");
+    }
+
+    /// Review finding 3: a kept identity the probe cap left unopened might be this
+    /// phrase's, so the check warns of a typo only when it opened every one.
+    #[test]
+    fn a_kept_identity_past_the_probe_cap_never_raises_the_typo_warning() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let root = tmp.path().join("data");
+        std::fs::create_dir_all(&root).unwrap();
+        for day in 1..=16u8 {
+            kept_from_root(&root, &format!("2025-09-{day:02}"), 0x10 + day, "old", false);
+        }
+        assert_eq!(check_kept_at(&root, &pass_of(0x70)), KeptCheck::NoneOpens, "control: every kept identity probed");
+        kept_from_root(&root, "2025-08-01", 0x30, "oldest", false);
+        assert_eq!(check_kept_at(&root, &pass_of(0x70)), KeptCheck::Clear, "a typo warning for a folder never opened");
+    }
+
     /// 6.2: the typo identity moves whole into its own kept folder, duress slot
     /// included; the real identity's relinked data is untouched; the root is at Welcome.
     #[test]
@@ -1756,7 +1836,7 @@ mod tests {
         root_with(&root, 0x59, 0x59, "typo");
         put(&root.join("identity.duress"), b"slot");
         put(&root.join("profiles.json"), b"{}");
-        mark_set_aside_at(&root, Some("relay.example.org".into())).unwrap();
+        mark_set_aside_at(&root, Some("relay.example.org".into()), DAY).unwrap();
 
         settle_set_aside_at(&root, DAY);
 
@@ -1775,16 +1855,49 @@ mod tests {
         );
     }
 
+    /// Review finding 4: a set-aside runs only at the launch right after its mark. One
+    /// that cannot run then moves nothing, drops its mark and says so once, so it never
+    /// fires later, after the identity may have met someone.
+    #[test]
+    fn a_set_aside_that_cannot_run_drops_its_mark_and_says_so() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let root = tmp.path().join("data");
+        root_with(&root, 0x5a, 0x5a, "typo");
+        mark_set_aside_at(&root, None, DAY).unwrap();
+        put(&root.join(WIPE_MARKER), b"");
+        settle_set_aside_at(&root, DAY);
+        assert!(root.join("identity.key").exists(), "moved while a wipe was unfinished");
+        assert!(!root.join(SET_ASIDE_MARK).exists(), "the mark waits for a later launch");
+        assert!(take_set_aside_failure_at(&root), "the failure is never said");
+        assert!(!take_set_aside_failure_at(&root), "the failure is said twice");
+        std::fs::remove_file(root.join(WIPE_MARKER)).unwrap();
+        settle_set_aside_at(&root, DAY);
+        assert_eq!(who(&root, 0x5a).unwrap(), "typo", "a later launch set the identity aside");
+    }
+
+    /// Review finding 4: a mark the launch after it never honoured (the app did not
+    /// restart) is dropped once it is older than a few minutes.
+    #[test]
+    fn a_set_aside_mark_from_an_earlier_launch_moves_nothing() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let root = tmp.path().join("data");
+        root_with(&root, 0x5d, 0x5d, "typo");
+        mark_set_aside_at(&root, None, DAY).unwrap();
+
+        settle_set_aside_at(&root, DAY + 3_600_000);
+
+        assert_eq!(who(&root, 0x5d).unwrap(), "typo", "an hour-old mark set the identity aside");
+        assert!(!root.join(SET_ASIDE_MARK).exists(), "the stale mark stayed");
+        assert!(take_set_aside_failure_at(&root), "the failure is never said");
+        assert!(!tmp.path().join("data-old-2025-10-10").exists());
+    }
+
     #[test]
     fn a_set_aside_mark_for_another_key_moves_nothing() {
         let tmp = crate::test_tmp::tempdir().unwrap();
         let root = tmp.path().join("data");
         root_with(&root, 0x5a, 0x5a, "typo");
-        mark_set_aside_at(&root, None).unwrap();
-        put(&root.join(WIPE_MARKER), b"");
-        settle_set_aside_at(&root, DAY);
-        assert!(root.join(SET_ASIDE_MARK).exists() && root.join("identity.key").exists(), "moved while a wipe was unfinished");
-        std::fs::remove_file(root.join(WIPE_MARKER)).unwrap();
+        mark_set_aside_at(&root, None, DAY).unwrap();
 
         for name in DB_SET {
             let _ = std::fs::remove_file(root.join(name));
@@ -1795,6 +1908,7 @@ mod tests {
         assert_eq!(who(&root, 0x5b).unwrap(), "the right one");
         assert!(!root.join(SET_ASIDE_MARK).exists(), "a stale mark stayed");
         assert!(!tmp.path().join("data-old-2025-10-10").exists());
+        assert!(!take_set_aside_failure_at(&root), "another identity's mark is no failure of this one");
     }
 
     /// The documented rule: a set-aside folder is this root's kept data, so a destroy of
@@ -1804,7 +1918,7 @@ mod tests {
         let tmp = crate::test_tmp::tempdir().unwrap();
         let root = tmp.path().join("data");
         root_with(&root, 0x5c, 0x5c, "typo");
-        mark_set_aside_at(&root, None).unwrap();
+        mark_set_aside_at(&root, None, DAY).unwrap();
         settle_set_aside_at(&root, DAY);
         let target = tmp.path().join("data-old-2025-10-10");
         assert!(target.exists());

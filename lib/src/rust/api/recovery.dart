@@ -6,7 +6,7 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `candidates`, `check_kept_at`, `day_of`, `dotted_name`, `email_at`, `ends_with_extension`, `export_copy`, `file_list`, `forget_unmarked_slots`, `frame_method_at`, `holds_key`, `hollow_dotted`, `in_use`, `instance_lock_held`, `ipv4_at`, `is_hex`, `is_kept_name`, `is_key_file`, `is_v6`, `keep_key_at`, `kept_aside_of`, `kept_aside`, `kept_from`, `kept_key_in_place`, `kept_keys_gone`, `kept_named_of`, `kept_named`, `kept_uri`, `keychain_key`, `keychain_locked`, `last_component`, `link_time_estimate`, `listed`, `loaded_identity`, `mark_set_aside_at`, `move_all`, `move_identity_aside`, `move_one`, `names_something`, `not_ready`, `now_ms`, `open_kept`, `ordered`, `origin_of`, `path_at`, `phone_at`, `present`, `probe`, `read_mark`, `redact`, `relink_at`, `relink_in_progress`, `remove_kept_aside`, `remove_kept_entry`, `repair_at`, `replace_at`, `report_for`, `same_folder`, `same_path`, `set_aside_digest`, `set_aside_welcome_at`, `settle_relink_at`, `settle_set_aside_at`, `starts_free`, `stays_on_relink`, `stays_on_repair`, `tail`, `take_instance_lock`, `tree_size`, `trouble_of`, `unique_in`, `url_at`, `write_set_aside_welcome`, `write_synced`, `zero_kept_aside`
+// These functions are ignored because they are not marked as `pub`: `candidates`, `check_kept_at`, `day_of`, `dotted_name`, `email_at`, `ends_with_extension`, `export_copy`, `file_list`, `forget_unmarked_slots`, `frame_method_at`, `holds_key`, `hollow_dotted`, `in_use`, `instance_lock_held`, `ipv4_at`, `is_hex`, `is_kept_name`, `is_key_file`, `is_v6`, `keep_key_at`, `kept_aside_of`, `kept_aside`, `kept_from`, `kept_key_in_place`, `kept_keys_gone`, `kept_named_of`, `kept_named`, `kept_order`, `kept_uri`, `keychain_key`, `keychain_locked`, `last_component`, `link_time_estimate`, `listed`, `loaded_identity`, `mark_set_aside_at`, `move_all`, `move_identity_aside`, `move_one`, `names_something`, `not_ready`, `now_ms`, `open_kept`, `ordered`, `origin_of`, `path_at`, `phone_at`, `present`, `probe`, `read_mark`, `redact`, `relink_at`, `relink_in_progress`, `remove_kept_aside`, `remove_kept_entry`, `repair_at`, `replace_at`, `report_for`, `same_folder`, `same_path`, `set_aside_digest`, `set_aside_welcome_at`, `settle_relink_at`, `settle_set_aside_at`, `starts_free`, `stays_on_relink`, `stays_on_repair`, `tail`, `take_instance_lock`, `take_set_aside_failure_at`, `tree_size`, `trouble_of`, `unique_in`, `url_at`, `write_set_aside_welcome`, `write_synced`, `zero_kept_aside`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `InstanceLock`, `Journal`, `KeptCheck`, `MoveFailed`, `Origin`, `Probe`, `SetAsideMark`, `SetAsideNote`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`
 
@@ -28,6 +28,10 @@ Future<String> relinkThisDevice() =>
 /// the last run asked for.
 Future<void> settleRelink() =>
     RustLib.instance.api.crateApiRecoverySettleRelink();
+
+/// Whether "Type my phrase again" did not run at this launch, said once: Home shows it.
+Future<bool> takeSetAsideFailure() =>
+    RustLib.instance.api.crateApiRecoveryTakeSetAsideFailure();
 
 /// The kept folder of a relink this profile has not shown Welcome for yet.
 Future<String?> relinkWelcome() =>

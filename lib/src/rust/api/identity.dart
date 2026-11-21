@@ -407,7 +407,8 @@ sealed class RestoreOutcome with _$RestoreOutcome {
   }) = RestoreOutcome_Restored;
 
   /// A folder of old data kept beside this profile opens with these words; nothing
-  /// changed. Desktop offers to switch to it. `profile_name` when the registry lists it.
+  /// changed. Desktop offers to switch to it. `profile_name` is always `None` from Rust:
+  /// Dart names the folder from the profile registry itself.
   const factory RestoreOutcome.keptMatch({
     required String path,
     String? profileName,

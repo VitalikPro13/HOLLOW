@@ -23,6 +23,11 @@ class _Api implements RustLibApi {
   bool mayRust = true;
   Object? setAsideFails;
   int setAsides = 0;
+  bool setAsideFailedAtStart = false;
+
+  @override
+  Future<bool> crateApiRecoveryTakeSetAsideFailure() async =>
+      setAsideFailedAtStart;
   final saved = <String, String>{};
 
   @override
@@ -103,6 +108,7 @@ void main() {
       ..setAsides = 0
       ..mayThrows = null
       ..closesOnRefusal = false
+      ..setAsideFailedAtStart = false
       ..saved.clear();
   });
 
@@ -173,6 +179,36 @@ void main() {
         setAsideOffered(
             rustAllows: true, acceptedFriend: false, holdsServer: true),
         isFalse);
+  });
+
+  testWidgets('a set-aside that did not run at this start says so on the card',
+      (tester) async {
+    _api
+      ..mark = _mark('admit')
+      ..setAsideFailedAtStart = true;
+    await pump(tester);
+    expect(find.text("Hollow couldn't set this identity aside. Try again."),
+        findsOneWidget);
+    expect(find.text('Type my phrase again'), findsOneWidget);
+  });
+
+  testWidgets(
+      'a set-aside that did not run says why once the card no longer offers it',
+      (tester) async {
+    _api
+      ..mark = _mark('admit')
+      ..mayRust = false
+      ..setAsideFailedAtStart = true;
+    await pump(tester);
+    expect(find.text(kSetAsideRefusedText), findsOneWidget);
+    expect(find.text('Type my phrase again'), findsNothing);
+  });
+
+  testWidgets('no failure line after a start that had none', (tester) async {
+    _api.mark = _mark('admit');
+    await pump(tester);
+    expect(find.text("Hollow couldn't set this identity aside. Try again."),
+        findsNothing);
   });
 
   test('each branch has its own lines', () {

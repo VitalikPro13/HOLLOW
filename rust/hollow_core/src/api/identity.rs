@@ -116,7 +116,8 @@ pub enum RestoreOutcome {
         locked_to_keychain: bool,
     },
     /// A folder of old data kept beside this profile opens with these words; nothing
-    /// changed. Desktop offers to switch to it. `profile_name` when the registry lists it.
+    /// changed. Desktop offers to switch to it. `profile_name` is always `None` from Rust:
+    /// Dart names the folder from the profile registry itself.
     KeptMatch { path: String, profile_name: Option<String> },
     /// Old data with an identity is kept beside this profile and none of it opens with
     /// these words; nothing changed. A typo is likely.
@@ -202,7 +203,7 @@ pub fn set_aside_this_identity() -> Result<(), String> {
         return Err("Hollow couldn't set this identity aside. Try again.".into());
     }
     crate::api::storage::refuse_while_not_ready()?;
-    crate::api::recovery::mark_set_aside_at(&root, relay)
+    crate::api::recovery::mark_set_aside_at(&root, relay, crate::node::roster_book::now_ms())
 }
 
 /// A new identity or a new lock starts its own count of missed tries.
