@@ -239,6 +239,16 @@ release pipeline is the `release` skill.
   identity does and is erased by the wipe. HOL-SEC-156.
 - The updater accepts a manifest version only as three numeric parts (`is_release_version`),
   and Windows script paths go through `bat_quoted_path`. HOL-SEC-147.
+- Every post-update relaunch carries the app's ORIGINAL argv (#155): a relaunch without
+  `--portable` comes back on another profile (with a profiles.json pin, the pinned one; with
+  none and an empty folder, Welcome). Windows quotes each argument with `bat_quoted_arg`
+  (`%` doubled, a trailing `\` run doubled for CommandLineToArgvW) and REFUSES the update for
+  one holding `"` or a control character, before anything is extracted; `update.bat` opens
+  with `setlocal DisableDelayedExpansion` and `chcp 65001` (the file is UTF-8, so a non-ASCII
+  username's paths decode). macOS passes `--args` and a `HOLLOW_DATA_DIR` override as
+  `open --env` (LaunchServices gives the app its own environment), every path `sh_quote`d.
+  Only the RUNNING build's script counts: an update FROM 0.14.1 or older still drops them.
+  `update_bat_tests` runs the real script under `cmd /V:ON` on Windows.
 - Quick patches (0.12.2): the build rides `"build": N` on the version entry and `APP_BUILD`
   beside `APP_VERSION` (never pubspec's `+N`); `version` / `latest` stay three-part forever
   (0.12.1 refuses the whole manifest otherwise). Paths use `release_tag` (`0.12.2-b1`), people

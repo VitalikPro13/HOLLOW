@@ -695,7 +695,7 @@ mod integrity_tests {
         fs::create_dir_all(&app).expect("app dir");
         // The platform's later steps may refuse this fake archive; the staging name is
         // chosen before them.
-        let _ = apply_update_at(tmp.path(), zip.to_str().unwrap(), app.to_str().unwrap(), "0.12.2", 1);
+        let _ = apply_update_at(tmp.path(), zip.to_str().unwrap(), app.to_str().unwrap(), "0.12.2", 1, &[]);
         assert!(tmp.path().join("updates").join("staging-0.12.2-b1").exists());
         assert!(!tmp.path().join("updates").join("staging-0.12.2").exists());
     }
@@ -706,7 +706,7 @@ mod integrity_tests {
         let zip = zip_with_one_file(tmp.path());
         let app = tmp.path().join("app");
         fs::create_dir_all(&app).expect("app dir");
-        let r = apply_update_at(tmp.path(), zip.to_str().unwrap(), app.to_str().unwrap(), "0.12.2", MAX_BUILD + 1);
+        let r = apply_update_at(tmp.path(), zip.to_str().unwrap(), app.to_str().unwrap(), "0.12.2", MAX_BUILD + 1, &[]);
         assert!(r.is_err(), "an out-of-range build was applied: {r:?}");
         assert!(!tmp.path().join("updates").exists(), "an out-of-range build staged files");
     }
@@ -720,7 +720,26 @@ pub fn apply_update(
     build: u32,
 ) -> Result<String, String> {
     let data = data_dir()?;
-    apply_update_at(&data, &zip_path, &app_dir, &version, build)
+    apply_update_at(&data, &zip_path, &app_dir, &version, build, &relaunch_args()?)
+}
+
+/// Why an update refused: the relaunch would have dropped one of the app's arguments.
+const UNCARRIED_ARGUMENT: &str = "Hollow was started with an argument the update cannot carry over, so nothing was installed. Start Hollow without it and try again.";
+
+/// This process's argv without argv[0], for the post-update relaunch: dropping
+/// `--portable` brings the app back on a DIFFERENT profile than the user ran.
+fn relaunch_args() -> Result<Vec<String>, String> {
+    carried_args(std::env::args_os().skip(1))
+}
+
+/// An argument that is not Unicode cannot be written into the script, so it
+/// refuses rather than relaunching without it.
+fn carried_args(args: impl IntoIterator<Item = std::ffi::OsString>) -> Result<Vec<String>, String> {
+    args.into_iter()
+        .map(|a| {
+            a.into_string().map_err(|_| UNCARRIED_ARGUMENT.to_string())
+        })
+        .collect()
 }
 
 /// A release as the apply paths name it: `tag` in file and folder names, `display`
@@ -739,12 +758,13 @@ fn apply_update_at(
     app_dir: &str,
     version: &str,
     build: u32,
+    relaunch_args: &[String],
 ) -> Result<String, String> {
     if !is_release_version(version) || build > MAX_BUILD {
         return Err("Update version is malformed; nothing was installed.".to_string());
     }
     let rel = ReleaseName { tag: release_tag(version, build), display: release_display(version, build) };
-    apply_update_impl(data, archive_path, app_dir, &rel)
+    apply_update_impl(data, archive_path, app_dir, &rel, relaunch_args)
 }
 
 /// Linux: the download is either the portable tarball or a `.flatpak` bundle,
@@ -756,6 +776,7 @@ fn apply_update_impl(
     archive_path: &str,
     app_dir: &str,
     rel: &ReleaseName,
+    _relaunch_args: &[String],
 ) -> Result<String, String> {
     match linux_install_kind_inner() {
         "flatpak" => apply_update_flatpak(data, archive_path, &rel.display),
@@ -769,6 +790,7 @@ fn apply_update_impl(
     zip_path: &str,
     app_dir: &str,
     rel: &ReleaseName,
+    relaunch_args: &[String],
 ) -> Result<String, String> {
     let staging_dir = data.join("updates").join(format!("staging-{}", rel.tag));
     let version = &rel.display;
@@ -794,12 +816,12 @@ fn apply_update_impl(
         if !status.success() {
             return Err(format!("ditto extraction failed (exit {status})"));
         }
-        return write_macos_update_script(data, staging_str, zip_path, app_dir, version);
+        return write_macos_update_script(data, staging_str, zip_path, app_dir, version, relaunch_args);
     }
 
     #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
     {
-        let _ = (zip_path, app_dir, version);
+        let _ = (zip_path, app_dir, version, relaunch_args);
         return Err("Auto-update is not supported on this platform yet".into());
     }
 
@@ -812,12 +834,50 @@ fn apply_update_impl(
     )?;
     let zip_path_str = bat_quoted_path(&zip_path.replace('/', "\\"))?;
     let app_dir = bat_quoted_path(app_dir)?;
+    // Refused before anything is extracted: an argument the script cannot carry
+    // must never relaunch the app without it.
+    let relaunch = bat_relaunch_line(&format!("{app_dir}\\hollow.exe"), relaunch_args)?;
 
     extract_zip_to(zip_path, &staging_dir)?;
 
     let bat_path = data.join("updates").join("update.bat");
-    let bat_content = format!(
+    let bat_content = update_bat_script(
+        version,
+        &staging_str,
+        &zip_path_str,
+        &app_dir,
+        "hollow.exe",
+        &relaunch,
+    );
+
+    fs::write(&bat_path, bat_content)
+        .map_err(|e| format!("Failed to write update script: {e}"))?;
+
+    bat_path
+        .to_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| "Bat path is not valid UTF-8".to_string())
+    }
+}
+
+/// `update.bat`: waits until no `wait_image` runs, copies the staged files over
+/// `app_dir`, cleans up and runs `relaunch`. Every path argument is already
+/// [`bat_quoted_path`] output. The script is UTF-8, so the code page switches
+/// before the first line that may hold a non-ASCII path, and delayed expansion
+/// is off whatever the registry says, so a `!` in a path or argument stays literal.
+#[cfg(any(target_os = "windows", test))]
+fn update_bat_script(
+    version: &str,
+    staging_str: &str,
+    zip_path_str: &str,
+    app_dir: &str,
+    wait_image: &str,
+    relaunch: &str,
+) -> String {
+    format!(
         "@echo off\r\n\
+         setlocal DisableDelayedExpansion\r\n\
+         chcp 65001 >NUL\r\n\
          title Hollow Update\r\n\
          echo.\r\n\
          echo   ========================================\r\n\
@@ -826,7 +886,7 @@ fn apply_update_impl(
          echo.\r\n\
          echo   Waiting for Hollow to close...\r\n\
          :wait\r\n\
-         tasklist /FI \"IMAGENAME eq hollow.exe\" 2>NUL | find /I \"hollow.exe\" >NUL\r\n\
+         tasklist /FI \"IMAGENAME eq {wait_image}\" 2>NUL | find /I \"{wait_image}\" >NUL\r\n\
          if %ERRORLEVEL% == 0 (\r\n\
              timeout /t 1 /nobreak >NUL\r\n\
              goto wait\r\n\
@@ -853,18 +913,37 @@ fn apply_update_impl(
          echo     1...\r\n\
          timeout /t 1 /nobreak >NUL\r\n\
          echo.\r\n\
-         start \"\" \"{app_dir}\\hollow.exe\"\r\n\
+         {relaunch}\r\n\
          exit\r\n"
-    );
+    )
+}
 
-    fs::write(&bat_path, bat_content)
-        .map_err(|e| format!("Failed to write update script: {e}"))?;
-
-    bat_path
-        .to_str()
-        .map(|s| s.to_string())
-        .ok_or_else(|| "Bat path is not valid UTF-8".to_string())
+/// The `start` line that relaunches `exe_quoted` (already [`bat_quoted_path`]
+/// output) with `args`, each through [`bat_quoted_arg`]; one it cannot carry
+/// refuses the whole update.
+#[cfg(any(target_os = "windows", test))]
+fn bat_relaunch_line(exe_quoted: &str, args: &[String]) -> Result<String, String> {
+    let mut line = format!("start \"\" \"{exe_quoted}\"");
+    for arg in args {
+        line.push(' ');
+        line.push_str(&bat_quoted_arg(arg)?);
     }
+    Ok(line)
+}
+
+/// One argument as cmd hands it to `start` and the app's CommandLineToArgvW
+/// splits it back: inside the quotes cmd reads `& | < > ^ ( )` literally, `%` is
+/// doubled against expansion, and a trailing backslash run is doubled so it
+/// does not escape the closing quote. A quote or a control character would end
+/// the argument or the line, so it refuses.
+#[cfg(any(target_os = "windows", test))]
+fn bat_quoted_arg(arg: &str) -> Result<String, String> {
+    if arg.chars().any(|c| c == '"' || c.is_control()) {
+        return Err(UNCARRIED_ARGUMENT.to_string());
+    }
+    let body = arg.replace('%', "%%");
+    let trailing = body.len() - body.trim_end_matches('\\').len();
+    Ok(format!("\"{body}{}\"", "\\".repeat(trailing)))
 }
 
 /// Builds the `.app`-swap shell script used on macOS.
@@ -872,7 +951,7 @@ fn apply_update_impl(
 /// The zip holds a single `*.app` bundle and `app_dir` is where the running one lives.
 /// The script waits for this process to exit, replaces the bundle via `ditto` (which
 /// preserves structure and signature), clears the quarantine attribute, then
-/// relaunches with `open`.
+/// relaunches with `open`, carrying `relaunch_args` and the data-root override.
 #[cfg(target_os = "macos")]
 fn write_macos_update_script(
     data: &std::path::Path,
@@ -880,6 +959,7 @@ fn write_macos_update_script(
     zip_path: &str,
     app_dir: &str,
     version: &str,
+    relaunch_args: &[String],
 ) -> Result<String, String> {
     // Locate the single .app bundle inside the staging dir.
     let staging = PathBuf::from(staging_str);
@@ -908,28 +988,39 @@ fn write_macos_update_script(
     let log_path = data.join("updates").join("update.log");
     let log_str = log_path.to_str().ok_or("Log path is not valid UTF-8")?;
 
-    // Note: `pgrep -f` on the installed bundle path waits for *this* app to die.
+    let relaunch = macos_relaunch_line(
+        &installed_app,
+        relaunch_args,
+        std::env::var("HOLLOW_DATA_DIR").ok().filter(|v| !v.is_empty()).as_deref(),
+    );
+    let log_q = sh_quote(log_str);
+    let installed_q = sh_quote(&installed_app);
+    let staged_q = sh_quote(staged_app_str);
+    let staging_q = sh_quote(staging_str);
+    let zip_q = sh_quote(zip_path);
+    // `pgrep -f` matches the installed bundle's binaries, so it waits for *this* app.
+    let pgrep_q = sh_quote(&format!("{installed_app}/Contents/MacOS/"));
+    let version_q = sh_quote(&format!("Hollow update -> v{version}"));
     let sh_content = format!(
         "#!/bin/sh\n\
          set -e\n\
-         LOG=\"{log_str}\"\n\
-         echo \"Hollow update -> v{version}\" > \"$LOG\"\n\
+         LOG={log_q}\n\
+         echo {version_q} > \"$LOG\"\n\
          echo \"Waiting for Hollow to close...\" >> \"$LOG\"\n\
-         # Wait until no process is running from the installed bundle.\n\
-         while pgrep -f \"{installed_app}/Contents/MacOS/\" >/dev/null 2>&1; do\n\
+         while pgrep -f {pgrep_q} >/dev/null 2>&1; do\n\
          \tsleep 1\n\
          done\n\
          sleep 1\n\
          echo \"Replacing bundle...\" >> \"$LOG\"\n\
-         rm -rf \"{installed_app}\" >> \"$LOG\" 2>&1 || true\n\
-         /usr/bin/ditto \"{staged_app_str}\" \"{installed_app}\" >> \"$LOG\" 2>&1\n\
+         rm -rf {installed_q} >> \"$LOG\" 2>&1 || true\n\
+         /usr/bin/ditto {staged_q} {installed_q} >> \"$LOG\" 2>&1\n\
          echo \"Clearing quarantine...\" >> \"$LOG\"\n\
-         /usr/bin/xattr -dr com.apple.quarantine \"{installed_app}\" >> \"$LOG\" 2>&1 || true\n\
+         /usr/bin/xattr -dr com.apple.quarantine {installed_q} >> \"$LOG\" 2>&1 || true\n\
          echo \"Cleaning up...\" >> \"$LOG\"\n\
-         rm -rf \"{staging_str}\" >> \"$LOG\" 2>&1 || true\n\
-         rm -f \"{zip_path}\" >> \"$LOG\" 2>&1 || true\n\
+         rm -rf {staging_q} >> \"$LOG\" 2>&1 || true\n\
+         rm -f {zip_q} >> \"$LOG\" 2>&1 || true\n\
          echo \"Relaunching...\" >> \"$LOG\"\n\
-         /usr/bin/open -n \"{installed_app}\" >> \"$LOG\" 2>&1\n\
+         {relaunch} >> \"$LOG\" 2>&1\n\
          exit 0\n"
     );
 
@@ -950,6 +1041,29 @@ fn write_macos_update_script(
         .to_str()
         .map(|s| s.to_string())
         .ok_or_else(|| "Script path is not valid UTF-8".to_string())
+}
+
+/// `open -n` of the installed bundle. LaunchServices starts the app with its
+/// OWN environment and argv, so the original arguments ride `--args` and a
+/// `HOLLOW_DATA_DIR` override rides `--env`: either one lost brings the app
+/// back on a different data root.
+#[cfg(any(target_os = "macos", test))]
+fn macos_relaunch_line(installed_app: &str, args: &[String], data_dir_env: Option<&str>) -> String {
+    let mut line = String::from("/usr/bin/open -n");
+    if let Some(dir) = data_dir_env {
+        line.push_str(" --env ");
+        line.push_str(&sh_quote(&format!("HOLLOW_DATA_DIR={dir}")));
+    }
+    line.push(' ');
+    line.push_str(&sh_quote(installed_app));
+    if !args.is_empty() {
+        line.push_str(" --args");
+        for arg in args {
+            line.push(' ');
+            line.push_str(&sh_quote(arg));
+        }
+    }
+    line
 }
 
 // ── Linux updates ───────────────────────────────────────────────────────────
@@ -975,7 +1089,7 @@ fn linux_install_kind_inner() -> &'static str {
 /// A path as it may sit between the double quotes `update.bat` puts around it: `%`
 /// doubled so cmd does not expand it, refused if it carries a quote or a control
 /// character, which would end the argument or the line.
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", test))]
 fn bat_quoted_path(path: &str) -> Result<String, String> {
     if path.chars().any(|c| c == '"' || c.is_control()) {
         return Err("An update path holds a character the update script cannot carry".to_string());
@@ -986,7 +1100,7 @@ fn bat_quoted_path(path: &str) -> Result<String, String> {
 /// POSIX single-quoting: wrap in `'…'`, write an embedded `'` as `'\''`. Every
 /// path and argv element baked into a generated script goes through this, so a
 /// space or a quote in a data directory cannot split a command.
-#[cfg(not(windows))]
+#[cfg(any(not(windows), test))]
 fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
@@ -1683,7 +1797,7 @@ mod extract_zip_tests {
         }
         let app = tmp.join("app");
         std::fs::create_dir_all(&app).expect("app dir");
-        let r = super::apply_update_at(&tmp, zip_path.to_str().unwrap(), app.to_str().unwrap(), "0.12.0 & calc", 0);
+        let r = super::apply_update_at(&tmp, zip_path.to_str().unwrap(), app.to_str().unwrap(), "0.12.0 & calc", 0, &[]);
         let staged = tmp.join("updates").exists();
         let _ = std::fs::remove_dir_all(&tmp);
         assert!(r.is_err(), "a malformed version was applied: {r:?}");
@@ -1721,7 +1835,6 @@ mod extract_zip_tests {
         }
     }
 
-    #[cfg(target_os = "windows")]
     #[test]
     fn bat_paths_keep_percent_literal_and_refuse_quotes() {
         assert_eq!(
@@ -2252,5 +2365,266 @@ org.freedesktop.portal.Desktop=talk
             new_marker.exists()
         );
         let _ = fs::remove_dir_all(&tmp);
+    }
+}
+
+#[cfg(test)]
+mod relaunch_args_tests {
+    use super::{bat_quoted_arg, bat_relaunch_line, macos_relaunch_line, update_bat_script};
+
+    fn strings(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// Inside the quotes cmd reads its metacharacters literally; only `%` needs
+    /// doubling, and only a TRAILING backslash run doubles for CommandLineToArgvW.
+    #[test]
+    fn bat_args_are_quoted_for_cmd_and_the_app() {
+        let cases: &[(&str, &str)] = &[
+            ("--portable", r#""--portable""#),
+            ("with space", r#""with space""#),
+            ("%PATH%", r#""%%PATH%%""#),
+            ("50%", r#""50%%""#),
+            ("a&b|c<d>e^f(g)!h!", r#""a&b|c<d>e^f(g)!h!""#),
+            (r"C:\a\b", r#""C:\a\b""#),
+            (r"C:\dir\", r#""C:\dir\\""#),
+            (r"C:\dir\\", r#""C:\dir\\\\""#),
+            ("", r#""""#),
+            ("ünï Віталій 测试 🎮", "\"ünï Віталій 测试 🎮\""),
+        ];
+        for (arg, want) in cases {
+            assert_eq!(bat_quoted_arg(arg).as_deref(), Ok(*want), "{arg:?}");
+        }
+    }
+
+    /// A quote ends cmd's quoted run (everything after it is live) and a control
+    /// character ends the line, so neither is ever written.
+    #[test]
+    fn bat_args_with_a_quote_or_control_character_refuse() {
+        for bad in ["a\"b", "\"", "a\" & calc & \"", "a\r\ncalc", "a\nb", "a\tb", "a\0b", "a\u{1b}b"] {
+            assert!(bat_quoted_arg(bad).is_err(), "{bad:?} accepted");
+        }
+    }
+
+    #[test]
+    fn one_argument_the_script_cannot_carry_refuses_the_relaunch() {
+        let r = bat_relaunch_line(r"C:\App\hollow.exe", &strings(&["--portable", "x\"y"]));
+        assert!(r.is_err(), "relaunch written without an argument: {r:?}");
+    }
+
+    #[test]
+    fn the_update_script_relaunches_with_the_original_arguments() {
+        let line = bat_relaunch_line(r"C:\App\hollow.exe", &strings(&["--portable", "x y", "%TEMP%"])).unwrap();
+        assert_eq!(line, r#"start "" "C:\App\hollow.exe" "--portable" "x y" "%%TEMP%%""#);
+        let bat = update_bat_script("0.14.2", r"C:\D\staging", r"C:\D\u.zip", r"C:\App", "hollow.exe", &line);
+        let lines: Vec<&str> = bat.split("\r\n").collect();
+        assert!(lines.contains(&line.as_str()), "relaunch line missing:\n{bat}");
+        assert_eq!(lines.iter().filter(|l| l.starts_with("start ")).count(), 1, "{bat}");
+        let pos = |needle: &str| lines.iter().position(|l| l.starts_with(needle)).unwrap();
+        // Both settings must be in force before the first line carrying a path.
+        assert!(pos("setlocal DisableDelayedExpansion") < pos("xcopy"));
+        assert!(pos("chcp 65001") < pos("xcopy"));
+        assert!(pos("xcopy") < pos("start "));
+    }
+
+    #[test]
+    fn the_relaunch_takes_this_processs_own_arguments() {
+        let own: Vec<String> = std::env::args().skip(1).collect();
+        assert!(!own.is_empty(), "the test runner passes arguments, so this proves something");
+        assert_eq!(super::relaunch_args().unwrap(), own);
+    }
+
+    #[test]
+    fn an_argument_that_is_not_unicode_refuses() {
+        #[cfg(windows)]
+        let bad = {
+            use std::os::windows::ffi::OsStringExt;
+            std::ffi::OsString::from_wide(&[0x61, 0xD800, 0x62])
+        };
+        #[cfg(unix)]
+        let bad = {
+            use std::os::unix::ffi::OsStringExt;
+            std::ffi::OsString::from_vec(vec![b'a', 0xff, b'b'])
+        };
+        let r = super::carried_args(vec!["--portable".into(), bad]);
+        assert!(r.is_err(), "a non-Unicode argument was dropped or mangled: {r:?}");
+        assert_eq!(super::carried_args(vec!["--portable".into()]).unwrap(), vec!["--portable".to_string()]);
+    }
+
+    #[test]
+    fn a_plain_launch_keeps_the_plain_line() {
+        assert_eq!(bat_relaunch_line(r"C:\App\hollow.exe", &[]).unwrap(), r#"start "" "C:\App\hollow.exe""#);
+    }
+
+    #[test]
+    fn the_macos_relaunch_carries_arguments_and_the_data_root_override() {
+        let args = strings(&["--portable", "it's here"]);
+        assert_eq!(
+            macos_relaunch_line("/Applications/Hollow.app", &args, None),
+            r#"/usr/bin/open -n '/Applications/Hollow.app' --args '--portable' 'it'\''s here'"#
+        );
+        assert_eq!(
+            macos_relaunch_line("/Applications/Hollow.app", &[], Some("/tmp/a b")),
+            "/usr/bin/open -n --env 'HOLLOW_DATA_DIR=/tmp/a b' '/Applications/Hollow.app'"
+        );
+    }
+
+    /// What `sh` hands `open`: every argument back exactly, nothing expanded.
+    #[cfg(unix)]
+    #[test]
+    fn the_macos_relaunch_line_parses_back_to_the_same_argv() {
+        let args = strings(&["--portable", "a b", "$HOME", "`id`", "x'y", "\"q\"", "ünï", "", "a;b&c|d"]);
+        let line = macos_relaunch_line("/Apps/My $X.app", &args, Some("/d/$Y"));
+        let probe = line.replacen("/usr/bin/open", "printf '%s\\0'", 1);
+        let out = std::process::Command::new("/bin/sh").args(["-c", &probe]).output().expect("sh");
+        let got: Vec<String> = String::from_utf8(out.stdout)
+            .unwrap()
+            .split_terminator('\0')
+            .map(str::to_string)
+            .collect();
+        let mut want = strings(&["-n", "--env", "HOLLOW_DATA_DIR=/d/$Y", "/Apps/My $X.app", "--args"]);
+        want.extend(args);
+        assert_eq!(got, want);
+    }
+}
+
+/// End to end on a real cmd: the generated `update.bat`, with delayed expansion
+/// forced on and the console's own code page, installs into a path full of cmd
+/// metacharacters and relaunches with every argument intact. The "app" is
+/// powershell reporting the argv its CommandLineToArgvW-style parse produced.
+#[cfg(all(test, windows))]
+mod update_bat_tests {
+    use super::{bat_quoted_path, bat_relaunch_line, update_bat_script};
+    use std::fs;
+    use std::time::{Duration, Instant};
+
+    fn weird_args() -> Vec<String> {
+        [
+            "--portable", "with space", "%PATH%", "!USERNAME!", "a&b|c<d>e^f", "(paren)", r"C:\trail\",
+            "ünï Віталій 测试", "",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
+    }
+
+    #[test]
+    fn update_bat_relaunches_with_every_argument_intact() {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+        let tmp = crate::test_tmp::tempdir().expect("tmp");
+        let root = tmp.path().join("a&b %PATH% !x! ^c (d) Віталій");
+        let staging = root.join("staging");
+        let app = root.join("app");
+        fs::create_dir_all(&staging).unwrap();
+        fs::create_dir_all(&app).unwrap();
+        fs::write(staging.join("marker.txt"), b"new build").unwrap();
+        let zip = root.join("u.zip");
+        fs::write(&zip, b"zip").unwrap();
+        let dumper = root.join("dump argv.ps1");
+        fs::write(
+            &dumper,
+            "$t = $env:HOLLOW_ARGV_OUT + '.tmp'\r\n\
+             [IO.File]::WriteAllText($t, ([Environment]::GetCommandLineArgs() -join \"`n\"), (New-Object Text.UTF8Encoding $false))\r\n\
+             Move-Item -LiteralPath $t -Destination $env:HOLLOW_ARGV_OUT\r\n",
+        )
+        .unwrap();
+        let out = tmp.path().join("argv.txt");
+
+        let ps = std::path::PathBuf::from(std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into()))
+            .join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
+        let prefix = ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", dumper.to_str().unwrap()];
+        let mut args: Vec<String> = prefix.iter().map(|s| s.to_string()).collect();
+        args.extend(weird_args());
+        let relaunch = bat_relaunch_line(&bat_quoted_path(ps.to_str().unwrap()).unwrap(), &args).unwrap();
+        let q = |p: &std::path::Path| bat_quoted_path(p.to_str().unwrap()).unwrap();
+        let bat = update_bat_script("9.9.9", &q(&staging), &q(&zip), &q(&app), "hollow-test-absent.exe", &relaunch);
+        let bat_path = tmp.path().join("update.bat");
+        fs::write(&bat_path, bat).unwrap();
+
+        // Its exit code is the last command's (a `timeout` with no console input
+        // fails), so only what the script did counts.
+        let console = tmp.path().join("console.txt");
+        let ran = std::process::Command::new("cmd")
+            .args(["/V:ON", "/C"])
+            .arg(&bat_path)
+            .env("HOLLOW_ARGV_OUT", &out)
+            .creation_flags(CREATE_NEW_CONSOLE)
+            .stdin(std::process::Stdio::null())
+            .stdout(fs::File::create(&console).unwrap())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("run update.bat");
+        let start = Instant::now();
+        while !out.exists() && start.elapsed() < Duration::from_secs(60) {
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        let dumped = fs::read_to_string(&out).unwrap_or_else(|_| {
+            panic!(
+                "the relaunched app never ran ({ran}); console:\n{}",
+                String::from_utf8_lossy(&fs::read(&console).unwrap_or_default())
+            )
+        });
+        let got: Vec<&str> = dumped.split('\n').collect();
+        assert_eq!(&got[1..1 + prefix.len()], &prefix[..], "prefix: {got:?}");
+        let want = weird_args();
+        assert_eq!(&got[1 + prefix.len()..], &want.iter().map(String::as_str).collect::<Vec<_>>()[..]);
+        assert!(app.join("marker.txt").exists(), "xcopy did not install into the metacharacter path");
+        assert!(!staging.exists(), "staging was not cleaned up");
+        assert!(!zip.exists(), "the zip was not deleted");
+    }
+
+    /// The real apply refuses before it writes a script that would drop the argument.
+    #[test]
+    fn apply_refuses_an_argument_the_script_cannot_carry() {
+        let tmp = crate::test_tmp::tempdir().expect("tmp");
+        let zip = tmp.path().join("update.zip");
+        {
+            use std::io::Write;
+            let mut w = zip::ZipWriter::new(fs::File::create(&zip).unwrap());
+            w.start_file("hollow.exe", zip::write::SimpleFileOptions::default()).unwrap();
+            w.write_all(b"exe").unwrap();
+            w.finish().unwrap();
+        }
+        let app = tmp.path().join("app");
+        fs::create_dir_all(&app).unwrap();
+        let bad = vec!["--portable".to_string(), "x\" & calc & \"".to_string()];
+        let r = super::apply_update_at(tmp.path(), zip.to_str().unwrap(), app.to_str().unwrap(), "0.14.2", 0, &bad);
+        assert!(r.is_err(), "an uncarriable argument was accepted: {r:?}");
+        assert!(!tmp.path().join("updates").join("update.bat").exists(), "a script was written");
+        let staged = tmp.path().join("updates").join("staging-0.14.2").join("hollow.exe");
+        assert!(!staged.exists(), "the update was extracted");
+        let ok = super::apply_update_at(tmp.path(), zip.to_str().unwrap(), app.to_str().unwrap(), "0.14.2", 0, &bad[..1]);
+        let bat = fs::read_to_string(ok.expect("a carriable argument was refused")).unwrap();
+        assert!(bat.contains(r#"\hollow.exe" "--portable""#), "{bat}");
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod macos_update_script_tests {
+    use std::fs;
+
+    #[test]
+    fn the_macos_update_script_relaunches_with_the_original_arguments() {
+        let tmp = crate::test_tmp::tempdir().expect("tmp");
+        let staging = tmp.path().join("updates").join("staging-x");
+        fs::create_dir_all(staging.join("Hollow.app").join("Contents")).unwrap();
+        let args = vec!["--portable".to_string(), "a 'b'".to_string()];
+        let path = super::write_macos_update_script(
+            tmp.path(),
+            staging.to_str().unwrap(),
+            "/tmp/u $x.zip",
+            "/Apps/It's here",
+            "0.14.2",
+            &args,
+        )
+        .unwrap();
+        let script = fs::read_to_string(&path).unwrap();
+        assert!(
+            script.contains(r#"/usr/bin/open -n '/Apps/It'\''s here/Hollow.app' --args '--portable' 'a '\''b'\'''"#),
+            "{script}"
+        );
+        let syntax = std::process::Command::new("/bin/sh").args(["-n", &path]).status().unwrap();
+        assert!(syntax.success(), "the script does not parse:\n{script}");
     }
 }
