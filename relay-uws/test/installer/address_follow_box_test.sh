@@ -24,6 +24,9 @@ cleanup() {
     local p
     for p in "${SERVERS[@]}"; do kill "$p" 2>/dev/null; done
     nft delete table ip box_follow 2>/dev/null
+    nft delete table ip6 box_follow6 2>/dev/null
+    ip -6 route del 2001:db8:5::5/128 dev lo 2>/dev/null
+    rm -f "$SHIM/ip"
     ip addr del 2001:db8:1::5/128 dev lo 2>/dev/null
     ip addr del 2001:db8:1::7/128 dev lo 2>/dev/null
     [ -f "$WORK_DIR/resolv.conf" ] && cat "$WORK_DIR/resolv.conf" >/etc/resolv.conf
@@ -562,9 +565,79 @@ eq "one the name now names and this machine holds is taken" "$(kv_get "$TURN_ETC
 has "and the lock holds it" "$(peers)" "2001:db8:1::7"
 eq "beside the follower's IPv4" "$(follower_ip) $(kv_get "$CONF_FILE" turn_public_ipv6)" "$NEW 2001:db8:1::7"
 eq "with the setup's answer kept" "$(kv_get "$CONF_FILE" public_ipv6)" 2001:db8:1::5
+# check-host judges the name's AAAA record against the addresses this machine holds (#153).
+part=$(address_part)
+has "check-host passes an AAAA record this machine holds" "$part" "ok    $NAME's IPv6 (AAAA) record names 2001:db8:1::7, which this machine holds."
+has "and says how to test it from outside" "$part" "curl -6 -m 10 https://$NAME/health"
 # a_v6_address_this_machine_no_longer_has_drops_after_the_window
 ip addr del 2001:db8:1::7/128 dev lo
+# The follower still names 2001:db8:1::7 (it keeps a lost address a while); the AAAA
+# cases below judge the record without that proof, then the answers come back as they were.
+cp "$CONF_FILE" "$WORK_DIR/conf.keep"
+sed -i 's/^turn_public_ipv6=.*/turn_public_ipv6=/' "$CONF_FILE"
+# check_host_fails_an_aaaa_outside_this_machines_ipv6_network: a stale prefix.
+ip addr add 2001:db8:2::9/128 dev lo
+part=$(address_part)
+has "check-host fails an AAAA record outside this machine's IPv6 network" "$part" "FAIL  $NAME's IPv6 (AAAA) record names 2001:db8:1::7, which is not in this machine's IPv6 network (this machine has "
+has "naming the addresses it holds" "$(grep 'AAAA' <<<"$part")" "2001:db8:2::9"
+has "and what to do" "$part" "People on IPv6 can't reach the relay. Update the AAAA record or remove it"
+ip addr del 2001:db8:2::9/128 dev lo
+# check_host_skips_an_aaaa_it_cannot_judge: only a ULA here (NPTv6), or another
+# address of this machine's own /64.
+ip addr add fd00::5/128 dev lo
+part=$(address_part)
+has "an AAAA record this machine can't judge is a skip with the outside test" "$part" "skip  $NAME's IPv6 (AAAA) record names 2001:db8:1::7, which this machine doesn't hold and couldn't prove from here, so test it from another network with curl -6 -m 10 https://$NAME/health"
+lacks "and no FAIL for a ULA-only machine" "$(grep 'AAAA' <<<"$part")" "FAIL"
+ip addr add 2001:db8:1::9/128 dev lo
+has "so is one in this machine's own /64" "$(address_part)" "skip  $NAME's IPv6 (AAAA) record names 2001:db8:1::7, which this machine doesn't hold"
+ip addr del 2001:db8:1::9/128 dev lo
+ip addr del fd00::5/128 dev lo
+# check_host_passes_an_aaaa_the_follower_proved: not held, beside a global address of
+# another /64, but proven: the follower's own address, or the relay's key answering there.
+ip addr add 2001:db8:2::9/128 dev lo
+sed -i 's/^turn_public_ipv6=.*/turn_public_ipv6=2001:db8:1::7/' "$CONF_FILE"
+has "check-host passes an AAAA address the follower proved" "$(address_part)" "ok    $NAME's IPv6 (AAAA) record names 2001:db8:1::7, which reaches this relay."
+sed -i 's/^turn_public_ipv6=.*/turn_public_ipv6=/' "$CONF_FILE"
+serve "[::1]:8443" relay
+nft -f - <<EOF
+table ip6 box_follow6 {
+    chain out {
+        type nat hook output priority -100;
+        ip6 daddr 2001:db8:5::5 tcp dport 443 dnat to [::1]:8443
+    }
+}
+EOF
+ip -6 route add 2001:db8:5::5/128 dev lo
+dns AAAA 2001:db8:5::5
+has "and one where the relay's key answers (a translated address)" "$(address_part)" "ok    $NAME's IPv6 (AAAA) record names 2001:db8:5::5, which reaches this relay."
+ip addr del 2001:db8:2::9/128 dev lo
+# an_address_that_failed_duplicate_detection_is_not_held: ip lists it, nothing answers there.
+real_ip=$(command -v ip)
+cat >"$SHIM/ip" <<EOF
+#!/bin/bash
+if [ "\$*" = "-o addr show" ]; then
+    $real_ip -o addr show
+    echo "1: lo    inet6 2001:db8:6::6/128 scope global dadfailed tentative valid_lft forever preferred_lft forever"
+    exit 0
+fi
+exec $real_ip "\$@"
+EOF
+chmod 0755 "$SHIM/ip"
+dns AAAA 2001:db8:6::6
+has "an address that failed duplicate detection is not held" "$(address_part)" "skip  $NAME's IPv6 (AAAA) record names 2001:db8:6::6, which this machine doesn't hold"
+rm -f "$SHIM/ip"
+# check_host_skips_an_aaaa_lookup_that_failed: no verdict is never "IPv4 only".
+dns AAAA SERVFAIL
+has "check-host skips an AAAA lookup that failed" "$(address_part)" "skip  no answer from this machine's DNS for $NAME's IPv6 (AAAA) record, so it can't be checked from here"
+dns AAAA DROP
+has "and one that got no answer at all" "$(address_part)" "skip  no answer from this machine's DNS for $NAME's IPv6 (AAAA) record"
+dns AAAA fd00::1
+has "check-host skips an AAAA answer that is not public" "$(address_part)" "skip  this network's DNS answers $NAME's IPv6 (AAAA) record with an address that is not public"
+dns AAAA
+has "a name without AAAA records (NODATA) serves IPv4 only" "$(address_part)" "ok    $NAME has no IPv6 (AAAA) record, so the relay serves IPv4 only, which is fine"
 dns AAAA NXDOMAIN
+has "check-host passes a name without an AAAA record" "$(address_part)" "ok    $NAME has no IPv6 (AAAA) record, so the relay serves IPv4 only, which is fine"
+cat "$WORK_DIR/conf.keep" >"$CONF_FILE"
 stamp last_change "$long_ago"
 out=$(follow)
 eq "one it lost stays a while" "$(kv_get "$TURN_ETC/turn.env" PUBLIC_IPV6)" 2001:db8:1::7

@@ -113,12 +113,15 @@ as_probe() {
 # resolve <A|AAAA>: NAMES = the name's addresses of that family; DNS_STATE = ok (at
 # least one, all public), private (any address that is not public: a router's or a
 # Pi-hole's local answer, which counts for nothing) or none (no answer, an error or
-# no such name).
+# no such name). DNS_FAILED = 1 when DNS gave no verdict (an error, a timeout, a probe
+# that did not run), 0 when it answered, a "no such record" too; none stays none either way.
 resolve() {
     local t=$1 out a bad=0
     NAMES=()
     DNS_STATE=none
+    DNS_FAILED=1
     out=$(as_probe timeout 12 python3 -I "$PROBE" dns "$HOST" "$t" 2>/dev/null) || return 0
+    case "$(head -n 1 <<<"$out")" in rcode=0 | rcode=3) DNS_FAILED=0 ;; esac
     [ "$(head -n 1 <<<"$out")" = rcode=0 ] || return 0
     while read -r a; do
         a=${a,,}
@@ -136,7 +139,8 @@ resolve() {
     return 0
 }
 
-own_addrs() { ip -o addr show 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | tr 'A-F' 'a-f'; }
+# An address that failed duplicate detection is listed but never answers.
+own_addrs() { ip -o addr show 2>/dev/null | awk '!/ dadfailed/ {print $4}' | cut -d/ -f1 | tr 'A-F' 'a-f'; }
 
 # The SHA-256 of the public key this machine's relay serves for its name, as curl pins it.
 local_pin() {
@@ -657,6 +661,62 @@ check_owed() {
     done <"$PENDING"
 }
 
+# v6_net <address>: its /64, which tells a stale prefix from a translated address.
+v6_net() {
+    python3 -I -c 'import ipaddress, sys; print(ipaddress.ip_network(sys.argv[1] + "/64", strict=False))' "$1" 2>/dev/null
+}
+
+# check_v6: the name's IPv6 (AAAA) record. A client with IPv6 may try that address
+# first, so one nobody reaches strands people on IPv6 networks while everyone on IPv4
+# gets in (#153). An address counts as this relay when this machine holds it, the
+# relay's key answers there, or the follower proved it (turn_public_ipv6: NPTv6, a
+# cloud's 1:1 mapping); it fails only beside a global address of another /64 here, the
+# stale-prefix case. Its own NAMES and DNS_STATE, so the A record's verdict stays.
+check_v6() {
+    local NAMES=() DNS_STATE DNS_FAILED a mine=() all=() good=() stale=() unsure=() t6 nets=" " how test
+    test="test it from another network with curl -6 -m 10 https://$HOST/health"
+    resolve AAAA
+    case "$DNS_STATE" in
+    none)
+        if [ "$DNS_FAILED" = 1 ]; then
+            skip "no answer from this machine's DNS for $HOST's IPv6 (AAAA) record, so it can't be checked from here"
+        else
+            ok "$HOST has no IPv6 (AAAA) record, so the relay serves IPv4 only, which is fine"
+        fi
+        return 0 ;;
+    private)
+        skip "this network's DNS answers $HOST's IPv6 (AAAA) record with an address that is not public, so it can't be checked from here"
+        return 0 ;;
+    esac
+    while read -r a; do
+        [ -n "$a" ] || continue
+        all+=("$a")
+        [ "$(ip6_class "$a")" = global ] && mine+=("$a") && nets+="$(v6_net "$a") "
+    done < <(own_addrs)
+    t6=$(key_get "$CONF" turn_public_ipv6)
+    t6=${t6,,}
+    how="which this machine holds"
+    for a in "${NAMES[@]}"; do
+        if in_list "$a" ${all[@]+"${all[@]}"}; then
+            good+=("$a")
+        elif [ "$a" = "$t6" ] || pin_proves "$a"; then
+            good+=("$a")
+            how="which reaches this relay"
+        elif [ ${#mine[@]} -gt 0 ] && [[ "$nets" != *" $(v6_net "$a") "* ]]; then
+            stale+=("$a")
+        else
+            unsure+=("$a")
+        fi
+    done
+    if [ ${#stale[@]} -gt 0 ]; then
+        bad "$HOST's IPv6 (AAAA) record names ${stale[*]}, which is not in this machine's IPv6 network (this machine has ${mine[*]}). People on IPv6 can't reach the relay. Update the AAAA record or remove it"
+    elif [ ${#unsure[@]} -gt 0 ]; then
+        skip "$HOST's IPv6 (AAAA) record names ${unsure[*]}, which this machine doesn't hold and couldn't prove from here, so $test"
+    else
+        ok "$HOST's IPv6 (AAAA) record names ${good[*]}, $how. Home routers often block incoming IPv6, so $test"
+    fi
+}
+
 main_check() {
     local peers what="your answers ($CONF)" verb=give follows=0
     [ -r "$CONF" ] || { echo "done"; return 0; }
@@ -693,6 +753,7 @@ main_check() {
             check_one "the TURN port lock's peers ($LOCK_ENV)" give "${peers%% *}"
         fi
     fi
+    [ "$ADDRESS" != ip ] && valid_name "$HOST" && check_v6
     [ "$follows" = 1 ] && check_owed
     if [ "$(systemctl show -p LoadState --value "$FOLLOW_UNIT" 2>/dev/null)" = loaded ]; then
         check_sandbox

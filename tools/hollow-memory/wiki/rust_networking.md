@@ -106,7 +106,20 @@ relay only ever sees DEVICE ids.
 `open_socket` = `challenge()` (steps 1 and 2) then `sign_in()` (steps 3 to 5); a move runs the two
 apart (see "Move to a better network").
 
-1. `dial_websocket()` opens the TCP stream itself, so socket options go on before TLS:
+1. `dial_websocket()` opens the TCP stream itself (`dial_tcp`), so socket options go on before TLS.
+   The name resolves once and the addresses race, Happy Eyeballs v2 (RFC 8305,
+   `node/happy_eyeballs.rs`): the family of the resolver's FIRST address leads (it carries OS policy:
+   prefer-IPv4, gai.conf, Teredo/ULA sorting; RFC 8305 §4), families alternating, each next attempt
+   250 ms after the last (`STAGGER`) or at once when one fails, first connect wins, losers dropped.
+   A family that connected TCP but never finished TLS + upgrade (error, or the handshake timeout
+   cancelling it: `StallGuard` dropped armed in `upgrade()`) gives the other family the lead for that
+   relay for `STALL_HOLD` (5 min, RAM, 16 relays; an upgrade over it clears it, `order_for`). Trap (#153): a
+   plain `TcpStream::connect("host:port")` tries the addresses one after another, each waiting out
+   its SYN timeout (21 s Windows, 75 s macOS), so an AAAA record that blackholes ate the whole 10 s
+   handshake and the A record was never tried. Debug builds race the `relay_connect` override's one
+   address, or under the fleet guard marker only what `fleet_relay_guard::vetted` judged.
+   reqwest (hyper-util `HttpConnector`, 300 ms) and Dart's `HttpClient` (250 ms) already stagger.
+   Then:
    `TCP_USER_TIMEOUT` 20 s on Linux and Android (`limit_unacked_send_time`, socket2), so the kernel
    stops hiding a dead path behind 15 to 30 minutes of retransmits. Then TLS and the upgrade
    (`client_async_tls_with_config`). TCP + TLS + upgrade together are bounded by
@@ -335,9 +348,9 @@ one leaked task per node restart.
 ### Fleet production relay guard (debug builds only)
 
 `node/fleet_relay_guard.rs`, compiled only with `debug_assertions`: a `relay_guard` file in the data
-dir (the fleet writes it; contents ignored) arms it. `connect_relay` then resolves the dial target
+dir (the fleet writes it; contents ignored) arms it. `dial_tcp_in` then resolves the dial target
 (`relay_connect` override or `host:port`), refuses a name under `anonlisten.com` or any address of
-the official relay (`141.227.186.209`, `2001:41d0:ab01::4:0:d`, v4-mapped too), and dials exactly the
+the official relay (`141.227.186.209`, `2001:41d0:ab01::4:0:d`, v4-mapped too), and races exactly the
 addresses it judged. `run_fetch` refuses an official relay when the marker sits beside its database
 (the push fetch node runs outside the probe's guard). Release builds dial as before. Tests
 `node::fleet_relay_guard::tests`; the tooling half is `scripts/fleet_relay_guard.ps1`.
