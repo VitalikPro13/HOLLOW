@@ -108,8 +108,12 @@ apart (see "Move to a better network").
 
 1. `dial_websocket()` opens the TCP stream itself (`dial_tcp`), so socket options go on before TLS.
    The name resolves once and the addresses race, Happy Eyeballs v2 (RFC 8305,
-   `node/happy_eyeballs.rs`): IPv6 first, families alternating, each next attempt 250 ms after the
-   last (`STAGGER`) or at once when one fails, first connect wins, losers dropped. Trap (#153): a
+   `node/happy_eyeballs.rs`): the family of the resolver's FIRST address leads (it carries OS policy:
+   prefer-IPv4, gai.conf, Teredo/ULA sorting; RFC 8305 §4), families alternating, each next attempt
+   250 ms after the last (`STAGGER`) or at once when one fails, first connect wins, losers dropped.
+   A family that connected TCP but never finished TLS + upgrade (error, or the handshake timeout
+   cancelling it: `StallGuard` dropped armed in `upgrade()`) gives the other family the lead for that
+   relay for `STALL_HOLD` (5 min, RAM, 16 relays; an upgrade over it clears it, `order_for`). Trap (#153): a
    plain `TcpStream::connect("host:port")` tries the addresses one after another, each waiting out
    its SYN timeout (21 s Windows, 75 s macOS), so an AAAA record that blackholes ate the whole 10 s
    handshake and the A record was never tried. Debug builds race the `relay_connect` override's one

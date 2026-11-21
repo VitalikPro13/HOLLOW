@@ -2979,10 +2979,24 @@ async fn dial_websocket(url: &str) -> Result<(WsStream, Option<(SocketAddr, Sock
     let tcp = dial_tcp(&host, port).await?;
     limit_unacked_send_time(&tcp);
     let path = tcp.local_addr().ok().zip(tcp.peer_addr().ok());
+    let stream = upgrade(&host, request, tcp).await?;
+    Ok((stream, path))
+}
+
+/// TLS and the WebSocket upgrade over a connected stream. One that fails or is cut short
+/// by the handshake timeout gives the other address family the lead on the next dials
+/// (`happy_eyeballs::StallGuard`).
+async fn upgrade(
+    host: &str,
+    request: tokio_tungstenite::tungstenite::handshake::client::Request,
+    tcp: tokio::net::TcpStream,
+) -> Result<WsStream, String> {
+    let stall = super::happy_eyeballs::StallGuard::arm(host, tcp.peer_addr().ok());
     let (stream, _response) = tokio_tungstenite::client_async_tls_with_config(request, tcp, None, extra_trust())
         .await
         .map_err(|e| format!("WebSocket connect failed: {e}"))?;
-    Ok((stream, path))
+    stall.upgraded();
+    Ok(stream)
 }
 
 /// The TCP stream to the relay, raced over every address its name resolves to
@@ -3003,12 +3017,12 @@ async fn dial_tcp_in(dir: Option<&std::path::Path>, host: &str, port: u16) -> Re
     } else {
         resolve(&target).await?
     };
-    race_relay(addrs).await
+    race_relay(host, addrs).await
 }
 
 #[cfg(not(debug_assertions))]
 async fn dial_tcp(host: &str, port: u16) -> Result<tokio::net::TcpStream, String> {
-    race_relay(resolve(&format!("{host}:{port}")).await?).await
+    race_relay(host, resolve(&format!("{host}:{port}")).await?).await
 }
 
 async fn resolve(target: &str) -> Result<Vec<SocketAddr>, String> {
@@ -3016,9 +3030,9 @@ async fn resolve(target: &str) -> Result<Vec<SocketAddr>, String> {
     Ok(found.collect())
 }
 
-async fn race_relay(addrs: Vec<SocketAddr>) -> Result<tokio::net::TcpStream, String> {
-    use super::happy_eyeballs::{race, STAGGER};
-    let (tcp, attempt) = race(addrs, STAGGER, tokio::net::TcpStream::connect)
+async fn race_relay(host: &str, addrs: Vec<SocketAddr>) -> Result<tokio::net::TcpStream, String> {
+    use super::happy_eyeballs::{order_for, race, STAGGER};
+    let (tcp, attempt) = race(order_for(host, addrs), STAGGER, tokio::net::TcpStream::connect)
         .await
         .map_err(|e| format!("WebSocket connect failed: {e}"))?;
     if attempt > 0 {
@@ -4179,10 +4193,54 @@ mod tests {
         let live = listener.local_addr().unwrap();
         let tcp = dial_tcp_in(Some(dir.path()), "127.0.0.1", live.port()).await.unwrap();
         assert_eq!(tcp.peer_addr().unwrap(), live);
-        drop(tcp);
-        drop(listener);
-        let refused = dial_tcp_in(Some(dir.path()), "127.0.0.1", live.port()).await;
+        // Port 0 is never a listener, so the dial fails at once on every OS.
+        let refused = dial_tcp_in(Some(dir.path()), "127.0.0.1", 0).await;
         assert!(refused.as_ref().is_err_and(|e| e.starts_with("WebSocket connect failed: ")), "{:?}", refused.map(|_| ()));
+    }
+
+    /// A relay address that takes the TCP connect and then never finishes TLS, or drops
+    /// the socket, hands the lead to the other family on the next dials (#153 review).
+    #[tokio::test]
+    async fn a_family_that_stalls_after_tcp_yields_the_next_dial() {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let live = listener.local_addr().unwrap();
+        let held = tokio::spawn(async move {
+            let (silent, _) = listener.accept().await.unwrap();
+            let (closed, _) = listener.accept().await.unwrap();
+            drop(closed);
+            tokio::time::sleep(Duration::from_secs(30)).await;
+            drop(silent);
+        });
+        let v6: SocketAddr = "[2001:db8::1]:443".parse().unwrap();
+        let order = |host: &str| super::super::happy_eyeballs::order_for(host, vec![live, v6]);
+
+        let request = "wss://stall-silent.test/".into_client_request().unwrap();
+        let tcp = tokio::net::TcpStream::connect(live).await.unwrap();
+        let cut = tokio::time::timeout(Duration::from_millis(300), upgrade("stall-silent.test", request, tcp)).await;
+        assert!(cut.is_err(), "the silent far end never finished TLS");
+        assert_eq!(order("stall-silent.test"), vec![v6, live], "a stall cut short by the timeout");
+
+        let request = "wss://stall-closed.test/".into_client_request().unwrap();
+        let tcp = tokio::net::TcpStream::connect(live).await.unwrap();
+        assert!(upgrade("stall-closed.test", request, tcp).await.is_err());
+        assert_eq!(order("stall-closed.test"), vec![v6, live], "a far end that drops the socket");
+        held.abort();
+    }
+
+    /// After a stall over IPv4 the next dial to that relay races IPv6 first, and it wins
+    /// when both answer at once.
+    #[tokio::test]
+    async fn the_next_dial_leads_with_the_other_family() {
+        let Ok(six) = tokio::net::TcpListener::bind("[::1]:0").await else { return };
+        let four = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let (a4, a6) = (four.local_addr().unwrap(), six.local_addr().unwrap());
+        let host = "lead-other.test";
+        let tcp = race_relay(host, vec![a4, a6]).await.unwrap();
+        assert_eq!(tcp.peer_addr().unwrap(), a4, "the resolver's order first");
+        drop(super::super::happy_eyeballs::StallGuard::arm(host, Some(a4)));
+        let tcp = race_relay(host, vec![a4, a6]).await.unwrap();
+        assert_eq!(tcp.peer_addr().unwrap(), a6, "IPv4 stalled, so IPv6 leads");
     }
 
     /// The fleet's extra trust anchor: only a PEM certificate file adds one.
