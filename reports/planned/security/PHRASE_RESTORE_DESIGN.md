@@ -388,6 +388,11 @@ same fault.
 1. `restore_flow::held_before(store, state, t)` is the one predicate: a first fold
    (`first_folds`) or a stored op (`op_first_seen_ms`) strictly before `t`.
 2. `held_before_recovery` filters by `held_before(.., t_ms)` (T, not the recovery's `at`).
+   "Not sure" (T = 0, fix round after code review 1): each server's T is its oldest restore
+   point here (`lost_t`), which this device's records reach by definition
+   (`records_reach_t`): a lost removal settles every held server, a recovery every server held
+   before the recovery's `at`, and `register` hands the witnesses only those first held after
+   it (a fresh install's chooser, DEVICE_PROOF_DESIGN 8.1).
 3. `settle_lost_devices` returns `Settled { done, to_restore }`. Per server, before any write,
    when `!held_before(store, state, state.lost_t(t_ms))`:
    - owned (`current_owner == us`): nothing written; `(sid, T)` into `to_restore`;
@@ -410,9 +415,11 @@ devices), as today's recovery does for servers it did not hold. Deferred (sectio
 
 **Tests** (10.4): the reviewer's harness probe ported, RED today,
 `pr216_a_device_that_held_nothing_before_t_keeps_what_the_lost_device_did_before_t`; the
-recovery branch `pr216_a_recovery_typed_on_a_device_that_joined_after_t_keeps_the_owners_history`;
+recovery branch `pr216_a_recovery_typed_on_a_device_that_joined_after_t_settles_nothing_and_asks_the_witnesses`;
 the member branch `pr216_a_member_server_first_held_after_t_gets_no_retire_from_the_remover`;
-`pr216_an_owned_server_first_held_after_t_goes_to_the_witnesses_and_survives_a_restart`; unit
+the restart is inside the first test; "not sure" (fix round)
+`pr216_a_not_sure_recovery_on_a_device_holding_the_server_settles_it`,
+`pr216_a_not_sure_lost_removal_settles_from_the_oldest_restore_point`; unit
 `restore_flow::tests::held_before_judges_against_t_not_the_recovery` and
 `sync_handler::tests::a_rival_merge_never_runs_on_a_server_held_only_after_t`. Controls that
 stay green: `w3c1_a_lost_laptop_settles_back_to_what_it_did_before_t`,
@@ -524,13 +531,12 @@ is removed, which is why the No card says to remove it).
   `node/witness.rs` (`judge`), `node/restore_flow.rs` (`register`, `held_before`),
   `sync_handler::settle_lost_devices`. Proven by: today's list plus
   `pr216_a_device_that_held_nothing_before_t_keeps_what_the_lost_device_did_before_t`,
-  `pr216_an_owned_server_first_held_after_t_goes_to_the_witnesses_and_survives_a_restart`,
   `held_before_judges_against_t_not_the_recovery`. Claims C-03, C-15.
 - **R-ID-11 (changed):** append "A device that held a server only from the moment I last had the
   lost device, or later, settles nothing there from its own records and writes no retire for
   it." Enforced in: adds `sync_handler::settle_lost_devices`, `merge_rival_settlings`,
   `restore_flow::held_before_recovery`. Proven by: adds
-  `pr216_a_recovery_typed_on_a_device_that_joined_after_t_keeps_the_owners_history`,
+  `pr216_a_recovery_typed_on_a_device_that_joined_after_t_settles_nothing_and_asks_the_witnesses`,
   `pr216_a_member_server_first_held_after_t_gets_no_retire_from_the_remover`,
   `a_rival_merge_never_runs_on_a_server_held_only_after_t`. Claims C-01, C-03.
 - **R-ID-14 (new, 215):** "A device my phrase adds on another machine, by an admission or by a

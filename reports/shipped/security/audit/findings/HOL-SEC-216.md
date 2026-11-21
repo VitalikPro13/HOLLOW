@@ -36,10 +36,21 @@ One predicate, `held_before(store, state, T)`: a first fold or a stored op stric
 `settle_lost_devices` writes nothing for a server that fails it: an owned one goes to the
 member witnesses (`lost_restore:{server}` rows that `restore_flow::register` hands to the
 witness desk, kept across restarts), a member one gets no retire. The recovery path filters by
-T, and a rival-settling merge skips such a server. Tests:
-`pr216_a_device_that_held_nothing_before_t_keeps_what_the_lost_device_did_before_t`,
-`pr216_a_recovery_typed_on_a_device_that_joined_after_t_keeps_the_owners_history`,
+T, and a rival-settling merge skips such a server. "Longer ago, or not sure" (T = 0) names no
+moment: each server's T is then the oldest restore point this device holds, which its records
+reach by definition, so a lost removal still settles every server the remover holds and a
+recovery every server held before the recovery itself; only an owned server first held after
+the recovery goes to the witnesses (the chooser). Residual: an owned server the witnesses
+restore keeps only what a checkpoint from before T holds; the lost device's later ops no
+checkpoint covers stop counting at members until the person picks a point.
+
+Tests: `pr216_a_device_that_held_nothing_before_t_keeps_what_the_lost_device_did_before_t`
+(the restore survives a restart),
+`pr216_a_recovery_typed_on_a_device_that_joined_after_t_settles_nothing_and_asks_the_witnesses`,
 `pr216_a_member_server_first_held_after_t_gets_no_retire_from_the_remover`,
-`pr216_an_owned_server_first_held_after_t_goes_to_the_witnesses_and_survives_a_restart`,
+`pr216_a_not_sure_recovery_on_a_device_holding_the_server_settles_it`,
+`pr216_a_not_sure_lost_removal_settles_from_the_oldest_restore_point`,
 `held_before_judges_against_t_not_the_recovery`,
+`a_not_sure_recovery_still_settles_what_this_device_held_long_before`,
+`a_not_sure_recovery_hands_the_witnesses_only_what_it_first_held_after_it`,
 `a_rival_merge_never_runs_on_a_server_held_only_after_t`.

@@ -3117,18 +3117,18 @@ pub(crate) fn settle_lost_devices(
             continue;
         }
         let Some(view) = before.get(server_id) else { continue };
-        let t_ms = state.lost_t(t_ms);
         let owner = state.current_owner().as_deref() == Some(local_peer_str);
         // HOL-SEC-216: our records start at or after T, so they cannot tell what the
         // lost device did before it. Nothing is written; a server we own restores from
         // members' witnesses instead.
-        if !super::restore_flow::held_before(&store, state, t_ms as i64) {
+        if !super::restore_flow::records_reach_t(&store, state, t_ms as i64) {
             hollow_log!("[HOLLOW-CRDT] {server_id} first held here after T: not settled from our records");
             if owner {
                 super::restore_flow::note_lost_restore(&store, state, local_peer_str, t_ms as i64);
             }
             continue;
         }
+        let t_ms = state.lost_t(t_ms);
         let seen = store.op_seen_ms(server_id).unwrap_or_default();
         let mut ops = Vec::new();
         if owner {

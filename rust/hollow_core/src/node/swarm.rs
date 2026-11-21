@@ -14729,7 +14729,7 @@ async fn handle_incoming_request_inner(
                     // it while the requester is away.
                     Some(("accepted", _, stored_req)) => {
                         hollow_log!("[HOLLOW-FRIENDS] Re-delivered request from {peer_str} — already accepted, answering again");
-                        if answer_resent.take(&req_master_early, peer_str, requested_at) {
+                        if answer_resent.take(&req_master_early, peer_str) {
                             social::send_friend_accept(
                                 ws_cmd_tx, local_peer_str, master_keypair, &req_master_early,
                                 peer_str, stored_req.max(requested_at), db_path, db_passphrase,
@@ -14747,7 +14747,7 @@ async fn handle_incoming_request_inner(
                         // mailbox, and when that copy expires before the requester next boots
                         // it re-deposits this very request and nobody answers again. So every
                         // swallow re-sends the decline, ONCE per requester per process.
-                        if answer_resent.take(&req_master_early, peer_str, requested_at) {
+                        if answer_resent.take(&req_master_early, peer_str) {
                             social::send_friend_reject(
                                 ws_cmd_tx, ws_room_peers, peer_str,
                                 &req_master_early, stored_req,

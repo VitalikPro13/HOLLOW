@@ -28222,7 +28222,10 @@ fn harness_fixed_sleep_budget_does_not_grow() {
     // 2026-11-21: pr-phrase-restore added spawn staggers and the T gaps of five lost-device
     // tests (the T an op lands before and after has no signal) and two absences, an answer
     // B's view never gives and a replay's answer with no event (12.6 s; scan 1270.85 s).
-    const BUDGET_MS: u64 = 1_270_850;
+    // 2026-11-21: the phrase-restore fix round added two absences, no witness hand-over
+    // after a not-sure settling (one register tick) and no second answer to stepped
+    // replays, and one spawn stagger (9.5 s; scan 1280.35 s).
+    const BUDGET_MS: u64 = 1_280_350;
 
     let src = include_str!("test_harness.rs");
     // Built from pieces so this scan does not count its own source text.
@@ -72313,7 +72316,7 @@ async fn pr216_a_member_server_first_held_after_t_gets_no_retire_from_the_remove
 /// the witnesses (`held_before_recovery` judges against T, never the recovery's time).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)]
-async fn pr216_a_recovery_typed_on_a_device_that_joined_after_t_keeps_the_owners_history() {
+async fn pr216_a_recovery_typed_on_a_device_that_joined_after_t_settles_nothing_and_asks_the_witnesses() {
     use crate::identity::roster;
     let _g = test_guard();
     let [m_tag, d1_tag, d2_tag, r_tag, j_tag] = [153u8, 154, 155, 156, 157];
@@ -72548,4 +72551,145 @@ async fn pr_a_welcome_recovery_beside_its_own_database_settles_what_it_held_befo
     );
     assert_eq!(name_at(&f).await.as_deref(), Some("honest"), "what the stolen device wrote after T stayed");
     assert!(wait_until(30, async || name_at(&j).await.as_deref() == Some("honest")).await, "the member never took the settling");
+}
+
+// pr-phrase-restore fix round
+
+/// Review finding 1: a phrase recovery answered "Longer ago, or not sure" (T = 0) on a
+/// device holding the server settles it from its own records (each server's T is its
+/// oldest restore point held here), and never also hands it to the witnesses. The
+/// holder founded the server, so its oldest restore point predates the dropped device.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pr216_a_not_sure_recovery_on_a_device_holding_the_server_settles_it() {
+    use crate::crdt::operations::CrdtPayload as P;
+    let _g = test_guard();
+    let [m_tag, d1_tag, d2_tag, r_tag, j_tag] = [160u8, 161, 162, 163, 164];
+    let W3c1Cut { relay, master, d1, d2, j, server_id, _tmp } = w3c1_cut_server([m_tag, d1_tag, d2_tag, r_tag, j_tag]).await;
+    let m_id = master.peer_id();
+    let (d1_id, d2_id) = (tag_kp(d1_tag).peer_id(), tag_kp(d2_tag).peer_id());
+    let name_at = async |n: &TestNode| n.live_server_state(&server_id).await.map(|s| s.name.read().clone());
+    let stolen = w3c1_device_op(&server_id, &master, &tag_kp(d2_tag), P::ServerRenamed { new_name: "stolen".into() }, 0);
+    for to in [&d1, &j] {
+        carry_as(&d2, to, crdt_broadcast(&server_id, &stolen)).await;
+    }
+    assert!(wait_until(15, async || name_at(&d1).await.as_deref() == Some("stolen")).await, "precondition: the thief's rename reached it");
+    relay.set_online(&d2.device_id, false);
+    drop(d2);
+
+    let roster = d1.store().load_roster(&m_id).ok().flatten().expect("the identity's roster");
+    let mut recovered = roster.clone();
+    recovered
+        .add_phrase_statement(
+            &crate::identity::roster::r_pub_of(&tag_kp(r_tag)),
+            Some(crate::identity::roster::sign_recovery(&master, &tag_kp(r_tag), super::roster_book::now_ms(), std::slice::from_ref(&d1_id), false)),
+            None,
+        )
+        .expect("the phrase signs the recovery");
+    let held = super::authority_view::hold_own(&d1.store(), &m_id);
+    assert!(held, "nothing held before this change");
+    super::roster_book::note_recovery_lost_since(&d1.store(), &recovered.base(), 0).unwrap();
+    super::roster_book::merge_for_test(&d1.store(), &recovered, &m_id, &d1_id);
+    d1.cmd_tx.send(NodeCommand::RosterChanged { newly_revoked: vec![d2_id.clone()] }).await.unwrap();
+    let settled = |s: &ServerState| s.base.as_ref().is_some_and(|b| b.state.cp_settles.as_ref().is_some_and(|st| st.devices.contains(&d2_id)));
+    assert!(
+        wait_until(30, async || d1.live_server_state(&server_id).await.is_some_and(|s| settled(&s))).await,
+        "a not-sure recovery settled nothing from the records of a device holding the server",
+    );
+    assert!(wait_until(30, async || j.live_server_state(&server_id).await.is_some_and(|s| settled(&s))).await, "the member takes the settling");
+    assert!(wait_until(15, async || name_at(&j).await.as_deref() == Some("Cut")).await, "the dropped device's rename stayed: {:?}", name_at(&j).await);
+    // Absence: one register tick (every 5 s) after the settling hands nothing over.
+    sleep_ms(6_000).await;
+    assert!(
+        super::restore_flow::snapshot_of(&d1.device_id).into_iter().all(|s| s.server_id != server_id),
+        "a server settled from our records went to the witnesses as well",
+    );
+}
+
+/// Review finding 1: a lost-or-stolen removal answered "Longer ago, or not sure"
+/// (T = 0) settles the server back from the oldest restore point the remover holds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pr216_a_not_sure_lost_removal_settles_from_the_oldest_restore_point() {
+    let _g = test_guard();
+    let [m_tag, d1_tag, d2_tag, r_tag, j_tag] = [165u8, 166, 167, 168, 169];
+    let W3c1Cut { relay, master, d1, d2, j, server_id, _tmp } = w3c1_cut_server([m_tag, d1_tag, d2_tag, r_tag, j_tag]).await;
+    let (m_id, d2_id) = (master.peer_id(), tag_kp(d2_tag).peer_id());
+    let name_at = async |n: &TestNode| n.live_server_state(&server_id).await.map(|s| s.name.read().clone());
+    let stolen = w3c1_device_op(&server_id, &master, &tag_kp(d2_tag), crate::crdt::operations::CrdtPayload::ServerRenamed { new_name: "stolen".into() }, 1000);
+    for to in [&d1, &j] {
+        carry_as(&d2, to, crdt_broadcast(&server_id, &stolen)).await;
+    }
+    assert!(wait_until(15, async || name_at(&d1).await.as_deref() == Some("stolen") && name_at(&j).await.as_deref() == Some("stolen")).await, "precondition: the thief renamed it everywhere");
+    relay.set_online(&d2.device_id, false);
+    drop(d2);
+
+    d1.cmd_tx
+        .send(NodeCommand::RevokeDevice { device_peer_id: d2_id.clone(), mode: super::roster_book::RemoveMode::Lost { t_ms: 0 }, with_dependents: false })
+        .await
+        .unwrap();
+    let settled = |s: &ServerState| s.base.as_ref().is_some_and(|b| b.state.cp_settles.is_some());
+    assert!(
+        wait_until(30, async || j.live_server_state(&server_id).await.is_some_and(|s| settled(&s))).await,
+        "a not-sure lost removal never settled the server",
+    );
+    assert!(
+        wait_until(15, async || {
+            j.live_server_state(&server_id).await.is_some_and(|s| s.authority.device_verdict(&m_id, &d2_id) == crate::crdt::authority::DeviceVerdict::Uncounted)
+        })
+        .await,
+        "the member holds the removal",
+    );
+    assert!(wait_until(15, async || name_at(&j).await.as_deref() == Some("Cut")).await, "the lost device's rename stayed: {:?}", name_at(&j).await);
+    let lost_restore = format!("{}{server_id}", super::restore_flow::LOST_RESTORE);
+    assert!(d1.store().load_setting(&lost_restore).unwrap().is_none(), "a server the remover settled went to the witnesses as well");
+}
+
+/// Review finding 5: a settled request replayed on one connection is answered once per
+/// requesting device, whatever `requested_at` it claims: a friend's device stepping it
+/// draws one accept, a declined requester's one decline.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pr_a_replayed_request_is_answered_once_per_device_and_connection() {
+    let _g = test_guard();
+    super::blocklist::clear_for_test();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (a_m, a_d, b_m, b_d, c_m, c_d) = (170u8, 171u8, 172u8, 173u8, 174u8, 175u8);
+    let (a_master, b_master, c_master) = (tag_kp(a_m).peer_id(), tag_kp(b_m).peer_id(), tag_kp(c_m).peer_id());
+    let a = spawn_node_with_friends(&relay, a_m, a_d, &[&b_master]).await;
+    let c = spawn_node_with_friends(&relay, c_m, c_d, &[]).await;
+    let b = spawn_node_with_friends(&relay, b_m, b_d, &[&a_master]).await;
+    b.store().save_friend(&c_master, "declined", "incoming", 5_000).unwrap();
+    // Spawn stagger: B's inbox join has no event to wait on.
+    sleep_ms(1500).await;
+    let request = |at: i64| {
+        serde_json::to_vec(&super::types::HavenMessage::FriendRequest { requested_at: at, carried_bundle: None, device_list: None, sealed_card: None }).unwrap()
+    };
+    let inbox = format!("inbox:{b_master}");
+    relay.set_recording(&b.device_id, true);
+    for at in [1_000, 1_001, 1_002] {
+        relay.inject_direct(&inbox, &a.device_id, &b.device_id, request(at));
+    }
+    for at in [4_000, 4_001, 4_002] {
+        relay.inject_direct(&inbox, &c.device_id, &b.device_id, request(at));
+    }
+    let count = |accept: bool| {
+        relay
+            .recorded_frames(&b.device_id)
+            .iter()
+            .filter(|f| match recorded_message(f) {
+                Ok(super::types::HavenMessage::FriendAccept { .. }) => accept,
+                Ok(super::types::HavenMessage::FriendReject { .. }) => !accept,
+                _ => false,
+            })
+            .count()
+    };
+    assert!(wait_until(15, async || count(true) >= 1 && count(false) >= 1).await, "precondition: B answers each replay: {} {}", count(true), count(false));
+    // Absence: no further answer to the stepped replays.
+    sleep_ms(2000).await;
+    assert_eq!(count(true), 1, "a friend's device stepping its request drew an accept each time");
+    assert_eq!(count(false), 1, "a declined requester stepping its request drew a decline each time");
+    drop((a, c));
 }

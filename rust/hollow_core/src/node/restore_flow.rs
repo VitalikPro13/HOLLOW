@@ -54,6 +54,21 @@ pub(crate) fn held_before(store: &MessageStore, state: &ServerState, at: i64) ->
     state.first_folds.values().any(|f| (*f as i64) < at) || store.op_first_seen_ms(&state.server_id).is_some_and(|ms| (ms as i64) < at)
 }
 
+/// Whether a settling with the answered `t_ms` may stand on this device's records of
+/// `state`. "Not sure" (0) names no moment: each server's T is then the oldest restore
+/// point held here (`ServerState::lost_t`), which our records hold by definition.
+pub(crate) fn records_reach_t(store: &MessageStore, state: &ServerState, t_ms: i64) -> bool {
+    t_ms <= 0 || held_before(store, state, t_ms)
+}
+
+/// Of a recovery answered with `t_ms` and signed at `at`, whether this device settles
+/// `state` from its records (else a server we own restores from witnesses, `register`):
+/// held before T; for "not sure", held before the recovery itself (DEVICE_PROOF_DESIGN
+/// 8.1: a fresh install, holding no restore point, gets the chooser).
+fn recovery_settles_here(store: &MessageStore, state: &ServerState, t_ms: i64, at: i64) -> bool {
+    held_before(store, state, if t_ms > 0 { t_ms } else { at })
+}
+
 /// Section 8.1: a phrase recovery treats every device it drops as lost or stolen since
 /// its T. Of the servers this device held before the recovery (the rest restore from
 /// witnesses, `register`), the views from before the drop, to settle them (section
@@ -64,10 +79,10 @@ pub(crate) fn held_before_recovery(
     local_master: &str,
     dropped: &[String],
 ) -> Option<(HashMap<String, std::sync::Arc<crate::crdt::authority::AuthorityView>>, u64)> {
-    let (_, t_ms, _) = recovery(store, local_master)?;
+    let (_, t_ms, at) = recovery(store, local_master)?;
     let views = server_states
         .iter()
-        .filter(|(_, s)| held_before(store, s, t_ms))
+        .filter(|(_, s)| recovery_settles_here(store, s, t_ms, at))
         .map(|(sid, s)| (sid.clone(), s.view_counting(local_master, dropped)))
         .collect();
     Some((views, t_ms.max(0) as u64))
@@ -92,9 +107,9 @@ pub(crate) fn register(desk: &mut WitnessDesk, server_states: &ServerStates, sto
     let ours = |sid: &str, state: &ServerState| {
         state.anchor_owner().as_deref() == Some(local_master) && !super::conference::is_conference_sid(sid) && !state.is_deleted()
     };
-    if let Some((base, t_ms, _)) = recovery(store, local_master) {
+    if let Some((base, t_ms, at)) = recovery(store, local_master) {
         for (sid, state) in server_states {
-            if !ours(sid, state) || held_before(store, state, t_ms) || store.load_setting(&done_key(sid, &base)).ok().flatten().is_some() {
+            if !ours(sid, state) || recovery_settles_here(store, state, t_ms, at) || store.load_setting(&done_key(sid, &base)).ok().flatten().is_some() {
                 continue;
             }
             desk.recover(sid, t_ms);
@@ -103,7 +118,7 @@ pub(crate) fn register(desk: &mut WitnessDesk, server_states: &ServerStates, sto
     for (key, _) in store.load_settings_with_prefix(LOST_RESTORE).unwrap_or_default() {
         let Some(sid) = key.strip_prefix(LOST_RESTORE) else { continue };
         let (Some(row), Some(state)) = (lost_restore(store, sid), server_states.get(sid)) else { continue };
-        if ours(sid, state) && !held_before(store, state, row.t_ms) {
+        if ours(sid, state) && !records_reach_t(store, state, row.t_ms) {
             desk.recover(sid, row.t_ms);
         }
     }
@@ -407,6 +422,54 @@ mod tests {
     use super::*;
     use crate::identity::native_identity::NativeKeypair;
     use crate::identity::roster::Roster;
+
+    /// A "not sure" recovery (T = 0) has each server's T at its oldest restore point
+    /// held here, so a server held for a year still settles from our records.
+    #[test]
+    fn a_not_sure_recovery_still_settles_what_this_device_held_long_before() {
+        let _g = super::super::resolver::test_lock();
+        let store = MessageStore::open(":memory:", &"ab".repeat(32)).unwrap();
+        let kp = |t: u8| NativeKeypair::from_secret_bytes(&[t; 32]);
+        let (master, recovery, me) = (kp(0x74), kp(0x75), kp(0x76));
+        let at = super::super::types::now_ms() - 60_000;
+        let r = Roster::genesis(&master, &recovery, &me, at);
+        super::super::roster_book::merge_for_test(&store, &r, &master.peer_id(), &me.peer_id());
+        super::super::roster_book::note_recovery_lost_since(&store, &r.base(), 0).unwrap();
+        let mut s = ServerState::new("long_held".into(), "long_held".into(), master.peer_id());
+        std::sync::Arc::make_mut(&mut s.first_folds).insert("cp".into(), (at - 365 * 86_400_000) as u64);
+        let mut states = ServerStates::new();
+        states.insert("long_held".into(), s);
+        let (views, _) = held_before_recovery(&states, &store, &master.peer_id(), &[]).expect("the recovery recorded its T");
+        assert!(views.contains_key("long_held"), "a server held for a year was not settled from our records after a not-sure recovery");
+    }
+
+    /// The other half of a "not sure" recovery: only an owned server first held after
+    /// the recovery itself goes to the witnesses (the chooser); one held before it
+    /// settled from our records and is never handed over as well.
+    #[test]
+    fn a_not_sure_recovery_hands_the_witnesses_only_what_it_first_held_after_it() {
+        let _g = super::super::resolver::test_lock();
+        let store = MessageStore::open(":memory:", &"ab".repeat(32)).unwrap();
+        let kp = |t: u8| NativeKeypair::from_secret_bytes(&[t; 32]);
+        let (master, recovery, me) = (kp(0x77), kp(0x78), kp(0x79));
+        let at = super::super::types::now_ms() - 60_000;
+        let r = Roster::genesis(&master, &recovery, &me, at);
+        super::super::roster_book::merge_for_test(&store, &r, &master.peer_id(), &me.peer_id());
+        super::super::roster_book::note_recovery_lost_since(&store, &r.base(), 0).unwrap();
+        let state = |sid: &str, first: i64| {
+            let mut s = ServerState::new(sid.into(), sid.into(), master.peer_id());
+            std::sync::Arc::make_mut(&mut s.first_folds).insert("cp".into(), first as u64);
+            s
+        };
+        let mut states = ServerStates::new();
+        states.insert("long_held".into(), state("long_held", at - 365 * 86_400_000));
+        states.insert("after".into(), state("after", at + 1));
+        let mut desk = WitnessDesk::default();
+
+        register(&mut desk, &states, &store, &master.peer_id());
+
+        assert_eq!(desk.restoring(), vec!["after".to_string()], "the witnesses got the wrong servers");
+    }
 
     /// HOL-SEC-216: a recovery settles from our records only the servers this device
     /// held before T, never those first held between T and the recovery itself.
