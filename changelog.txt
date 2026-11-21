@@ -1,3 +1,47 @@
+v0.14.2 - Name Colors Everywhere, File Paste, DM Catch-Up & Safer Updates
+
+No breaking changes, so 0.14.1 and 0.14.2 work together. Self-hosters, update your relay too, so its online figure counts people, its setup works on Linux Mint and similar systems, and TURN follows a changed public address.
+
+SECURITY
+
+- Important security fixes for servers on relays, phone notifications, the friends list and relay setup
+
+SERVERS
+
+- A server now stays on its owner's relay, and members on another relay get a button to switch (#151)
+
+MESSAGES
+
+- Fixed DMs sent while you and a friend were apart sometimes never arriving (#152)
+- You can paste copied files, including from ShareX, and Cmd+V works on macOS and iPad (#142)
+
+PROFILES
+
+- Chosen name colors and gradients show on every name, chats included (#149)
+- Name colors you pick no longer turn pale on dark backgrounds
+
+UPDATES
+
+- Fixed a Windows update sometimes opening the Welcome page instead of your account (#155)
+- If Hollow starts on a stray profile while your account sits in Default, it offers to switch back
+- Updates from this version on keep the options Hollow was started with, such as --portable
+- Portable copies keep their data through every update
+- A Windows update blocked by a busy file tries again instead of leaving the app half copied
+
+WINDOWS
+
+- Uninstalling no longer deletes a profile kept in Hollow's folder
+- A silent uninstall no longer stops to ask about your data
+
+SELF-HOSTING
+
+- The relay's online figure counts people, not connections or apps in the background (#150)
+- The relay setup runs on Linux Mint and other systems built on Ubuntu or Debian (#148)
+- Hollow falls back to IPv4 when a relay's IPv6 address doesn't answer, instead of staying on No connection (#153)
+- The host check passes on Linux Mint, and TURN ports are reserved from boot so no other program can take them (#153)
+- TURN and the media forwarder follow your relay when its public address changes
+- The guide says Android push on a self-hosted relay needs no ntfy server of your own
+
 v0.14.1 - Name Colors, Hideable Sidebar Places & Screen Share Audio Fix
 
 No breaking changes, so 0.14.0 and 0.14.1 work together. Self-hosters, update your relay too, so phones using it follow the new mentions-only notification default.

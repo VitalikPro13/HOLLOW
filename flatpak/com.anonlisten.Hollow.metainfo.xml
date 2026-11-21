@@ -20,6 +20,11 @@
   <launchable type="desktop-id">com.anonlisten.Hollow.desktop</launchable>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.14.2" date="2026-11-21">
+      <description>
+        <p>Name colors everywhere, file paste, DM catch-up and safer updates</p>
+      </description>
+    </release>
     <release version="0.14.1" date="2026-11-19">
       <description>
         <p>Name colors, hideable sidebar places and a screen share audio fix</p>
