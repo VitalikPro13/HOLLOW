@@ -1122,7 +1122,7 @@ If both answer without a certificate warning, your relay is live.
 On the server, the host checks look at each service's account, who can read its
 secrets, how tight its sandbox is, whether anything could reach the disk, whether
 TURN and the forwarder use the address your relay's name points at, whether its
-IPv6 (AAAA) record names an address the server has, and SSH. They
+IPv6 (AAAA) record leads to this server, and SSH. They
 change nothing. The setup runs them at the end and from **Check the machine
 again**. To run them yourself:
 
@@ -1239,13 +1239,14 @@ server with `timedatectl`. Logins carry a signed timestamp with a 60 second
 window, so a clock that is minutes out turns away every login while everything
 else looks fine.
 
-**Some members stay on No connection while your phone on mobile data gets
+**Some members stay on No connection, and a member on IPv4 often gets
 through.** Look at your name's IPv6 (AAAA) record. An AAAA record has to point at
 an address people can reach over IPv6. If people can't, delete the record. Hollow
 works on IPv4 alone. The host checks (see [Check it](#check-it)) look at it in
-their **Public address** lines and fail when the record names an address the
-server doesn't have. An address the server does have can still be blocked by the
-router. To test that, use a machine with IPv6 on another network, such as a
+their **Public address** lines. They fail when the record names an address outside
+the server's IPv6 network, and when they can't tell, they say so and suggest the
+test below. An address the server does have can still be blocked by the router.
+To test that, use a machine with IPv6 on another network, such as a
 laptop on your phone's hotspot, because from inside your home it proves nothing:
 
 ```bash

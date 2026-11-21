@@ -19,6 +19,7 @@ import hashlib
 import hmac
 import ipaddress
 import os
+import re
 import secrets
 import socket
 import struct
@@ -44,19 +45,31 @@ def resolved_query(name, qtype):
         r = subprocess.run(
             ["resolvectl", "query", "--legend=no", "--cache=no", "--synthesize=no", "--zone=no",
              "--protocol=dns", "-t", qtype, "--", name],
-            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-            timeout=9, check=False)
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=9, check=False, env={"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "LC_ALL": "C"})
     except (OSError, subprocess.SubprocessError):
         out("rcode=fail")
         return
     if r.returncode != 0:
-        out("rcode=fail")
+        out(resolved_failure(name, r.stderr.decode("ascii", "replace")))
         return
     out("rcode=0")
     for line in r.stdout.decode("ascii", "replace").splitlines()[:64]:
         f = line.split()
         if len(f) >= 4 and f[1] == "IN" and f[2] == qtype:
             out(f[3])
+
+
+def resolved_failure(name, err):
+    """resolvectl's verdict line for a failed query: a name that does not exist (rcode=3)
+    and one without records of the type (rcode=0, nothing after it) are answers; anything
+    else (SERVFAIL, a timeout, resolved itself failing) is no answer at all."""
+    quoted = "name '" + re.escape(name.rstrip(".")) + r"\.?' "
+    if re.search(quoted + "not found", err, re.I):
+        return "rcode=3"
+    if re.search(quoted + "does not have any rr of the requested type", err, re.I):
+        return "rcode=0"
+    return "rcode=fail"
 
 
 def nameservers():
