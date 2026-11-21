@@ -33,6 +33,7 @@ pub(crate) mod forwarder_client;
 pub(crate) mod gossip;
 pub(crate) mod gossip_relay;
 pub(crate) mod guest_view;
+pub(crate) mod happy_eyeballs;
 pub(crate) mod image_check;
 pub(crate) mod image_convert;
 pub(crate) mod image_gate;

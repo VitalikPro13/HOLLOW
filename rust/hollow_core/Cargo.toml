@@ -136,6 +136,8 @@ core-foundation = "0.10"
 
 [dev-dependencies]
 tempfile = "3"
+# Paused clocks for the dial race tests (node::happy_eyeballs).
+tokio = { version = "1", features = ["test-util"] }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(frb_expand)', 'cfg(image_check_standalone)', 'cfg(fuzzing)'] }

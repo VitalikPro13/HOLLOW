@@ -2976,8 +2976,7 @@ async fn dial_websocket(url: &str) -> Result<(WsStream, Option<(SocketAddr, Sock
             _ => None,
         })
         .ok_or_else(|| format!("Bad relay URL: {url}"))?;
-    let addr = dial_override().unwrap_or_else(|| format!("{host}:{port}"));
-    let tcp = connect_relay(&host, &addr).await?;
+    let tcp = dial_tcp(&host, port).await?;
     limit_unacked_send_time(&tcp);
     let path = tcp.local_addr().ok().zip(tcp.peer_addr().ok());
     let (stream, _response) = tokio_tungstenite::client_async_tls_with_config(request, tcp, None, extra_trust())
@@ -2986,43 +2985,47 @@ async fn dial_websocket(url: &str) -> Result<(WsStream, Option<(SocketAddr, Sock
     Ok((stream, path))
 }
 
-/// Debug builds only: under the fleet's relay guard marker the dial goes to the
-/// addresses `fleet_relay_guard::vetted` judged, never the official relay's.
+/// The TCP stream to the relay, raced over every address its name resolves to
+/// (`happy_eyeballs`). Debug builds: under the fleet's relay guard marker the race runs
+/// over the addresses `fleet_relay_guard::vetted` judged, never the official relay's.
 #[cfg(debug_assertions)]
-async fn connect_relay(host: &str, addr: &str) -> Result<tokio::net::TcpStream, String> {
-    connect_relay_in(crate::identity::data_dir().ok().as_deref(), host, addr).await
+async fn dial_tcp(host: &str, port: u16) -> Result<tokio::net::TcpStream, String> {
+    dial_tcp_in(crate::identity::data_dir().ok().as_deref(), host, port).await
 }
 
 #[cfg(debug_assertions)]
-async fn connect_relay_in(dir: Option<&std::path::Path>, host: &str, addr: &str) -> Result<tokio::net::TcpStream, String> {
-    let guarded = dir.is_some_and(crate::node::fleet_relay_guard::armed_in);
-    let tcp = if guarded {
-        let vetted = crate::node::fleet_relay_guard::vetted(host, addr)
+async fn dial_tcp_in(dir: Option<&std::path::Path>, host: &str, port: u16) -> Result<tokio::net::TcpStream, String> {
+    let target = dir.and_then(dial_override_in).unwrap_or_else(|| format!("{host}:{port}"));
+    let addrs = if dir.is_some_and(crate::node::fleet_relay_guard::armed_in) {
+        crate::node::fleet_relay_guard::vetted(host, &target)
             .await
-            .inspect_err(|e| hollow_log!("[HOLLOW-WS] {e}"))?;
-        tokio::net::TcpStream::connect(&vetted[..]).await
+            .inspect_err(|e| hollow_log!("[HOLLOW-WS] {e}"))?
     } else {
-        tokio::net::TcpStream::connect(addr).await
+        resolve(&target).await?
     };
-    tcp.map_err(|e| format!("WebSocket connect failed: {e}"))
+    race_relay(addrs).await
 }
 
 #[cfg(not(debug_assertions))]
-async fn connect_relay(_host: &str, addr: &str) -> Result<tokio::net::TcpStream, String> {
-    tokio::net::TcpStream::connect(addr).await.map_err(|e| format!("WebSocket connect failed: {e}"))
+async fn dial_tcp(host: &str, port: u16) -> Result<tokio::net::TcpStream, String> {
+    race_relay(resolve(&format!("{host}:{port}")).await?).await
 }
 
-/// Debug builds only: a `relay_connect` file in the data dir (one `ip:port` line) is
-/// dialled instead of the relay, so the fleet can cut one app's path at its proxy.
-/// TLS and the auth domain stay the relay's.
-#[cfg(debug_assertions)]
-fn dial_override() -> Option<String> {
-    dial_override_in(&crate::identity::data_dir().ok()?)
+async fn resolve(target: &str) -> Result<Vec<SocketAddr>, String> {
+    let found = tokio::net::lookup_host(target).await.map_err(|e| format!("WebSocket connect failed: {e}"))?;
+    Ok(found.collect())
 }
 
-#[cfg(not(debug_assertions))]
-fn dial_override() -> Option<String> {
-    None
+async fn race_relay(addrs: Vec<SocketAddr>) -> Result<tokio::net::TcpStream, String> {
+    use super::happy_eyeballs::{race, STAGGER};
+    let (tcp, attempt) = race(addrs, STAGGER, tokio::net::TcpStream::connect)
+        .await
+        .map_err(|e| format!("WebSocket connect failed: {e}"))?;
+    if attempt > 0 {
+        let won = tcp.peer_addr().map(|a| a.to_string()).unwrap_or_default();
+        hollow_log!("[HOLLOW-WS] relay dial: attempt {} ({won}) answered first", attempt + 1);
+    }
+    Ok(tcp)
 }
 
 /// Debug builds only: a `relay_ca.pem` in the data dir is trusted beside the public
@@ -3061,6 +3064,9 @@ fn extra_trust_in(dir: &std::path::Path) -> Option<tokio_tungstenite::Connector>
     Some(tokio_tungstenite::Connector::Rustls(Arc::new(config)))
 }
 
+/// Debug builds only: a `relay_connect` file in the data dir (one `ip:port` line) is
+/// dialled instead of the relay, so the fleet can cut one app's path at its proxy.
+/// TLS and the auth domain stay the relay's.
 #[cfg(debug_assertions)]
 fn dial_override_in(dir: &std::path::Path) -> Option<String> {
     let line = std::fs::read_to_string(dir.join("relay_connect")).ok()?;
@@ -4141,12 +4147,42 @@ mod tests {
     async fn the_fleet_marker_refuses_a_dial_to_the_official_relay() {
         let dir = crate::test_tmp::tempdir().unwrap();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap().to_string();
-        assert!(connect_relay_in(Some(dir.path()), "relay.anonlisten.com", &addr).await.is_ok(), "no marker, no judgement");
+        // The override keeps every dial below on the local listener.
+        std::fs::write(dir.path().join("relay_connect"), listener.local_addr().unwrap().to_string()).unwrap();
+        assert!(dial_tcp_in(Some(dir.path()), "relay.anonlisten.com", 443).await.is_ok(), "no marker, no judgement");
         std::fs::write(dir.path().join(crate::node::fleet_relay_guard::MARKER), "on\n").unwrap();
-        let refused = connect_relay_in(Some(dir.path()), "relay.anonlisten.com", &addr).await;
+        let refused = dial_tcp_in(Some(dir.path()), "relay.anonlisten.com", 443).await;
         assert!(refused.as_ref().is_err_and(|e| e.contains("PRODUCTION RELAY GUARD")), "{:?}", refused.map(|_| ()));
-        assert!(connect_relay_in(Some(dir.path()), "hollowtest.example", &addr).await.is_ok(), "a test relay still dials");
+        assert!(dial_tcp_in(Some(dir.path()), "hollowtest.example", 443).await.is_ok(), "a test relay still dials");
+    }
+
+    /// The fleet's `relay_connect` override is what the raced dial reaches; the relay's
+    /// own name (here one that never resolves) is not looked up at all.
+    #[tokio::test]
+    #[cfg(debug_assertions)]
+    async fn the_debug_dial_override_still_applies() {
+        let dir = crate::test_tmp::tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let live = listener.local_addr().unwrap();
+        assert!(dial_tcp_in(Some(dir.path()), "relay.invalid", live.port()).await.is_err(), "no override, the name");
+        std::fs::write(dir.path().join("relay_connect"), format!("{live}\n")).unwrap();
+        let tcp = dial_tcp_in(Some(dir.path()), "relay.invalid", 443).await.unwrap();
+        assert_eq!(tcp.peer_addr().unwrap(), live);
+    }
+
+    /// One address: dialled at once, and a refusal comes back as the same error as before.
+    #[tokio::test]
+    #[cfg(debug_assertions)]
+    async fn a_single_address_relay_dials_as_before() {
+        let dir = crate::test_tmp::tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let live = listener.local_addr().unwrap();
+        let tcp = dial_tcp_in(Some(dir.path()), "127.0.0.1", live.port()).await.unwrap();
+        assert_eq!(tcp.peer_addr().unwrap(), live);
+        drop(tcp);
+        drop(listener);
+        let refused = dial_tcp_in(Some(dir.path()), "127.0.0.1", live.port()).await;
+        assert!(refused.as_ref().is_err_and(|e| e.starts_with("WebSocket connect failed: ")), "{:?}", refused.map(|_| ()));
     }
 
     /// The fleet's extra trust anchor: only a PEM certificate file adds one.
