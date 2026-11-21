@@ -928,13 +928,17 @@ fn note_own_phrase(db_path: &str, db_passphrase: &str, own: OwnPhrase) {
 }
 
 /// This device's own phrase statement that the current base outdated: this device is
-/// neither a member nor removed, and the base's recovery is dated at or after it.
+/// neither a member nor removed, and the base's recovery is dated at or after it, within
+/// the skew a clock may have. A base dated any later is a change made elsewhere on
+/// purpose, which [`dropped_by_recovery_at`] reports: typing the phrase again here would
+/// sign a recovery dropping the device that made it.
 pub(crate) fn own_phrase_outdated(store: &MessageStore, roster: &Roster, state: &RosterState, me: &str) -> Option<OwnPhrase> {
     if state.is_member(me) || state.removed.contains_key(me) {
         return None;
     }
     let own: OwnPhrase = serde_json::from_str(&store.load_setting(OWN_PHRASE).ok()??).ok()?;
-    (roster.base_at()? >= own.at_ms).then_some(own)
+    let after = roster.base_at()?.checked_sub(own.at_ms)?;
+    (0..=roster::MAX_FUTURE_SKEW_MS).contains(&after).then_some(own)
 }
 
 /// When the recovery that left this device out was signed: this device counted for the

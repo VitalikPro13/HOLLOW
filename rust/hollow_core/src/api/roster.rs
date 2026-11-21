@@ -578,6 +578,37 @@ mod tests {
         assert!(roster_status().unwrap().member, "typing the phrase again dates it past the base");
     }
 
+    /// Review finding 6: a base signed long after our own admission is a deliberate
+    /// change made elsewhere, not a clock behind: the lock says the phrase was used on
+    /// another device (D3b), never "type it again", whose recovery would drop that device.
+    #[test]
+    fn a_base_signed_long_after_our_admission_says_left_out_not_too_early() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = crate::api::storage::store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        // SAFETY: serialized by the locks above.
+        unsafe { std::env::set_var("HOLLOW_DATA_DIR", tmp.path()) };
+        crate::identity::encryption::clear_session_key();
+        let c = fresh_identity_on_disk(tmp.path());
+        join_with_phrase(PHRASE.into()).unwrap();
+        assert!(roster_status().unwrap().member, "precondition: the phrase admitted this device");
+        {
+            let store = MessageStore::open(&c.db_path, &c.db_passphrase).unwrap();
+            let key = crate::node::roster_book::OWN_PHRASE;
+            let mut own: crate::node::roster_book::OwnPhrase = serde_json::from_str(&store.load_setting(key).unwrap().unwrap()).unwrap();
+            own.at_ms -= 60 * 60 * 1000;
+            store.save_setting(key, &serde_json::to_string(&own).unwrap()).unwrap();
+        }
+        let at = crate::node::roster_book::now_ms();
+        recovery_elsewhere(&c, at);
+
+        let status = roster_status().unwrap();
+
+        assert!(!status.member);
+        assert_eq!(status.too_early, None, "an hour-old admission was called too early");
+        assert_eq!(status.dropped_by_recovery_at_ms, Some(at));
+    }
+
     /// Review (Dart half, b): our recovery said "backups need approval"; a base dated
     /// after it says otherwise. Typing the phrase again keeps the person's choice, and the
     /// Home card reports it, before and after.

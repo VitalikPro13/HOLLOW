@@ -23,7 +23,7 @@ pub(crate) const PENDING_MATURITY_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 /// A removed device erases itself this long after it learns of the removal.
 pub(crate) const REMOVAL_GRACE_MS: i64 = 3 * 24 * 60 * 60 * 1000;
 /// How far past our clock a phrase statement may be dated.
-const MAX_FUTURE_SKEW_MS: i64 = 10 * 60 * 1000;
+pub(crate) const MAX_FUTURE_SKEW_MS: i64 = 10 * 60 * 1000;
 /// When the recovery an identity from before 0.12 signs at its first 0.12 start is
 /// dated (2020-01-01): fixed, so each of its devices signs the very same statement,
 /// and older than any phrase typed on 0.12, so a typed recovery supersedes it.
