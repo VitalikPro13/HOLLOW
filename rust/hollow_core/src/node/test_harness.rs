@@ -28219,10 +28219,10 @@ fn harness_fixed_sleep_budget_does_not_grow() {
     // asks, no ask after it, and no ask back to a stranger (4.5 s; scan 1253.7 s).
     // 2026-11-20: i151 added two absence proofs, an owner's kick that never reaches another
     // relay and a home an owner's second start never names again (4.5 s; scan 1258.2 s).
-    // 2026-11-21: pr-phrase-restore added spawn staggers and the T gaps of four lost-device
+    // 2026-11-21: pr-phrase-restore added spawn staggers and the T gaps of five lost-device
     // tests (the T an op lands before and after has no signal) and two absences, an answer
-    // B's view never gives and a replay's answer with no event (11.15 s; scan 1269.35 s).
-    const BUDGET_MS: u64 = 1_269_350;
+    // B's view never gives and a replay's answer with no event (12.6 s; scan 1270.85 s).
+    const BUDGET_MS: u64 = 1_270_850;
 
     let src = include_str!("test_harness.rs");
     // Built from pieces so this scan does not count its own source text.
@@ -72501,4 +72501,51 @@ async fn pr_a_welcome_recovery_drops_the_old_device_and_restores_owned_servers_f
     rx.await.expect("an answer").expect("the choice is taken");
     assert!(wait_until(40, async || name_at(&j).await.as_deref() == Some("honest")).await, "what the thief wrote after T stayed");
     drop((d1, k));
+}
+
+/// Yes beside the identity's own database (1.2 steps 8-9): the old device D2's folder,
+/// its key file gone, is restored with "someone else could have it". The restore mints F
+/// on D2's database, drops D2's secrets, signs the recovery, and the settling it owes runs
+/// at F's first start from what D2 held before T: what the stolen D1 wrote after T is
+/// undone at the member.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pr_a_welcome_recovery_beside_its_own_database_settles_what_it_held_before_t() {
+    use crate::crdt::operations::CrdtPayload as P;
+    let _g = test_guard();
+    let [m_tag, d1_tag, d2_tag, r_tag, j_tag] = [131u8, 132, 133, 134, 135];
+    let f_tag = 136u8;
+    let W3c1Cut { relay, master, d1, d2, j, server_id, _tmp } = w3c1_cut_server([m_tag, d1_tag, d2_tag, r_tag, j_tag]).await;
+    let d1_id = tag_kp(d1_tag).peer_id();
+    let name_at = async |n: &TestNode| n.live_server_state(&server_id).await.map(|s| s.name.read().clone());
+    let honest = w3c1_device_op(&server_id, &master, &tag_kp(d1_tag), P::ServerRenamed { new_name: "honest".into() }, 0);
+    for to in [&d2, &j] {
+        carry_as(&d1, to, crdt_broadcast(&server_id, &honest)).await;
+    }
+    assert!(wait_until(15, async || name_at(&d2).await.as_deref() == Some("honest")).await, "precondition: D2 folds it");
+    sleep_ms(1200).await;
+    let t_ms = crate::crdt::hlc::wall_clock_ms() as i64;
+    sleep_ms(300).await;
+    let stolen = w3c1_device_op(&server_id, &master, &tag_kp(d1_tag), P::ServerRenamed { new_name: "stolen".into() }, 0);
+    for to in [&d2, &j] {
+        carry_as(&d1, to, crdt_broadcast(&server_id, &stolen)).await;
+    }
+    assert!(wait_until(15, async || name_at(&d2).await.as_deref() == Some("stolen") && name_at(&j).await.as_deref() == Some("stolen")).await);
+    relay.set_online(&d1.device_id, false);
+    drop(d1);
+
+    let f = restart_node_with(&relay, d2, m_tag, f_tag, |db, pass| {
+        let store = crate::storage::MessageStore::open(db, pass).expect("D2's database");
+        store.forget_device_secrets().expect("the old device's secrets go");
+        let sign = crate::api::roster::RestoreSign::Recover { lost_since_ms: t_ms, no_wait: false };
+        crate::api::roster::sign_restore(&master, &tag_kp(f_tag), &tag_kp(r_tag), sign, db, pass).expect("the restore signs");
+    })
+    .await;
+    let settled = |s: &ServerState| s.base.as_ref().is_some_and(|b| b.state.cp_settles.as_ref().is_some_and(|st| st.devices.contains(&d1_id)));
+    assert!(
+        wait_until(40, async || f.live_server_state(&server_id).await.is_some_and(|s| settled(&s))).await,
+        "the settling the recovery owed never ran at F's first start",
+    );
+    assert_eq!(name_at(&f).await.as_deref(), Some("honest"), "what the stolen device wrote after T stayed");
+    assert!(wait_until(30, async || name_at(&j).await.as_deref() == Some("honest")).await, "the member never took the settling");
 }

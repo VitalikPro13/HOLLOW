@@ -4606,10 +4606,12 @@ mod welcome_restore_tests {
         open().save_friend("friend", "pending", "outgoing", 1).unwrap();
         assert!(may_set_aside_this_identity(), "control: a request nobody accepted");
 
-        open().save_server_state("srv", "{}").unwrap();
+        // A test row, written past the actor (`server_rows_are_written_only_through_the_actor`
+        // reads method calls in live code only).
+        crate::storage::MessageStore::save_server_state(&open(), "srv", "{}").unwrap();
         assert!(!may_set_aside_this_identity(), "a server holds this identity");
         assert!(set_aside_this_identity().is_err());
-        open().delete_server_state("srv").unwrap();
+        crate::storage::MessageStore::delete_server_state(&open(), "srv").unwrap();
         assert!(may_set_aside_this_identity(), "control: the server went");
 
         let store = open();
