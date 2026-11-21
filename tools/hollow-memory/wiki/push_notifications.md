@@ -183,6 +183,62 @@ db_passphrase) -> Vec<FetchedDm>`.
 - Joins exactly one DM room (DM wake) or the server room (`server_room` Some =
   channel wake), parses binary `0x06` (text) + `0x08` (image) frames + `EditMessage`
   (DM) / MLS + public channel messages (channel).
+- **Keeps what it does not show (HOL-SEC-244, 0.14.2).** The relay DELETES what it
+  buffered for the room as it hands it to the fetch socket (`replay_buffered_msgs`),
+  so a frame the fetch reads and drops is gone for the app too. The fetch shows DMs,
+  edits, DM link cards and file headers (and keeps a carried `RosterSync`'s roster);
+  every other `0x06` frame whose class is durable (`fetch_keep::durable`: relay lane,
+  not `live_only`) goes to `fetch_kept` in the message DB: deletions, reactions,
+  `DmSyncBatch`, carried `ProfileCard`/`SyncResponse`/CRDT twins, the Olm
+  `DestroyIdentityOrder` copy, `FriendAccept`/`FriendRemove`, a channel `LinkPreviewSet`,
+  own-sibling frames (never decrypted here) and Olm frames no session opened (key
+  unspent). A channel wake keeps its non-post directs from members (posts ride the
+  ring). An Olm frame the fetch DECRYPTED keeps its plaintext with the SHA-256 of its
+  `body` (its key is spent), so the app never decrypts it again; a later read of a
+  frame kept as it came attaches its plaintext to that row, in place.
+- **Who is kept.** DM wake: only a device the roster counts for one of the room's two
+  masters (`dm_sender_placed`: `resolver::is_device_of(from, ours)` or the wake's
+  friend, `fetch::Wake`); a bare master is dropped before (G1). Channel wake: a member
+  of the stored state (read ONCE per wake, `Wake::server_state`). Never: a device any
+  roster removed (`is_revoked`, checked before any decrypt; its `RosterNotice` is still
+  heard, never kept), a blocked identity, a refused PreKey, live-only envelopes (stale
+  by replay time), oversized frames. A read frame that cannot be kept is LOGGED (its
+  key is spent; sync is what brings it back).
+- **Bounds** (`storage/messages/fetch_kept.rs`): DM rooms 384 rows / 6 MiB, server rooms
+  128 rows / 2 MiB, separate budgets so no server member ever evicts what a friend sent;
+  1 MiB per frame, 30-day TTL, one row per frame hash. Inside a budget each ROOM is one
+  share (`scope`: the friend's master, or the server id), since identities are free: a
+  full budget gives up the oldest frame of the heaviest SENDER in the heaviest ROOM; a
+  newcomer room (or, within its room, a newcomer sender) that would be heaviest with
+  nothing held is turned away. Purged with the room: `save_friend` to anything but
+  accepted, `remove_friend`, `delete_server_state` (leave), `clear_history_in`; expired
+  rows are swept at node start (`KeptQueue::new`) and by every keep.
+- **Saves come after the keep.** A PreKey's new session (`persist_crypto_state`) and the
+  read (`persist_olm_read`) are queued only once the row committed
+  (`olm_decrypt_payload` no longer saves; `handle_binary_frame` does), so no crash leaves
+  a key spent on disk with its frame gone.
+- **The app replays them as relay frames** (`fetch_keep::KeptQueue`): on the room's
+  `members` answer (a fresh join and a resumed session both get one) the rows are read
+  (a row already queued is not queued twice) and fed ahead of the relay's own events as
+  `WsEvent::DirectMessage` through the whole live path: own-echo drop, seal
+  (`frame_auth::open`, room + route), bare-master drop, live-only/lane checks,
+  `handle_incoming_request`, every handler gate. Only the frame budget is skipped (the
+  keep caps bound it). A row is forgotten when the loop asks for the next event, i.e.
+  once its replay returned: a stop mid-queue keeps the rest (and the one in flight). A
+  decrypted Olm frame's plaintext stands in for the decrypt only inside its own replay
+  (`fetch_keep::OPENED` task-local, matched by device + body hash); the ratchet and read
+  mark stay as the fetch saved them. Duplicates (a resumed session's ring delivering the
+  same frame, or a replay cut short and handed back after a restart) fall to
+  `already_decrypted`, the read mark, and each durable handler's own id dedup.
+- **Not affected:** `own_room`/`inbox:` traffic (the fetch never joins those rooms; the
+  mailbox replay is TTL-only) and a session-in-grace's ring (`replay_grace_directs`
+  copies, never deletes). On a resume the ring hands the same frames back, but their
+  keys are spent in the copy the app takes, so the kept rows are what carries them.
+- **Trap (stack):** the app takes the fetch's newer Olm copy (`take_newer_if_answered`)
+  at the top of the WS frame arm. Taken inside the Olm arm, the pickle restore overran a
+  2 MiB debug worker stack (measured Nov 21: event loop poll frame ~1.05 MiB, the
+  handler ~755 KiB, the restore ~200 KiB); harness
+  `sec244_a_resumed_app_takes_its_fetchs_copy_before_it_reads_the_ring`.
 - `IDLE_AFTER_FIRST = 1200ms`: after the first message, wait only this between
   frames to drain the replayed burst, then return PROMPTLY (the banner can't
   render until this returns). `outstanding_image` holds to the full deadline when

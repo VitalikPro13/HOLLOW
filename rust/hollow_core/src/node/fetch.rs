@@ -4,7 +4,7 @@
 //! the SERVER room for a channel wake (MLS group ciphertext fanned out per
 //! offline member, or signed public-channel plaintext). No CRDT, no gossip.
 
-use crate::storage::ChannelInsert;
+use crate::storage::{ChannelInsert, KeptPool};
 use std::time::Duration;
 
 use base64::Engine;
@@ -88,15 +88,15 @@ pub(crate) async fn run_fetch(
         hollow_log!("[HOLLOW-FETCH] Channel wake for a server this phone hides as age-restricted, nothing fetched");
         return Ok(Vec::new());
     }
-    let room = match server_room {
-        Some(sid) => sid.to_string(),
+    let (room, mut wake) = match server_room {
+        Some(sid) => (sid.to_string(), Wake::channel(sid)),
         None => {
             let store = crate::storage::MessageStore::open(db_path, db_passphrase)?;
             let Some(room) = dm_wake_room(&store, local_master, sender_peer_id) else {
                 hollow_log!("[HOLLOW-FETCH] DM wake from someone who is not a friend, nothing fetched");
                 return Ok(Vec::new());
             };
-            room
+            (room, Wake::for_dm_sender(sender_peer_id))
         }
     };
 
@@ -162,7 +162,7 @@ pub(crate) async fn run_fetch(
             }
             Message::Binary(data) => {
                 handle_binary_frame(
-                    &data, server_room, olm, mls, &mut mls_dirty, crypto_store, db_path,
+                    &data, &mut wake, olm, mls, &mut mls_dirty, crypto_store, db_path,
                     db_passphrase, peer_id, local_master, &mut messages,
                 );
             }
@@ -375,7 +375,7 @@ fn handle_text_frame(text: &str) {
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn handle_binary_frame(
     data: &[u8],
-    server_room: Option<&str>,
+    wake: &mut Wake,
     olm: &mut OlmManager,
     mls: &mut Option<MlsManager>,
     mls_dirty: &mut bool,
@@ -413,30 +413,119 @@ pub(crate) fn handle_binary_frame(
             crate::node::frame_auth::Delivery::Room
         };
         match crate::node::frame_auth::open(frame, &from, &room, delivery, crate::node::frame_auth::now_ms()) {
-            Ok(opened) => Some((from, String::from_utf8_lossy(opened.body).to_string(), opened.ts_ms)),
+            Ok(opened) => Some((from, room, frame, String::from_utf8_lossy(opened.body).to_string(), opened.ts_ms)),
             Err(refusal) => {
                 hollow_log!("[HOLLOW-FETCH] Dropped a frame from {from}: {refusal:?}");
                 None
             }
         }
     });
-    if let Some((from, payload, sealed_at)) = payload {
-        if server_room.is_some() {
+    if let Some((from, room, frame, payload, sealed_at)) = payload {
+        if let Some(sid) = wake.server.clone() {
             if let Some(entry) = try_process_channel_msg(
                 &from, &payload, mls, mls_dirty, db_path, db_passphrase, local_master,
             ) {
                 messages.push(entry);
+            } else if data[0] == 0x06
+                && channel_wake_keeps(&from, &payload, wake, db_path, db_passphrase)
+                && !crate::node::fetch_keep::keep(db_path, db_passphrase, KeptPool::Server, &sid, &from, &room, frame, None)
+            {
+                hollow_log!("[HOLLOW-FETCH] A frame from {from} in {sid} could not be kept for the app");
             }
         } else if data[0] == 0x06 {
-            if let Some(dm) = try_decrypt_dm(
+            let (dm, keep, new_session) = try_decrypt_dm(
                 &from, &payload, sealed_at, olm, crypto_store, db_path, db_passphrase, peer_id, local_master,
-            ) {
+            );
+            let keep = match keep {
+                Keep::No => Keep::No,
+                keep if dm_sender_placed(&from, local_master, wake.peer.as_deref()) => keep,
+                keep => {
+                    hollow_log!(
+                        "[HOLLOW-FETCH] Not keeping a frame from {from}: neither side's roster counts it{}",
+                        if matches!(keep, Keep::Opened { .. }) { "; it was read, so its key is spent" } else { "" },
+                    );
+                    Keep::No
+                }
+            };
+            let scope = wake.peer.clone().unwrap_or_default();
+            let opened = match keep {
+                Keep::No => false,
+                Keep::Raw => {
+                    if !crate::node::fetch_keep::keep(db_path, db_passphrase, KeptPool::Dm, &scope, &from, &room, frame, None) {
+                        hollow_log!("[HOLLOW-FETCH] A frame from {from} could not be kept for the app");
+                    }
+                    false
+                }
+                Keep::Opened { body, plaintext } => {
+                    if !crate::node::fetch_keep::keep(
+                        db_path, db_passphrase, KeptPool::Dm, &scope, &from, &room, frame, Some((body.as_str(), plaintext)),
+                    ) {
+                        hollow_log!("[HOLLOW-FETCH] A frame from {from} was read and could not be kept for the app; its key is spent");
+                    }
+                    true
+                }
+            };
+            // The session saves come after the keep, so no crash leaves a key spent on
+            // disk and its frame gone.
+            if new_session {
+                persist_crypto_state(olm, crypto_store, &from);
+            }
+            if let Some(dm) = dm {
                 persist_olm_read(olm, crypto_store, &from, sealed_at);
                 messages.push(dm);
+            } else if opened {
+                persist_olm_read(olm, crypto_store, &from, sealed_at);
             }
         }
     }
     // Other binary frames (file transfers) — ignore.
+}
+
+/// What one fetch woke for, read once for all its frames.
+pub(crate) struct Wake {
+    /// A channel wake: the server.
+    server: Option<String>,
+    /// A DM wake: the master at the room's other end (ours for our own room).
+    peer: Option<String>,
+    /// The server's stored state, read at the first frame that asks.
+    state: Option<Option<crate::crdt::server_state::ServerState>>,
+}
+
+impl Wake {
+    pub(crate) fn channel(server_id: &str) -> Self {
+        Wake { server: Some(server_id.to_string()), peer: None, state: None }
+    }
+
+    pub(crate) fn dm(peer_master: &str) -> Self {
+        Wake { server: None, peer: Some(peer_master.to_string()), state: None }
+    }
+
+    /// A DM wake named by `sender`, a device or a master: the room's other end is its master.
+    fn for_dm_sender(sender: &str) -> Self {
+        Wake::dm(&crate::node::resolver::resolve(sender))
+    }
+
+    fn server_state(&mut self, db_path: &str, db_passphrase: &str) -> Option<&crate::crdt::server_state::ServerState> {
+        let sid = self.server.as_deref()?;
+        self.state.get_or_insert_with(|| stored_server_state(db_path, db_passphrase, sid)).as_ref()
+    }
+}
+
+/// A DM-room frame is kept for the app only from a device the roster counts for one of
+/// the room's two masters: ours or the friend's. Any other key is a fresh share for
+/// whoever mints it, and a bare master id is no device.
+fn dm_sender_placed(from: &str, local_master: &str, peer: Option<&str>) -> bool {
+    crate::node::resolver::is_device_of(from, local_master) || peer.is_some_and(|m| crate::node::resolver::is_device_of(from, m))
+}
+
+/// What the app gets of a DM-room frame the fetch read but does not handle (HOL-SEC-244):
+/// the relay has deleted its copy.
+enum Keep {
+    No,
+    /// The frame as it came: the app reads it as if from the relay.
+    Raw,
+    /// An Olm frame the fetch decrypted: its plaintext, since the key is spent.
+    Opened { body: String, plaintext: Vec<u8> },
 }
 
 /// A FileHeader and its companion text DM can arrive as TWO entries sharing one
@@ -821,6 +910,21 @@ fn stored_server_state(
     serde_json::from_str(&json).ok()
 }
 
+/// A direct frame in a channel wake that is not a post: the app gets it if it is durable
+/// and from a member we have not blocked whose device no roster removed. Posts come
+/// again from the channel's ring.
+fn channel_wake_keeps(from: &str, payload: &str, wake: &mut Wake, db_path: &str, db_passphrase: &str) -> bool {
+    let Ok(msg) = serde_json::from_str::<HavenMessage>(payload) else { return false };
+    if matches!(msg, HavenMessage::MlsChannelMessage { .. } | HavenMessage::PublicChannelMessage { .. })
+        || !crate::node::fetch_keep::durable(&msg)
+        || crate::node::blocklist::is_blocked(from)
+        || crate::node::resolver::is_revoked(from)
+    {
+        return false;
+    }
+    wake.server_state(db_path, db_passphrase).is_some_and(|s| s.is_member(&crate::node::resolver::resolve(from)))
+}
+
 /// The live node's post gate (member, visibility, posting, mute, media-only, slow
 /// mode) for a push-fetched channel post: true = drop.
 #[allow(clippy::too_many_arguments)]
@@ -964,14 +1068,23 @@ fn try_decrypt_dm(
     // is THIS device (used only for the own-sibling self-check); the signature is
     // over the master, so the two are distinct on a linked device.
     local_master: &str,
-) -> Option<FetchedDm> {
+) -> (Option<FetchedDm>, Keep, bool) {
     let haven: HavenMessage = match serde_json::from_str(data) {
         Ok(h) => h,
         Err(e) => {
             hollow_log!("[HOLLOW-FETCH] Buffered DM frame from {from} ({} B) failed HavenMessage parse — dropped: {e}", data.len());
-            return None;
+            return (None, Keep::No, false);
         }
     };
+    let raw = if crate::node::fetch_keep::durable(&haven) && !crate::node::resolver::is_revoked(from) { Keep::Raw } else { Keep::No };
+
+    // PHANTOM-CHAT GUARD, as live: a device removed (a DM earlier in this fetch may have
+    // carried its removal) gets nothing decrypted, stored, shown or kept. Its roster
+    // statements still count: they verify alone.
+    if crate::node::resolver::is_revoked(from) && !matches!(haven, HavenMessage::RosterNotice { .. }) {
+        hollow_log!("[HOLLOW-REVOKE] Fetch dropped a frame from removed device {from}");
+        return (None, Keep::No, false);
+    }
 
     // DEFENSE: never process an envelope from OUR OWN identity (a sibling
     // self-echo). This inserter hardcodes `is_mine=false` and files under
@@ -979,7 +1092,7 @@ fn try_decrypt_dm(
     // mid-keyed dedup would then block the correct copy from ever landing.
     if crate::node::resolver::same_identity(from, local_peer_id) {
         hollow_log!("[HOLLOW-FETCH] Skipping own-sibling envelope from {from}");
-        return None;
+        return (None, raw, false);
     }
 
     // Olm decrypt is keyed by the SENDER DEVICE id, since sessions are
@@ -990,7 +1103,7 @@ fn try_decrypt_dm(
     // BLOCK GUARD: relay-buffered replays from a blocked identity are dropped
     // exactly like live traffic.
     if crate::node::blocklist::is_blocked(from) {
-        return None;
+        return (None, Keep::No, false);
     }
     match haven {
         HavenMessage::Encrypted {
@@ -1000,25 +1113,24 @@ fn try_decrypt_dm(
             identity_sig,
             identity_pk,
         } => {
-            // PHANTOM-CHAT GUARD, as live: a device removed (a DM earlier in this fetch
-            // may have carried its removal) gets nothing decrypted, stored or shown.
-            if crate::node::resolver::is_revoked(from) {
-                hollow_log!("[HOLLOW-REVOKE] Fetch dropped a DM from removed device {from}");
-                return None;
-            }
             let ciphertext = match OlmManager::decode_base64(&body) {
                 Ok(b) => b,
                 Err(e) => {
                     hollow_log!("[HOLLOW-FETCH] Encrypted body from {from}: base64 decode failed — dropped: {e}");
-                    return None;
+                    return (None, Keep::No, false);
                 }
             };
 
-            let plaintext = olm_decrypt_payload(
+            // Unread here, its key is unspent: the app's own session judges it.
+            let (plaintext, new_session) = match olm_decrypt_payload(
                 from, message_type, identity_key.as_deref(),
                 identity_sig.as_deref(), identity_pk.as_deref(),
-                &ciphertext, olm, crypto_store, local_peer_id,
-            )?;
+                &ciphertext, olm, local_peer_id,
+            ) {
+                Ok(opened) => opened,
+                Err(Unread::Refused) => return (None, Keep::No, false),
+                Err(Unread::Failed) => return (None, Keep::Raw, false),
+            };
             // The app loads this session later and never sees the PreKey, so the
             // key-change notice is recorded here or not at all.
             if let (0, Some(key), Ok(store)) = (
@@ -1030,7 +1142,11 @@ fn try_decrypt_dm(
             }
 
             let text = String::from_utf8_lossy(&plaintext).to_string();
-            match serde_json::from_str::<MessageEnvelope>(&text) {
+            let envelope = serde_json::from_str::<MessageEnvelope>(&text);
+            // Anything acted on however late that the fetch does not show goes to the app
+            // with the plaintext; the live-only would be stale by the time it replays.
+            let lasting = envelope.as_ref().is_ok_and(|env| !env.live_only());
+            let shown = match envelope {
                 Ok(MessageEnvelope::DirectMessage { inner }) => {
                     handle_direct_message(from, &convo, local_master, local_peer_id, *inner, db_path, db_passphrase)
                 }
@@ -1049,7 +1165,7 @@ fn try_decrypt_dm(
                 }
                 // A roster trade the app would answer (AR-29): its key is spent here, so
                 // keep what verifies and leave the answer to the app.
-                Ok(MessageEnvelope::Carried { msg, .. }) => {
+                Ok(MessageEnvelope::Carried { msg, .. }) if matches!(*msg, HavenMessage::RosterSync { .. }) => {
                     if let HavenMessage::RosterSync { roster, reply, .. } = *msg {
                         persist_olm_read(olm, crypto_store, from, sealed_at);
                         crate::node::roster_reach::fetch_roster(
@@ -1062,21 +1178,31 @@ fn try_decrypt_dm(
                     hollow_log!("[HOLLOW-FETCH] Decrypted envelope from {from} failed MessageEnvelope parse ({} B) — dropped: {e}", text.len());
                     None
                 }
-                Ok(_) => None, // Other envelope types — ignore in fetch mode.
-            }
+                Ok(_) => return (None, if lasting { Keep::Opened { body, plaintext } } else { Keep::No }, new_session),
+            };
+            (shown, Keep::No, new_session)
         }
         HavenMessage::RosterNotice { roster } => {
             crate::node::roster_reach::fetch_roster(
                 db_path, db_passphrase, local_master, local_peer_id, from, roster, false,
             );
-            None
+            (None, Keep::No, false)
         }
-        _ => None,
+        _ => (None, raw, false),
     }
 }
 
+/// Why an Olm body went unread in the fetch.
+enum Unread {
+    /// What the app refuses too: no identity key, or one its device did not sign.
+    Refused,
+    /// No session of ours opened it, and its key is still unspent.
+    Failed,
+}
+
 /// Decrypt an Olm-encrypted DM body. Sessions are keyed by the SENDER DEVICE
-/// id (`from`). Returns `None` (logged) when decryption fails.
+/// id (`from`). Says why (logged) when it reads nothing; with the plaintext, whether a
+/// PreKey made or switched the session, which the caller saves once it kept the frame.
 #[allow(clippy::too_many_arguments)]
 fn olm_decrypt_payload(
     from: &str,
@@ -1086,42 +1212,36 @@ fn olm_decrypt_payload(
     identity_pk: Option<&str>,
     ciphertext: &[u8],
     olm: &mut OlmManager,
-    crypto_store: &CryptoStore,
     local_device: &str,
-) -> Option<Vec<u8>> {
+) -> Result<(Vec<u8>, bool), Unread> {
     if message_type == 0 {
         // PreKeyMessage
         let their_identity = match identity_key {
             Some(k) => k,
             None => {
                 hollow_log!("[HOLLOW-FETCH] PreKey from {from} missing identity_key — dropped");
-                return None;
+                return Err(Unread::Refused);
             }
         };
         // Same gate as the live node, and here it matters twice: a session built
         // in this isolate is persisted and loaded by the app afterwards.
         if !crate::node::crypto_handler::verify_olm_identity(from, their_identity, identity_sig, identity_pk) {
             hollow_log!("[HOLLOW-SECURITY] REJECTED PreKey from {from} in fetch: identity key not signed by that device");
-            return None;
+            return Err(Unread::Refused);
         }
         match olm.open_prekey(from, their_identity, ciphertext, local_device) {
-            Ok(opened) => {
-                if opened.created || opened.switched {
-                    persist_crypto_state(olm, crypto_store, from);
-                }
-                Some(opened.plaintext)
-            }
+            Ok(opened) => Ok((opened.plaintext, opened.created || opened.switched)),
             Err(e) => {
                 hollow_log!("[HOLLOW-FETCH] PreKey from {from} undecryptable: {e}");
-                None
+                Err(Unread::Failed)
             }
         }
     } else {
         match olm.decrypt(from, message_type, ciphertext) {
-            Ok(opened) => Some(opened.plaintext),
+            Ok(opened) => Ok((opened.plaintext, false)),
             Err(e) => {
                 hollow_log!("[HOLLOW-FETCH] Decrypt failed for {from}: {e}");
-                None
+                Err(Unread::Failed)
             }
         }
     }
@@ -1900,7 +2020,7 @@ mod tests {
         .unwrap();
 
         let crypto_store = CryptoStore::open(path.clone(), pass.clone()).unwrap();
-        assert!(try_decrypt_dm(&b, &frame, crate::node::frame_auth::now_ms(), &mut alice_olm, &crypto_store, &path, &pass, &a, &a).is_some());
+        assert!(try_decrypt_dm(&b, &frame, crate::node::frame_auth::now_ms(), &mut alice_olm, &crypto_store, &path, &pass, &a, &a).0.is_some());
         let store = crate::storage::MessageStore::open(&path, &pass).unwrap();
         assert!(
             store.get_security_alerts().unwrap().iter().any(|al| {
@@ -1952,7 +2072,7 @@ mod tests {
 
         let crypto_store = CryptoStore::open(path.clone(), pass.clone()).unwrap();
         let mut messages = Vec::new();
-        handle_binary_frame(&data, None, &mut alice_olm, &mut None, &mut false, &crypto_store, &path, &pass, &a, &a, &mut messages);
+        handle_binary_frame(&data, &mut Wake::dm(&b), &mut alice_olm, &mut None, &mut false, &crypto_store, &path, &pass, &a, &a, &mut messages);
         assert_eq!(messages.len(), 1, "the DM must open");
         let store = crate::storage::MessageStore::open(&path, &pass).unwrap();
         let mut marks = Vec::new();
@@ -2023,6 +2143,11 @@ mod tests {
     impl B3Push {
         /// `envelope` from `b1`, read by the push fetch as Alice.
         fn fetch(&mut self, envelope: &MessageEnvelope) -> Option<FetchedDm> {
+            self.read(envelope).0
+        }
+
+        /// [`Self::fetch`], with what it leaves for the app.
+        fn read(&mut self, envelope: &MessageEnvelope) -> (Option<FetchedDm>, Keep) {
             let json = serde_json::to_string(envelope).unwrap();
             let (message_type, ciphertext) = self.b1_olm.encrypt(&self.a_dev, json.as_bytes()).unwrap();
             let frame = serde_json::to_string(
@@ -2031,10 +2156,11 @@ mod tests {
             .unwrap();
             let crypto_store = CryptoStore::open(self.path.clone(), self.pass.clone()).unwrap();
             let (path, pass, a, a_dev) = (self.path.clone(), self.pass.clone(), self.a.clone(), self.a_dev.clone());
-            try_decrypt_dm(
+            let (shown, keep, _) = try_decrypt_dm(
                 &self.b1.peer_id(), &frame, crate::node::frame_auth::now_ms(), &mut self.alice_olm, &crypto_store,
                 &path, &pass, &a_dev, &a,
-            )
+            );
+            (shown, keep)
         }
 
         fn store(&self) -> crate::storage::MessageStore {
@@ -2056,6 +2182,262 @@ mod tests {
                 }),
             }
         }
+    }
+
+    /// HOL-SEC-244: an envelope the fetch decrypts but does not show leaves its plaintext
+    /// for the app only when the app would still act on it that late.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // the resolver guard is process-global
+    async fn sec244_the_fetch_keeps_a_durable_envelope_it_does_not_show() {
+        let _g = crate::node::resolver::test_lock();
+        crate::node::resolver::clear_all();
+        crate::node::blocklist::clear_for_test();
+        let mut push = b3_push();
+        match push.read(&MessageEnvelope::SessionAck) {
+            (None, Keep::Opened { body, plaintext }) => {
+                assert!(!body.is_empty());
+                assert!(matches!(serde_json::from_slice(&plaintext), Ok(MessageEnvelope::SessionAck)));
+            }
+            _ => panic!("a durable envelope the fetch does not show is kept with its plaintext"),
+        }
+        let typing = MessageEnvelope::Typing { sid: "s".into(), cid: "c".into() };
+        assert!(matches!(push.read(&typing), (None, Keep::No)), "a live-only envelope is never kept");
+        let dm = push.dm("s244-dm", None);
+        assert!(matches!(push.read(&dm), (Some(_), Keep::No)), "a DM the fetch shows is not kept again");
+    }
+
+    /// `msg` sealed by `b1` for Alice's device in `room`, handed to the push fetch as the
+    /// relay replays a direct frame. Returns the sealed frame.
+    fn sec244_feed(push: &mut B3Push, room: &str, server_room: Option<&str>, from: &NativeKeypair, msg: &HavenMessage) -> Vec<u8> {
+        let sealed = crate::node::frame_auth::seal(from, room, &push.a_dev, &serde_json::to_vec(msg).unwrap());
+        let mut data = vec![0x06];
+        data.extend_from_slice(format!("{room}\0{}\0", from.peer_id()).as_bytes());
+        data.extend_from_slice(&sealed);
+        let crypto_store = CryptoStore::open(push.path.clone(), push.pass.clone()).unwrap();
+        let (path, pass, a, a_dev) = (push.path.clone(), push.pass.clone(), push.a.clone(), push.a_dev.clone());
+        let mut wake = server_room.map_or_else(|| Wake::dm(&push.bm.peer_id()), Wake::channel);
+        handle_binary_frame(
+            &data, &mut wake, &mut push.alice_olm, &mut None, &mut false, &crypto_store, &path, &pass, &a_dev, &a,
+            &mut Vec::new(),
+        );
+        sealed
+    }
+
+    /// HOL-SEC-244: a frame the fetch cannot read or does not handle, but the app would
+    /// still act on, is kept as it came; what the app refuses, or acts on only while
+    /// fresh, is not.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // the resolver guard is process-global
+    async fn sec244_the_fetch_keeps_an_unread_durable_frame_as_it_came() {
+        let _g = crate::node::resolver::test_lock();
+        crate::node::resolver::clear_all();
+        crate::node::blocklist::clear_for_test();
+        let mut push = b3_push();
+        let b1 = push.b1.clone();
+        let room = "sec244-dm-room";
+        let removal = HavenMessage::FriendRemove { at: None };
+        let unread = HavenMessage::Encrypted {
+            message_type: 1, body: "AAAAAAAA".into(), identity_key: None, identity_sig: None, identity_pk: None,
+        };
+        let kept_removal = sec244_feed(&mut push, room, None, &b1, &removal);
+        let kept_unread = sec244_feed(&mut push, room, None, &b1, &unread);
+        sec244_feed(&mut push, room, None, &b1, &HavenMessage::KeyRequest { to: None, ts: None, sig: None, pk: None });
+        let refused = HavenMessage::Encrypted {
+            message_type: 0, body: "AAAAAAAA".into(), identity_key: None, identity_sig: None, identity_pk: None,
+        };
+        sec244_feed(&mut push, room, None, &b1, &refused);
+        crate::node::blocklist::block(&push.bm.peer_id());
+        sec244_feed(&mut push, room, None, &b1, &HavenMessage::FriendRemove { at: Some(7) });
+        crate::node::blocklist::clear_for_test();
+
+        let kept = push.store().take_fetch_kept(room, crate::node::frame_auth::now_ms()).unwrap();
+        let frames: Vec<&[u8]> = kept.iter().map(|k| k.frame.as_slice()).collect();
+        assert_eq!(frames, [kept_removal.as_slice(), kept_unread.as_slice()], "kept: a durable plaintext frame and an Olm frame no session read");
+        assert!(kept.iter().all(|k| k.opened.is_none() && k.device == push.b1.peer_id() && k.room == room));
+    }
+
+    /// HOL-SEC-244: a channel wake keeps a member's direct that is not a post; posts come
+    /// again from the channel's ring, and a stranger's frame is never kept.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // the resolver guard is process-global
+    async fn sec244_a_channel_wake_keeps_a_members_direct_but_never_a_post() {
+        let _g = crate::node::resolver::test_lock();
+        crate::node::resolver::clear_all();
+        crate::node::blocklist::clear_for_test();
+        let mut push = b3_push();
+        let sid = "srv-sec244";
+        let (a, bm) = (push.a.clone(), push.bm.peer_id());
+        let state = server_with(sid, &[(a.as_str(), "a"), (bm.as_str(), "b")]);
+        push.store().save_server_state(sid, &serde_json::to_string(&state).unwrap()).unwrap();
+        let b1 = push.b1.clone();
+        let stranger = kp(131);
+        let removal = HavenMessage::FriendRemove { at: None };
+        let kept_removal = sec244_feed(&mut push, sid, Some(sid), &b1, &removal);
+        let post = HavenMessage::MlsChannelMessage { server_id: sid.into(), body: "AAAAAAAA".into(), channel_id: None };
+        sec244_feed(&mut push, sid, Some(sid), &b1, &post);
+        sec244_feed(&mut push, sid, Some(sid), &stranger, &removal);
+        crate::node::blocklist::block(&bm);
+        sec244_feed(&mut push, sid, Some(sid), &b1, &HavenMessage::FriendRemove { at: Some(9) });
+        crate::node::blocklist::clear_for_test();
+        let kept = push.store().take_fetch_kept(sid, crate::node::frame_auth::now_ms()).unwrap();
+        assert!(kept.iter().all(|k| k.scope == sid && k.pool == KeptPool::Server), "charged to the server's room");
+        assert_eq!(kept.iter().map(|k| k.frame.clone()).collect::<Vec<_>>(), [kept_removal]);
+    }
+
+    /// Review HOL-SEC-244 (SHOULD-2): a DM wake keeps a frame from a device that is
+    /// neither ours nor the friend's; each such key is a fresh fair share of its own.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // the resolver guard is process-global
+    async fn rev244_a_dm_wake_keeps_nothing_from_a_device_no_side_counts() {
+        let _g = crate::node::resolver::test_lock();
+        crate::node::resolver::clear_all();
+        crate::node::blocklist::clear_for_test();
+        let mut push = b3_push();
+        let room = "rev244-dm-room";
+        let throwaway = kp(141);
+        sec244_feed(&mut push, room, None, &throwaway, &HavenMessage::FriendRemove { at: None });
+        let kept = push.store().take_fetch_kept(room, crate::node::frame_auth::now_ms()).unwrap();
+        assert!(kept.is_empty(), "a DM wake kept a frame from {}, a device neither side counts", throwaway.peer_id());
+        // Control: the friend's own device and ours are kept.
+        let (b2, a2) = (push.b2.clone(), push.a2.clone());
+        let theirs = sec244_feed(&mut push, room, None, &b2, &HavenMessage::FriendRemove { at: Some(3) });
+        let ours = sec244_feed(&mut push, room, None, &a2, &HavenMessage::FriendRemove { at: Some(4) });
+        let kept = push.store().take_fetch_kept(room, crate::node::frame_auth::now_ms()).unwrap();
+        let bm = push.bm.peer_id();
+        assert!(kept.iter().all(|k| k.scope == bm && k.pool == KeptPool::Dm), "charged to the friend's room");
+        assert_eq!(kept.into_iter().map(|k| k.frame).collect::<Vec<_>>(), [theirs, ours]);
+    }
+
+    /// HOL-SEC-244 review (SHOULD-2): a wake named by a friend's device keeps by that
+    /// friend's master, so all its counted devices place.
+    #[test]
+    fn sec244_a_dm_wake_is_for_the_senders_master() {
+        let _g = crate::node::resolver::test_lock();
+        crate::node::resolver::clear_all();
+        let push = b3_push();
+        assert_eq!(Wake::for_dm_sender(&push.b1.peer_id()).peer, Some(push.bm.peer_id()));
+        crate::node::resolver::clear_all();
+    }
+
+    /// Review HOL-SEC-244 (SHOULD-3): the wiki and gate table say a removed device's frame
+    /// is never kept; only the Olm arm checked it, so its plaintext frames were kept.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // the resolver guard is process-global
+    async fn rev244_a_removed_devices_frame_is_never_kept() {
+        let _g = crate::node::resolver::test_lock();
+        crate::node::resolver::clear_all();
+        crate::node::blocklist::clear_for_test();
+        let mut push = b3_push();
+        let room = "rev244-dm-room2";
+        let (b1, bm) = (push.b1.clone(), push.bm.peer_id());
+        // A confirmed session, so b1's next DM is a normal Olm message no PreKey check sees.
+        let before = push.dm("rev244-before", None);
+        assert!(push.fetch(&before).is_some(), "precondition: b1's DM opens");
+        let (t, ct) = push.alice_olm.encrypt(&b1.peer_id(), b"ack").unwrap();
+        push.b1_olm.decrypt(&push.a_dev, t, &ct).unwrap();
+        // Removed, yet still resolving to its master (each layer alone: placement passes).
+        crate::node::resolver::mark_revoked(&[b1.peer_id()]);
+        crate::node::resolver::update(&b1.peer_id(), &bm);
+        assert!(crate::node::resolver::is_revoked(&b1.peer_id()));
+        sec244_feed(&mut push, room, None, &b1, &HavenMessage::FriendRemove { at: None });
+        let dm = push.dm_at("rev244-removed-dm", 2_000, None);
+        let json = serde_json::to_string(&dm).unwrap();
+        let (t, _) = push.b1_olm.encrypt(&push.a_dev, json.as_bytes()).unwrap();
+        assert_eq!(t, 1, "precondition: a normal Olm message");
+        let dm = push.dm_at("rev244-removed-dm2", 3_000, None);
+        assert!(push.fetch(&dm).is_none(), "a removed device's DM was read");
+        crate::node::resolver::unmark_revoked(&[b1.peer_id()]);
+        // Our own removed device's roster statement is heard, never kept.
+        let (a2, own, a) = (push.a2.clone(), push.own.clone(), push.a.clone());
+        crate::node::resolver::mark_revoked(&[a2.peer_id()]);
+        crate::node::resolver::update(&a2.peer_id(), &a);
+        sec244_feed(&mut push, room, None, &a2, &HavenMessage::RosterNotice { roster: own });
+        crate::node::resolver::unmark_revoked(&[a2.peer_id()]);
+        let kept = push.store().take_fetch_kept(room, crate::node::frame_auth::now_ms()).unwrap();
+        assert!(kept.is_empty(), "a removed device's frame was kept");
+    }
+
+    /// HOL-SEC-244 review (SHOULD-3): a channel wake keeps nothing from a member's device
+    /// some roster removed, the same frame from a counted device being kept.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // the resolver guard is process-global
+    async fn sec244_a_channel_wake_keeps_nothing_from_a_removed_device() {
+        let _g = crate::node::resolver::test_lock();
+        crate::node::resolver::clear_all();
+        crate::node::blocklist::clear_for_test();
+        let mut push = b3_push();
+        let sid = "srv-sec244-rev";
+        let (a, bm) = (push.a.clone(), push.bm.peer_id());
+        let state = server_with(sid, &[(a.as_str(), "a"), (bm.as_str(), "b")]);
+        push.store().save_server_state(sid, &serde_json::to_string(&state).unwrap()).unwrap();
+        let (b1, b2) = (push.b1.clone(), push.b2.clone());
+        crate::node::resolver::mark_revoked(&[b2.peer_id()]);
+        crate::node::resolver::update(&b2.peer_id(), &bm);
+        sec244_feed(&mut push, sid, Some(sid), &b2, &HavenMessage::FriendRemove { at: None });
+        crate::node::resolver::unmark_revoked(&[b2.peer_id()]);
+        let kept = sec244_feed(&mut push, sid, Some(sid), &b1, &HavenMessage::FriendRemove { at: Some(5) });
+        let held = push.store().take_fetch_kept(sid, crate::node::frame_auth::now_ms()).unwrap();
+        assert_eq!(held.into_iter().map(|k| k.frame).collect::<Vec<_>>(), [kept], "a removed device's frame was kept");
+    }
+
+    /// HOL-SEC-244 review (NIT-4): reading a PreKey saves no session by itself; the
+    /// session the fetch made is saved by the caller once the frame is kept.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // the resolver guard is process-global
+    async fn sec244_a_prekey_session_is_saved_only_after_its_frame_is_kept() {
+        let _g = crate::node::resolver::test_lock();
+        crate::node::resolver::clear_all();
+        crate::node::blocklist::clear_for_test();
+        let b1 = |push: &B3Push| push.b1.peer_id();
+        let mut push = b3_push();
+        let crypto_store = CryptoStore::open(push.path.clone(), push.pass.clone()).unwrap();
+        let json = serde_json::to_string(&MessageEnvelope::SessionAck).unwrap();
+        let (message_type, ciphertext) = push.b1_olm.encrypt(&push.a_dev, json.as_bytes()).unwrap();
+        assert_eq!(message_type, 0, "precondition: the first frame is a PreKey");
+        let frame = serde_json::to_string(&crate::node::crypto_handler::encrypted_frame(&push.b1_olm, message_type, &ciphertext)).unwrap();
+        let (path, pass, a, a_dev) = (push.path.clone(), push.pass.clone(), push.a.clone(), push.a_dev.clone());
+        let (_, keep, new_session) = try_decrypt_dm(
+            &b1(&push), &frame, crate::node::frame_auth::now_ms(), &mut push.alice_olm, &crypto_store, &path, &pass, &a_dev, &a,
+        );
+        assert!(matches!(keep, Keep::Opened { .. }) && new_session);
+        assert!(crypto_store.flushed(Duration::from_secs(10)).await);
+        assert!(push.store().load_olm_session(&b1(&push)).unwrap().is_none(), "the read saved the session before any keep");
+
+        let room = "sec244-prekey-room";
+        let mut push = b3_push();
+        sec244_prekey_through_the_fetch(&mut push, room, &MessageEnvelope::SessionAck).await;
+        let kept = push.store().fetch_kept_for(room, crate::node::frame_auth::now_ms()).unwrap();
+        assert!(kept.len() == 1 && kept[0].opened.is_some(), "the read frame is kept with its plaintext");
+        assert!(push.store().load_olm_session(&b1(&push)).unwrap().is_some(), "the session the PreKey made is saved");
+        assert!(
+            push.store().load_olm_read_marks().unwrap().iter().any(|(p, _)| *p == b1(&push)),
+            "the read mark of a kept frame is saved",
+        );
+
+        // Neither shown nor kept: the session the PreKey made is saved all the same.
+        let mut push = b3_push();
+        sec244_prekey_through_the_fetch(&mut push, room, &MessageEnvelope::Typing { sid: "s".into(), cid: "c".into() }).await;
+        assert!(push.store().fetch_kept_for(room, crate::node::frame_auth::now_ms()).unwrap().is_empty());
+        assert!(push.store().load_olm_session(&b1(&push)).unwrap().is_some(), "the session a PreKey made is saved, kept or not");
+    }
+
+    /// `envelope` as `b1`'s first (PreKey) frame to Alice, through the push fetch's whole
+    /// frame handling in `room`, its saves landed.
+    async fn sec244_prekey_through_the_fetch(push: &mut B3Push, room: &str, envelope: &MessageEnvelope) {
+        let crypto_store = CryptoStore::open(push.path.clone(), push.pass.clone()).unwrap();
+        let json = serde_json::to_string(envelope).unwrap();
+        let (message_type, ciphertext) = push.b1_olm.encrypt(&push.a_dev, json.as_bytes()).unwrap();
+        assert_eq!(message_type, 0, "precondition: the first frame is a PreKey");
+        let body = serde_json::to_vec(&crate::node::crypto_handler::encrypted_frame(&push.b1_olm, message_type, &ciphertext)).unwrap();
+        let mut data = vec![0x06];
+        data.extend_from_slice(format!("{room}\0{}\0", push.b1.peer_id()).as_bytes());
+        data.extend_from_slice(&crate::node::frame_auth::seal(&push.b1, room, &push.a_dev, &body));
+        let (path, pass, a, a_dev) = (push.path.clone(), push.pass.clone(), push.a.clone(), push.a_dev.clone());
+        handle_binary_frame(
+            &data, &mut Wake::dm(&push.bm.peer_id()), &mut push.alice_olm, &mut None, &mut false, &crypto_store,
+            &path, &pass, &a_dev, &a, &mut Vec::new(),
+        );
+        assert!(crypto_store.flushed(Duration::from_secs(10)).await);
     }
 
     /// The push fetch spends the Olm key of a roster trade, so it keeps the removal the
@@ -2148,7 +2530,7 @@ mod tests {
             let frame = serde_json::to_string(&crate::node::crypto_handler::encrypted_frame(&b2_olm, message_type, &ciphertext)).unwrap();
             let crypto_store = CryptoStore::open(push.path.clone(), push.pass.clone()).unwrap();
             let (path, pass, a, a_dev) = (push.path.clone(), push.pass.clone(), push.a.clone(), push.a_dev.clone());
-            try_decrypt_dm(&push.b2.peer_id(), &frame, crate::node::frame_auth::now_ms(), &mut push.alice_olm, &crypto_store, &path, &pass, &a_dev, &a)
+            try_decrypt_dm(&push.b2.peer_id(), &frame, crate::node::frame_auth::now_ms(), &mut push.alice_olm, &crypto_store, &path, &pass, &a_dev, &a).0
         };
         let base = push.roster.base();
         let rm = vec![crate::identity::roster::sign_removal(&push.b1, &push.bm.peer_id(), &base, &push.b2.peer_id(), &[])];
@@ -2462,13 +2844,13 @@ mod tests {
         let now = crate::node::frame_auth::now_ms();
         for (proof, what) in [((None, None), "no proof"), (by(&carol), "another device's proof")] {
             assert!(
-                try_decrypt_dm(&b, &frame(proof), now, &mut alice_olm, &crypto_store, &path, &pass, &a, &a).is_none(),
+                try_decrypt_dm(&b, &frame(proof), now, &mut alice_olm, &crypto_store, &path, &pass, &a, &a).0.is_none(),
                 "a push PreKey with {what} was opened",
             );
             assert!(!alice_olm.has_session(&b), "a push PreKey with {what} built a session");
         }
         assert!(
-            try_decrypt_dm(&b, &frame(by(&bob)), now, &mut alice_olm, &crypto_store, &path, &pass, &a, &a).is_some(),
+            try_decrypt_dm(&b, &frame(by(&bob)), now, &mut alice_olm, &crypto_store, &path, &pass, &a, &a).0.is_some(),
             "the sender's own proof opens the same PreKey",
         );
         crate::node::resolver::clear_all();

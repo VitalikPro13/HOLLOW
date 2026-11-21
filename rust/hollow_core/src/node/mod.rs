@@ -20,6 +20,7 @@ pub(crate) mod door_room;
 pub(crate) mod embedded_forwarder;
 pub(crate) mod emotes;
 pub(crate) mod fetch;
+pub(crate) mod fetch_keep;
 pub(crate) mod frame_auth;
 pub(crate) mod frame_budget;
 pub(crate) mod channel_asks;

@@ -45113,7 +45113,7 @@ async fn push_fetch_reads(relay: &MockRelay, from: &TestNode, to: &TestNode, fet
         data.extend_from_slice(format!("{}\0{}\0", frame.room, from.device_id).as_bytes());
         data.extend_from_slice(&frame.frame);
         super::fetch::handle_binary_frame(
-            &data, None, &mut fetch.0, &mut None, &mut false, &fetch.1, &to.db_path, &to.passphrase,
+            &data, &mut super::fetch::Wake::dm(&from.master_id), &mut fetch.0, &mut None, &mut false, &fetch.1, &to.db_path, &to.passphrase,
             &to.device_id, &to.master_id, &mut read,
         );
     }
@@ -71123,3 +71123,196 @@ async fn fix152r_case_viewer_suspended(cast: Fix152Cast) {
 fix152_test!(fix152r_dm_sent_from_another_relay_reaches_a_friend_whose_app_was_in_the_background, fix152r_case_viewer_hidden, FIX152_SYNC_ONLY);
 fix152_test!(fix152r_dm_sent_from_another_relay_reaches_a_friend_whose_socket_was_suspended, fix152r_case_viewer_suspended, FIX152_SYNC_ONLY);
 fix152_test!(fix152r_the_dm_ask_back_stops_after_one_round, fix152r_case_ask_back_stops, FIX152_FRESH);
+
+// sec244-fetch-keep
+// HOL-SEC-244: the relay deletes a DM room's buffer as it hands the frames to a push
+// fetch, and the fetch read only DMs, edits, cards and file headers: everything else a
+// friend sent the offline phone (deletions, reactions, sync pages, carried messages) was
+// spent and gone. The fetch now keeps what it does not handle for the app.
+
+/// A reacts to B's message and deletes one of its own while B's phone is away, and B's
+/// push fetch takes the relay's copies (unfetched: the copies are lost). A quits before
+/// B's app is back, so nothing A still held in memory is sent again. Returns both,
+/// restarted.
+async fn sec244_offline_delete_and_reaction(
+    relay: &MockRelay,
+    a: TestNode,
+    a_tag: u8,
+    b: TestNode,
+    b_tag: u8,
+    fetched: bool,
+) -> (TestNode, TestNode) {
+    relay.hold_direct(&a.device_id, &b.device_id);
+    let since = olm_frames_for(relay, &a.device_id, &b).len();
+    a.cmd_tx
+        .send(NodeCommand::AddDmReaction { peer_id: b.master_id.clone(), message_id: "s244b-0".into(), emoji: "👍".into() })
+        .await
+        .unwrap();
+    a.cmd_tx
+        .send(NodeCommand::DeleteDmMessage { peer_id: b.master_id.clone(), message_id: "s244-0".into() })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(10, async || olm_frames_for(relay, &a.device_id, &b).len() >= since + 2).await,
+        "A never sent the reaction and the deletion",
+    );
+    if fetched {
+        let mut fetch = push_fetch_of(&b);
+        assert_eq!(push_fetch_reads(relay, &a, &b, &mut fetch, since).await, 0, "neither is a DM to show");
+        drop(fetch);
+    }
+    // The relay handed its buffer to the fetch socket (or, unfetched, the frames are lost).
+    relay.discard_held_kind(&a.device_id, &b.device_id, "encrypted");
+    let a = restart_node(relay, a, a_tag, a_tag).await;
+    let b = restart_node(relay, b, b_tag, b_tag).await;
+    relay.release_held(&a.device_id, &b.device_id);
+    (a, b)
+}
+
+fn sec244_reacted(node: &TestNode, mid: &str) -> bool {
+    node.store()
+        .load_reactions_for_messages(&[mid.to_string()])
+        .ok()
+        .and_then(|m| m.get(mid).cloned())
+        .is_some_and(|r| r.iter().any(|(emoji, _, _)| emoji == "👍"))
+}
+
+async fn sec244_pair(relay: &MockRelay, a_tag: u8, b_tag: u8) -> (TestNode, TestNode) {
+    relay.start_wiretap();
+    relay.set_recording(&tag_kp(a_tag).peer_id(), true);
+    let (mut a, mut b) = friend_pair(relay, a_tag, b_tag).await;
+    send_dm_burst(&a, &b, "s244", 2).await;
+    assert_eq!(read_dm_burst(&mut b, "s244", 2, 15).await.0, 2);
+    send_dm_burst(&b, &a, "s244b", 1).await;
+    assert_eq!(read_dm_burst(&mut a, "s244b", 1, 15).await.0, 1);
+    (a, b)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn fetch_keeps_a_durable_carried_frame_for_the_app() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (a_tag, b_tag) = (229, 238);
+    let (a, b) = sec244_pair(&relay, a_tag, b_tag).await;
+
+    let (_a, b) = sec244_offline_delete_and_reaction(&relay, a, a_tag, b, b_tag, true).await;
+    assert!(
+        wait_until(20, async || b.store().get_dm_message_hidden_at("s244-0").is_some()).await,
+        "the deletion the push fetch took never reached the app",
+    );
+    assert!(wait_until(10, async || sec244_reacted(&b, "s244b-0")).await, "the reaction the push fetch took never reached the app");
+    assert_eq!(b.store().fetch_kept_count(), 0, "a replayed frame stays kept");
+}
+
+// What DM catch-up brings back on its own when a deletion and a reaction never reach the
+// phone (before HOL-SEC-244, anything a push fetch took). A friend serves only rows it
+// sent, newer than our newest minus the lookback or changed since (`updated_at`): its
+// deletion of its own recent message comes back, its reaction on OUR message never does
+// (nor a reaction on an older message: a reaction does not touch the row's `updated_at`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn sec244_dm_catch_up_alone_restores_a_lost_deletion_but_not_a_lost_reaction() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (a_tag, b_tag) = (229, 238);
+    let (a, b) = sec244_pair(&relay, a_tag, b_tag).await;
+
+    let (a, mut b) = sec244_offline_delete_and_reaction(&relay, a, a_tag, b, b_tag, false).await;
+    // Both ends talk again, so catch-up has its chance both ways.
+    dm_read(&a, &mut b, "s244-after").await;
+    let deleted = wait_until(15, async || b.store().get_dm_message_hidden_at("s244-0").is_some()).await;
+    assert!(deleted, "catch-up no longer brings back a deletion of the friend's own recent message");
+    // The page that brought the deletion is the whole answer; one more round trip settles it.
+    dm_read(&a, &mut b, "s244-after2").await;
+    assert!(!sec244_reacted(&b, "s244b-0"), "catch-up now brings back a reaction on our message");
+}
+
+// The iOS shape: the app sits suspended on a resumable session while its extension
+// fetches. The relay's ring still hands the frames back on the resume, but their keys
+// are spent in the copy the app takes, so only what the fetch kept carries them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn sec244_a_resumed_app_replays_what_its_push_fetch_kept() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (a_tag, b_tag) = (237, 239);
+    let (a, mut b) = sec244_pair(&relay, a_tag, b_tag).await;
+    relay.hold_direct(&a.device_id, &b.device_id);
+    relay.suspend(&b.device_id);
+    let since = olm_frames_for(&relay, &a.device_id, &b).len();
+    a.cmd_tx
+        .send(NodeCommand::AddDmReaction { peer_id: b.master_id.clone(), message_id: "s244b-0".into(), emoji: "👍".into() })
+        .await
+        .unwrap();
+    a.cmd_tx
+        .send(NodeCommand::DeleteDmMessage { peer_id: b.master_id.clone(), message_id: "s244-0".into() })
+        .await
+        .unwrap();
+    assert!(wait_until(10, async || olm_frames_for(&relay, &a.device_id, &b).len() >= since + 2).await);
+    let mut fetch = push_fetch_of(&b);
+    assert_eq!(push_fetch_reads(&relay, &a, &b, &mut fetch, since).await, 0);
+    drop(fetch);
+    assert_eq!(b.store().fetch_kept_count(), 2, "the fetch keeps the reaction and the deletion");
+
+    relay.resume(&b.device_id);
+    flush_frames(&relay, &mut b).await;
+    relay.release_held(&a.device_id, &b.device_id);
+    assert!(
+        wait_until(15, async || b.store().get_dm_message_hidden_at("s244-0").is_some()).await,
+        "the deletion the extension took never reached the resumed app",
+    );
+    assert!(wait_until(10, async || sec244_reacted(&b, "s244b-0")).await, "the reaction the extension took never reached the resumed app");
+    assert_eq!(b.store().fetch_kept_count(), 0);
+}
+
+// More kept frames from one friend than its frame budget lets through at once: the
+// replay lands whole, since the keep caps bound it and a bucket drop here is final.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn sec244_a_replay_past_the_frame_budget_lands_whole() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (a_tag, b_tag) = (229, 238);
+    let (mut a, b) = sec244_pair(&relay, a_tag, b_tag).await;
+    // Three emojis per reactor and message at most, so 201 reactions need 67 messages.
+    const N: usize = 201;
+    send_dm_burst(&b, &a, "s244m", N / 3).await;
+    assert_eq!(read_dm_burst(&mut a, "s244m", N / 3, 30).await.0, N / 3);
+    let mids: Vec<String> = (0..N / 3).map(|m| format!("s244m-{m}")).collect();
+    relay.hold_direct(&a.device_id, &b.device_id);
+    let since = olm_frames_for(&relay, &a.device_id, &b).len();
+    for i in 0..N {
+        a.cmd_tx
+            .send(NodeCommand::AddDmReaction { peer_id: b.master_id.clone(), message_id: mids[i / 3].clone(), emoji: format!("e{}", i % 3) })
+            .await
+            .unwrap();
+    }
+    assert!(wait_until(60, async || olm_frames_for(&relay, &a.device_id, &b).len() >= since + N).await, "A never sent every reaction");
+    let mut fetch = push_fetch_of(&b);
+    assert_eq!(push_fetch_reads(&relay, &a, &b, &mut fetch, since).await, 0);
+    drop(fetch);
+    assert_eq!(b.store().fetch_kept_count(), N as i64);
+    relay.discard_held_kind(&a.device_id, &b.device_id, "encrypted");
+    let a = restart_node(&relay, a, a_tag, a_tag).await;
+    let mut b = restart_node(&relay, b, b_tag, b_tag).await;
+    relay.release_held(&a.device_id, &b.device_id);
+    let landed = |b: &TestNode| {
+        b.store().load_reactions_for_messages(&mids).map(|m| m.values().map(Vec::len).sum::<usize>()).unwrap_or(0)
+    };
+    let all = wait_until(30, async || {
+        drain_events(&mut b);
+        landed(&b) == N
+    })
+    .await;
+    assert!(all, "a replayed frame fell to the frame budget: {} of {N} landed", landed(&b));
+}
+
