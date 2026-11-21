@@ -62,10 +62,20 @@ impl Drop for RemoveAtShutdown {
 /// every caller in it, never shared with another process.
 pub(crate) fn process_dir(name: &str) -> PathBuf {
     static DIR: OnceLock<PathBuf> = OnceLock::new();
-    let dir = DIR.get_or_init(|| root().join(format!("{PREFIX}{}-proc", std::process::id())));
+    let dir = DIR.get_or_init(|| new_process_dir(root()));
     let path = dir.join(name);
     std::fs::create_dir_all(&path).expect("test process dir");
     path
+}
+
+/// A NEW folder for this process: Windows reuses pids, so a folder named by the pid
+/// alone handed a later run whatever an earlier one left there.
+fn new_process_dir(root: &Path) -> PathBuf {
+    tempfile::Builder::new()
+        .prefix(&format!("{PREFIX}{}-proc-", std::process::id()))
+        .tempdir_in(root)
+        .expect("test process dir")
+        .keep()
 }
 
 /// `tempfile::tempdir()` under the test root.
@@ -148,6 +158,24 @@ mod tests {
         db.execute_batch("PRAGMA journal_mode = WAL; CREATE TABLE t (x INTEGER)")
             .unwrap();
         db
+    }
+
+    /// #155 review: Windows reuses pids, and a per-process root named by the pid alone
+    /// gave a later run the files an earlier one left behind.
+    #[test]
+    fn a_reused_pid_gets_a_fresh_process_dir() {
+        let parent = tempdir().unwrap();
+        let root = parent.path();
+        let earlier = root.join(format!("{PREFIX}{}-proc", std::process::id()));
+        std::fs::create_dir_all(earlier.join("os-root").join("hollow")).unwrap();
+        std::fs::write(earlier.join("os-root").join("hollow").join("identity.key"), b"x").unwrap();
+
+        let first = new_process_dir(root);
+        let second = new_process_dir(root);
+        assert_ne!(first, earlier, "a reused pid got the earlier run's folder");
+        assert_ne!(first, second, "two processes could share one folder");
+        assert!(first.starts_with(root) && first.is_dir());
+        assert_eq!(std::fs::read_dir(&first).unwrap().count(), 0, "the folder must start empty");
     }
 
     #[test]
