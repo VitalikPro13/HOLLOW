@@ -39,7 +39,7 @@ class RecoveryPhraseField extends StatelessWidget {
     return SecretScreen(
       child: HollowTextField(
         controller: controller,
-        hintText: 'The 12 or 24 words, in order',
+        hintText: 'Your 24 words, in order',
         minLines: 2,
         maxLines: 4,
         autofocus: autofocus,
@@ -100,6 +100,24 @@ Future<bool> showRecoverWithPhraseDialog(
           keep: keep.toList(),
           // Nothing else to drop: no moment to judge from.
           lostSinceMs: lostSinceMs ?? DateTime.now().millisecondsSinceEpoch),
+    ),
+  );
+  return ok ?? false;
+}
+
+/// Type the phrase again after a recovery the roster outdated before it
+/// counted (HOL-SEC-218): the same recovery, keeping only this device and
+/// judging lost devices from the moment the first one did.
+Future<bool> showRecoverAgainDialog(BuildContext context,
+    {required int lostSinceMs}) async {
+  final ok = await showHollowDialog<bool>(
+    context: context,
+    builder: (_) => _PhraseDialog(
+      title: 'Use your recovery phrase',
+      body: 'Typing it keeps this device and removes every other device.',
+      confirmLabel: 'Keep this device',
+      onSubmit: (phrase, _, _) => roster_api.recoverWithPhrase(
+          phrase: phrase, keep: const [], lostSinceMs: lostSinceMs),
     ),
   );
   return ok ?? false;

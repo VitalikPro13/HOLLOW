@@ -72,6 +72,7 @@ import 'package:hollow/src/core/providers/server_avatar_anim_provider.dart';
 import 'package:hollow/src/core/providers/server_avatar_provider.dart';
 import 'package:hollow/src/core/providers/server_banner_provider.dart';
 import 'package:hollow/src/core/providers/device_proof_provider.dart';
+import 'package:hollow/src/core/services/phrase_restore.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/sticker_provider.dart';
 import 'package:hollow/src/core/providers/server_strip_layout_provider.dart';
@@ -1167,8 +1168,9 @@ class _HollowShellState extends ConsumerState<HollowShell>
     // handles open, Windows keeps messages.db and the next identity loads
     // forever.
     await _finishPendingWipe();
-    // A relink a restart cut short is finished or undone before the link import
-    // and anything else reads the identity.
+    // A relink a restart cut short is finished or undone, and an identity the
+    // person set aside moves out, before the link import and anything else
+    // reads the identity.
     try {
       await recovery_api.settleRelink();
     } catch (_) {}
@@ -1214,15 +1216,22 @@ class _HollowShellState extends ConsumerState<HollowShell>
     WelcomeResult? welcomeResult;
     if (!hasExisting && mounted) {
       final relinked = await keptOldDataForWelcome();
+      final setAside =
+          await recovery_api.setAsideWelcome().catchError((_) => false);
       if (!mounted) return;
       _setPreparing(false);
       welcomeResult = await showWelcomeDialog(context,
-          relinkedTo: relinked?.profile, relinkedFolder: relinked?.folder);
+          relinkedTo: relinked?.profile,
+          relinkedFolder: relinked?.folder,
+          afterSetAside: setAside);
       if (!mounted) return;
       _setPreparing(true);
       unawaited(recovery_api.clearRelinkWelcome().catchError((_) {}));
+      if (setAside) {
+        unawaited(recovery_api.clearSetAsideWelcome().catchError((_) {}));
+      }
 
-      // 'restored_mnemonic' and 'restored_backup' leave an identity on disk;
+      // 'restored_phrase' and 'restored_backup' leave an identity on disk;
       // 'create_new' and null fall through to a normal load, which generates.
     }
 
@@ -1260,8 +1269,22 @@ class _HollowShellState extends ConsumerState<HollowShell>
       if (_unlocking && mounted) setState(() => _unlocking = false);
       return;
     }
+    if (phraseRestoreFollowUps(welcomeResult).offerLock) {
+      await _offerLockAfterPhraseRestore();
+    }
     await _afterIdentity(
         welcomeResult: welcomeResult, linkedThisLaunch: linkedThisLaunch);
+  }
+
+  /// A phrase restore lands its keys unlocked unless the keychain default took
+  /// them, so the first start offers a lock (C-IDENTITY-15), as after a link.
+  Future<void> _offerLockAfterPhraseRestore() async {
+    try {
+      if ((await identity_api.getIdentityProtectionStatus()).isEncrypted) return;
+      await storage_api.saveSetting(key: kProtectionOfferDueKey, value: '1');
+    } catch (e) {
+      debugPrint('[HOLLOW] Lock offer after restore skipped: $e');
+    }
   }
 
   /// A repair put a database that opens in place of one that did not: load
@@ -1550,6 +1573,11 @@ class _HollowShellState extends ConsumerState<HollowShell>
     // questions, so the keychain offer waits for a later one.
     final setUpThisLaunch = welcomeResult != null || linkedThisLaunch;
     unawaited(_offerAfterStart(setUpThisLaunch: setUpThisLaunch));
+    // Behind the start's offers: the restore chooser for the servers it owned.
+    if (phraseRestoreFollowUps(welcomeResult).askChooser && mounted) {
+      askForRestoreChooser(ProviderScope.containerOf(context, listen: false),
+          fresh: true);
+    }
 
     await _resumeInviteAfterRelaySwitch();
 
@@ -3027,4 +3055,19 @@ class _ShellScaffold extends StatelessWidget {
       ),
     );
   }
+}
+
+/// What a launch owes a Welcome phrase restore: a lock offer after either
+/// branch, and on a recovery the chooser for the servers it owned
+/// (PHRASE_RESTORE_DESIGN 1.1 step 4).
+@visibleForTesting
+({bool offerLock, bool askChooser}) phraseRestoreFollowUps(
+    WelcomeResult? result) {
+  if (result?.action != 'restored_phrase') {
+    return (offerLock: false, askChooser: false);
+  }
+  return (
+    offerLock: true,
+    askChooser: result!.branch == PhraseRestoreBranch.recover,
+  );
 }

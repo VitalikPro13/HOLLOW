@@ -71,9 +71,14 @@ Future<void> applyDefaultKeychainProtection(
   }
   if (!locked) return;
   container.invalidate(identityProtectionProvider);
-  _toast('Your identity is now locked to this computer. You can change that '
-      'in Settings, under Security.', HollowToastType.success);
+  showKeychainLockedToast();
 }
+
+/// What the person reads once the default lock took their identity.
+void showKeychainLockedToast() => _toast(
+    'Your identity is now locked to this computer. You can change that in '
+    'Settings, under Security.',
+    HollowToastType.success);
 
 void _toast(String message, HollowToastType type) {
   final overlay = hollowNavigatorKey.currentState?.overlay;

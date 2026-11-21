@@ -62,6 +62,9 @@ class _BootApi implements RustLibApi {
   @override
   Future<String?> crateApiRecoveryRelinkWelcome() async => null;
 
+  @override
+  Future<bool> crateApiRecoverySetAsideWelcome() async => false;
+
   // Anything else the launch asks waits forever: nothing past Welcome runs.
   @override
   dynamic noSuchMethod(Invocation invocation) {

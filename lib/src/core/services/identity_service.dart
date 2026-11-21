@@ -7,8 +7,4 @@ class IdentityService {
 
   Future<ffi.IdentityInfo> generateNewIdentity() =>
       ffi.generateNewIdentity();
-
-  Future<ffi.IdentityInfo> restoreIdentityFromMnemonic({
-    required String phrase,
-  }) => ffi.restoreIdentityFromMnemonic(phrase: phrase);
 }
