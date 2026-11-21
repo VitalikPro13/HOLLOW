@@ -64,7 +64,9 @@ final restoreCardProvider =
   if (!restoreCardShows(mark, now: DateTime.now(), doneFor: doneFor)) {
     return null;
   }
-  final rustAllows = await identity_api.maySetAsideThisIdentity();
+  // An unread gate offers no set-aside; the guidance shows either way.
+  final rustAllows =
+      await identity_api.maySetAsideThisIdentity().catchError((_) => false);
   return (
     atMs: mark.atMs,
     branch: phraseRestoreBranchFrom(mark.branch)!,
@@ -157,7 +159,7 @@ class HomeRestoreCard extends ConsumerWidget {
                 if (state.maySetAside)
                   HollowButton.ghost(
                     compact: !touch,
-                    onPressed: () => showSetAsideDialog(context),
+                    onPressed: () => showSetAsideDialog(context, ref),
                     child: const Text('Type my phrase again'),
                   ),
                 _DoneButton(touch: touch, onDone: () => _done(ref, state.atMs)),
@@ -204,9 +206,15 @@ class _DoneButtonState extends State<_DoneButton> {
       );
 }
 
+/// Said when Rust's gate closed since the card read it (a friend accepted, a
+/// server or a pending join holds us).
+const kSetAsideRefusedText =
+    "Someone else knows this identity now, so Hollow can't set it aside.";
+
 /// "Type your phrase again?": sets this identity aside (nothing is deleted)
-/// and restarts at Welcome. A phone closes instead and opens there.
-Future<void> showSetAsideDialog(BuildContext context) async {
+/// and restarts at Welcome. A phone closes instead and opens there. A failure
+/// reads the gate again, so a refusal says so and the card stops offering it.
+Future<void> showSetAsideDialog(BuildContext context, WidgetRef ref) async {
   await showHollowConfirm(
     context: context,
     title: 'Type your phrase again?',
@@ -217,8 +225,13 @@ Future<void> showSetAsideDialog(BuildContext context) async {
       try {
         await identity_api.setAsideThisIdentity();
       } catch (_) {
-        throw const FriendlyException(
-            "Hollow couldn't set this identity aside. Try again.");
+        final allowed = await identity_api
+            .maySetAsideThisIdentity()
+            .catchError((_) => true);
+        ref.invalidate(restoreCardProvider);
+        throw FriendlyException(allowed
+            ? "Hollow couldn't set this identity aside. Try again."
+            : kSetAsideRefusedText);
       }
       await relaunchAfterSetAside();
     },

@@ -40,13 +40,24 @@ class _Api implements RustLibApi {
     if (key == kRestoreCardDoneKey) done = value;
   }
 
+  Object? mayThrows;
+
+  /// Rust's gate closes as it refuses (a friend accepted meanwhile).
+  bool closesOnRefusal = false;
+
   @override
-  Future<bool> crateApiIdentityMaySetAsideThisIdentity() async => mayRust;
+  Future<bool> crateApiIdentityMaySetAsideThisIdentity() async {
+    if (mayThrows != null) throw mayThrows!;
+    return mayRust;
+  }
 
   @override
   Future<void> crateApiIdentitySetAsideThisIdentity() async {
     setAsides++;
-    if (setAsideFails != null) throw setAsideFails!;
+    if (setAsideFails != null) {
+      if (closesOnRefusal) mayRust = false;
+      throw setAsideFails!;
+    }
   }
 
   @override
@@ -58,6 +69,16 @@ class _Friends extends FriendsNotifier {
   _Friends(this.friends);
   @override
   Map<String, FriendInfo> build() => friends;
+
+  void accept(String id) => state = {
+        ...state,
+        id: FriendInfo(
+            peerId: id,
+            status: 'accepted',
+            direction: '',
+            requestedAt: 1,
+            updatedAt: 1),
+      };
 }
 
 WelcomeRestoreState _mark(String branch,
@@ -80,19 +101,22 @@ void main() {
       ..mayRust = true
       ..setAsideFails = null
       ..setAsides = 0
+      ..mayThrows = null
+      ..closesOnRefusal = false
       ..saved.clear();
   });
 
-  Future<void> pump(WidgetTester tester,
+  Future<_Friends> pump(WidgetTester tester,
       {Map<String, FriendInfo> friends = const {},
       Map<String, ServerInfo> servers = const {},
       bool touch = false}) async {
+    final notifier = _Friends(friends);
     tester.view.physicalSize = touch ? const Size(390, 844) : const Size(1000, 800);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.reset);
     await tester.pumpWidget(ProviderScope(
       overrides: [
-        friendsProvider.overrideWith(() => _Friends(friends)),
+        friendsProvider.overrideWith(() => notifier),
         keptServersProvider.overrideWithValue(servers),
       ],
       child: MaterialApp(
@@ -103,6 +127,7 @@ void main() {
       ),
     ));
     await tester.pumpAndSettle();
+    return notifier;
   }
 
   group('restoreCardShows', () {
@@ -291,6 +316,50 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text("Hollow couldn't set this identity aside. Try again."),
         findsOneWidget);
+    expect(relaunched, 0);
+  });
+
+  testWidgets('the card still shows when only the set-aside gate read fails',
+      (tester) async {
+    _api
+      ..mark = _mark('admit')
+      ..mayThrows = 'Not built yet';
+    await pump(tester);
+    expect(find.text('Finish restoring your identity'), findsOneWidget);
+    expect(find.text('Type my phrase again'), findsNothing);
+    expect(find.text('Done'), findsOneWidget);
+  });
+
+  testWidgets('a friend accepting while the card is up removes the retry at '
+      'once', (tester) async {
+    _api.mark = _mark('admit');
+    final friends = await pump(tester);
+    expect(find.text('Type my phrase again'), findsOneWidget);
+    friends.accept('f');
+    await tester.pumpAndSettle();
+    expect(find.text('Type my phrase again'), findsNothing);
+    expect(find.text('Finish restoring your identity'), findsOneWidget);
+  });
+
+  testWidgets('once Rust refuses the set-aside the card says why and stops '
+      'offering it', (tester) async {
+    var relaunched = 0;
+    relaunchAfterSetAside = () async => relaunched++;
+    _api
+      ..mark = _mark('admit')
+      ..setAsideFails = 'set aside refused'
+      ..closesOnRefusal = true;
+    await pump(tester);
+    await tester.tap(find.text('Type my phrase again'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Set aside'));
+    await tester.pumpAndSettle();
+    expect(find.text(kSetAsideRefusedText), findsOneWidget);
+    expect(find.textContaining('Try again'), findsNothing);
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
+    expect(find.text('Type my phrase again'), findsNothing);
+    expect(find.text('Finish restoring your identity'), findsOneWidget);
     expect(relaunched, 0);
   });
 }
