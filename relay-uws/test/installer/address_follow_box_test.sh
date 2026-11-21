@@ -562,9 +562,22 @@ eq "one the name now names and this machine holds is taken" "$(kv_get "$TURN_ETC
 has "and the lock holds it" "$(peers)" "2001:db8:1::7"
 eq "beside the follower's IPv4" "$(follower_ip) $(kv_get "$CONF_FILE" turn_public_ipv6)" "$NEW 2001:db8:1::7"
 eq "with the setup's answer kept" "$(kv_get "$CONF_FILE" public_ipv6)" 2001:db8:1::5
+# check-host judges the name's AAAA record against the addresses this machine holds (#153).
+part=$(address_part)
+has "check-host passes an AAAA record this machine holds" "$part" "ok    $NAME's IPv6 (AAAA) record names 2001:db8:1::7, which this machine holds."
+has "and says how to test it from outside" "$part" "curl -6 -m 10 https://$NAME/health"
 # a_v6_address_this_machine_no_longer_has_drops_after_the_window
 ip addr del 2001:db8:1::7/128 dev lo
+ip addr add 2001:db8:1::9/128 dev lo
+part=$(address_part)
+has "check-host fails an AAAA record this machine doesn't hold" "$part" "FAIL  $NAME's IPv6 (AAAA) record names 2001:db8:1::7, an address this machine doesn't have (it has "
+has "naming the addresses it holds" "$(grep 'AAAA' <<<"$part")" "2001:db8:1::9"
+has "and what to do" "$part" "People on IPv6 can't reach the relay. Update the AAAA record or remove it"
+ip addr del 2001:db8:1::9/128 dev lo
+dns AAAA fd00::1
+has "check-host skips an AAAA answer that is not public" "$(address_part)" "skip  this network's DNS answers $NAME's IPv6 (AAAA) record with an address that is not public"
 dns AAAA NXDOMAIN
+has "check-host passes a name without an AAAA record" "$(address_part)" "ok    $NAME has no IPv6 (AAAA) record, so the relay serves IPv4 only, which is fine"
 stamp last_change "$long_ago"
 out=$(follow)
 eq "one it lost stays a while" "$(kv_get "$TURN_ETC/turn.env" PUBLIC_IPV6)" 2001:db8:1::7

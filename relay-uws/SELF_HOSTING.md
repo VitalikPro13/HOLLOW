@@ -76,6 +76,8 @@ because every member would have to type the new address by hand.
 **A domain you own.** Point the domain's A record at your server before you run
 the setup. Port 80 has to stay open for the certificate. If your router or a
 dynamic DNS service keeps the record current, calls follow a new address too.
+Add an AAAA (IPv6) record only if people outside can reach the server over IPv6
+(see [Troubleshooting](#troubleshooting)).
 
 The relay always listens on port 443, so the address never carries a port.
 
@@ -1119,7 +1121,8 @@ If both answer without a certificate warning, your relay is live.
 
 On the server, the host checks look at each service's account, who can read its
 secrets, how tight its sandbox is, whether anything could reach the disk, whether
-TURN and the forwarder use the address your relay's name points at, and SSH. They
+TURN and the forwarder use the address your relay's name points at, whether its
+IPv6 (AAAA) record names an address the server has, and SSH. They
 change nothing. The setup runs them at the end and from **Check the machine
 again**. To run them yourself:
 
@@ -1235,6 +1238,28 @@ address. If it works and the app still won't connect, check the clock on the
 server with `timedatectl`. Logins carry a signed timestamp with a 60 second
 window, so a clock that is minutes out turns away every login while everything
 else looks fine.
+
+**Some members stay on No connection while your phone on mobile data gets
+through.** Look at your name's IPv6 (AAAA) record. An AAAA record has to point at
+an address people can reach over IPv6. If people can't, delete the record. Hollow
+works on IPv4 alone. The host checks (see [Check it](#check-it)) look at it in
+their **Public address** lines and fail when the record names an address the
+server doesn't have. An address the server does have can still be blocked by the
+router. To test that, use a machine with IPv6 on another network, such as a
+laptop on your phone's hotspot, because from inside your home it proves nothing:
+
+```bash
+curl -6 -m 10 https://YOUR_ADDRESS/health
+```
+
+It should answer like the check in [Check it](#check-it). If it times out while
+`curl -4 -m 10 https://YOUR_ADDRESS/health` answers, nobody outside reaches the
+server over IPv6. Home routers usually block incoming IPv6, and a provider can
+change your IPv6 prefix before a dynamic DNS updater catches up. Allow incoming
+IPv6 to the server on port 443 (and 80 when your certificate needs it) in the
+router, or delete the AAAA record and turn IPv6 off in your dynamic DNS updater
+so it doesn't come back. Recent versions of the app try IPv4 when IPv6 stays
+silent, but older ones wait on IPv6 until they give up.
 
 **Some members connect and others can't.** The app signs the exact address it
 connected to, and the relay accepts only its own address (`RELAY_HOST`, or

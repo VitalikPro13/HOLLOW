@@ -657,6 +657,34 @@ check_owed() {
     done <"$PENDING"
 }
 
+# check_v6: the name's IPv6 (AAAA) record against the addresses this machine holds. A
+# client with IPv6 tries that address first, so one nobody reaches strands people on
+# IPv6 networks while everyone on IPv4 gets in (#153). Its own NAMES and DNS_STATE, so
+# the A record's judgement stays as it was.
+check_v6() {
+    local NAMES=() DNS_STATE a mine=() missing=()
+    resolve AAAA
+    case "$DNS_STATE" in
+    none)
+        ok "$HOST has no IPv6 (AAAA) record, so the relay serves IPv4 only, which is fine"
+        return 0 ;;
+    private)
+        skip "this network's DNS answers $HOST's IPv6 (AAAA) record with an address that is not public, so it can't be checked from here"
+        return 0 ;;
+    esac
+    while read -r a; do
+        [ "$(ip6_class "$a")" = global ] && mine+=("$a")
+    done < <(own_addrs)
+    for a in "${NAMES[@]}"; do
+        in_list "$a" ${mine[@]+"${mine[@]}"} || missing+=("$a")
+    done
+    if [ ${#missing[@]} -gt 0 ]; then
+        bad "$HOST's IPv6 (AAAA) record names ${missing[*]}, an address this machine doesn't have (it has ${mine[*]:-no IPv6 address}). People on IPv6 can't reach the relay. Update the AAAA record or remove it"
+    else
+        ok "$HOST's IPv6 (AAAA) record names ${NAMES[*]}, which this machine holds. Home routers often block incoming IPv6, so test it from another network with curl -6 -m 10 https://$HOST/health"
+    fi
+}
+
 main_check() {
     local peers what="your answers ($CONF)" verb=give follows=0
     [ -r "$CONF" ] || { echo "done"; return 0; }
@@ -693,6 +721,7 @@ main_check() {
             check_one "the TURN port lock's peers ($LOCK_ENV)" give "${peers%% *}"
         fi
     fi
+    [ "$ADDRESS" != ip ] && valid_name "$HOST" && check_v6
     [ "$follows" = 1 ] && check_owed
     if [ "$(systemctl show -p LoadState --value "$FOLLOW_UNIT" 2>/dev/null)" = loaded ]; then
         check_sandbox
