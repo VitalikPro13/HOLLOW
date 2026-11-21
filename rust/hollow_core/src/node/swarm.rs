@@ -800,6 +800,8 @@ async fn run_event_loop(
     // Tracks which peers are in which WS rooms. Key: room_code, Value: set of peer_id strings.
     let mut ws_room_peers: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
     let mut bare_presence = super::roster_book::BarePresence::default();
+    // Frames our push fetch took from the relay and left for us (HOL-SEC-244).
+    let mut kept_frames = super::fetch_keep::KeptQueue::new(&db_path, &db_passphrase);
 
     // Embedded peer forwarder: this desktop can serve as a blind packet
     // forwarder for screen shares it watches. Desktop-only and feature-gated.
@@ -3948,7 +3950,7 @@ async fn run_event_loop(
                 }
             }
             // -- WebSocket relay events --
-            Some(ws_event) = ws_event_rx.recv() => {
+            Some((ws_event, mut replay)) = kept_frames.next(&mut ws_event_rx) => {
                 use super::ws_client::WsEvent;
                 arm_started = Some(("ws", ws_event.kind(), std::time::Instant::now()));
                 match ws_event {
@@ -4951,6 +4953,7 @@ async fn run_event_loop(
                             }
                         }
                         ws_room_peers.insert(room.clone(), room_set);
+                        kept_frames.release(&room);
                         carry_unseen_ops(&mut crdt_resync, &server_states, &ws_cmd_tx, &ws_room_peers, &local_peer_str, &room);
                         hand_unsent_ops(
                             &mut crdt_resync.unsent, &server_states, &denials, &mut frame_budget, &ws_cmd_tx, &ws_room_peers,
@@ -5837,6 +5840,9 @@ async fn run_event_loop(
                         let (WsEvent::Message { room, from, data } | WsEvent::DirectMessage { room, from, data }) = ws_frame else {
                             continue;
                         };
+                        // A copy our push fetch saved is taken here, not under the Olm arm,
+                        // where restoring its pickle overran a debug worker's stack.
+                        olm.take_newer_if_answered();
                         // The relay never hands a device its own frames; one that does is
                         // echoing a genuine seal back to us.
                         if from == device_peer_id {
@@ -5848,7 +5854,9 @@ async fn run_event_loop(
                         // sibling's first sync is a legitimate burst far past the bucket,
                         // and every frame lost there is state the new device never gets.
                         // Our bare master id is no device (G1), so it pays like anyone.
-                        let rate_ok = (!super::resolver::is_bare_master(&from)
+                        // A kept frame passed the relay once already, and its own caps bound it.
+                        let rate_ok = replay.is_some()
+                            || (!super::resolver::is_bare_master(&from)
                             && super::resolver::same_identity(&from, &local_peer_str))
                             || match frame_budget.limiter.admit(
                                 &from,
@@ -6247,7 +6255,11 @@ async fn run_event_loop(
                                             frame_ts,
                                         &mut next,
                                         );
-                                        if unwrapped {
+                                        // The Olm frame itself, never what it carries; and only a kept frame
+                                        // pays for the scope, as live traffic runs near the worker stack's end.
+                                        if let Some(opened) = replay.as_mut().and_then(|r| r.opened.take()) {
+                                            super::fetch_keep::OPENED.scope(Some(opened), request).await;
+                                        } else if unwrapped {
                                             super::mls_turns::VIA_FORWARD.scope((), request).await;
                                         } else {
                                             super::join_verdict::OLD_LINK.scope(old_link, request).await;
@@ -10474,7 +10486,13 @@ async fn handle_incoming_request_inner(
                 return;
             }
 
-            let plaintext = if message_type == 0 {
+            // Our push fetch read this very frame and spent its key: what it read stands
+            // in for the decrypt, and the ratchet is left as the fetch saved it.
+            let kept = super::fetch_keep::opened_for(peer_str, &body);
+            let read_by_fetch = kept.is_some();
+            let plaintext = if let Some(plaintext) = kept {
+                plaintext
+            } else if message_type == 0 {
                 let their_identity = match &identity_key {
                     Some(k) => k,
                     None => {
@@ -10654,7 +10672,9 @@ async fn handle_incoming_request_inner(
 
             olm.note_decrypted(peer_str, &ciphertext);
             // The ratchet and the read mark moved; the account is unchanged.
-            persist_olm_read(olm, crypto_store, peer_str, frame_ts_ms);
+            if !read_by_fetch {
+                persist_olm_read(olm, crypto_store, peer_str, frame_ts_ms);
+            }
 
             let text = String::from_utf8_lossy(&plaintext).to_string();
 
@@ -14954,6 +14974,12 @@ async fn handle_incoming_request_inner(
         }
 
         HavenMessage::FriendReject { requested_at, device_list } => {
+            // A reject ends an accepted friendship too (the mutual race below), so it
+            // is judged as a removal before either branch writes anything.
+            if social::removal_sender_refused(peer_str) {
+                hollow_log!("[HOLLOW-SECURITY] REJECTED a friend reject from {peer_str}: a removed device or a bare master id");
+                return;
+            }
             // ATTRIBUTION FIRST. The sender is a DEVICE id and our outgoing request row
             // is keyed by their MASTER, so a raw device-id lookup silently misses it.
             // `resolve()` alone cannot bridge that here: a decline of an ASYNC request
@@ -15053,6 +15079,10 @@ async fn handle_incoming_request_inner(
         }
 
         HavenMessage::FriendRemove { at } => {
+            if social::removal_sender_refused(peer_str) {
+                hollow_log!("[HOLLOW-SECURITY] REJECTED a friend removal from {peer_str}: a removed device or a bare master id");
+                return;
+            }
             // The remover sends from a DEVICE id while the friendship is keyed by their
             // MASTER on our side, so resolve or the DELETE misses and the removal is
             // asymmetric. Delete both keys for any legacy device-stranded row.

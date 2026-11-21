@@ -279,6 +279,10 @@ pub(crate) struct PersonalStickerRow {
     pub added_at: i64,
 }
 
+/// What a push fetch took from the relay but left for the app (HOL-SEC-244).
+mod fetch_kept;
+pub(crate) use fetch_kept::{KeptFrame, KeptPool};
+
 /// Encrypted SQLite message store.
 pub(crate) struct MessageStore {
     conn: Connection,
@@ -2195,6 +2199,7 @@ impl MessageStore {
                 sig          TEXT NOT NULL,
                 pk           TEXT NOT NULL
             )")?;
+        fetch_kept::create(conn)?;
 
         Ok(())
     }
@@ -3463,6 +3468,7 @@ impl MessageStore {
         self.conn
             .execute("DELETE FROM cp_seen WHERE server_id = ?1", params![server_id])
             .map_err(|e| format!("Failed to delete first folds: {e}"))?;
+        fetch_kept::purge(&self.conn, KeptPool::Server, Some(server_id))?;
         self.conn
             .execute("DELETE FROM own_kept WHERE server_id = ?1", params![server_id])
             .map_err(|e| format!("Failed to delete own rows' dates: {e}"))?;
@@ -4084,6 +4090,7 @@ impl MessageStore {
             for (sid, cid, floor, old_exact) in floors {
                 remember_cleared_ids(conn, &sid, &cid, floor, old_exact).map_err(err("cleared ids"))?;
             }
+            fetch_kept::purge(conn, KeptPool::Server, server_id)?;
             // A clear's floor is its line: a hole would ask for what it threw away.
             conn.execute(
                 "DELETE FROM channel_sync_holes WHERE EXISTS (SELECT 1 FROM channel_floors f
@@ -7256,6 +7263,9 @@ impl MessageStore {
                 params![peer_id, status, direction, requested_at, now],
             )
             .map_err(|e| format!("Failed to save friend: {e}"))?;
+        if status != "accepted" {
+            fetch_kept::purge(&self.conn, KeptPool::Dm, Some(peer_id))?;
+        }
         Ok(())
     }
 
@@ -7295,7 +7305,7 @@ impl MessageStore {
         self.conn
             .execute("DELETE FROM friends WHERE peer_id = ?1", params![peer_id])
             .map_err(|e| format!("Failed to remove friend: {e}"))?;
-        Ok(())
+        fetch_kept::purge(&self.conn, KeptPool::Dm, Some(peer_id))
     }
 
     /// Re-key a friend row from a DEVICE id to its MASTER id once the mapping is known.

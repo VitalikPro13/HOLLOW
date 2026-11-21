@@ -45113,7 +45113,7 @@ async fn push_fetch_reads(relay: &MockRelay, from: &TestNode, to: &TestNode, fet
         data.extend_from_slice(format!("{}\0{}\0", frame.room, from.device_id).as_bytes());
         data.extend_from_slice(&frame.frame);
         super::fetch::handle_binary_frame(
-            &data, None, &mut fetch.0, &mut None, &mut false, &fetch.1, &to.db_path, &to.passphrase,
+            &data, &mut super::fetch::Wake::dm(&from.master_id), &mut fetch.0, &mut None, &mut Vec::new(), &fetch.1, &to.db_path, &to.passphrase,
             &to.device_id, &to.master_id, &mut read,
         );
     }
@@ -71123,3 +71123,457 @@ async fn fix152r_case_viewer_suspended(cast: Fix152Cast) {
 fix152_test!(fix152r_dm_sent_from_another_relay_reaches_a_friend_whose_app_was_in_the_background, fix152r_case_viewer_hidden, FIX152_SYNC_ONLY);
 fix152_test!(fix152r_dm_sent_from_another_relay_reaches_a_friend_whose_socket_was_suspended, fix152r_case_viewer_suspended, FIX152_SYNC_ONLY);
 fix152_test!(fix152r_the_dm_ask_back_stops_after_one_round, fix152r_case_ask_back_stops, FIX152_FRESH);
+
+// sec244-fetch-keep
+// HOL-SEC-244: the relay deletes a DM room's buffer as it hands the frames to a push
+// fetch, and the fetch read only DMs, edits, cards and file headers: everything else a
+// friend sent the offline phone (deletions, reactions, sync pages, carried messages) was
+// spent and gone. The fetch now keeps what it does not handle for the app.
+
+/// A reacts to B's message and deletes one of its own while B's phone is away, and B's
+/// push fetch takes the relay's copies (unfetched: the copies are lost). A quits before
+/// B's app is back, so nothing A still held in memory is sent again. Returns both,
+/// restarted.
+async fn sec244_offline_delete_and_reaction(
+    relay: &MockRelay,
+    a: TestNode,
+    a_tag: u8,
+    b: TestNode,
+    b_tag: u8,
+    fetched: bool,
+) -> (TestNode, TestNode) {
+    relay.hold_direct(&a.device_id, &b.device_id);
+    let since = olm_frames_for(relay, &a.device_id, &b).len();
+    a.cmd_tx
+        .send(NodeCommand::AddDmReaction { peer_id: b.master_id.clone(), message_id: "s244b-0".into(), emoji: "👍".into() })
+        .await
+        .unwrap();
+    a.cmd_tx
+        .send(NodeCommand::DeleteDmMessage { peer_id: b.master_id.clone(), message_id: "s244-0".into() })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(10, async || olm_frames_for(relay, &a.device_id, &b).len() >= since + 2).await,
+        "A never sent the reaction and the deletion",
+    );
+    if fetched {
+        let mut fetch = push_fetch_of(&b);
+        assert_eq!(push_fetch_reads(relay, &a, &b, &mut fetch, since).await, 0, "neither is a DM to show");
+        drop(fetch);
+    }
+    // The relay handed its buffer to the fetch socket (or, unfetched, the frames are lost).
+    relay.discard_held_kind(&a.device_id, &b.device_id, "encrypted");
+    let a = restart_node(relay, a, a_tag, a_tag).await;
+    let b = restart_node(relay, b, b_tag, b_tag).await;
+    relay.release_held(&a.device_id, &b.device_id);
+    (a, b)
+}
+
+fn sec244_reacted(node: &TestNode, mid: &str) -> bool {
+    node.store()
+        .load_reactions_for_messages(&[mid.to_string()])
+        .ok()
+        .and_then(|m| m.get(mid).cloned())
+        .is_some_and(|r| r.iter().any(|(emoji, _, _)| emoji == "👍"))
+}
+
+async fn sec244_pair(relay: &MockRelay, a_tag: u8, b_tag: u8) -> (TestNode, TestNode) {
+    relay.start_wiretap();
+    relay.set_recording(&tag_kp(a_tag).peer_id(), true);
+    let (mut a, mut b) = friend_pair(relay, a_tag, b_tag).await;
+    send_dm_burst(&a, &b, "s244", 2).await;
+    assert_eq!(read_dm_burst(&mut b, "s244", 2, 15).await.0, 2);
+    send_dm_burst(&b, &a, "s244b", 1).await;
+    assert_eq!(read_dm_burst(&mut a, "s244b", 1, 15).await.0, 1);
+    (a, b)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn fetch_keeps_a_durable_carried_frame_for_the_app() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (a_tag, b_tag) = (229, 238);
+    let (a, b) = sec244_pair(&relay, a_tag, b_tag).await;
+
+    let (_a, b) = sec244_offline_delete_and_reaction(&relay, a, a_tag, b, b_tag, true).await;
+    assert!(
+        wait_until(20, async || b.store().get_dm_message_hidden_at("s244-0").is_some()).await,
+        "the deletion the push fetch took never reached the app",
+    );
+    assert!(wait_until(10, async || sec244_reacted(&b, "s244b-0")).await, "the reaction the push fetch took never reached the app");
+    assert_eq!(b.store().fetch_kept_count(), 0, "a replayed frame stays kept");
+}
+
+// What DM catch-up brings back on its own when a deletion and a reaction never reach the
+// phone (before HOL-SEC-244, anything a push fetch took). A friend serves only rows it
+// sent, newer than our newest minus the lookback or changed since (`updated_at`): its
+// deletion of its own recent message comes back, its reaction on OUR message never does
+// (nor a reaction on an older message: a reaction does not touch the row's `updated_at`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn sec244_dm_catch_up_alone_restores_a_lost_deletion_but_not_a_lost_reaction() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (a_tag, b_tag) = (229, 238);
+    let (a, b) = sec244_pair(&relay, a_tag, b_tag).await;
+
+    let (a, mut b) = sec244_offline_delete_and_reaction(&relay, a, a_tag, b, b_tag, false).await;
+    // Both ends talk again, so catch-up has its chance both ways.
+    dm_read(&a, &mut b, "s244-after").await;
+    let deleted = wait_until(15, async || b.store().get_dm_message_hidden_at("s244-0").is_some()).await;
+    assert!(deleted, "catch-up no longer brings back a deletion of the friend's own recent message");
+    // The page that brought the deletion is the whole answer; one more round trip settles it.
+    dm_read(&a, &mut b, "s244-after2").await;
+    assert!(!sec244_reacted(&b, "s244b-0"), "catch-up now brings back a reaction on our message");
+}
+
+// The iOS shape: the app sits suspended on a resumable session while its extension
+// fetches. The relay's ring still hands the frames back on the resume, but their keys
+// are spent in the copy the app takes, so only what the fetch kept carries them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn sec244_a_resumed_app_replays_what_its_push_fetch_kept() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (a_tag, b_tag) = (237, 239);
+    let (a, mut b) = sec244_pair(&relay, a_tag, b_tag).await;
+    relay.hold_direct(&a.device_id, &b.device_id);
+    relay.suspend(&b.device_id);
+    let since = olm_frames_for(&relay, &a.device_id, &b).len();
+    a.cmd_tx
+        .send(NodeCommand::AddDmReaction { peer_id: b.master_id.clone(), message_id: "s244b-0".into(), emoji: "👍".into() })
+        .await
+        .unwrap();
+    a.cmd_tx
+        .send(NodeCommand::DeleteDmMessage { peer_id: b.master_id.clone(), message_id: "s244-0".into() })
+        .await
+        .unwrap();
+    assert!(wait_until(10, async || olm_frames_for(&relay, &a.device_id, &b).len() >= since + 2).await);
+    let mut fetch = push_fetch_of(&b);
+    assert_eq!(push_fetch_reads(&relay, &a, &b, &mut fetch, since).await, 0);
+    drop(fetch);
+    assert_eq!(b.store().fetch_kept_count(), 2, "the fetch keeps the reaction and the deletion");
+
+    relay.resume(&b.device_id);
+    flush_frames(&relay, &mut b).await;
+    relay.release_held(&a.device_id, &b.device_id);
+    assert!(
+        wait_until(15, async || b.store().get_dm_message_hidden_at("s244-0").is_some()).await,
+        "the deletion the extension took never reached the resumed app",
+    );
+    assert!(wait_until(10, async || sec244_reacted(&b, "s244b-0")).await, "the reaction the extension took never reached the resumed app");
+    assert_eq!(b.store().fetch_kept_count(), 0);
+}
+
+// More kept frames from one friend than its frame budget lets through at once: the
+// replay lands whole, since the keep caps bound it and a bucket drop here is final.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn sec244_a_replay_past_the_frame_budget_lands_whole() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (a_tag, b_tag) = (229, 238);
+    let (mut a, b) = sec244_pair(&relay, a_tag, b_tag).await;
+    // Three emojis per reactor and message at most, so 201 reactions need 67 messages.
+    const N: usize = 201;
+    send_dm_burst(&b, &a, "s244m", N / 3).await;
+    assert_eq!(read_dm_burst(&mut a, "s244m", N / 3, 30).await.0, N / 3);
+    let mids: Vec<String> = (0..N / 3).map(|m| format!("s244m-{m}")).collect();
+    relay.hold_direct(&a.device_id, &b.device_id);
+    let since = olm_frames_for(&relay, &a.device_id, &b).len();
+    for i in 0..N {
+        a.cmd_tx
+            .send(NodeCommand::AddDmReaction { peer_id: b.master_id.clone(), message_id: mids[i / 3].clone(), emoji: format!("e{}", i % 3) })
+            .await
+            .unwrap();
+    }
+    assert!(wait_until(60, async || olm_frames_for(&relay, &a.device_id, &b).len() >= since + N).await, "A never sent every reaction");
+    let mut fetch = push_fetch_of(&b);
+    assert_eq!(push_fetch_reads(&relay, &a, &b, &mut fetch, since).await, 0);
+    drop(fetch);
+    assert_eq!(b.store().fetch_kept_count(), N as i64);
+    relay.discard_held_kind(&a.device_id, &b.device_id, "encrypted");
+    let a = restart_node(&relay, a, a_tag, a_tag).await;
+    let mut b = restart_node(&relay, b, b_tag, b_tag).await;
+    relay.release_held(&a.device_id, &b.device_id);
+    let landed = |b: &TestNode| {
+        b.store().load_reactions_for_messages(&mids).map(|m| m.values().map(Vec::len).sum::<usize>()).unwrap_or(0)
+    };
+    let all = wait_until(30, async || {
+        drain_events(&mut b);
+        landed(&b) == N
+    })
+    .await;
+    assert!(all, "a replayed frame fell to the frame budget: {} of {N} landed", landed(&b));
+}
+
+// sec244-stack
+// Found with HOL-SEC-244: a resumed app whose push fetch read a DM takes the fetch's
+// session copy at its first change. When that change was a ring frame's decrypt, the
+// restore ran under the event loop and the Olm arm and overran a debug worker's stack.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn sec244_a_resumed_app_takes_its_fetchs_copy_before_it_reads_the_ring() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (a_tag, b_tag) = (237, 239);
+    let (a, mut b) = sec244_pair(&relay, a_tag, b_tag).await;
+    relay.hold_direct(&a.device_id, &b.device_id);
+    relay.suspend(&b.device_id);
+    let since = olm_frames_for(&relay, &a.device_id, &b).len();
+    send_dm_burst(&a, &b, "ring", 2).await;
+    assert!(wait_until(10, async || olm_frames_for(&relay, &a.device_id, &b).len() >= since + 2).await);
+    let mut fetch = push_fetch_of(&b);
+    assert_eq!(push_fetch_reads(&relay, &a, &b, &mut fetch, since).await, 2);
+    drop(fetch);
+    relay.resume(&b.device_id);
+    flush_frames(&relay, &mut b).await;
+    relay.release_held(&a.device_id, &b.device_id);
+    drain_events(&mut b);
+    // B reads the ring's copies (spent, so quietly dropped) and goes on reading A.
+    dm_read(&a, &mut b, "ring-after").await;
+}
+
+// sec248-friend-remove
+// HOL-SEC-248: the live FriendRemove arm took a removal from any device that still
+// resolved to the friend, so a device the friend's roster removed could end the
+// friendship. The request and sibling-list paths already refused such a device.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn sec248_a_removed_device_cannot_end_a_friendship_live() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (d1, s, mut f) = ar29_cast(&relay, [231, 232, 233, 234]).await;
+    let o_master = d1.master_id.clone();
+    d1.cmd_tx
+        .send(NodeCommand::RevokeDevice { device_peer_id: s.device_id.clone(), mode: super::roster_book::RemoveMode::Retire, with_dependents: false })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(20, async || d1.revoked_devices(&o_master).contains(&s.device_id)).await,
+        "precondition: D1 removed S",
+    );
+    // The harness resolver is shared: F counts S removed, and S still resolves to O, as
+    // a device F linked before its removal.
+    assert!(super::resolver::is_revoked(&s.device_id));
+    super::resolver::update_many(&o_master, [s.device_id.as_str()]);
+    let room = super::types::dm_room_code(&o_master, &f.master_id);
+    let removal = serde_json::to_vec(&super::types::HavenMessage::FriendRemove { at: None }).unwrap();
+    assert_eq!(f.store().get_friend_status(&o_master).unwrap().as_deref(), Some("accepted"), "precondition: friends");
+    relay.inject_direct(&room, &s.device_id, &f.device_id, removal.clone());
+    // ABSENCE: an end that never comes.
+    let ended = wait_until(8, async || f.store().get_friend_status(&o_master).ok().flatten().as_deref() != Some("accepted")).await;
+    assert!(!ended, "a device O's roster removed ended F's friendship with O");
+    dm_read(&d1, &mut f, "s248-after").await;
+    // Control: the same removal from a device O's roster counts ends it.
+    relay.inject_direct(&room, &d1.device_id, &f.device_id, removal);
+    assert!(
+        wait_until(15, async || f.store().get_friend_status(&o_master).ok().flatten().as_deref() != Some("accepted")).await,
+        "a removal from O's counted device must end the friendship",
+    );
+    drop(s);
+}
+
+/// HOL-SEC-248: a FriendReject ends an accepted friendship in the mutual race, and its
+/// roster-less branch only resolved the sender, so a removed device ended it there too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn sec248_a_removed_device_cannot_end_a_friendship_by_a_reject() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (d1, s, mut f) = ar29_cast(&relay, [241, 242, 243, 244]).await;
+    let o_master = d1.master_id.clone();
+    d1.cmd_tx
+        .send(NodeCommand::RevokeDevice { device_peer_id: s.device_id.clone(), mode: super::roster_book::RemoveMode::Retire, with_dependents: false })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(20, async || d1.revoked_devices(&o_master).contains(&s.device_id)).await,
+        "precondition: D1 removed S",
+    );
+    assert!(super::resolver::is_revoked(&s.device_id));
+    super::resolver::update_many(&o_master, [s.device_id.as_str()]);
+    let room = super::types::dm_room_code(&o_master, &f.master_id);
+    assert_eq!(f.store().get_friend_status(&o_master).unwrap().as_deref(), Some("accepted"), "precondition: friends");
+    // The sender picks the stamp, so the newest one names any accepted friendship.
+    let reject = serde_json::to_vec(&super::types::HavenMessage::FriendReject { requested_at: i64::MAX, device_list: None }).unwrap();
+    relay.inject_direct(&room, &s.device_id, &f.device_id, reject.clone());
+    // ABSENCE: an end that never comes.
+    let ended = wait_until(8, async || f.store().get_friend_status(&o_master).ok().flatten().as_deref() != Some("accepted")).await;
+    assert!(!ended, "a device O's roster removed ended F's friendship with O by a roster-less FriendReject");
+    dm_read(&d1, &mut f, "s248r-after").await;
+    // Control: the same reject from a device O's roster counts ends it.
+    relay.inject_direct(&room, &d1.device_id, &f.device_id, reject);
+    assert!(
+        wait_until(15, async || f.store().get_friend_status(&o_master).ok().flatten().as_deref() != Some("accepted")).await,
+        "a reject from O's counted device must end the accepted friendship",
+    );
+    drop(s);
+}
+
+// sec249-channel-wake
+// HOL-SEC-249: a channel wake decrypted every MLS frame it met and saved the group
+// state, spending the message key of each edit, deletion and reaction it does not
+// show; the app's copy of that same ciphertext (the channel's ring, a resumed session)
+// then no longer opened. The fetch now saves only the reads of posts it stored.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn sec249_the_app_still_reads_its_ring_copies_after_a_channel_wake() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    const O_TAG: u8 = 235;
+    const J_TAG: u8 = 236;
+    let (o_master, j_master) = (tag_kp(O_TAG).peer_id(), tag_kp(J_TAG).peer_id());
+    let mut o = spawn_node_with_friends(&relay, O_TAG, O_TAG, &[&j_master]).await;
+    let mut j = spawn_node_with_friends(&relay, J_TAG, J_TAG, &[&o_master]).await;
+    expect_dm_pair_ready(&relay, &o, &j, 20).await;
+    let server_id = create_server_and_wait(&mut o, "Wake Server").await;
+    let general = general_channel_of(&server_id);
+    j.cmd_tx
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&server_id) })
+        .await
+        .unwrap();
+    assert!(wait_until(30, async || j.mls_members(&server_id).await.len() == 2).await, "J joins the server's MLS group");
+    g13w3_post(&o, &server_id, &general, "s249-0", "to be deleted").await;
+    assert!(g13w3_got_post(&mut j, "to be deleted").await);
+    g13w3_post(&o, &server_id, &general, "s249-1", "to be edited").await;
+    assert!(g13w3_got_post(&mut j, "to be edited").await);
+
+    // J's app is away; O edits, reacts, posts and deletes. Each change rides the
+    // channel's ring alone; the post also gets J's offline copy.
+    relay.set_online(&j.device_id, false);
+    assert!(wait_until(10, async || !relay.online_devices().contains(&j.device_id)).await);
+    relay.set_recording(&o.device_id, true);
+    let ops = [
+        NodeCommand::EditChannelMessage { server_id: server_id.clone(), channel_id: general.clone(), message_id: "s249-1".into(), new_text: "edited while away".into() },
+        NodeCommand::AddChannelReaction { server_id: server_id.clone(), channel_id: general.clone(), message_id: "s249-1".into(), emoji: "👍".into() },
+        NodeCommand::SendChannelMessage { server_id: server_id.clone(), channel_id: general.clone(), text: "posted while away".into(), message_id: "s249-2".into(), reply_to_mid: None, link_preview: None },
+        NodeCommand::DeleteChannelMessage { server_id: server_id.clone(), channel_id: general.clone(), message_id: "s249-0".into() },
+    ];
+    for op in ops {
+        o.cmd_tx.send(op).await.unwrap();
+    }
+    let mls_frames = || {
+        relay
+            .recorded_frames(&o.device_id)
+            .into_iter()
+            .filter(|f| matches!(recorded_message(f), Ok(super::types::HavenMessage::MlsChannelMessage { server_id: s, .. }) if s == server_id))
+            .collect::<Vec<_>>()
+    };
+    // Edit, reaction, post, its hint, deletion (and the post's offline copy).
+    assert!(wait_until(15, async || mls_frames().len() >= 5).await, "O never sent its four changes");
+    let frames = mls_frames();
+    // O goes too, so nothing but the ring can bring J the changes.
+    relay.set_online(&o.device_id, false);
+    assert!(wait_until(10, async || !relay.online_devices().contains(&o.device_id)).await);
+
+    // J's push fetch is handed every frame as if live while its socket was in the room:
+    // the post's hint by the room broadcast it rode (0x05, the route a fetch meets
+    // live), the rest by the channel's topic.
+    let (sid, o_dev) = (server_id.clone(), o.device_id.clone());
+    let (j_dev, j_mst) = (j.device_id.clone(), j.master_id.clone());
+    let mut hint_frame = None;
+    let mut j = restart_node_with(&relay, j, J_TAG, J_TAG, |db_path, passphrase| {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let store = crate::storage::MessageStore::open(db_path, passphrase).unwrap();
+                let mut olm = OlmManager::load(&store).unwrap().expect("J's Olm account");
+                let mut mls = crate::crypto::MlsManager::load_from(&store, std::slice::from_ref(&sid)).unwrap();
+                assert!(mls.is_some(), "precondition: J's fetch holds the group");
+                let crypto_store = CryptoStore::open(db_path.to_string(), passphrase.to_string()).unwrap();
+                let ciphertext = |f: &[u8]| match recorded_message(f) {
+                    Ok(super::types::HavenMessage::MlsChannelMessage { body, .. }) => OlmManager::decode_base64(&body).ok(),
+                    _ => None,
+                };
+                // A RAM-only copy of J's group tells which frame is the hint.
+                let mut probe = crate::crypto::MlsManager::load_from(&store, std::slice::from_ref(&sid)).unwrap().expect("J's group");
+                let hint_at = frames
+                    .iter()
+                    .position(|f| {
+                        ciphertext(f)
+                            .and_then(|ct| probe.decrypt(&sid, &ct).ok())
+                            .and_then(|(plain, _)| serde_json::from_slice::<super::types::MessageEnvelope>(&plain).ok())
+                            .is_some_and(|e| matches!(e, super::types::MessageEnvelope::ChannelHint { .. }))
+                    })
+                    .expect("O's post sent its hint");
+                let mut posts = Vec::new();
+                let mut shown = Vec::new();
+                let mut wake = super::fetch::Wake::channel(&sid);
+                for (i, frame) in frames.iter().enumerate() {
+                    let mut data = if i == hint_at {
+                        [&[0x05u8][..], format!("{sid}\0{o_dev}\0").as_bytes()].concat()
+                    } else {
+                        [&[0x08u8][..], format!("{sid}\0topic\0{o_dev}\0").as_bytes()].concat()
+                    };
+                    data.extend_from_slice(frame);
+                    super::fetch::handle_binary_frame(
+                        &data, &mut wake, &mut olm, &mut mls, &mut posts, &crypto_store, db_path, passphrase, &j_dev, &j_mst, &mut shown,
+                    );
+                }
+                assert_eq!(shown.len(), 1, "the fetch shows the one post");
+                // The fetch read the broadcast: its reading copy holds that key spent.
+                let hint_ct = ciphertext(&frames[hint_at]).expect("the hint's ciphertext");
+                assert!(
+                    mls.as_mut().expect("the fetch's group").decrypt(&sid, &hint_ct).is_err(),
+                    "the fetch never read the hint it met as a 0x05 broadcast",
+                );
+                hint_frame = Some(frames[hint_at].clone());
+                super::fetch::save_posts_read(&mut mls, &posts, &crypto_store, db_path, passphrase);
+                assert!(crypto_store.flushed(std::time::Duration::from_secs(10)).await, "the fetch's save never landed");
+                // On disk: the post's key is spent, every other frame's key is not.
+                let after = crate::storage::MessageStore::open(db_path, passphrase).unwrap();
+                let mut copy = crate::crypto::MlsManager::load_from(&after, std::slice::from_ref(&sid)).unwrap().expect("J's group");
+                let spent = frames
+                    .iter()
+                    .filter_map(|f| ciphertext(f))
+                    .filter(|ct| copy.decrypt(&sid, ct).is_err())
+                    .count();
+                assert_eq!(spent, 1, "the fetch saved the reads of frames it does not show");
+            })
+        });
+    })
+    .await;
+
+    let mid = |m: &str| vec![m.to_string()];
+    assert!(
+        wait_until(20, async || j.channel_messages(&server_id, &general).iter().any(|m| m.text == "edited while away")).await,
+        "the edit the fetch read no longer opened from the ring",
+    );
+    // The hint's other copy reaches the app as an iOS grace session's ring replays it.
+    let hint_frame = hint_frame.expect("the stage ran");
+    relay.inject_raw(&server_id, &o.device_id, &j.device_id, hint_frame);
+    assert!(
+        wait_event(&mut j, std::time::Duration::from_secs(20), |ev| {
+            matches!(ev, NetworkEvent::ChannelNotificationHint { message_id, .. } if message_id == "s249-2")
+        })
+        .await,
+        "the hint the fetch read as a 0x05 broadcast no longer opened from the app's copy",
+    );
+    assert!(
+        wait_until(10, async || j.store().load_reactions_for_messages(&mid("s249-1")).ok().and_then(|r| r.get("s249-1").cloned()).is_some_and(|r| r.iter().any(|(e, _, _)| e == "👍"))).await,
+        "the reaction the fetch read no longer opened from the ring",
+    );
+    assert!(
+        wait_until(10, async || j.store().deleted_message_ids(&mid("s249-0")).is_ok_and(|d| !d.is_empty())).await,
+        "the deletion the fetch read no longer opened from the ring",
+    );
+    assert!(j.channel_messages(&server_id, &general).iter().any(|m| m.text == "posted while away"), "the fetch stored the post");
+    drop(o);
+}
