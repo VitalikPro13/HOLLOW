@@ -17,6 +17,7 @@ import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/dialogs/recovery_phrase_dialogs.dart';
+import 'package:hollow/src/ui/shell/home_restore_card.dart';
 import 'package:hollow/src/core/peer_id_label.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -112,6 +113,8 @@ class _RosterLockScreenState extends ConsumerState<RosterLockScreen> {
       );
       if (!done) return;
       await container.read(rosterGateProvider.notifier).refresh();
+      // The new base may judge backups differently; the card says what Rust holds.
+      container.invalidate(restoreCardProvider);
       askForRestoreChooser(container, fresh: true);
     } catch (e) {
       if (mounted) HollowToast.show(context, friendlyError(e), type: HollowToastType.error);
@@ -124,15 +127,23 @@ class _RosterLockScreenState extends ConsumerState<RosterLockScreen> {
   }
 
   /// The statement that came too early, made again: an admission joins, a
-  /// recovery recovers from the same moment as before.
+  /// recovery recovers from the same moment as before, keeping the devices
+  /// picked from the roster held now.
   Future<void> _typeAgain(RosterGate gate) async {
     if (gate.tooEarly != PhraseRestoreBranch.recover) return _join();
     final container = ProviderScope.containerOf(context, listen: false);
-    final done = await showRecoverAgainDialog(context,
-        lostSinceMs: gate.lostSinceMs ?? 0);
-    if (!done) return;
-    await container.read(rosterGateProvider.notifier).refresh();
-    askForRestoreChooser(container, fresh: true);
+    try {
+      final status = await roster_api.rosterStatus();
+      if (!mounted) return;
+      final done = await showRecoverAgainDialog(context,
+          status: status, lostSinceMs: gate.lostSinceMs);
+      if (!done) return;
+      await container.read(rosterGateProvider.notifier).refresh();
+      container.invalidate(restoreCardProvider);
+      askForRestoreChooser(container, fresh: true);
+    } catch (e) {
+      if (mounted) HollowToast.show(context, friendlyError(e), type: HollowToastType.error);
+    }
   }
 
   @override
@@ -147,9 +158,10 @@ class _RosterLockScreenState extends ConsumerState<RosterLockScreen> {
     final String body;
     if (tooEarly) {
       title = 'Type your recovery phrase again';
-      body = "Your identity doesn't count this device yet. It changed after "
-          "you typed your phrase here, or this device's clock was behind. "
-          'Check the date and time, then type the phrase again.';
+      body = "Your identity doesn't count this device yet. Your recovery "
+          'phrase was used on another device after you typed it here, or '
+          "this device's clock was behind. Check the date and time, then type "
+          'the phrase again.';
     } else if (removed) {
       // A bare id names nothing a removed device can look up, so only a label is said.
       final label = labels[gate.removedBy];
