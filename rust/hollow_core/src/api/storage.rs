@@ -2978,6 +2978,18 @@ pub(crate) fn move_database_to(root: &std::path::Path, stem: &str) -> Result<(),
     Ok(())
 }
 
+/// Removes the database in `root` with the files SQLite keeps beside it: only one a
+/// failed phrase restore made itself, holding nothing but what that restore wrote.
+pub(crate) fn remove_database(root: &std::path::Path) -> Result<(), String> {
+    for part in DB_PARTS {
+        let path = root.join(format!("messages.db{part}"));
+        if present(&path) {
+            std::fs::remove_file(&path).map_err(|e| format!("Failed to remove messages.db{part}: {e}"))?;
+        }
+    }
+    Ok(())
+}
+
 /// Undoes [`set_database_aside`] for `stem`, never over a file already in place.
 pub(crate) fn put_database_back(root: &std::path::Path, stem: &str) -> Result<(), String> {
     let back: Vec<&str> = DB_PARTS.into_iter().filter(|part| present(&root.join(format!("{stem}{part}")))).collect();

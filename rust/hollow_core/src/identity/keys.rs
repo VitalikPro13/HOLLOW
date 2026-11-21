@@ -176,7 +176,7 @@ fn land_identity_key(
     keypair: &NativeKeypair,
     mirror: Option<&[u8]>,
     set_aside_locked: bool,
-) -> Result<(), String> {
+) -> Result<Landing, String> {
     let _landing = super::encryption::key_file_lock();
     let planned: Vec<&str> = if set_aside_locked {
         LOCKED_KEY_FILES.iter().map(|(name, _)| *name).filter(|name| is_encrypted_key(&root.join(name))).collect()
@@ -190,12 +190,76 @@ fn land_identity_key(
     landed
 }
 
+/// What a key landing moved, so a restore that fails after it puts the folder back
+/// ([`Landing::undo`]).
+pub(crate) struct Landing {
+    locked: Vec<(&'static str, &'static str)>,
+    /// The database the new identity cannot open, kept aside under this name.
+    kept: Option<String>,
+    /// The new identity's own kept database, put back from this name.
+    reclaimed: Option<String>,
+    /// The plaintext key file the new one replaced.
+    replaced: Option<zeroize::Zeroizing<Vec<u8>>>,
+    /// No database was in place once the key landed.
+    no_database: bool,
+}
+
+impl Landing {
+    /// Puts back what the landing changed: the key file as it was, the locked keys
+    /// under their names, the databases where they were. A database made after the
+    /// landing holds only what the failed restore wrote, and goes, so typing the phrase
+    /// again signs for one device, never beside one nobody holds a key for.
+    fn undo(self, root: &std::path::Path) {
+        crate::log::init();
+        let path = root.join("identity.key");
+        match &self.replaced {
+            Some(bytes) => {
+                if let Err(e) = super::encryption::write_key_file(&path, bytes) {
+                    hollow_log!("[HOLLOW-ID] The key file a failed restore replaced could not be put back: {e}");
+                }
+            }
+            None => {
+                let _landing = super::encryption::key_file_lock();
+                crate::api::wipe::zero_and_remove(&path);
+                if path.exists() {
+                    hollow_log!("[HOLLOW-ID] The key a failed restore landed could not be taken back out");
+                }
+            }
+        }
+        {
+            let _landing = super::encryption::key_file_lock();
+            for (name, aside) in &self.locked {
+                if !root.join(name).exists()
+                    && let Err(e) = fs::rename(root.join(aside), root.join(name))
+                {
+                    hollow_log!("[HOLLOW-ID] A locked key file could not go back after a failed restore: {e}");
+                }
+            }
+        }
+        let databases = (|| {
+            if self.no_database {
+                crate::api::storage::remove_database(root)?;
+            }
+            if let Some(stem) = &self.reclaimed {
+                crate::api::storage::move_database_to(root, stem)?;
+            }
+            if let Some(stem) = &self.kept {
+                crate::api::storage::put_database_back(root, stem)?;
+            }
+            Ok::<(), String>(())
+        })();
+        if let Err(e) = databases {
+            hollow_log!("[HOLLOW-STORE] A database stays where a failed restore left it: {e}");
+        }
+    }
+}
+
 fn land_staged_key(
     root: &std::path::Path,
     keypair: &NativeKeypair,
     mirror: Option<&[u8]>,
     set_aside_locked: bool,
-) -> Result<(), String> {
+) -> Result<Landing, String> {
     let path = root.join("identity.key");
     let staged = super::encryption::staging_path(&path);
     let discard = || crate::api::wipe::zero_and_remove(&staged);
@@ -233,7 +297,11 @@ fn land_staged_key(
         }
     };
     let locked = if set_aside_locked { set_aside_locked_keys(root) } else { Vec::new() };
-    let Err(e) = place_staged_key(&staged, &path) else { return Ok(()) };
+    let replaced = fs::read(&path).ok().map(zeroize::Zeroizing::new);
+    let Err(e) = place_staged_key(&staged, &path) else {
+        let no_database = !root.join("messages.db").exists();
+        return Ok(Landing { locked, kept, reclaimed, replaced, no_database });
+    };
     discard();
     for (name, aside) in locked {
         if !root.join(name).exists() {
@@ -432,7 +500,6 @@ pub(crate) fn restore_identity_from_mnemonic(phrase: &str) -> Result<IdentityDat
 /// drops a gone identity's duress slot first and leaves the mark the Home card reads.
 pub(crate) fn restore_with_phrase(mnemonic: &Mnemonic, how: PhraseRestore, welcome: bool) -> Result<Restored, String> {
     let keypair = NativeKeypair::from_mnemonic(mnemonic)?;
-    let peer_id = keypair.peer_id();
     crate::api::storage::refuse_while_not_ready()?;
     let root = data_dir()?;
     if welcome && !root.join("identity.key").exists() {
@@ -441,8 +508,15 @@ pub(crate) fn restore_with_phrase(mnemonic: &Mnemonic, how: PhraseRestore, welco
     }
     // An encrypted key it replaces is kept aside under its locked name, so the new one
     // mirrors no protection.
-    land_identity_key(&root, &keypair, None, true)?;
+    let landing = land_identity_key(&root, &keypair, None, true)?;
+    // A restore that fails past here leaves the folder as it was, so no launch runs
+    // the new master key beside the old device.
+    restore_landed(&root, mnemonic, keypair, how, welcome).inspect_err(|_| landing.undo(&root))
+}
 
+/// [`restore_with_phrase`] once the master key landed.
+fn restore_landed(root: &std::path::Path, mnemonic: &Mnemonic, keypair: NativeKeypair, how: PhraseRestore, welcome: bool) -> Result<Restored, String> {
+    let peer_id = keypair.peer_id();
     let seed = zeroize::Zeroizing::new(mnemonic.to_seed(""));
     let recovery = super::recovery::recovery_keypair_from_seed(&seed);
     let db_path = root.join("messages.db").to_str().ok_or("Invalid path encoding")?.to_string();
@@ -452,7 +526,7 @@ pub(crate) fn restore_with_phrase(mnemonic: &Mnemonic, how: PhraseRestore, welco
     let empty = held.is_none();
 
     if how == PhraseRestore::Admit
-        && let Some(old) = device_kept_here(&root, &store, held.as_ref(), &keypair)
+        && let Some(old) = device_kept_here(root, &store, held.as_ref(), &keypair)
     {
         let device_peer_id = old.peer_id();
         return Ok(Restored {
@@ -493,7 +567,7 @@ pub(crate) fn restore_with_phrase(mnemonic: &Mnemonic, how: PhraseRestore, welco
         crate::node::phrase_restore::write(&store, &mark)?;
     }
     drop(store);
-    save_keypair_to(&device_keypair_path()?, &device_keypair)?;
+    place_key_file(&device_keypair_path()?, &device_keypair)?;
 
     Ok(Restored {
         data: IdentityData { keypair, peer_id, device_keypair, device_peer_id, mnemonic: None },
@@ -614,6 +688,14 @@ pub(crate) fn save_keypair_to(path: &PathBuf, keypair: &NativeKeypair) -> Result
     let bytes_to_write = encode_key_file(existing.as_deref(), keypair)?;
     fs::write(path, bytes_to_write).map_err(|e| format!("Failed to write identity file: {e}"))?;
     Ok(())
+}
+
+/// [`save_keypair_to`] through a staged write, so a write that fails or dies leaves
+/// the file there before it whole.
+fn place_key_file(path: &std::path::Path, keypair: &NativeKeypair) -> Result<(), String> {
+    let existing = zeroize::Zeroizing::new(fs::read(path).ok());
+    let bytes = zeroize::Zeroizing::new(encode_key_file(existing.as_deref(), keypair)?);
+    super::encryption::write_key_file(path, &bytes)
 }
 
 /// A key file's bytes: an HKEYV1 envelope with `existing`'s protection when a session
@@ -1007,5 +1089,73 @@ mod phrase_restore_tests {
 
         assert!(!slot.exists(), "a gone identity's duress slot stayed beside the restored one");
         assert!(fs::read(&peek).unwrap().iter().all(|b| *b == 0), "the slot was unlinked unzeroed");
+    }
+
+    /// Review finding 2: a Yes restore that fails once the master key has landed takes
+    /// the key back out, so the next launch never runs as the old device the person
+    /// said someone else may hold.
+    #[test]
+    fn a_recovery_that_fails_after_the_key_lands_never_runs_as_the_old_device() {
+        let r = root();
+        let (phrase, master, old) = ran_once(&r);
+        crate::api::wipe::zero_and_remove(&r.path().join("identity.key"));
+        let db = r.path().join("messages.db");
+        let mut perms = fs::metadata(&db).unwrap().permissions();
+        perms.set_readonly(true);
+        fs::set_permissions(&db, perms.clone()).unwrap();
+        assert!(fs::OpenOptions::new().write(true).open(&db).is_err(), "precondition: the database cannot be written");
+        let out = restore_with_phrase(&parse_phrase(&phrase).unwrap(), PhraseRestore::Recover { lost_since_ms: 1_000 }, true);
+        #[allow(clippy::permissions_set_readonly_false)]
+        perms.set_readonly(false);
+        fs::set_permissions(&db, perms).unwrap();
+        assert!(out.is_err(), "precondition: the restore failed");
+        let landed = r.path().join("identity.key").exists();
+        let device = fs::read(r.path().join("identity.device")).ok().and_then(|b| NativeKeypair::from_protobuf_encoding(&b).ok()).map(|k| k.peer_id());
+        let counted = own_state(&r, &master).1.is_member(&old.peer_id());
+        assert!(
+            !(landed && device.as_deref() == Some(old.peer_id().as_str()) && counted),
+            "the failed recovery left the master key beside the old device, which still counts: the next launch runs as it",
+        );
+        assert!(!landed, "the landed key stayed after the restore failed");
+    }
+
+    /// Review finding 2: a restore on a fresh install that fails at its last step
+    /// leaves the folder as it found it, so typing the phrase again admits one device,
+    /// never a second beside a first nobody holds a key for.
+    #[test]
+    fn a_failed_restore_on_a_fresh_install_leaves_nothing_behind() {
+        let r = root();
+        let phrase = Mnemonic::from_entropy(&[0x35; 32]).unwrap().to_string();
+        super::super::encryption::test_faults::fail_rename_of("identity.device");
+        let out = restore_with_phrase(&parse_phrase(&phrase).unwrap(), PhraseRestore::Recover { lost_since_ms: 1_000 }, true);
+        super::super::encryption::test_faults::clear();
+        assert!(out.is_err(), "precondition: the restore failed");
+        for name in ["identity.key", "identity.device", "messages.db", "messages.db-wal"] {
+            assert!(!r.path().join(name).exists(), "{name} stayed after the restore failed");
+        }
+
+        let done = restore(&phrase, PhraseRestore::Recover { lost_since_ms: 1_000 });
+
+        let master = NativeKeypair::from_mnemonic(&parse_phrase(&phrase).unwrap()).unwrap();
+        let members = own_state(&r, &master).1.members;
+        assert_eq!(members.into_iter().collect::<Vec<_>>(), vec![done.data.device_peer_id], "the failed restore's device still counts");
+    }
+
+    /// Review finding 2: a locked identity's key file, set aside for a restore that then
+    /// fails, comes back under its own name.
+    #[test]
+    fn a_failed_restore_puts_a_locked_key_back() {
+        let r = root();
+        let mut locked = b"HKEYV1".to_vec();
+        locked.push(0x02);
+        locked.resize(119, 7);
+        fs::write(r.path().join("identity.key"), &locked).unwrap();
+        let phrase = Mnemonic::from_entropy(&[0x36; 32]).unwrap().to_string();
+        super::super::encryption::test_faults::fail_rename_of("identity.device");
+        let out = restore_with_phrase(&parse_phrase(&phrase).unwrap(), PhraseRestore::Admit, true);
+        super::super::encryption::test_faults::clear();
+        assert!(out.is_err(), "precondition: the restore failed");
+        assert_eq!(fs::read(r.path().join("identity.key")).unwrap(), locked, "the locked key is not back");
+        assert!(!r.path().join("identity.key.locked").exists());
     }
 }
