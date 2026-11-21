@@ -733,13 +733,23 @@ fn relaunch_args() -> Result<Vec<String>, String> {
 }
 
 /// An argument that is not Unicode cannot be written into the script, so it
-/// refuses rather than relaunching without it.
+/// refuses rather than relaunching without it. A `hollow:` link the app was
+/// started with is dropped: it was handled at that start, and a relaunch would
+/// open it again (an invite, a share, a recovery link).
 fn carried_args(args: impl IntoIterator<Item = std::ffi::OsString>) -> Result<Vec<String>, String> {
-    args.into_iter()
-        .map(|a| {
-            a.into_string().map_err(|_| UNCARRIED_ARGUMENT.to_string())
-        })
-        .collect()
+    let mut kept = Vec::new();
+    for a in args {
+        let a = a.into_string().map_err(|_| UNCARRIED_ARGUMENT.to_string())?;
+        if !is_deep_link(&a) {
+            kept.push(a);
+        }
+    }
+    Ok(kept)
+}
+
+/// The scheme the OS hands a cold start (`hollow.exe "hollow://..."`, `%u` on Linux).
+fn is_deep_link(arg: &str) -> bool {
+    arg.get(..7).is_some_and(|scheme| scheme.eq_ignore_ascii_case("hollow:"))
 }
 
 /// A release as the apply paths name it: `tag` in file and folder names, `display`
@@ -861,18 +871,28 @@ fn apply_update_impl(
     }
 }
 
+/// What a copy still failing after its retries leaves on screen, before the key press
+/// that tries again (`echo` lines: no characters cmd reads; the path rides quoted).
+#[cfg(any(target_os = "windows", test))]
+const COPY_FAILED_1: &str = "The update could not copy its files, so Hollow has not restarted yet.";
+#[cfg(any(target_os = "windows", test))]
+const COPY_FAILED_2: &str = "The new version is waiting in";
+#[cfg(any(target_os = "windows", test))]
+const COPY_FAILED_3: &str = "Close anything that uses the Hollow folder, then press any key to try again.";
+
+/// How often a failed copy is tried again on its own, two seconds apart, before it asks.
+#[cfg(any(target_os = "windows", test))]
+const COPY_TRIES: u32 = 5;
+
 /// `update.bat`: waits until process `wait_pid` (named `wait_image`, so a reused pid
 /// is not waited on) is gone, copies the staged files over `app_dir`, cleans up and
-/// runs `relaunch`. A copy that fails relaunches nothing: a half-copied app could
-/// start on mismatched parts. Every path argument is already [`bat_quoted_path`] output. The script is UTF-8, so the code page switches
-/// before the first line that may hold a non-ASCII path, and delayed expansion
-/// is off whatever the registry says, so a `!` in a path or argument stays literal.
-/// What a failed copy leaves on screen (two `echo` lines: no characters cmd reads).
-#[cfg(any(target_os = "windows", test))]
-const COPY_FAILED_1: &str = "The update could not copy its files, so Hollow was not restarted.";
-#[cfg(any(target_os = "windows", test))]
-const COPY_FAILED_2: &str = "Close anything that uses the Hollow folder, then start Hollow and update again.";
-
+/// runs `relaunch`. A copy that fails relaunches nothing (a half-copied app could
+/// start on mismatched parts): it is tried again a few times, then again on each key
+/// press, from the staged files it keeps. Every path argument is already
+/// [`bat_quoted_path`] output. The script is UTF-8, so the code page switches before
+/// the first line that may hold a non-ASCII path, and delayed expansion is off
+/// whatever the registry says, so a `!` in a path or argument stays literal. The
+/// retry delay is `ping`, not `timeout`, which fails at once without console input.
 #[cfg(any(target_os = "windows", test))]
 fn update_bat_script(
     version: &str,
@@ -901,8 +921,25 @@ fn update_bat_script(
              goto wait\r\n\
          )\r\n\
          echo   Copying files...\r\n\
+         set HOLLOW_COPY_TRIES=0\r\n\
+         :copy\r\n\
          xcopy /E /Y /Q \"{staging_str}\\*\" \"{app_dir}\\\" >NUL\r\n\
-         if errorlevel 1 goto copyfailed\r\n\
+         if not errorlevel 1 goto copied\r\n\
+         set /a HOLLOW_COPY_TRIES+=1\r\n\
+         if %HOLLOW_COPY_TRIES% GEQ {COPY_TRIES} goto copyfailed\r\n\
+         ping -n 3 127.0.0.1 >NUL\r\n\
+         goto copy\r\n\
+         :copyfailed\r\n\
+         echo.\r\n\
+         echo   {COPY_FAILED_1}\r\n\
+         echo   {COPY_FAILED_2} \"{staging_str}\".\r\n\
+         echo   {COPY_FAILED_3}\r\n\
+         echo.\r\n\
+         pause >NUL\r\n\
+         echo   Copying files...\r\n\
+         set HOLLOW_COPY_TRIES=0\r\n\
+         goto copy\r\n\
+         :copied\r\n\
          echo.\r\n\
          echo   Cleaning up...\r\n\
          rd /S /Q \"{staging_str}\" >NUL 2>&1\r\n\
@@ -924,14 +961,7 @@ fn update_bat_script(
          timeout /t 1 /nobreak >NUL\r\n\
          echo.\r\n\
          {relaunch}\r\n\
-         exit\r\n\
-         :copyfailed\r\n\
-         echo.\r\n\
-         echo   {COPY_FAILED_1}\r\n\
-         echo   {COPY_FAILED_2}\r\n\
-         echo.\r\n\
-         pause\r\n\
-         exit /b 1\r\n"
+         exit\r\n"
     )
 }
 
@@ -1000,6 +1030,13 @@ fn write_macos_update_script(
         .ok_or("Staged app path is not valid UTF-8")?;
     // Install path: keep the bundle's own name, placed back in app_dir.
     let installed_app = format!("{app_dir}/{bundle_name}");
+    // The swap deletes the old bundle whole; a data root inside it would go with it.
+    // A portable copy keeps `hollow_data` beside the bundle, never in it.
+    if let (Ok(d), Ok(a)) = (fs::canonicalize(data), fs::canonicalize(&installed_app))
+        && d.starts_with(&a)
+    {
+        return Err(DATA_INSIDE_APP.to_string());
+    }
 
     let sh_path = data.join("updates").join("update.sh");
     let log_path = data.join("updates").join("update.log");
@@ -1181,7 +1218,9 @@ fn apply_update_tarball(
 
     let updates = data.join("updates");
     fs::create_dir_all(&updates).map_err(|e| format!("Failed to create updates dir: {e}"))?;
-    let staging = updates.join(format!("staging-{}", rel.tag));
+    let app_dir = app_dir.trim_end_matches('/');
+    let places = tarball_places(&updates, Path::new(app_dir), &rel.tag)?;
+    let staging = places.staging;
     if staging.exists() {
         fs::remove_dir_all(&staging).map_err(|e| format!("Failed to clean staging dir: {e}"))?;
     }
@@ -1221,6 +1260,15 @@ fn apply_update_tarball(
                 .to_string(),
         );
     };
+    // A build that brought a data folder or a marker would take the person's place in
+    // the swap (#155): it never installs one.
+    for name in BUNDLE_PROFILE_NAMES {
+        let path = bundle.join(name);
+        if path.symlink_metadata().is_ok() {
+            let gone = if path.is_dir() && !path.is_symlink() { fs::remove_dir_all(&path) } else { fs::remove_file(&path) };
+            gone.map_err(|e| format!("The update could not be prepared: {e}. Nothing was installed."))?;
+        }
+    }
 
     let exe = bundle.join("hollow");
     let mode = fs::metadata(&exe)
@@ -1234,8 +1282,7 @@ fn apply_update_tarball(
     }
 
     let bundle_str = bundle.to_str().ok_or("Staged bundle path is not valid UTF-8")?;
-    let log_path = updates.join("update.log");
-    let log_str = log_path.to_str().ok_or("Log path is not valid UTF-8")?;
+    let log_str = places.log.to_str().ok_or("Log path is not valid UTF-8")?;
     let script_path = updates.join("update.sh");
 
     crate::hollow_log!(
@@ -1257,7 +1304,50 @@ fn apply_update_tarball(
     write_shell_script(&script_path, &body)
 }
 
+/// Where a tarball update stages the new build and keeps its log.
+#[cfg(target_os = "linux")]
+struct TarballPlaces {
+    staging: PathBuf,
+    log: PathBuf,
+}
+
+/// The swap moves the whole app folder aside, so nothing the script needs may sit in
+/// it: a data root inside it (a portable copy's `hollow_data`) stages beside the app
+/// folder instead. A data root elsewhere inside the app folder would be deleted with
+/// the old build, so that update refuses.
+#[cfg(target_os = "linux")]
+fn tarball_places(updates: &Path, app: &Path, tag: &str) -> Result<TarballPlaces, String> {
+    let real = |p: &Path| {
+        fs::canonicalize(p).map_err(|e| format!("The update could not read {}: {e}. Nothing was installed.", p.display()))
+    };
+    let app_real = real(app)?;
+    let updates_real = real(updates)?;
+    if !updates_real.starts_with(&app_real) {
+        return Ok(TarballPlaces { staging: updates.join(format!("staging-{tag}")), log: updates.join("update.log") });
+    }
+    let portable = app_real.join(BUNDLE_PROFILE_NAMES[0]);
+    if !updates_real.starts_with(&portable) {
+        return Err(DATA_INSIDE_APP.to_string());
+    }
+    let name = app
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or("The app folder has no name the update can use. Nothing was installed.")?;
+    Ok(TarballPlaces {
+        staging: app.with_file_name(format!("{name}.update-{tag}")),
+        log: app.with_file_name(format!("{name}.update.log")),
+    })
+}
+
+/// Why an update refused: the data root sits inside the folder an update replaces.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const DATA_INSIDE_APP: &str = "Hollow keeps its data inside the app folder that an update replaces, so nothing was installed. Move the data folder out of the app folder and try again.";
+
 /// The swap script itself.
+///
+/// The person's data folder and markers in the app folder (`BUNDLE_PROFILE_NAMES`)
+/// move from the old build to the new one before it starts and back on a rollback,
+/// and a folder still holding one is never deleted: the script stops instead.
 ///
 /// The relaunch uses `nohup`, not `setsid`: `setsid` FORKS when the calling shell is
 /// already a process group leader, which this one is, so `$!` would be a helper that
@@ -1284,42 +1374,77 @@ fn tarball_update_script(
          NEW={new_q}\n\
          STAGING={staging_q}\n\
          ARCHIVE={archive_q}\n\
+         KEEP='{keep}'\n\
+         note() {{ echo \"$1\" >> \"$LOG\" 2>/dev/null; }}\n\
+         has() {{ [ -e \"$1\" ] || [ -L \"$1\" ]; }}\n\
+         holds_data() {{ for k in $KEEP; do if has \"$1/$k\"; then return 0; fi; done; return 1; }}\n\
+         restore() {{\n\
+         for k in $KEEP; do\n\
+         if has \"$APP/$k\" && ! has \"$OLD/$k\"; then mv \"$APP/$k\" \"$OLD/$k\" >> \"$LOG\" 2>&1; fi\n\
+         done\n\
+         if holds_data \"$APP\"; then\n\
+         note \"could not move the data back, so the new build stays in place with it and the previous one stays in $OLD\"\n\
+         return 1\n\
+         fi\n\
+         rm -rf \"$APP\" >> \"$LOG\" 2>&1\n\
+         mv \"$OLD\" \"$APP\" >> \"$LOG\" 2>&1\n\
+         }}\n\
          echo \"Hollow update to v{version}\" > \"$LOG\"\n\
-         echo \"waiting for pid {pid} to exit\" >> \"$LOG\"\n\
+         note \"waiting for pid {pid} to exit\"\n\
          while kill -0 {pid} 2>/dev/null; do sleep 0.3; done\n\
          sleep 0.5\n\
-         echo \"swapping the bundle\" >> \"$LOG\"\n\
+         if has \"$OLD\"; then\n\
+         if holds_data \"$OLD\"; then\n\
+         note \"an earlier update left data in $OLD, nothing was changed\"\n\
+         exit 1\n\
+         fi\n\
          rm -rf \"$OLD\" >> \"$LOG\" 2>&1\n\
+         fi\n\
+         if holds_data \"$NEW\"; then\n\
+         note \"the new build carries a data folder or marker, nothing was changed\"\n\
+         exit 1\n\
+         fi\n\
+         note \"swapping the bundle\"\n\
          if ! mv \"$APP\" \"$OLD\" >> \"$LOG\" 2>&1; then\n\
-         echo \"could not move the current build aside, nothing was changed\" >> \"$LOG\"\n\
+         note \"could not move the current build aside, nothing was changed\"\n\
          exit 1\n\
          fi\n\
          if ! mv \"$NEW\" \"$APP\" >> \"$LOG\" 2>&1; then\n\
-         echo \"could not move the new build into place, restoring the previous version\" >> \"$LOG\"\n\
+         note \"could not move the new build into place, restoring the previous version\"\n\
          mv \"$OLD\" \"$APP\" >> \"$LOG\" 2>&1\n\
          exit 1\n\
          fi\n\
-         echo \"starting the new build\" >> \"$LOG\"\n\
+         for k in $KEEP; do\n\
+         if has \"$OLD/$k\" && ! mv \"$OLD/$k\" \"$APP/$k\" >> \"$LOG\" 2>&1; then\n\
+         note \"could not move $k into the new build, restoring the previous version\"\n\
+         if restore; then nohup \"$APP/hollow\" {args_quoted} >/dev/null 2>&1 & fi\n\
+         exit 1\n\
+         fi\n\
+         done\n\
+         note \"starting the new build\"\n\
          nohup \"$APP/hollow\" {args_quoted} >/dev/null 2>&1 &\n\
          NEWPID=$!\n\
          sleep 8\n\
          if ! kill -0 \"$NEWPID\" 2>/dev/null; then\n\
-         echo \"new build exited early, restoring previous version\" >> \"$LOG\"\n\
-         rm -rf \"$APP\" >> \"$LOG\" 2>&1\n\
-         mv \"$OLD\" \"$APP\" >> \"$LOG\" 2>&1\n\
-         nohup \"$APP/hollow\" {args_quoted} >/dev/null 2>&1 &\n\
+         note \"new build exited early, restoring previous version\"\n\
+         if restore; then nohup \"$APP/hollow\" {args_quoted} >/dev/null 2>&1 & fi\n\
          exit 1\n\
          fi\n\
+         if holds_data \"$OLD\"; then\n\
+         note \"kept $OLD, it still holds a data folder or marker\"\n\
+         else\n\
          rm -rf \"$OLD\" >> \"$LOG\" 2>&1\n\
+         fi\n\
          rm -rf \"$STAGING\" >> \"$LOG\" 2>&1\n\
          rm -f \"$ARCHIVE\" >> \"$LOG\" 2>&1\n\
-         echo \"updated to v{version}\" >> \"$LOG\"\n\
+         note \"updated to v{version}\"\n\
          exit 0\n",
         log_q = sh_quote(log),
         app_q = sh_quote(app_dir),
         new_q = sh_quote(bundle),
         staging_q = sh_quote(staging),
         archive_q = sh_quote(archive),
+        keep = BUNDLE_PROFILE_NAMES.join(" "),
     )
 }
 
@@ -1654,6 +1779,10 @@ pub(crate) fn extract_zip_to(zip_path: &str, staging_dir: &std::path::Path) -> R
     Ok(())
 }
 
+/// What lives in the app folder but belongs to the person: the portable data folder
+/// and the markers that select it. An update neither brings nor deletes them.
+const BUNDLE_PROFILE_NAMES: [&str; 4] = ["hollow_data", "portable", "portable.txt", "portable.txt.txt"];
+
 /// A portable data folder or a portable marker in an update archive: installing it
 /// would switch the app to another data root on its next start, over a database
 /// the archive brought (#155; 0.12.1 to 0.14.1 shipped one).
@@ -1661,10 +1790,10 @@ fn never_installed(name: &str) -> bool {
     let mut parts = name.split('/').filter(|p| !p.is_empty() && *p != ".");
     let Some(first) = parts.next() else { return false };
     let first = first.to_ascii_lowercase();
-    if first == "hollow_data" {
+    if first == BUNDLE_PROFILE_NAMES[0] {
         return true;
     }
-    parts.next().is_none() && matches!(first.as_str(), "portable" | "portable.txt" | "portable.txt.txt")
+    parts.next().is_none() && BUNDLE_PROFILE_NAMES[1..].contains(&first.as_str())
 }
 
 fn detect_common_prefix(archive: &mut zip::ZipArchive<fs::File>) -> Option<String> {
@@ -1975,6 +2104,10 @@ pub fn spawn_relaunch_waiter() -> Result<(), String> {
 /// What the waiter runs for THIS process: its exe, its own arguments, and the
 /// data-root override where the relaunch would not inherit it.
 fn self_restart_snippet() -> Result<String, String> {
+    self_restart_snippet_for(std::env::args_os().skip(1))
+}
+
+fn self_restart_snippet_for(args: impl IntoIterator<Item = std::ffi::OsString>) -> Result<String, String> {
     let exe = std::env::current_exe()
         .map_err(|e| format!("current_exe failed: {e}"))?;
     let exe = exe
@@ -1982,7 +2115,7 @@ fn self_restart_snippet() -> Result<String, String> {
         .ok_or("Executable path is not valid UTF-8")?
         .to_string();
     let data_dir_env = std::env::var("HOLLOW_DATA_DIR").ok().filter(|v| !v.is_empty());
-    Ok(relaunch_snippet(&exe, &relaunch_args()?, data_dir_env.as_deref()))
+    Ok(relaunch_snippet(&exe, &carried_args(args)?, data_dir_env.as_deref()))
 }
 
 /// The platform snippet the waiter runs once the watched pid is gone.
@@ -2481,6 +2614,157 @@ org.freedesktop.portal.Desktop=talk
         );
         let _ = fs::remove_dir_all(&tmp);
     }
+
+    /// A portable copy: its data folder and marker live in the bundle folder the swap
+    /// moves aside, and the update's own files would have moved with them.
+    struct PortableCopy {
+        tmp: PathBuf,
+        app: PathBuf,
+        archive: PathBuf,
+        new_body: String,
+        new_marker: PathBuf,
+        old_pids: PathBuf,
+        new_pids: PathBuf,
+    }
+
+    fn portable_copy(tag: &str, new_lives: bool) -> PortableCopy {
+        let tmp = unique_tmp(tag);
+        let old_pids = tmp.join("old.pid");
+        let new_pids = tmp.join("new.pid");
+        let new_marker = tmp.join("new-ran");
+        let app = tmp.join("Hollow");
+        fs::create_dir_all(app.join("hollow_data")).expect("create the data folder");
+        write_exec(&app.join("hollow"), &fake_app(&tmp.join("old-ran"), &old_pids, true));
+        fs::write(app.join("hollow_data").join("identity.key"), b"the person's key").unwrap();
+        fs::write(app.join("hollow_data").join("messages.db"), b"the person's messages").unwrap();
+        fs::write(app.join("portable.txt"), b"").unwrap();
+
+        // The new build notes whether the data was in place when it started, and
+        // carries a stray data folder of its own, as 0.12.1 to 0.14.1 did on Windows.
+        let src = tmp.join("src");
+        fs::create_dir_all(src.join("bundle").join("hollow_data")).unwrap();
+        fs::write(src.join("bundle").join("hollow_data").join("messages.db"), b"stray").unwrap();
+        let tail = if new_lives { "exec sleep 60\n" } else { "exit 1\n" };
+        let new_body = format!(
+            "#!/bin/sh\nif [ -f \"$(dirname \"$0\")/hollow_data/identity.key\" ]; then echo data >> {m}; else echo nodata >> {m}; fi\necho $$ >> {p}\n{tail}",
+            m = sh_quote(&new_marker.display().to_string()),
+            p = sh_quote(&new_pids.display().to_string()),
+        );
+        write_exec(&src.join("bundle").join("hollow"), &new_body);
+        // Downloaded where the app puts it: into the data root, inside the bundle folder.
+        fs::create_dir_all(app.join("hollow_data").join("updates")).unwrap();
+        let archive = app.join("hollow_data").join("updates").join("hollow-9.9.9-linux.tar.gz");
+        let tar = Command::new("tar")
+            .args(["czf", archive.to_str().unwrap(), "-C", src.to_str().unwrap(), "bundle"])
+            .status()
+            .expect("run tar");
+        assert!(tar.success(), "could not build the fixture tarball");
+        PortableCopy { tmp, app, archive, new_body, new_marker, old_pids, new_pids }
+    }
+
+    fn run_portable_update(c: &PortableCopy) {
+        let mut child = Command::new(c.app.join("hollow")).spawn().expect("start the fake running Hollow");
+        let script = apply_update_tarball(
+            &c.app.join("hollow_data"),
+            c.archive.to_str().unwrap(),
+            c.app.to_str().unwrap(),
+            &ReleaseName { tag: "9.9.9".into(), display: "9.9.9".into() },
+            child.id(),
+        )
+        .expect("generate the update script");
+        launch_update_script(script).expect("start the update script");
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    fn assert_data_kept(c: &PortableCopy, log: &str) {
+        let data = c.app.join("hollow_data");
+        assert_eq!(fs::read(data.join("identity.key")).ok().as_deref(), Some(&b"the person's key"[..]), "the identity is gone.\nlog:\n{log}");
+        assert_eq!(fs::read(data.join("messages.db")).ok().as_deref(), Some(&b"the person's messages"[..]), "the database is gone or replaced.\nlog:\n{log}");
+        assert!(c.app.join("portable.txt").exists(), "the portable marker is gone.\nlog:\n{log}");
+    }
+
+    /// #155 review: the swap moved the bundle folder aside and deleted it with the
+    /// portable data folder and marker inside.
+    #[test]
+    fn a_tarball_update_keeps_the_portable_data_folder() {
+        let c = portable_copy("portable", true);
+        run_portable_update(&c);
+        let old_dir = c.tmp.join("Hollow.old");
+        let done = poll_until(25, || {
+            read(&c.app.join("hollow")) == c.new_body && c.new_marker.exists() && !old_dir.exists()
+        });
+        let log = read(&c.tmp.join("Hollow.update.log"));
+        kill_recorded_pids(&c.new_pids);
+        kill_recorded_pids(&c.old_pids);
+        assert!(done, "the bundle swap did not complete.\nlog:\n{log}");
+        assert_eq!(read(&c.new_marker).trim(), "data", "the new build started without the data.\nlog:\n{log}");
+        assert_data_kept(&c, &log);
+        assert!(log.contains("updated to v9.9.9"), "log:\n{log}");
+        assert!(!c.tmp.join("Hollow.update-9.9.9").exists(), "the staging folder was not cleaned up");
+        assert!(!c.archive.exists(), "the archive was not cleaned up");
+        let _ = fs::remove_dir_all(&c.tmp);
+    }
+
+    /// A new build that dies early hands the data back to the previous build.
+    #[test]
+    fn a_tarball_rollback_keeps_the_portable_data_folder() {
+        let c = portable_copy("portable_rollback", false);
+        run_portable_update(&c);
+        let old_dir = c.tmp.join("Hollow.old");
+        let done = poll_until(35, || {
+            c.new_marker.exists()
+                && read(&c.old_pids).lines().filter(|l| !l.trim().is_empty()).count() >= 2
+                && !old_dir.exists()
+        });
+        let log = read(&c.tmp.join("Hollow.update.log"));
+        kill_recorded_pids(&c.old_pids);
+        kill_recorded_pids(&c.new_pids);
+        assert!(done, "the update did not roll back.\nlog:\n{log}");
+        assert_ne!(read(&c.app.join("hollow")), c.new_body, "the broken build stayed.\nlog:\n{log}");
+        assert_data_kept(&c, &log);
+        let _ = fs::remove_dir_all(&c.tmp);
+    }
+
+    /// An earlier update that stopped with data still in `<app>.old` keeps it: the
+    /// next update changes nothing rather than clearing that folder.
+    #[test]
+    fn a_tarball_update_never_clears_an_old_build_holding_data() {
+        let c = portable_copy("portable_leftover", true);
+        let left = c.tmp.join("Hollow.old").join("hollow_data");
+        fs::create_dir_all(&left).unwrap();
+        fs::write(left.join("identity.key"), b"an earlier identity").unwrap();
+        run_portable_update(&c);
+        let log_path = c.tmp.join("Hollow.update.log");
+        let stopped = poll_until(20, || read(&log_path).contains("nothing was changed"));
+        let log = read(&log_path);
+        kill_recorded_pids(&c.new_pids);
+        kill_recorded_pids(&c.old_pids);
+        assert!(stopped, "the update went on.\nlog:\n{log}");
+        assert_eq!(fs::read(left.join("identity.key")).ok().as_deref(), Some(&b"an earlier identity"[..]), "log:\n{log}");
+        assert_data_kept(&c, &log);
+        assert_ne!(read(&c.app.join("hollow")), c.new_body, "log:\n{log}");
+        let _ = fs::remove_dir_all(&c.tmp);
+    }
+
+    /// A data root inside the app folder but not its `hollow_data` would go with the
+    /// old build, so that update installs nothing.
+    #[test]
+    fn a_tarball_update_refuses_a_data_root_it_would_delete() {
+        let c = portable_copy("portable_refuse", true);
+        let data = c.app.join("lib").join("my data");
+        fs::create_dir_all(&data).unwrap();
+        let r = apply_update_tarball(
+            &data,
+            c.archive.to_str().unwrap(),
+            c.app.to_str().unwrap(),
+            &ReleaseName { tag: "9.9.9".into(), display: "9.9.9".into() },
+            1,
+        );
+        assert_eq!(r, Err(DATA_INSIDE_APP.to_string()));
+        assert!(!data.join("updates").join("update.sh").exists(), "a script was written");
+        let _ = fs::remove_dir_all(&c.tmp);
+    }
 }
 
 #[cfg(test)]
@@ -2542,10 +2826,13 @@ mod relaunch_args_tests {
         assert!(pos("xcopy") < pos("start "));
         // It waits for the process that wrote it, by pid.
         assert!(lines[pos("tasklist")].contains("/FI \"PID eq 4242\""), "{bat}");
-        // A failed copy jumps past the relaunch.
-        assert_eq!(lines[pos("xcopy") + 1], "if errorlevel 1 goto copyfailed", "{bat}");
-        assert!(pos("start ") < pos(":copyfailed") && pos("exit") < pos(":copyfailed"), "{bat}");
-        assert_eq!(lines[pos(":copyfailed")..].iter().filter(|l| l.starts_with("start ")).count(), 0);
+        // Only a copy that succeeded reaches the relaunch; a failed one loops back to it.
+        assert_eq!(lines[pos("xcopy") + 1], "if not errorlevel 1 goto copied", "{bat}");
+        assert!(pos(":copy") < pos("xcopy") && pos(":copied") < pos("start "), "{bat}");
+        assert_eq!(lines[..pos(":copied")].iter().filter(|l| l.starts_with("start ")).count(), 0);
+        let failed = &lines[pos(":copyfailed")..pos(":copied")];
+        assert_eq!(failed.last(), Some(&"goto copy"), "{bat}");
+        assert!(failed.iter().any(|l| l.contains(r#"waiting in "C:\D\staging"."#)), "the message must name the staged files:\n{bat}");
     }
 
     /// The self-restart hands Start-Process ONE command line: as a list, Windows
@@ -2625,6 +2912,22 @@ mod relaunch_args_tests {
         let r = super::carried_args(vec!["--portable".into(), bad]);
         assert!(r.is_err(), "a non-Unicode argument was dropped or mangled: {r:?}");
         assert_eq!(super::carried_args(vec!["--portable".into()]).unwrap(), vec!["--portable".to_string()]);
+    }
+
+    /// #155 review: a copy started by a `hollow:` link opened it again after every
+    /// update and self-restart.
+    #[test]
+    fn the_relaunch_does_not_replay_a_deep_link() {
+        let argv = |v: &[&str]| v.iter().map(std::ffi::OsString::from).collect::<Vec<_>>();
+        let launched = argv(&["hollow://invite/abc#key=x", "--portable", "HOLLOW:share/1", "Hollow://x"]);
+        assert_eq!(super::carried_args(launched.clone()).unwrap(), strings(&["--portable"]));
+        assert_eq!(super::carried_args(argv(&["hollow:"])).unwrap(), Vec::<String>::new());
+        // Only the scheme counts: a path or value that merely mentions it stays.
+        let kept = strings(&["--data-dir=/x/hollow://y", "hollowx", "hollow", ""]);
+        assert_eq!(super::carried_args(argv(&["--data-dir=/x/hollow://y", "hollowx", "hollow", ""])).unwrap(), kept);
+        let snippet = super::self_restart_snippet_for(launched).unwrap();
+        assert!(!snippet.to_ascii_lowercase().contains("hollow:"), "the self-restart replays the link: {snippet}");
+        assert!(snippet.contains("--portable"), "{snippet}");
     }
 
     #[test]
@@ -2744,7 +3047,8 @@ mod update_bat_tests {
             .arg(&bat_path)
             .env("HOLLOW_ARGV_OUT", &out)
             .creation_flags(CREATE_NEW_CONSOLE)
-            .stdin(std::process::Stdio::null())
+            // A pipe nobody writes to: `pause` waits on it until a test "presses a key".
+            .stdin(std::process::Stdio::piped())
             .stdout(fs::File::create(&console).unwrap())
             .stderr(std::process::Stdio::null())
             .spawn()
@@ -2830,23 +3134,79 @@ mod update_bat_tests {
         assert!(other_alive, "the relaunch waited for another process of the same name");
     }
 
-    /// A copy that fails (a file in use) leaves the window up and starts nothing:
-    /// a half-copied app could start on mismatched parts.
-    #[test]
-    fn a_failed_copy_relaunches_nothing() {
+    /// Ends a script a test gave up on, by its pid (its `pause` would wait forever).
+    /// Disarmed (`None`) before the child is reaped, so a reused pid is never hit.
+    struct KillOnDrop(Option<u32>);
+
+    impl Drop for KillOnDrop {
+        fn drop(&mut self) {
+            if let Some(pid) = self.0 {
+                let _ = std::process::Command::new("taskkill")
+                    .args(["/F", "/T", "/PID", &pid.to_string()])
+                    .output();
+            }
+        }
+    }
+
+    fn hold_marker(app: &std::path::Path) -> fs::File {
         use std::os::windows::fs::OpenOptionsExt;
+        fs::OpenOptions::new().read(true).share_mode(0).open(app.join("marker.txt")).unwrap()
+    }
+
+    fn wait_until(secs: u64, mut ready: impl FnMut() -> bool) -> bool {
+        let start = Instant::now();
+        while !ready() && start.elapsed() < Duration::from_secs(secs) {
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        ready()
+    }
+
+    /// #155 review: a file in use for a moment (a scan, a closing helper) failed the
+    /// whole update. The copy is tried again on its own, with no key pressed.
+    #[test]
+    fn a_copy_blocked_for_a_moment_retries_and_finishes() {
         let tmp = crate::test_tmp::tempdir().expect("tmp");
-        let (child, run, lock) = start_bat(tmp.path(), ("hollow-test-absent.exe", 1), &[], |app| {
-            fs::OpenOptions::new().read(true).share_mode(0).open(app.join("marker.txt")).unwrap()
-        });
-        let run = finish(child, run);
-        let relaunched = wait_for(&run.out, 10);
+        let (child, run, lock) = start_bat(tmp.path(), ("hollow-test-absent.exe", 1), &[], hold_marker);
+        let mut kill = KillOnDrop(Some(child.id()));
+        // Held from before the first copy for longer than five tries without a pause
+        // take, and well inside the five tries two seconds apart.
+        let copying = wait_until(60, || console(&run).contains("Copying files"));
+        std::thread::sleep(Duration::from_secs(4));
         drop(lock);
+        assert!(copying, "the script never reached the copy; console:\n{}", console(&run));
+        let relaunched = wait_for(&run.out, 60);
         let text = console(&run);
-        assert!(!relaunched, "a half-copied app was started; console:\n{text}");
-        assert_eq!(run.status.code(), Some(1), "console:\n{text}");
-        assert!(text.contains(super::COPY_FAILED_1), "console:\n{text}");
+        assert!(relaunched, "a copy blocked for a moment never finished; console:\n{text}");
+        assert!(!text.contains(super::COPY_FAILED_1), "it asked before trying again:\n{text}");
+        kill.0 = None;
+        let run = finish(child, run);
+        assert_eq!(fs::read(run.app.join("marker.txt")).unwrap(), b"new build", "xcopy did not install");
+        assert!(!run.staging.exists() && !run.zip.exists(), "the update was not cleaned up");
+    }
+
+    /// A copy still failing after its retries starts nothing (a half-copied app could
+    /// start on mismatched parts), keeps its files, names where they are and tries
+    /// again on a key press.
+    #[test]
+    fn a_copy_still_blocked_asks_and_tries_again_on_a_key() {
+        use std::io::Write;
+        let tmp = crate::test_tmp::tempdir().expect("tmp");
+        let (mut child, run, lock) = start_bat(tmp.path(), ("hollow-test-absent.exe", 1), &[], hold_marker);
+        let mut kill = KillOnDrop(Some(child.id()));
+        let asked = wait_until(60, || console(&run).contains(super::COPY_FAILED_3));
+        let text = console(&run);
+        assert!(asked, "a blocked copy never asked; console:\n{text}");
+        assert!(text.contains(super::COPY_FAILED_1) && text.contains(super::COPY_FAILED_2), "console:\n{text}");
+        assert!(!run.out.exists(), "a half-copied app was started; console:\n{text}");
         assert!(run.zip.exists() && run.staging.exists(), "a failed update threw its files away");
+        drop(lock);
+        child.stdin.as_mut().unwrap().write_all(b"\r\n").unwrap();
+        let relaunched = wait_for(&run.out, 60);
+        let text = console(&run);
+        assert!(relaunched, "a key press did not try again; console:\n{text}");
+        kill.0 = None;
+        let run = finish(child, run);
+        assert_eq!(fs::read(run.app.join("marker.txt")).unwrap(), b"new build", "xcopy did not install");
     }
 
     /// The real apply refuses before it writes a script that would drop the argument.
@@ -2902,5 +3262,34 @@ mod macos_update_script_tests {
         );
         let syntax = std::process::Command::new("/bin/sh").args(["-n", &path]).status().unwrap();
         assert!(syntax.success(), "the script does not parse:\n{script}");
+    }
+
+    /// The swap deletes the old bundle whole, so a data root inside it refuses the
+    /// update; the portable folder beside the bundle is outside what it touches.
+    #[test]
+    fn the_macos_update_never_replaces_a_bundle_holding_the_data() {
+        let tmp = crate::test_tmp::tempdir().expect("tmp");
+        let apps = tmp.path().join("Apps");
+        let installed = apps.join("Hollow.app");
+        fs::create_dir_all(installed.join("Contents")).unwrap();
+        let inside = installed.join("Contents").join("data");
+        let staging = inside.join("updates").join("staging-x");
+        fs::create_dir_all(staging.join("Hollow.app").join("Contents")).unwrap();
+        let r = super::write_macos_update_script(
+            &inside, staging.to_str().unwrap(), "/tmp/u.zip", apps.to_str().unwrap(), "0.14.2", &[],
+        );
+        assert_eq!(r, Err(super::DATA_INSIDE_APP.to_string()));
+        assert!(!inside.join("updates").join("update.sh").exists(), "a script was written");
+
+        let beside = apps.join("hollow_data");
+        let staging = beside.join("updates").join("staging-x");
+        fs::create_dir_all(staging.join("Hollow.app").join("Contents")).unwrap();
+        let path = super::write_macos_update_script(
+            &beside, staging.to_str().unwrap(), "/tmp/u.zip", apps.to_str().unwrap(), "0.14.2", &[],
+        )
+        .expect("the portable folder beside the bundle refused the update");
+        let script = fs::read_to_string(path).unwrap();
+        let removes: Vec<&str> = script.lines().filter(|l| l.starts_with("rm ")).collect();
+        assert!(removes.iter().all(|l| !l.contains("hollow_data'") && !l.contains("Apps' ")), "{script}");
     }
 }
