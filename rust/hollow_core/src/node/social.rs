@@ -3063,8 +3063,32 @@ pub(crate) async fn handle_profile_relay(
     }).await;
 }
 
+/// Whether `device` is refused when it ends a friendship (a removal, or a reject, which
+/// ends an accepted one in the mutual race): a device some roster removed still holds its
+/// key, and a bare master id is no device (G1); neither speaks for the friend. The
+/// bare-master half is defence in depth: `roster_book::heard_from` drops those frames first.
+pub(crate) fn removal_sender_refused(device: &str) -> bool {
+    super::resolver::is_revoked(device) || super::resolver::is_bare_master(device)
+}
+
 #[cfg(test)]
 mod tests {
+    /// HOL-SEC-248: a removal from a removed device or a bare master id is refused, one
+    /// from a device the roster counts is not.
+    #[test]
+    fn a_removal_from_a_removed_device_or_a_bare_master_is_refused() {
+        let _g = crate::node::resolver::test_lock();
+        crate::node::resolver::clear_all();
+        let (master, counted, removed) = ("m248", "d248-counted", "d248-removed");
+        crate::node::resolver::update(counted, master);
+        crate::node::resolver::update(removed, master);
+        crate::node::resolver::note_roster(master);
+        assert!(!super::removal_sender_refused(counted), "a counted device's removal is heard");
+        crate::node::resolver::mark_revoked(&[removed.to_string()]);
+        assert!(super::removal_sender_refused(removed), "a removed device's removal is refused");
+        assert!(super::removal_sender_refused(master), "a bare master's removal is refused");
+        crate::node::resolver::clear_all();
+    }
     use super::{
         gated_profile_image, profile_blob_hash, profile_text_oversized, sanitize_incoming_frame,
         save_incoming_profile, valid_avatar_frame_id, PROFILE_ABOUT_MAX_BYTES,

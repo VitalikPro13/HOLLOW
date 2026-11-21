@@ -71344,3 +71344,84 @@ async fn sec244_a_resumed_app_takes_its_fetchs_copy_before_it_reads_the_ring() {
     // B reads the ring's copies (spent, so quietly dropped) and goes on reading A.
     dm_read(&a, &mut b, "ring-after").await;
 }
+
+// sec248-friend-remove
+// HOL-SEC-248: the live FriendRemove arm took a removal from any device that still
+// resolved to the friend, so a device the friend's roster removed could end the
+// friendship. The request and sibling-list paths already refused such a device.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn sec248_a_removed_device_cannot_end_a_friendship_live() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (d1, s, mut f) = ar29_cast(&relay, [231, 232, 233, 234]).await;
+    let o_master = d1.master_id.clone();
+    d1.cmd_tx
+        .send(NodeCommand::RevokeDevice { device_peer_id: s.device_id.clone(), mode: super::roster_book::RemoveMode::Retire, with_dependents: false })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(20, async || d1.revoked_devices(&o_master).contains(&s.device_id)).await,
+        "precondition: D1 removed S",
+    );
+    // The harness resolver is shared: F counts S removed, and S still resolves to O, as
+    // a device F linked before its removal.
+    assert!(super::resolver::is_revoked(&s.device_id));
+    super::resolver::update_many(&o_master, [s.device_id.as_str()]);
+    let room = super::types::dm_room_code(&o_master, &f.master_id);
+    let removal = serde_json::to_vec(&super::types::HavenMessage::FriendRemove { at: None }).unwrap();
+    assert_eq!(f.store().get_friend_status(&o_master).unwrap().as_deref(), Some("accepted"), "precondition: friends");
+    relay.inject_direct(&room, &s.device_id, &f.device_id, removal.clone());
+    // ABSENCE: an end that never comes.
+    let ended = wait_until(8, async || f.store().get_friend_status(&o_master).ok().flatten().as_deref() != Some("accepted")).await;
+    assert!(!ended, "a device O's roster removed ended F's friendship with O");
+    dm_read(&d1, &mut f, "s248-after").await;
+    // Control: the same removal from a device O's roster counts ends it.
+    relay.inject_direct(&room, &d1.device_id, &f.device_id, removal);
+    assert!(
+        wait_until(15, async || f.store().get_friend_status(&o_master).ok().flatten().as_deref() != Some("accepted")).await,
+        "a removal from O's counted device must end the friendship",
+    );
+    drop(s);
+}
+
+/// HOL-SEC-248: a FriendReject ends an accepted friendship in the mutual race, and its
+/// roster-less branch only resolved the sender, so a removed device ended it there too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other tests
+async fn sec248_a_removed_device_cannot_end_a_friendship_by_a_reject() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (d1, s, mut f) = ar29_cast(&relay, [241, 242, 243, 244]).await;
+    let o_master = d1.master_id.clone();
+    d1.cmd_tx
+        .send(NodeCommand::RevokeDevice { device_peer_id: s.device_id.clone(), mode: super::roster_book::RemoveMode::Retire, with_dependents: false })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(20, async || d1.revoked_devices(&o_master).contains(&s.device_id)).await,
+        "precondition: D1 removed S",
+    );
+    assert!(super::resolver::is_revoked(&s.device_id));
+    super::resolver::update_many(&o_master, [s.device_id.as_str()]);
+    let room = super::types::dm_room_code(&o_master, &f.master_id);
+    assert_eq!(f.store().get_friend_status(&o_master).unwrap().as_deref(), Some("accepted"), "precondition: friends");
+    // The sender picks the stamp, so the newest one names any accepted friendship.
+    let reject = serde_json::to_vec(&super::types::HavenMessage::FriendReject { requested_at: i64::MAX, device_list: None }).unwrap();
+    relay.inject_direct(&room, &s.device_id, &f.device_id, reject.clone());
+    // ABSENCE: an end that never comes.
+    let ended = wait_until(8, async || f.store().get_friend_status(&o_master).ok().flatten().as_deref() != Some("accepted")).await;
+    assert!(!ended, "a device O's roster removed ended F's friendship with O by a roster-less FriendReject");
+    dm_read(&d1, &mut f, "s248r-after").await;
+    // Control: the same reject from a device O's roster counts ends it.
+    relay.inject_direct(&room, &d1.device_id, &f.device_id, reject);
+    assert!(
+        wait_until(15, async || f.store().get_friend_status(&o_master).ok().flatten().as_deref() != Some("accepted")).await,
+        "a reject from O's counted device must end the accepted friendship",
+    );
+    drop(s);
+}

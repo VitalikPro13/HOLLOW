@@ -14974,6 +14974,12 @@ async fn handle_incoming_request_inner(
         }
 
         HavenMessage::FriendReject { requested_at, device_list } => {
+            // A reject ends an accepted friendship too (the mutual race below), so it
+            // is judged as a removal before either branch writes anything.
+            if social::removal_sender_refused(peer_str) {
+                hollow_log!("[HOLLOW-SECURITY] REJECTED a friend reject from {peer_str}: a removed device or a bare master id");
+                return;
+            }
             // ATTRIBUTION FIRST. The sender is a DEVICE id and our outgoing request row
             // is keyed by their MASTER, so a raw device-id lookup silently misses it.
             // `resolve()` alone cannot bridge that here: a decline of an ASYNC request
@@ -15073,6 +15079,10 @@ async fn handle_incoming_request_inner(
         }
 
         HavenMessage::FriendRemove { at } => {
+            if social::removal_sender_refused(peer_str) {
+                hollow_log!("[HOLLOW-SECURITY] REJECTED a friend removal from {peer_str}: a removed device or a bare master id");
+                return;
+            }
             // The remover sends from a DEVICE id while the friendship is keyed by their
             // MASTER on our side, so resolve or the DELETE misses and the removal is
             // asymmetric. Delete both keys for any legacy device-stranded row.
