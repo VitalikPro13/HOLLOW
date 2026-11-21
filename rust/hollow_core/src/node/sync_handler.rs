@@ -3118,9 +3118,20 @@ pub(crate) fn settle_lost_devices(
         }
         let Some(view) = before.get(server_id) else { continue };
         let t_ms = state.lost_t(t_ms);
+        let owner = state.current_owner().as_deref() == Some(local_peer_str);
+        // HOL-SEC-216: our records start at or after T, so they cannot tell what the
+        // lost device did before it. Nothing is written; a server we own restores from
+        // members' witnesses instead.
+        if !super::restore_flow::held_before(&store, state, t_ms as i64) {
+            hollow_log!("[HOLLOW-CRDT] {server_id} first held here after T: not settled from our records");
+            if owner {
+                super::restore_flow::note_lost_restore(&store, state, local_peer_str, t_ms as i64);
+            }
+            continue;
+        }
         let seen = store.op_seen_ms(server_id).unwrap_or_default();
         let mut ops = Vec::new();
-        if state.current_owner().as_deref() == Some(local_peer_str) {
+        if owner {
             for device in dropped {
                 co_sign_marks(
                     state, mls, ws_cmd_tx, ws_room_peers, gossip_overlays, event_tx, local_peer_str, device_keypair, server_id, device,
@@ -3193,7 +3204,8 @@ pub(crate) fn merge_rival_settlings(
         if !state.cut || super::conference::is_conference_sid(server_id) || state.is_deleted() || state.current_owner().as_deref() != Some(local_peer_str) {
             continue;
         }
-        let Some((dropped, t_ms)) = state.merged_settling() else { continue };
+        let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) else { return };
+        let Some((dropped, t_ms)) = rival_merge_due(state, &store) else { continue };
         let ids: Vec<String> = state.rival_settles.iter().map(|st| st.id()).collect();
         if !tried.insert(format!("{server_id}:{}", ids.join(","))) {
             continue;
@@ -3201,7 +3213,6 @@ pub(crate) fn merge_rival_settlings(
         if tried.len() > 256 {
             tried.clear();
         }
-        let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) else { return };
         let Some(roster) = store.load_roster(local_peer_str).ok().flatten() else { return };
         let seen = store.op_seen_ms(server_id).unwrap_or_default();
         let before = state.view_counting(local_peer_str, &dropped);
@@ -3210,6 +3221,13 @@ pub(crate) fn merge_rival_settlings(
             broadcast_op_mls_first(mls, ws_cmd_tx, ws_room_peers, gossip_overlays, event_tx, state, local_peer_str, server_id, &op, crypto_store);
         }
     }
+}
+
+/// The rival settlings `state` owes a merge of, while this device held the server before
+/// their T: a sibling that did merges, our records cannot (HOL-SEC-216).
+fn rival_merge_due(state: &ServerState, store: &crate::storage::MessageStore) -> Option<(Vec<String>, u64)> {
+    let (dropped, t_ms) = state.merged_settling()?;
+    super::restore_flow::held_before(store, state, t_ms as i64).then_some((dropped, t_ms))
 }
 
 /// Section 8.2 step 1 (M4): before a retire, ask member identities of every server we hold
@@ -5227,6 +5245,19 @@ mod tests {
 
     fn store() -> crate::storage::MessageStore {
         crate::storage::MessageStore::open(":memory:", &"ab".repeat(32)).expect("open in-memory store")
+    }
+
+    /// HOL-SEC-216: a rival merge is written from this device's records only when they
+    /// reach back before the merged T (2,000 here).
+    #[test]
+    fn a_rival_merge_never_runs_on_a_server_held_only_after_t() {
+        let mut phone = crate::crdt::settle::tests::rival_world();
+        assert!(rival_merge_due(&phone, &store()).is_some(), "control: first folded at 1,000, before T");
+        for at in std::sync::Arc::make_mut(&mut phone.first_folds).values_mut() {
+            *at = 2_500;
+        }
+        assert!(phone.merged_settling().is_some(), "precondition: the rivalry stands");
+        assert_eq!(rival_merge_due(&phone, &store()), None);
     }
 
     fn dm_item(ts: i64, edited_at: Option<i64>) -> DmSyncItem {

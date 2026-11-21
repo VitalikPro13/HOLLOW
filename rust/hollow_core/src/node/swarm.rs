@@ -1220,14 +1220,14 @@ async fn run_event_loop(
     // Pending friend requests: peer_id → requested_at timestamp.
     // Queued when peer isn't reachable (no shared rooms), sent when they appear.
     let mut pending_friend_requests: HashMap<String, i64> = HashMap::new();
-    // Masters whose decline or accept we have already re-sent on THIS connection. The
-    // relay's copy of an answer can expire, or go to a socket that was already dead,
-    // before the requester next boots; the mailbox then replays the same request and
-    // we swallow it against the settled row, so without re-arming the answer the
-    // requester would never learn. Cleared on Disconnected like every reconnect-scoped
-    // gate: the mailbox only replays on an inbox rejoin, so one re-send per connection
-    // is exactly one per replay burst.
-    let mut answer_resent: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Requesting devices whose decline or accept we have already re-sent on THIS
+    // connection (`social::AnswerResent`, keyed per device, D7). The relay's copy of an
+    // answer can expire, or go to a socket that was already dead, before the requester
+    // next boots; the mailbox then replays the same request and we swallow it against
+    // the settled row, so without re-arming the answer the requester would never learn.
+    // Cleared on Disconnected like every reconnect-scoped gate: the mailbox only replays
+    // on an inbox rejoin, so one re-send per connection is one per replay burst.
+    let mut answer_resent = super::social::AnswerResent::default();
     let mut pending_nickname_resolve: Option<String> = None;
     let mut nick_hold = super::nick_claim::NickHold::default();
     let mut link = link_handler::LinkState::default();
@@ -9256,7 +9256,7 @@ fn handle_incoming_request(
     pending_friend_accepts: &mut HashMap<String, i64>,
     pending_friend_requests: &mut HashMap<String, i64>,
     pending_friend_removals: &mut std::collections::HashSet<String>,
-    answer_resent: &mut std::collections::HashSet<String>,
+    answer_resent: &mut super::social::AnswerResent,
     pending_asset_asks: &mut HashMap<String, emotes::PendingAsk>,
     overlay_book: &mut super::overlay::OverlayBook,
     pending_file_asks: &mut HashMap<String, file_asks::PendingFileAsk>,
@@ -10307,7 +10307,7 @@ async fn handle_incoming_request_inner(
     pending_friend_accepts: &mut HashMap<String, i64>,
     pending_friend_requests: &mut HashMap<String, i64>,
     pending_friend_removals: &mut std::collections::HashSet<String>,
-    answer_resent: &mut std::collections::HashSet<String>,
+    answer_resent: &mut super::social::AnswerResent,
     pending_asset_asks: &mut HashMap<String, emotes::PendingAsk>,
     overlay_book: &mut super::overlay::OverlayBook,
     pending_file_asks: &mut HashMap<String, file_asks::PendingFileAsk>,
@@ -14729,7 +14729,7 @@ async fn handle_incoming_request_inner(
                     // it while the requester is away.
                     Some(("accepted", _, stored_req)) => {
                         hollow_log!("[HOLLOW-FRIENDS] Re-delivered request from {peer_str} — already accepted, answering again");
-                        if answer_resent.insert(req_master_early.clone()) {
+                        if answer_resent.take(&req_master_early, peer_str, requested_at) {
                             social::send_friend_accept(
                                 ws_cmd_tx, local_peer_str, master_keypair, &req_master_early,
                                 peer_str, stored_req.max(requested_at), db_path, db_passphrase,
@@ -14747,7 +14747,7 @@ async fn handle_incoming_request_inner(
                         // mailbox, and when that copy expires before the requester next boots
                         // it re-deposits this very request and nobody answers again. So every
                         // swallow re-sends the decline, ONCE per requester per process.
-                        if answer_resent.insert(req_master_early.clone()) {
+                        if answer_resent.take(&req_master_early, peer_str, requested_at) {
                             social::send_friend_reject(
                                 ws_cmd_tx, ws_room_peers, peer_str,
                                 &req_master_early, stored_req,

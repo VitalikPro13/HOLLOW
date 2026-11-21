@@ -4214,6 +4214,17 @@ async fn spawn_node_staged(
     friend_masters: &[&str],
     stage: impl FnOnce(&crate::storage::MessageStore),
 ) -> TestNode {
+    spawn_node_staged_at(relay, master, device_tag, friend_masters, |st, _, _| stage(st)).await
+}
+
+/// [`spawn_node_staged`], `stage` also given the database's path and key.
+async fn spawn_node_staged_at(
+    relay: &MockRelay,
+    master: NativeKeypair,
+    device_tag: u8,
+    friend_masters: &[&str],
+    stage: impl FnOnce(&crate::storage::MessageStore, &str, &str),
+) -> TestNode {
     let device = NativeKeypair::from_secret_bytes(&seed_bytes(device_tag));
     let passphrase = passphrase_for(&master);
 
@@ -4237,7 +4248,7 @@ async fn spawn_node_staged(
         for fm in friend_masters {
             store.save_friend(fm, "accepted", "outgoing", 0).expect("seed friend");
         }
-        stage(&store);
+        stage(&store, &db_path, &passphrase);
         mgr
     };
     let crypto_store = CryptoStore::open(db_path.clone(), passphrase.clone()).expect("crypto store");
@@ -71911,4 +71922,254 @@ async fn i151_the_owner_names_a_missing_home_once() {
     // ABSENCE: a second start names nothing again (one batch tick is 2 s).
     sleep_ms(2500).await;
     assert_eq!(stamps(&o), 1, "and never again");
+}
+
+// pr-phrase-restore
+
+/// A fresh install the recovery phrase restored on Welcome (PHRASE_RESTORE_DESIGN 1.2):
+/// the restore's own signing into an empty database (`api::roster::sign_restore`, the
+/// admission or recovery dated by `phrase_time`) and its mark, then the node. `marked_at`
+/// dates the mark (the Home card's and the server asks' 30 days).
+async fn pr_restored(relay: &MockRelay, m_tag: u8, f_tag: u8, friends: &[&str], how: crate::api::roster::RestoreSign, marked_at: i64) -> TestNode {
+    let (master, device) = (tag_kp(m_tag), tag_kp(f_tag));
+    spawn_node_staged_at(relay, master.clone(), f_tag, friends, |st, db, pass| {
+        crate::api::roster::sign_restore(&master, &device, &recovery_kp(m_tag), how, db, pass).expect("the restore signs");
+        let branch = match how {
+            crate::api::roster::RestoreSign::Admit => super::phrase_restore::Branch::Admit,
+            crate::api::roster::RestoreSign::Recover { .. } => super::phrase_restore::Branch::Recover,
+        };
+        let mark = super::phrase_restore::Mark { at_ms: marked_at, branch, empty: true, device: device.peer_id() };
+        super::phrase_restore::write(st, &mark).expect("the mark");
+    })
+    .await
+}
+
+/// Identity A (phrase-rooted, one device A1) and its friend B, who founds a server A1
+/// joins; A1 and B have a DM. Tags (A, A1, B).
+struct PrWorld {
+    relay: MockRelay,
+    a1: TestNode,
+    b: TestNode,
+    sid: String,
+    _tmp: crate::test_tmp::TestDir,
+}
+
+async fn pr_world([a, a1_tag, b_tag]: [u8; 3]) -> PrWorld {
+    let tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", tmp.path()); }
+    let relay = MockRelay::new();
+    let (a_master, b_master) = (tag_kp(a).peer_id(), tag_kp(b_tag).peer_id());
+    let old = protected_roster(a, &[a1_tag], super::roster_book::now_ms() - 3_600_000);
+    let mut a1 = spawn_node_seeded(&relay, a, a1_tag, &[&b_master], Some(old.clone())).await;
+    let mut b = spawn_node_staged(&relay, tag_kp(b_tag), b_tag, &[&a_master], |st| {
+        let me = tag_kp(b_tag).peer_id();
+        super::roster_book::merge_for_test(st, &old, &me, &me);
+    })
+    .await;
+    expect_dm_pair_ready(&relay, &a1, &b, 25).await;
+    let sid = create_server_and_wait(&mut b, "PR shared").await;
+    a1.cmd_tx
+        .send(NodeCommand::JoinServer { server_id: sid.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&sid) })
+        .await
+        .unwrap();
+    assert!(
+        wait_event(&mut a1, std::time::Duration::from_secs(20), |ev| matches!(ev, NetworkEvent::ServerJoined { server_id: s, .. } if *s == sid)).await,
+        "precondition: A1 joined B's server",
+    );
+    send_dm(&a1, &b_master, "before the loss", "pr-before-the-loss").await;
+    assert!(wait_until(20, async || dm_texts(&b, &a_master).iter().any(|t| t == "before the loss")).await, "precondition: B holds the DM");
+    PrWorld { relay, a1, b, sid, _tmp: tmp }
+}
+
+/// No branch (decision 5, R2): A's only device is gone; the phrase admits a fresh install
+/// F. F re-adds B, who answers at once (no prompt), and F gets back the server they share,
+/// holding an MLS leaf, and the DM history; B still counts A1 and warns of F.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pr_a_phrase_restored_device_gets_its_server_back_through_a_re_added_friend() {
+    let _g = test_guard();
+    let (a, a1_tag, b_tag, f_tag) = (81u8, 82u8, 83u8, 84u8);
+    let PrWorld { relay, a1, mut b, sid, _tmp } = pr_world([a, a1_tag, b_tag]).await;
+    let (a_master, b_master) = (tag_kp(a).peer_id(), tag_kp(b_tag).peer_id());
+    let a1_dev = a1.device_id.clone();
+    relay.set_online(&a1_dev, false);
+    drop(a1);
+
+    let mut f = pr_restored(&relay, a, f_tag, &[], crate::api::roster::RestoreSign::Admit, super::roster_book::now_ms()).await;
+    drain_events(&mut b);
+    f.cmd_tx.send(NodeCommand::SendFriendRequest { peer_id: b_master.clone() }).await.unwrap();
+    assert!(wait_until(30, async || f.friend_status(&b_master).as_deref() == Some("accepted")).await, "B never answered the re-add");
+    assert_eq!(b.friend_status(&a_master).as_deref(), Some("accepted"), "B's friendship moved");
+    assert!(
+        !wait_event(&mut b, std::time::Duration::from_secs(1), |ev| matches!(ev, NetworkEvent::FriendRequestReceived { .. })).await,
+        "B was asked again for a friend it already has",
+    );
+    assert!(
+        wait_event(&mut f, std::time::Duration::from_secs(60), |ev| matches!(ev, NetworkEvent::ServerJoined { server_id: s, .. } if *s == sid)).await,
+        "F never got back the server B shares",
+    );
+    expect_mls_leaf(&b, &sid, &f.device_id, 40).await;
+    let general = general_channel_of(&sid);
+    drain_events(&mut b);
+    post_in(&f, &sid, &general, "back again").await;
+    assert!(reads_live(&mut b, "back again").await, "B never read F's post");
+    assert!(wait_until(30, async || dm_texts(&f, &b_master).iter().any(|t| t == "before the loss")).await, "B never served F the DM history");
+    assert!(
+        super::server_rosters::counts(&b.store(), &b.db_path, &a_master, &a1_dev),
+        "an admission dropped A's old device at B",
+    );
+    let f_dev = f.device_id.clone();
+    assert!(
+        b.security_alerts().iter().any(|r| r.kind == super::security_alerts::KIND_NEW_DEVICE && r.detail == f_dev),
+        "B was not warned of A's new device: {:?}",
+        b.security_alerts().iter().map(|r| (r.kind.clone(), r.detail.clone())).collect::<Vec<_>>(),
+    );
+}
+
+/// The typo case: a checksum-valid wrong phrase makes another identity. Its request to B
+/// is a stranger's (a prompt, never auto-accepted), and it learns no server.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pr_a_wrong_phrase_is_a_new_request_and_learns_no_servers() {
+    let _g = test_guard();
+    let (a, a1_tag, b_tag, typo, f_tag) = (85u8, 86u8, 87u8, 88u8, 89u8);
+    let PrWorld { relay, a1, mut b, sid, _tmp } = pr_world([a, a1_tag, b_tag]).await;
+    let b_master = tag_kp(b_tag).peer_id();
+    relay.set_online(&a1.device_id, false);
+    drop(a1);
+    let mut f = pr_restored(&relay, typo, f_tag, &[], crate::api::roster::RestoreSign::Admit, super::roster_book::now_ms()).await;
+    drain_events(&mut b);
+    f.cmd_tx.send(NodeCommand::SendFriendRequest { peer_id: b_master.clone() }).await.unwrap();
+    assert!(
+        wait_event(&mut b, std::time::Duration::from_secs(30), |ev| matches!(ev, NetworkEvent::FriendRequestReceived { .. })).await,
+        "B never saw the stranger's request",
+    );
+    assert_eq!(b.friend_status(&tag_kp(typo).peer_id()).as_deref(), Some("pending"), "a stranger was accepted");
+    // ABSENCE: a server nobody shares with this identity.
+    let joined = wait_event(&mut f, std::time::Duration::from_secs(5), |ev| matches!(ev, NetworkEvent::ServerJoined { .. })).await;
+    assert!(!joined && f.live_server_state(&sid).await.is_none(), "the typo identity learned a server");
+    assert_ne!(f.friend_status(&b_master).as_deref(), Some("accepted"));
+}
+
+/// R2's window: a Welcome admission 31 days old asks no friend for servers.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pr_a_fresh_restore_never_asks_after_its_window() {
+    let _g = test_guard();
+    let (a, a1_tag, b_tag, f_tag) = (90u8, 91u8, 92u8, 93u8);
+    let PrWorld { relay, a1, b, sid, _tmp } = pr_world([a, a1_tag, b_tag]).await;
+    let b_master = tag_kp(b_tag).peer_id();
+    relay.set_online(&a1.device_id, false);
+    drop(a1);
+    let long_ago = super::roster_book::now_ms() - super::shared_servers::RECOVERY_WINDOW_MS - 1;
+    let mut f = pr_restored(&relay, a, f_tag, &[], crate::api::roster::RestoreSign::Admit, long_ago).await;
+    f.cmd_tx.send(NodeCommand::SendFriendRequest { peer_id: b_master.clone() }).await.unwrap();
+    assert!(wait_until(30, async || f.friend_status(&b_master).as_deref() == Some("accepted")).await, "precondition: B answered");
+    // ABSENCE: an ask that must never go out.
+    let joined = wait_event(&mut f, std::time::Duration::from_secs(5), |ev| matches!(ev, NetworkEvent::ServerJoined { .. })).await;
+    let asked = f.carried_to(&b.device_id).await.into_iter().filter(|m| matches!(m, super::types::HavenMessage::SharedServers { ask: true, .. })).count();
+    assert!(!joined && asked == 0 && f.live_server_state(&sid).await.is_none(), "an old restore asked for servers ({asked} asks)");
+}
+
+/// HOL-SEC-216 (reviewer probe, ported, with the fix's whole path): an owner device the
+/// phrase admitted AFTER T, which first held the server after T, removes the lost device
+/// as lost or stolen since T. It holds no record from before T, so it writes no settling
+/// from its records; the server goes to the witness desk, survives a restart there, and
+/// the person's pick of what two members folded before T keeps what the lost device did
+/// before T.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pr216_a_device_that_held_nothing_before_t_keeps_what_the_lost_device_did_before_t() {
+    use crate::crdt::operations::CrdtPayload as P;
+    use crate::identity::roster;
+    let _g = test_guard();
+    let [m_tag, d1_tag, d2_tag, r_tag, j_tag] = [146u8, 147, 148, 149, 150];
+    let (f_tag, k_tag) = (151u8, 152u8);
+    let W3c1Cut { relay, master, d1, d2, j, server_id, _tmp } = w3c1_cut_server([m_tag, d1_tag, d2_tag, r_tag, j_tag]).await;
+    let (m_id, d1_id) = (master.peer_id(), tag_kp(d1_tag).peer_id());
+    let (j_master, k_master) = (j.master_id.clone(), tag_kp(k_tag).peer_id());
+    let k = spawn_node_with_friends(&relay, k_tag, k_tag, &[&m_id]).await;
+    sleep_ms(1500).await;
+    k.cmd_tx
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&server_id) })
+        .await
+        .unwrap();
+    assert!(wait_until(30, async || j.live_server_state(&server_id).await.is_some_and(|s| s.is_member(&k_master))).await, "precondition: K joined");
+    let name_at = async |n: &TestNode| n.live_server_state(&server_id).await.map(|s| s.name.read().clone());
+    let base_at = async |n: &TestNode| n.live_server_state(&server_id).await.and_then(|s| s.base.as_ref().map(|b| b.hash));
+    let honest = w3c1_device_op(&server_id, &master, &tag_kp(d1_tag), P::ServerRenamed { new_name: "honest".into() }, 0);
+    for to in [&j, &k] {
+        carry_as(&d1, to, crdt_broadcast(&server_id, &honest)).await;
+    }
+    assert!(wait_until(15, async || name_at(&j).await.as_deref() == Some("honest") && name_at(&k).await.as_deref() == Some("honest")).await);
+    let state = j.live_server_state(&server_id).await.unwrap();
+    let json = state.checkpoint_json(&m_id, &[], crate::crdt::hlc::wall_clock_ms()).expect("a checkpoint");
+    let cp1 = w3c1_device_op(&server_id, &master, &tag_kp(d1_tag), P::ServerCheckpoint { state: json, covers: state.checkpoint_covers() }, 500);
+    for to in [&j, &k] {
+        carry_as(&d1, to, crdt_broadcast(&server_id, &cp1)).await;
+    }
+    let cp1_hash = cp1.content_hash();
+    assert!(wait_until(15, async || base_at(&j).await == Some(cp1_hash) && base_at(&k).await == Some(cp1_hash)).await, "precondition: both members fold cp1");
+    relay.set_online(&d2.device_id, false);
+    drop(d2);
+    sleep_ms(1200).await;
+    let t_ms = crate::crdt::hlc::wall_clock_ms() as i64;
+    sleep_ms(300).await;
+
+    // F: the device the phrase admits on a fresh install after T.
+    let f_dev = tag_kp(f_tag).peer_id();
+    let mut r = super::roster_book::load(&j.store(), &m_id).expect("J holds the owner's roster");
+    r.add_consent(roster::sign_consent(&tag_kp(f_tag), &m_id));
+    r.add_phrase_statement(&roster::r_pub_of(&tag_kp(r_tag)), None, Some(roster::sign_phrase_admit(&master, &tag_kp(r_tag), super::roster_book::now_ms(), &f_dev)))
+        .expect("the phrase admits F");
+    for n in [&j, &k] {
+        super::roster_book::merge_for_test(&n.store(), &r, &n.master_id, &n.device_id);
+    }
+    super::server_rosters::touched();
+    let f = spawn_node_staged(&relay, tag_kp(m_tag), f_tag, &[&j_master, &k_master], |st| {
+        super::roster_book::merge_for_test(st, &r, &m_id, &f_dev);
+    })
+    .await;
+    expect_dm_pair_ready(&relay, &f, &j, 25).await;
+    f.cmd_tx
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&server_id) })
+        .await
+        .unwrap();
+    assert!(wait_until(30, async || name_at(&f).await.as_deref() == Some("honest")).await, "precondition: F re-entered after T and holds the owner's rename");
+
+    f.cmd_tx
+        .send(NodeCommand::RevokeDevice { device_peer_id: d1_id.clone(), mode: super::roster_book::RemoveMode::Lost { t_ms }, with_dependents: false })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(30, async || {
+            j.live_server_state(&server_id).await.is_some_and(|s| s.authority.device_verdict(&m_id, &d1_id) == crate::crdt::authority::DeviceVerdict::Uncounted)
+        })
+        .await,
+        "precondition: the member holds the removal",
+    );
+    let lost_restore = format!("{}{server_id}", super::restore_flow::LOST_RESTORE);
+    assert!(wait_until(15, async || f.store().load_setting(&lost_restore).unwrap().is_some()).await, "the owned server was not handed to the witnesses");
+    let settled = |s: &ServerState| s.base.as_ref().is_some_and(|b| b.state.cp_settles.is_some());
+    assert!(!j.live_server_state(&server_id).await.is_some_and(|s| settled(&s)), "F settled the server from records that start after T");
+
+    let f = restart_node(&relay, f, m_tag, f_tag).await;
+    let restore = || super::restore_flow::snapshot_of(&f.device_id).into_iter().find(|s| s.server_id == server_id);
+    assert!(
+        wait_until(90, async || restore().is_some_and(|r| r.stage == super::witness::Stage::Pick)).await,
+        "F is never offered a pick after the restart: {:?}",
+        restore().map(|r| (r.stage, r.points.len())),
+    );
+    let pick = restore().and_then(|r| r.pick).expect("a pick");
+    assert_eq!(pick.cp, hex::encode(cp1_hash), "the members' checkpoint from before T");
+    let (reply, rx) = tokio::sync::oneshot::channel();
+    f.cmd_tx.send(NodeCommand::ChooseRestore { server_id: server_id.clone(), cp: Some(pick.cp.clone()), reply }).await.unwrap();
+    rx.await.expect("an answer").expect("the choice is taken");
+    assert!(
+        wait_until(40, async || j.live_server_state(&server_id).await.is_some_and(|s| settled(&s) && s.base.as_ref().and_then(|b| b.parent) == Some(cp1_hash))).await,
+        "the member never took F's settling on cp1",
+    );
+    assert_eq!(name_at(&j).await.as_deref(), Some("honest"), "what the lost device did before T was undone");
+    assert!(wait_until(15, async || f.store().load_setting(&lost_restore).unwrap().is_none()).await, "the restore row outlived the restore");
+    drop((d1, k));
 }

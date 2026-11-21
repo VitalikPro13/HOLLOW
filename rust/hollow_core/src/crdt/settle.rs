@@ -436,10 +436,37 @@ pub(crate) mod tests {
     /// Section 8.3, two settlings at once: two siblings settle two lost devices on one
     /// base; the owner device holding both writes one child of the winner dropping both,
     /// T the earlier one, and the rivalry ends there.
+    /// The phone's replica of the rivalry below, first folded at 1,000, with a sibling's
+    /// settling (T 2,000) rival to its own (T 3,000): `merged_settling` is due.
+    pub(crate) fn rival_world() -> ServerState {
+        rival_parts().0
+    }
+
     #[test]
     fn two_settlings_at_once_end_in_one_child_of_the_winner_dropping_both() {
-        const TABLET: u8 = 5;
-        const DESK: u8 = 6;
+        let (mut phone, _, after, seen) = rival_parts();
+        let (m_id, phone_kp) = (keys(OWNER).1, keys(PHONE).0);
+        let (devices, t_ms) = phone.merged_settling().expect("the rival drops a device the line does not");
+        let mut both = vec![keys(LAPTOP).1, keys(DESK).1];
+        both.sort();
+        assert_eq!((devices.clone(), t_ms), (both.clone(), 2_000));
+
+        let generation = phone.base.as_ref().map(|b| b.generation).unwrap();
+        let st = Settling { before: phone.view_counting(&m_id, &devices), dropped: &devices, t_ms, seen: &seen, roster: after.clone() };
+        phone.author_settling(&m_id, &st, &phone_kp).expect("the merged settling");
+        let base = phone.base.as_ref().expect("a base");
+        assert_eq!(base.generation, generation + 1, "a child of the winner");
+        assert_eq!(base.state.cp_settles.as_ref().map(|st| st.devices.clone()), Some(both), "dropping both");
+        assert!(phone.merged_settling().is_none(), "and the rivalry ends");
+        assert_eq!(phone.name.read().as_str(), "laptop before T", "what a dropped device did before the earlier T stays");
+    }
+
+    const TABLET: u8 = 5;
+    const DESK: u8 = 6;
+
+    /// Section 8.3, two settlings at once: two siblings settle two lost devices on one
+    /// base; the phone holds both. Returns the phone, the rosters and the first sights.
+    fn rival_parts() -> (ServerState, Roster, Roster, SeenAt) {
         let (master, m_id, pk) = keys(OWNER);
         let mut before = Roster::genesis(&master, &keys(RECOVERY).0, &keys(PHONE).0, 1_000);
         for d in [LAPTOP, TABLET, DESK] {
@@ -480,19 +507,7 @@ pub(crate) mod tests {
         assert!(phone.merged_settling().is_none(), "one settling has no rival");
         let theirs = lost(&mut tablet, DESK, 2_000, TABLET);
         phone.ingest_remote(&theirs);
-        let (devices, t_ms) = phone.merged_settling().expect("the rival drops a device the line does not");
-        let mut both = vec![keys(LAPTOP).1, keys(DESK).1];
-        both.sort();
-        assert_eq!((devices.clone(), t_ms), (both.clone(), 2_000));
-
-        let generation = phone.base.as_ref().map(|b| b.generation).unwrap();
-        let st = Settling { before: phone.view_counting(&m_id, &devices), dropped: &devices, t_ms, seen: &seen, roster: after.clone() };
-        phone.author_settling(&m_id, &st, &phone_kp).expect("the merged settling");
-        let base = phone.base.as_ref().expect("a base");
-        assert_eq!(base.generation, generation + 1, "a child of the winner");
-        assert_eq!(base.state.cp_settles.as_ref().map(|st| st.devices.clone()), Some(both), "dropping both");
-        assert!(phone.merged_settling().is_none(), "and the rivalry ends");
-        assert_eq!(phone.name.read().as_str(), "laptop before T", "what a dropped device did before the earlier T stays");
+        (phone, before, after, seen)
     }
 
     fn stamp_of(op: &CrdtOp) -> SettleStamp {
