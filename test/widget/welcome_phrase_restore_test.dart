@@ -13,6 +13,7 @@ import 'package:hollow/src/rust/api/identity.dart';
 import 'package:hollow/src/rust/frb_generated.dart';
 import 'package:hollow/src/theme/hollow_theme_data.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
+import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/dialogs/welcome_dialog.dart';
 import 'package:hollow/src/ui/dialogs/welcome_phrase_step.dart';
 
@@ -89,6 +90,7 @@ void main() {
     Size size = const Size(1440, 900),
     void Function(WelcomeResult?)? result,
     bool afterSetAside = false,
+    String? relayDomain,
   }) async {
     IOOverrides.global = _NoProfiles();
     addTearDown(() => IOOverrides.global = null);
@@ -105,7 +107,8 @@ void main() {
         }),
       ),
     ));
-    showWelcomeDialog(host, afterSetAside: afterSetAside)
+    showWelcomeDialog(host,
+            afterSetAside: afterSetAside, relayDomain: relayDomain)
         .then((r) => result?.call(r));
     await tester.pumpAndSettle();
     if (afterSetAside) return;
@@ -114,8 +117,9 @@ void main() {
   }
 
   Future<void> openStep(WidgetTester tester,
-      {void Function(WelcomeResult?)? result}) async {
-    await open(tester, result: result);
+      {void Function(WelcomeResult?)? result,
+      Size size = const Size(1440, 900)}) async {
+    await open(tester, result: result, size: size);
     await tester.tap(find.text('Use your recovery phrase'));
     await tester.pumpAndSettle();
   }
@@ -338,6 +342,26 @@ void main() {
     expect(popped?.action, 'restored_phrase');
   });
 
+  testWidgets('the kept-data dialog closes without choosing, and the step '
+      'keeps the words', (tester) async {
+    _api.answers = [
+      () => const RestoreOutcome.keptMatch(
+          path: '/data/hollow-old-2026-11-02', profileName: 'Mira'),
+    ];
+    WelcomeResult? popped;
+    await openStep(tester, result: (r) => popped = r);
+    await pick(tester, PhraseRestoreBranch.admit);
+    await type(tester, _phrase);
+    await restore(tester);
+    expect(find.byType(HollowDialogCloseButton), findsOneWidget);
+    await tester.tap(find.byType(HollowDialogCloseButton));
+    await tester.pumpAndSettle();
+    expect(find.text('Your data is still here'), findsNothing);
+    expect(_api.calls, hasLength(1), reason: 'closing restores nothing');
+    expect(fieldText(tester), _phrase);
+    expect(popped, isNull);
+  });
+
   testWidgets('a kept folder no profile lists is named by its day',
       (tester) async {
     _api.answers = [
@@ -423,6 +447,53 @@ void main() {
     expect(find.text('Could someone else have your old device?'), findsOneWidget);
     expect(find.textContaining('The identity those words made is set aside'),
         findsOneWidget);
+  });
+
+  testWidgets('after a set-aside the restore lands on the relay that '
+      'identity used, and the step shows it', (tester) async {
+    WelcomeResult? popped;
+    await open(tester,
+        afterSetAside: true,
+        relayDomain: 'relay.example.org',
+        result: (r) => popped = r);
+    expect(find.byKey(const ValueKey('phrase-step-relay')), findsOneWidget);
+    expect(find.text('relay.example.org'), findsOneWidget);
+    await pick(tester, PhraseRestoreBranch.admit);
+    await type(tester, _phrase);
+    await restore(tester);
+    expect(popped?.action, 'restored_phrase');
+    expect(popped?.relayDomain, 'relay.example.org',
+        reason: 'never the default unasked');
+  });
+
+  testWidgets('the relay shown on the step opens the relay field', (tester) async {
+    await open(tester, afterSetAside: true, relayDomain: 'relay.example.org');
+    await tester.tap(find.byKey(const ValueKey('phrase-step-relay')));
+    await tester.pumpAndSettle();
+    expect(find.text('Relay address'), findsOneWidget);
+    expect(find.text('Could someone else have your old device?'), findsNothing);
+  });
+
+  testWidgets('on the default relay the step shows no relay', (tester) async {
+    await open(tester, afterSetAside: true);
+    expect(find.byKey(const ValueKey('phrase-step-relay')), findsNothing);
+  });
+
+  testWidgets('at 375 px and text scale 2 the chosen row keeps the gutter',
+      (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.iOS;
+    try {
+      await openStep(tester, size: const Size(375, 667));
+      tester.platformDispatcher.textScaleFactorTestValue = 2;
+      addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+      await tester.pumpAndSettle();
+      await pick(tester, PhraseRestoreBranch.recover);
+      expect(tester.takeException(), isNull);
+      final row = find.byKey(const ValueKey('phrase-branch-recover'));
+      expect(tester.getRect(row).right, lessThanOrEqualTo(375 - 16));
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
   });
 
   test('restoreReady needs a branch, a time on Yes, and words', () {

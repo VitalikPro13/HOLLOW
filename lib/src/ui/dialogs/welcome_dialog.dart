@@ -43,15 +43,21 @@ typedef WelcomeResult = ({
 /// profile lists the old data (a portable copy, a data folder override).
 /// Linking then comes first. [afterSetAside]: the last phrase restore's
 /// identity was set aside, so Welcome opens on the phrase step again.
+/// [relayDomain]: the relay to start from instead of the default (the one the
+/// set-aside identity used).
 Future<WelcomeResult?> showWelcomeDialog(BuildContext context,
-    {String? relinkedTo, String? relinkedFolder, bool afterSetAside = false}) {
+    {String? relinkedTo,
+    String? relinkedFolder,
+    bool afterSetAside = false,
+    String? relayDomain}) {
   return showHollowDialog<WelcomeResult>(
     context: context,
     barrierDismissible: false,
     builder: (dialogContext) => _WelcomeContent(
         relinkedTo: relinkedTo,
         relinkedFolder: relinkedFolder,
-        afterSetAside: afterSetAside),
+        afterSetAside: afterSetAside,
+        relayDomain: relayDomain),
   );
 }
 
@@ -67,16 +73,23 @@ class _WelcomeContent extends StatefulWidget {
   final String? relinkedTo;
   final String? relinkedFolder;
   final bool afterSetAside;
+  final String? relayDomain;
 
   const _WelcomeContent(
-      {this.relinkedTo, this.relinkedFolder, this.afterSetAside = false});
+      {this.relinkedTo,
+      this.relinkedFolder,
+      this.afterSetAside = false,
+      this.relayDomain});
 
   @override
   State<_WelcomeContent> createState() => _WelcomeContentState();
 }
 
 class _WelcomeContentState extends State<_WelcomeContent> {
-  final _relayController = TextEditingController(text: kDefaultRelayDomain);
+  late final _relayController = TextEditingController(
+      text: widget.relayDomain?.trim().isNotEmpty == true
+          ? widget.relayDomain!.trim()
+          : kDefaultRelayDomain);
   final _passController = TextEditingController();
   bool _showAdvanced = false;
   String? _relayError;
@@ -257,8 +270,15 @@ class _WelcomeContentState extends State<_WelcomeContent> {
   @override
   Widget build(BuildContext context) {
     if (_phraseOpen) {
+      final domain = _relayDomain;
       return WelcomePhraseStep(
         afterSetAside: widget.afterSetAside,
+        relayDomain:
+            domain != null && domain != kDefaultRelayDomain ? domain : null,
+        onChangeRelay: () => setState(() {
+          _phraseOpen = false;
+          _showAdvanced = true;
+        }),
         onBack: () => setState(() => _phraseOpen = false),
         canStart: _phraseCanStart,
         onRestored: (branch) => _finish('restored_phrase', branch: branch),

@@ -8,9 +8,12 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hollow/src/core/providers/device_proof_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/services/phrase_restore.dart';
 import 'package:hollow/src/rust/api/identity.dart';
+import 'package:hollow/src/rust/api/recovery.dart';
+import 'package:hollow/src/rust/api/roster.dart';
 import 'package:hollow/src/rust/frb_generated.dart';
 import 'package:hollow/src/theme/hollow_theme_data.dart';
 import 'package:hollow/src/ui/dialogs/protection_prompt.dart';
@@ -58,8 +61,11 @@ class _BootApi implements RustLibApi {
   @override
   Future<String?> crateApiRecoveryRelinkWelcome() async => null;
 
+  String? setAsideRelay;
+
   @override
-  Future<bool> crateApiRecoverySetAsideWelcome() async => setAside;
+  Future<SetAsideWelcome?> crateApiRecoverySetAsideWelcome() async =>
+      setAside ? SetAsideWelcome(relay: setAsideRelay) : null;
 
   @override
   Future<void> crateApiRecoveryClearSetAsideWelcome() async =>
@@ -88,23 +94,45 @@ class _BootApi implements RustLibApi {
           {required String key, required String value}) async =>
       saved[key] = value;
 
+  @override
+  Future<RosterStatus> crateApiRosterRosterStatus() async => const RosterStatus(
+      member: true, protected: true, backupWait: false, devices: []);
+
   // Anything else the launch asks waits forever.
   @override
   dynamic noSuchMethod(Invocation invocation) {
-    if (invocation.memberName.toString().contains('crateApi')) {
+    final name = invocation.memberName.toString();
+    if (_nullAnswers.any(name.contains) ||
+        (_bootPastWelcome && name.contains('crateApi'))) {
+      return Future<Null>.value(null);
+    }
+    if (name.contains('crateApi')) {
       return Completer<Never>().future;
     }
     return super.noSuchMethod(invocation);
   }
 }
 
+/// Reads and fire-and-forget calls the launch makes after Welcome, answered
+/// "nothing here" so a restore reaches the node start.
+const _nullAnswers = [
+  'crateApiStorageLoadSetting"',
+  'crateApiStorageGetAvatar"',
+  'crateApiNetworkLogFromDart"',
+  'crateApiRecoveryClearRelinkWelcome"',
+  'crateApiRosterStoredPhraseForUpgrade"',
+  'crateApiRosterWelcomeRestoreState"',
+  'crateApiNetworkSetRelayUrl"',
+];
+
 final class _NoProfiles extends IOOverrides {
   @override
   File createFile(String path) =>
-      path.endsWith('profiles.json') || path.endsWith('identity.key')
-          ? _Missing(path)
-          : super.createFile(path);
+      _missing.any(path.endsWith) ? _Missing(path) : super.createFile(path);
 }
+
+/// Files the launch looks for; real file IO never completes under the test clock.
+const _missing = ['profiles.json', 'identity.key', 'custom_background.img'];
 
 class _Missing implements File {
   _Missing(this.path);
@@ -112,6 +140,8 @@ class _Missing implements File {
   final String path;
   @override
   bool existsSync() => false;
+  @override
+  Future<bool> exists() async => false;
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
@@ -126,6 +156,7 @@ class _NoIdentityYet extends IdentityNotifier {
 }
 
 final _api = _BootApi();
+var _bootPastWelcome = false;
 
 Future<void> _launch(WidgetTester tester, FutureOr<void> Function() check) async {
   IOOverrides.global = _NoProfiles();
@@ -157,6 +188,10 @@ Future<void> _launch(WidgetTester tester, FutureOr<void> Function() check) async
 Future<void> _restoreWithNo(WidgetTester tester) async {
   await tester.tap(find.byKey(const ValueKey('phrase-branch-admit')));
   await tester.pump(const Duration(milliseconds: 300));
+  await _typeAndRestore(tester);
+}
+
+Future<void> _typeAndRestore(WidgetTester tester) async {
   await tester.enterText(
       find.descendant(
           of: find.byKey(const ValueKey('welcome-phrase-field')),
@@ -173,8 +208,10 @@ Future<void> _restoreWithNo(WidgetTester tester) async {
 void main() {
   setUpAll(() => RustLib.initMock(api: _api));
   setUp(() {
+    _bootPastWelcome = false;
     _api
       ..setAside = false
+      ..setAsideRelay = null
       ..setAsideCleared = 0
       ..encrypted = false
       ..saved.clear()
@@ -214,15 +251,51 @@ void main() {
 
   testWidgets('after a set-aside the launch opens Welcome on the phrase step '
       'and clears the note once', (tester) async {
-    _api.setAside = true;
+    _api
+      ..setAside = true
+      ..setAsideRelay = 'relay.example.org';
     await _launch(tester, () async {
       expect(find.text('Could someone else have your old device?'),
           findsOneWidget);
+      expect(find.text('relay.example.org'), findsOneWidget,
+          reason: 'the set-aside identity\'s relay, never the default unasked');
       expect(find.textContaining('The identity those words made is set aside'),
           findsOneWidget);
       await _restoreWithNo(tester);
       expect(_api.setAsideCleared, 1);
       expect(find.byType(MobileShell), findsOneWidget);
+    });
+  });
+
+  testWidgets('a Yes restore asks the restore chooser once the node is up',
+      (tester) async {
+    await _launch(tester, () async {
+      await tester.tap(find.text('Agree and continue'));
+      await tester.pump(const Duration(milliseconds: 300));
+      await tester.ensureVisible(find.text('Use your recovery phrase'));
+      await tester.tap(find.text('Use your recovery phrase'));
+      await tester.pump(const Duration(milliseconds: 300));
+      final container =
+          ProviderScope.containerOf(tester.element(find.byType(HollowShell)));
+      expect(container.read(restoreChooserAskProvider), isNull);
+      // The launch past this point is not under test: it waits from here on.
+      container.listen(restoreChooserAskProvider, (_, _) => _bootPastWelcome = false);
+      await tester.tap(find.byKey(const ValueKey('phrase-branch-recover')));
+      await tester.pump(const Duration(milliseconds: 300));
+      await tester.ensureVisible(
+          find.byKey(const ValueKey('last-had-yesterday')));
+      await tester.tap(find.byKey(const ValueKey('last-had-yesterday')));
+      await tester.pump(const Duration(milliseconds: 300));
+      _bootPastWelcome = true;
+      await _typeAndRestore(tester);
+      expect(_api.restores.single, isA<WelcomeRestoreMode_Recover>());
+      // Past the relay status fetch, which gives up after 5 s.
+      for (var i = 0; i < 200 && container.read(restoreChooserAskProvider) == null; i++) {
+        await tester.pump(const Duration(milliseconds: 50));
+      }
+      expect(container.read(restoreChooserAskProvider)?.fresh, isTrue);
+      await tester.pumpWidget(const SizedBox());
+      await tester.pump(const Duration(minutes: 1));
     });
   });
 

@@ -1,4 +1,5 @@
 import 'package:hollow/src/rust/api/identity.dart' as identity_api;
+import 'package:hollow/src/rust/api/recovery.dart' as recovery_api;
 
 /// The phrase restore on Welcome (PHRASE_RESTORE_DESIGN): the branch the
 /// person chose and the copy for a phrase Rust refused.
@@ -44,4 +45,16 @@ String? phraseErrorText(Object error) {
         'order.';
   }
   return null;
+}
+
+/// Welcome's note after "Type my phrase again" set an identity aside, with the
+/// relay that identity used: its database moved away with it, and the next
+/// restore must land there, never on the default unasked. Null when nothing was
+/// set aside; [relayDomain] null when the note names none.
+typedef SetAsideNote = ({String? relayDomain});
+
+/// Reads the set-aside note Welcome shows once.
+Future<SetAsideNote?> readSetAsideNote() async {
+  final note = await recovery_api.setAsideWelcome();
+  return note == null ? null : (relayDomain: note.relay);
 }

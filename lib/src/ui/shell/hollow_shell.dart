@@ -1216,18 +1216,18 @@ class _HollowShellState extends ConsumerState<HollowShell>
     WelcomeResult? welcomeResult;
     if (!hasExisting && mounted) {
       final relinked = await keptOldDataForWelcome();
-      final setAside =
-          await recovery_api.setAsideWelcome().catchError((_) => false);
+      final setAside = await readSetAsideNote().catchError((_) => null);
       if (!mounted) return;
       _setPreparing(false);
       welcomeResult = await showWelcomeDialog(context,
           relinkedTo: relinked?.profile,
           relinkedFolder: relinked?.folder,
-          afterSetAside: setAside);
+          afterSetAside: setAside != null,
+          relayDomain: setAside?.relayDomain);
       if (!mounted) return;
       _setPreparing(true);
       unawaited(recovery_api.clearRelinkWelcome().catchError((_) {}));
-      if (setAside) {
+      if (setAside != null) {
         unawaited(recovery_api.clearSetAsideWelcome().catchError((_) {}));
       }
 

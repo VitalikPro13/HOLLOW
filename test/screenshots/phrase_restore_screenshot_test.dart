@@ -42,6 +42,7 @@ const _phrase = 'abandon ability able about above absent absorb abstract '
     'absurd abuse access accident account accuse achieve acid acoustic '
     'acquire across act action actor actress actual';
 const _added = '12D3KooWAddedAddedAddedAddedAddedAddedAdded';
+const _newer = '12D3KooWNewerNewerNewerNewerNewerNewerNewer';
 
 class _Api implements RustLibApi {
   RestoreOutcome Function() outcome =
@@ -65,6 +66,36 @@ class _Api implements RustLibApi {
 
   @override
   Future<String?> crateApiStorageLoadSetting({required String key}) async => null;
+
+  bool setAsideRefused = false;
+
+  @override
+  Future<void> crateApiIdentitySetAsideThisIdentity() async {
+    if (!setAsideRefused) return;
+    maySetAside = false;
+    throw 'set aside refused';
+  }
+
+  @override
+  Future<RosterStatus> crateApiRosterRosterStatus() async => const RosterStatus(
+        member: false,
+        protected: true,
+        backupWait: true,
+        tooEarly: 'recover',
+        devices: [
+          RosterDevice(
+              devicePeerId: 'self', state: 'member', thisDevice: true, added: []),
+          RosterDevice(
+              devicePeerId: _newer, state: 'member', thisDevice: false, added: []),
+          RosterDevice(
+              devicePeerId: _added, state: 'member', thisDevice: false, added: []),
+        ],
+      );
+
+  @override
+  Future<List<String>> crateApiRosterRecoveryKeptByDefault(
+          {required int lostSinceMs}) async =>
+      const [_newer];
 
   @override
   dynamic noSuchMethod(Invocation invocation) => Completer<Never>().future;
@@ -90,7 +121,7 @@ class _Alerts extends SecurityAlertsNotifier {
 
 class _Kinds extends DeviceKindNotifier {
   @override
-  Map<String, String> build() => const {_added: 'phone'};
+  Map<String, String> build() => const {_added: 'phone', _newer: 'desktop'};
 }
 
 class _Gate extends RosterGateNotifier {
@@ -142,7 +173,8 @@ void main() {
     _api
       ..outcome = (() => const RestoreOutcome.keptNoneOpens())
       ..mark = null
-      ..maySetAside = true;
+      ..maySetAside = true
+      ..setAsideRefused = false;
     keptMatchOffersSwitch = () => true;
   });
 
@@ -261,6 +293,8 @@ void main() {
     t.platformDispatcher.textScaleFactorTestValue = 2;
     addTearDown(t.platformDispatcher.clearTextScaleFactorTestValue);
     await tap(t, find.byKey(const ValueKey('phrase-branch-recover')));
+    // The grown row would end at the viewport's foot: bring it to the top.
+    await t.ensureVisible(find.byKey(const ValueKey('phrase-branch-recover')));
     await settle(t);
     await capture(t, 'phrase_step_yes_phone375_text2_dark');
   }, variant: _phone);
@@ -273,6 +307,24 @@ void main() {
     await tap(t, find.text('Restore'));
     await capture(t, 'phrase_step_error_desktop_dark');
   }, variant: _desktop);
+
+  for (final (size, platform, light) in [
+    (_desk, _desktop, false),
+    (_desk, _desktop, true),
+    (_hand, _phone, false),
+    (_hand, _phone, true),
+  ]) {
+    final where = size == _desk ? 'desktop' : 'phone';
+    final theme = light ? 'light' : 'dark';
+    testWidgets('phrase step after a set-aside on its own relay, $where $theme',
+        (t) async {
+      await pumpHost(t, size: size, light: light);
+      unawaited(showWelcomeDialog(host,
+          afterSetAside: true, relayDomain: 'relay.example.org'));
+      await settle(t);
+      await capture(t, 'phrase_step_set_aside_relay_${where}_$theme');
+    }, variant: platform);
+  }
 
   testWidgets('phrase step after a set-aside', (t) async {
     await pumpHost(t, size: _desk, light: true);
@@ -380,6 +432,21 @@ void main() {
     await capture(t, 'set_aside_dialog_desktop_dark');
   }, variant: _desktop);
 
+  testWidgets('set-aside refused', (t) async {
+    _api
+      ..mark = WelcomeRestoreState(
+          atMs: DateTime.now().millisecondsSinceEpoch,
+          branch: 'admit',
+          empty: true,
+          noWait: false)
+      ..setAsideRefused = true;
+    await pumpHost(t,
+        size: _desk, home: const HomeDashboard(), extra: homeOverrides());
+    await tap(t, find.text('Type my phrase again'));
+    await tap(t, find.text('Set aside'));
+    await capture(t, 'set_aside_refused_desktop_dark');
+  }, variant: _desktop);
+
   // ---------------------------------------------------------- Roster lock
 
   for (final (label, gate) in [
@@ -405,13 +472,47 @@ void main() {
         await capture(t, 'lock_${label}_desktop_$theme');
       }, variant: _desktop);
     }
-    testWidgets('roster lock $label, phone', (t) async {
-      await pumpHost(t,
-          size: _hand,
-          home: const RosterLockScreen(),
-          extra: [rosterGateProvider.overrideWith(() => _Gate(gate))]);
-      await capture(t, 'lock_${label}_phone_dark');
-    }, variant: _phone);
+    for (final light in [false, true]) {
+      final theme = light ? 'light' : 'dark';
+      testWidgets('roster lock $label, phone $theme', (t) async {
+        await pumpHost(t,
+            size: _hand,
+            light: light,
+            home: const RosterLockScreen(),
+            extra: [rosterGateProvider.overrideWith(() => _Gate(gate))]);
+        await capture(t, 'lock_${label}_phone_$theme');
+      }, variant: _phone);
+    }
+  }
+
+  for (final (stored, label) in [
+    (DateTime(2026, 11, 19, 9, 30).millisecondsSinceEpoch, 'stored'),
+    (null, 'asked'),
+  ]) {
+    for (final (size, platform, light) in [
+      (_desk, _desktop, false),
+      (_desk, _desktop, true),
+      (_hand, _phone, false),
+      (_hand, _phone, true),
+    ]) {
+      final where = size == _desk ? 'desktop' : 'phone';
+      final theme = light ? 'light' : 'dark';
+      testWidgets('recover again, moment $label, $where $theme', (t) async {
+        await pumpHost(t,
+            size: size,
+            light: light,
+            home: const RosterLockScreen(),
+            extra: [
+              rosterGateProvider.overrideWith(() => _Gate(RosterGate(
+                  kind: RosterGateKind.tooEarly,
+                  tooEarly: PhraseRestoreBranch.recover,
+                  lostSinceMs: stored))),
+              deviceKindProvider.overrideWith(_Kinds.new),
+            ]);
+        await tap(t, find.text('Use recovery phrase'));
+        await capture(t, 'recover_again_${label}_${where}_$theme');
+      }, variant: platform);
+    }
   }
 
   // ------------------------------------------------------- Phrase field

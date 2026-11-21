@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:hollow/src/core/app_relaunch.dart';
 import 'package:hollow/src/core/friendly_error.dart';
+import 'package:hollow/src/core/hollow_data_dir.dart';
+import 'package:hollow/src/core/profile_registry.dart';
 import 'package:hollow/src/core/services/phrase_restore.dart';
 import 'package:hollow/src/core/services/privacy_screen.dart';
 import 'package:hollow/src/rust/api/identity.dart' as identity_api;
@@ -32,12 +34,21 @@ class WelcomePhraseStep extends StatefulWidget {
   /// The last restore's identity was set aside: say so once.
   final bool afterSetAside;
 
+  /// The relay this restore lands on when it is not the default, shown so a
+  /// relay picked earlier (or the set-aside identity's) is never a surprise.
+  final String? relayDomain;
+
+  /// Opens the relay field on Welcome's first screen.
+  final VoidCallback? onChangeRelay;
+
   const WelcomePhraseStep({
     super.key,
     required this.onBack,
     required this.canStart,
     required this.onRestored,
     this.afterSetAside = false,
+    this.relayDomain,
+    this.onChangeRelay,
   });
 
   @override
@@ -132,7 +143,7 @@ class _WelcomePhraseStepState extends State<WelcomePhraseStep> {
       context: context,
       builder: (_) => _KeptMatchDialog(
         path: path,
-        profileName: profileName ?? keptProfileName(day),
+        profileName: profileName ?? listedProfileName(path) ?? keptProfileName(day),
         day: day,
       ),
     );
@@ -153,6 +164,7 @@ class _WelcomePhraseStepState extends State<WelcomePhraseStep> {
       color: hollow.textSecondary,
     );
     final branch = _branch;
+    final relay = widget.relayDomain;
 
     Widget option(PhraseRestoreBranch value, String title, String subtitle) {
       final chosen = branch == value;
@@ -276,6 +288,24 @@ class _WelcomePhraseStepState extends State<WelcomePhraseStep> {
         onBack: widget.onBack,
         body: body,
         bottom: WelcomeActions(
+          lead: relay == null
+              ? null
+              : Align(
+                  alignment: AlignmentDirectional.centerStart,
+                  widthFactor: 1,
+                  child: HollowButton.ghost(
+                    key: const ValueKey('phrase-step-relay'),
+                    compact: !phone,
+                    touch: phone,
+                    semanticLabel: 'Change the relay, $relay',
+                    icon: const Icon(LucideIcons.server, size: 14),
+                    onPressed: _busy ? null : widget.onChangeRelay,
+                    // The button cannot ellipsize its label.
+                    child: Text(relay.length > 32
+                        ? '${relay.substring(0, 31)}\u2026'
+                        : relay),
+                  ),
+                ),
           children: [
             HollowButton.filled(
               expand: phone,
@@ -295,6 +325,18 @@ class _WelcomePhraseStepState extends State<WelcomePhraseStep> {
 /// never on a phone or a portable copy. Tests stand in for it.
 @visibleForTesting
 bool Function() keptMatchOffersSwitch = listsKeptProfilesHere;
+
+/// The name the profile list gives the kept folder at [path], if it lists it
+/// (Rust names no profile; the list is Dart's).
+@visibleForTesting
+String? listedProfileName(String path) {
+  try {
+    for (final row in listProfileRows(readProfileRegistrySync())) {
+      if (sameProfilePath(row.path, path)) return row.name;
+    }
+  } catch (_) {}
+  return null;
+}
 
 /// Whether Restore may run: a branch picked, on Yes a time answered, and some
 /// words typed (Rust judges the words).
@@ -339,6 +381,8 @@ class _KeptMatchDialogState extends State<_KeptMatchDialog>
     return HollowDialog(
       title: 'Your data is still here',
       width: 420,
+      // Closing does nothing: the step stays with the words typed.
+      showClose: true,
       busy: actionRunning,
       error: actionError,
       content: HollowDialogText(
