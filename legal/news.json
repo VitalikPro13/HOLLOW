@@ -1,5 +1,11 @@
 [
   {
+    "id": "2026-11-21-v0142",
+    "date": "November 21, 2026",
+    "title": "v0.14.2 - Name Colors Everywhere, File Paste, DM Catch-Up & Safer Updates",
+    "body": "Tons of smaller fixes across the app and the relay. Issues are rising on GitHub, so it's a bit hard to keep up with them but doing my best. Reminder: that TestFlight closes tomorrow. Thanks!"
+  },
+  {
     "id": "2026-11-19-v0141",
     "date": "November 19, 2026",
     "title": "v0.14.1 - Name Colors, Hideable Sidebar Places & Screen Share Audio Fix",

@@ -614,6 +614,7 @@ t_lock_remove() {
     local log=$TMP/lockrm.log l
     lock_stubs "$log"
     UNIT_DIR=$TMP/lr_units LOCK_ENV=$TMP/lr_etc/turn-port-lock.env LOCK_BIN=$TMP/lr_bin/hollow-turn-port-lock
+    LOCK_SYSCTL=$TMP/lr_etc/zz-hollow-turn-ports.conf
     LOCK_DROPIN_DIR=$TMP/lr_units/hollow-coturn.service.d LOCK_DROPIN=$TMP/lr_units/hollow-coturn.service.d/hollow-port-lock.conf
     rm -rf "$TMP/lr_units" "$TMP/lr_etc" "$TMP/lr_bin"
     mkdir -p "$UNIT_DIR" "$TMP/lr_etc" "$TMP/lr_bin"
