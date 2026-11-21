@@ -1551,6 +1551,66 @@ t_duckdns() {
 in_sub t_duckdns
 lacks "the token question never moves the record" "$(sed -n '/^ask_duckdns()/,/^}/p' "$DEPLOY/lib/questions.sh")" "duckdns_update"
 
+echo "the address checks"
+# the_setup_explains_a_lan_answer_for_its_own_name: a router or a Pi-hole that answers
+# the relay's name with a LAN address at home says nothing about the public record.
+t_lan_answer() {
+    local F=$TMP/fake_lan out t0
+    mkfake "$F" curl 'cat >/dev/null; printf "OK\n%s\n\nUPDATED" "$FAKE_SEEN"'
+    PATH="$F:$PATH"
+    sleep() { :; }
+    # shellcheck disable=SC2086 # one word per answer
+    dns_a() { printf '%s\n' $FAKE_DNS; }
+    UI_MODE=answers CFG_ADDRESS=domain CFG_MODE=docker CFG_HOST=relay.example.com CFG_PUBLIC_IP=203.0.113.7 DRY_RUN=0
+    FAKE_DNS="192.168.1.5"
+    t0=$(date +%s)
+    out=$( (address_check && echo CHECK-PASSED) 2>&1)
+    has "a domain this network answers with a LAN address goes on to the certificate" "$out" "CHECK-PASSED"
+    has "saying why the record can't be checked" "$out" "answers relay.example.com with 192.168.1.5, a LAN address, so the public record can't be checked from here"
+    lacks "and never telling a person to fix a record that may be right" "$out" "Set its A record"
+    yes_ test $(($(date +%s) - t0)) -lt 5
+    FAKE_DNS="192.168.1.5 198.51.100.4"
+    out=$( (address_check || echo "WHY $ADDRESS_WHY") 2>&1)
+    has "a public answer naming another address still says to fix the record" "$out" "WHY relay.example.com points at 192.168.1.5 198.51.100.4, not at this machine (203.0.113.7). Set its A record to 203.0.113.7"
+    FAKE_DNS="203.0.113.7 192.168.1.5"
+    out=$( (address_check && echo CHECK-PASSED) 2>&1)
+    has "an answer naming this machine passes as before" "$out" "it does"
+    # DuckDNS took the update; the name's answer here is a LAN one.
+    CFG_ADDRESS=duckdns CFG_HOST=myrelay.duckdns.org CFG_DUCKDNS_TOKEN=a1b2c3d4-0000-1111-2222-333344445555 CFG_DUCKDNS_IP=""
+    FAKE_DNS="192.168.1.5"
+    export FAKE_SEEN=203.0.113.7
+    out=$( (duckdns_point_now && echo POINTED) 2>&1)
+    has "the DuckDNS step goes on" "$out" "POINTED"
+    has "with the same note" "$out" "answers myrelay.duckdns.org with 192.168.1.5, a LAN address"
+    lacks "and never waits three minutes for it" "$out" "after three minutes"
+}
+in_sub t_lan_answer
+
+# a_fresh_duckdns_install_stops_when_duckdns_and_the_echo_disagree: an address measured
+# in this run that DuckDNS did not see the update come from is no address to give TURN.
+t_duckdns_disagree() {
+    local F=$TMP/fake_dd2 out
+    mkfake "$F" curl 'cat >/dev/null; printf "OK\n%s\n\nUPDATED" "$FAKE_SEEN"'
+    PATH="$F:$PATH"
+    dns_points_at() { DNS_SEEN=$2; return 0; }
+    ANS=()
+    UI_MODE=answers DRY_RUN=0 PF_BEHIND_NAT=0 PF_PUBLIC_IP=203.0.113.7 PF_PUBLIC_IPV6=""
+    CFG_ADDRESS=duckdns CFG_HOST=myrelay.duckdns.org CFG_DUCKDNS_TOKEN=a1b2c3d4-0000-1111-2222-333344445555
+    export FAKE_SEEN=198.51.100.9
+    out=$( (ask_public_ip && duckdns_point_now && echo POINTED) 2>&1)
+    has "a fresh install stops" "$out" "DIE DuckDNS saw this machine at 198.51.100.9, but the internet saw it at 203.0.113.7 a moment ago"
+    lacks "before TURN gets either" "$out" "POINTED"
+    FAKE_SEEN=203.0.113.7
+    out=$( (ask_public_ip && duckdns_point_now && echo POINTED) 2>&1)
+    has "when they agree it goes on" "$out" "POINTED"
+    # An address kept from install.conf may be older than the line's: DuckDNS's wins.
+    FAKE_SEEN=198.51.100.9 PUBLIC_IP_MEASURED=0 CFG_PUBLIC_IP=203.0.113.7 CFG_PUBLIC_IP_FIXED=no CFG_DUCKDNS_IP=""
+    out=$( (duckdns_point_now && echo POINTED) 2>&1)
+    has "an update goes on with the address DuckDNS saw" "$out" "POINTED"
+    has "and says TURN moves there once it is proven" "$out" "DuckDNS sees this machine at 198.51.100.9, not 203.0.113.7"
+}
+in_sub t_duckdns_disagree
+
 echo "docker re-run"
 t_docker_rerun() {
     REPO=$TMP/no-sources DOCKER_DIR=$TMP/dk STACK_DIR=$TMP/dk/relay-uws CFG_FORWARDER=no DRY_RUN=0

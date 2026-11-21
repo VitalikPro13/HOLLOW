@@ -86,18 +86,22 @@ address. With a DuckDNS name or your own domain, the setup checks every five
 minutes where the name points. It asks the server's own DNS servers, never
 `/etc/hosts` and never a public resolver. When the name points somewhere new,
 TURN and the forwarder move there once the new address proves to be this
-server: the setup connects to it, and the far end has to answer with your
+server. The setup connects to it, and the far end has to answer with your
 relay's own certificate key and with your TURN server's secret. A DNS answer
 alone never moves them, so a forged one cannot send TURN traffic to someone
 else's machine.
 
 Some home routers can't connect from inside the network to their own public
 address, so the check can't run from the server. Then the setup takes nothing
-new. It stops using the old address, which someone else may have by then, only
-when every check for half an hour agrees: the server no longer has the old
-address, your relay no longer answers there, DNS keeps naming the same new
-address, and for a DuckDNS name DuckDNS itself saw the server at that address.
-From then on calls that need TURN fail until you confirm the new address: run
+new. It drops the old address, which someone else may have by then, only after
+half an hour in which every check agrees: the server no longer has that address,
+your relay doesn't answer there, DNS keeps naming the same new address, and
+something other than DNS says the server moved. For a DuckDNS name that is
+DuckDNS itself, which saw the server's updates come from the new address. For
+your own domain it is the server having reached your relay at the old address
+before, because behind a router that never lets the server reach itself a failed
+check proves nothing. Such a domain keeps the old address. In both cases calls
+that need TURN fail until you confirm the new address. Run
 `sudo hollow-relay-setup`, choose **Change a setting**, then the address. The
 setup's check names both addresses (see [Check it](#check-it)).
 
@@ -1112,8 +1116,9 @@ If both answer without a certificate warning, your relay is live.
 
 On the server, the host checks look at each service's account, who can read its
 secrets, how tight its sandbox is, whether anything could reach the disk, whether
-TURN and the forwarder use the address your relay's name points at, and SSH. They change nothing. The setup runs them at the end and from
-**Check the machine again**. To run them yourself:
+TURN and the forwarder use the address your relay's name points at, and SSH. They
+change nothing. The setup runs them at the end and from **Check the machine
+again**. To run them yourself:
 
 ```bash
 sudo bash /usr/local/lib/hollow-relay/installer/deploy/check-host.sh
@@ -1244,10 +1249,10 @@ complains about, remove the `--no-stdout-log` line from
 the line back.
 
 **Calls fail after the server's public address changed.** With a DuckDNS name or
-your own domain, TURN and the forwarder follow a new address within minutes, once
-it proves to be this server (see [A new address](#a-new-address)). If they don't,
-run `sudo bash /usr/local/lib/hollow-relay/installer/deploy/check-host.sh` and
-read its **Public address** lines, which name the address TURN uses and where
+your own domain, TURN and the forwarder follow a new address within minutes,
+once it proves to be this server (see [A new address](#a-new-address)). If they
+don't, run `sudo bash /usr/local/lib/hollow-relay/installer/deploy/check-host.sh`
+and read its **Public address** lines, which name the address TURN uses and where
 your name points. `sudo journalctl -u hollow-address-follow` says why a new
 address wasn't taken. The usual reasons: a router that can't connect to its own
 public address from inside, a router or Pi-hole that answers your name with a

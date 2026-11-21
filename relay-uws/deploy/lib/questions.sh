@@ -77,6 +77,9 @@ ask_public_ip() {
         CFG_PUBLIC_IP=$PF_PUBLIC_IP
         CFG_PUBLIC_IP_FIXED=no
     fi
+    # Measured in this run, so DuckDNS has to see the same one (duckdns_point_now).
+    # shellcheck disable=SC2034 # read by duckdns_point_now
+    [ "$CFG_PUBLIC_IP_FIXED" = yes ] || PUBLIC_IP_MEASURED=1
     CFG_PUBLIC_IPV6=$(ans_get public_ipv6 "$PF_PUBLIC_IPV6")
     # It opens coturn's peer lock to that address, so one global address only.
     if [ -n "$CFG_PUBLIC_IPV6" ] && [ "$(ip6_class "$CFG_PUBLIC_IPV6")" != global ]; then
@@ -445,10 +448,12 @@ address_check() {
         fi ;;
     esac
     step "Checking that $CFG_HOST points at $CFG_PUBLIC_IP"
-    if dns_points_at "$CFG_HOST" "$CFG_PUBLIC_IP" 30; then
-        say "  it does"
-        return 0
-    fi
+    local rc=0
+    dns_points_at "$CFG_HOST" "$CFG_PUBLIC_IP" 30 || rc=$?
+    case "$rc" in
+    0) say "  it does"; return 0 ;;
+    2) say "  $(dns_lan_note "$CFG_HOST")"; return 0 ;;
+    esac
     [ "$DRY_RUN" = 1 ] && { say "  it does not yet (${DNS_SEEN:-no answer}); a real run would stop here"; return 0; }
     ADDRESS_WHY="$CFG_HOST points at ${DNS_SEEN:-nothing}, not at this machine ($CFG_PUBLIC_IP). Set its A record to $CFG_PUBLIC_IP at your DNS provider and wait until it shows, then check again. I did not ask Let's Encrypt yet, so no attempt was used up."
     return 1

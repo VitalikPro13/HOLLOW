@@ -99,6 +99,7 @@ EOF
 # A run told to die halfway through a rewrite, between mktemp and the rename.
 cat >"$SHIM/chown" <<'EOF'
 #!/bin/bash
+[ -e /usr/local/lib/box-follow/turn-env-unwritable ] && [[ "$*" == *turn.env.follow.* ]] && exit 1
 if [ -e /usr/local/lib/box-follow/kill-at-chown ]; then
     rm -f /usr/local/lib/box-follow/kill-at-chown
     kill -TERM "$PPID"
@@ -244,6 +245,7 @@ stamp() {
 # window <looks> <start> <set> <current>: an old address already that long unconfirmed.
 window() { stamp w4_looks "$1"; stamp w4_start "$2"; stamp w4_set "$3"; stamp w4_cur "$4"; }
 looks() { sed -n 's/^w4_looks=//p' "$FOLLOW_STATE"; }
+state_val() { sed -n "s/^$1=//p" "$FOLLOW_STATE"; }
 long_ago=$(($(date +%s) - 3600))
 eq "coturn starts on the old address" "$(turn_ip)" "$OLD"
 modes_before=$(modes)
@@ -254,6 +256,7 @@ stamp last_change "$long_ago"
 c0=$(inv hollow-coturn) f0=$(inv hollow-forwarder) n0=$(nft list table inet hollow_turn)
 out=$(follow)
 eq "the name still pointing here restarts no coturn" "$(inv hollow-coturn)" "$c0"
+eq "a look that cannot reach this relay at its own address notes nothing" "$(state_val loop4)" ""
 eq "and no forwarder" "$(inv hollow-forwarder)" "$f0"
 eq "and leaves the lock's rule" "$(nft list table inet hollow_turn)" "$n0"
 eq "and coturn's address" "$(turn_ip)" "$OLD"
@@ -304,6 +307,7 @@ dns A "$NEW"
 out=$(follow)
 printf '%s\n' "$out" | sed 's/^/  | /'
 has "it says both the TLS key and the TURN secret answered" "$out" "both this relay's TLS key and its TURN secret answered there"
+eq "a handshake that proved the address notes that this machine reaches itself" "$(state_val loop4)" yes
 eq "coturn's settings take the new address" "$(turn_ip)" "$NEW"
 eq "the lock's peers drop the old one" "$(peers)" "$NEW $L"
 eq "the forwarder takes it" "$(fwd_ip)" "$NEW"
@@ -332,10 +336,12 @@ root turn-cred"
 part=$(address_part)
 eq "check-host passes the new address" "$(grep FAIL <<<"$part")" ""
 has "naming it" "$part" "ok    coturn's settings ($TURN_ETC/turn.env) give $NEW, the address $NAME points at"
-has "and the follower's address beside the setup's answer" "$part" "the follower's address in $CONF_FILE (your answer is $OLD) give $NEW"
+has "and the follower's address beside the setup's answer" "$part" "the follower's address in $CONF_FILE (your answer is $OLD) gives $NEW"
 c1=$(inv hollow-coturn) f1=$(inv hollow-forwarder)
+stamp loop4 ""
 out=$(follow)
 eq "a second look restarts nothing" "$(inv hollow-coturn) $(inv hollow-forwarder)" "$c1 $f1"
+eq "and notes that its own address answers a pinned handshake from here" "$(state_val loop4)" yes
 
 echo "the address follower: private and missing answers"
 # a_private_address_is_never_taken: not even this machine's own LAN address.
@@ -344,7 +350,9 @@ dns A "$L"
 out=$(follow)
 eq "a name pointing at a private address moves nothing" "$(turn_ip)" "$NEW"
 part=$(address_part)
-has "check-host skips an answer naming a private address" "$part" "skip  where $NAME points: this machine's DNS answers with a private address"
+# the_follower_says_once_that_it_cannot_follow_on_a_split_horizon_network
+has "check-host says in one line that the follower can't follow on this network" "$part" "skip  this network's DNS answers $NAME with a LAN address, so the follower can't follow a new public address on this network"
+lacks "and does not say it follows" "$part" "TURN and the forwarder follow a new address"
 eq "and fails nothing for it" "$(grep FAIL <<<"$part")" ""
 dns A "$GONE" "$L"
 out=$(follow)
@@ -355,7 +363,7 @@ printf '%s %s\n' "$NEW2" "$NAME" >>/etc/hosts
 out=$(follow)
 eq "a name only /etc/hosts knows moves nothing, though that address proves" "$(turn_ip)" "$NEW"
 printf '127.0.1.1 %s\n' "$NAME" >>/etc/hosts
-has "check-host skips it as no answer" "$(address_part)" "skip  where $NAME points: no answer from this machine's DNS"
+has "check-host skips it as no answer" "$(address_part)" "skip  no answer from this machine's DNS for where $NAME points"
 sed -i "/ $NAME\$/d" /etc/hosts
 rm -f "$FOLLOW_STATE"
 stamp last_change "$(date +%s)"
@@ -378,6 +386,8 @@ nft delete element ip box_follow turn3478 "{ $NEW2 }"
 dns A "$GONE"
 rm -f "$FOLLOW_STATE"
 stamp last_change "$long_ago"
+# A pinned handshake to its own address worked here once, so a failed one means something.
+stamp loop4 yes
 out=$(follow)
 eq "a first stale look drops nothing" "$(turn_ip)" "$NEW2"
 eq "and starts the window" "$(looks)" 1
@@ -419,6 +429,14 @@ out=$(follow)
 # shellcheck disable=SC2086 # the route's words
 ip route add $gw
 eq "with no address of its own to fall back on nothing drops" "$(turn_ip) $(looks)" "$NEW2 "
+# a_domain_behind_a_router_without_loopback_is_not_dropped_on_dns_alone
+window 5 "$long_ago" "$GONE" "$NEW2"
+stamp loop4 ""
+out=$(follow)
+eq "a domain whose own address never answered a pinned handshake from here is not dropped on DNS alone" "$(turn_ip) $(looks)" "$NEW2 "
+has "and it says why" "$out" "a router without NAT loopback"
+has "check-host names both addresses" "$(address_part)" "FAIL  coturn's settings ($TURN_ETC/turn.env) give $NEW2, but $NAME points at $GONE"
+stamp loop4 yes
 # a_full_window_drops_the_old_address_and_leaves_the_setups_answer
 window 5 "$long_ago" "$GONE" "$NEW2"
 out=$(follow)
@@ -450,6 +468,8 @@ install -d -m 0755 /run/hollow-duckdns
 seen() { printf '%s\n' "$1" >/run/hollow-duckdns/seen; touch -d "@${2:-$(date +%s)}" /run/hollow-duckdns/seen; }
 rm -f /run/hollow-duckdns/seen
 dns A "$GONE"
+# DuckDNS's own answer is the evidence beyond DNS, with or without NAT loopback.
+stamp loop4 ""
 systemctl reset-failed hollow-coturn
 window 5 "$long_ago" "$GONE" "$NEW2"
 out=$(follow)
@@ -618,6 +638,128 @@ sleep 1
 serve 127.0.0.1:443 relay
 sleep 1
 
+echo "the address follower: restarts that do not happen"
+# A systemctl that fails coturn's restart or the lock's reload on demand, or is killed
+# in the middle of coturn's, after the follower renamed its settings.
+REAL_SYSTEMCTL=$(command -v systemctl)
+cat >"$SHIM/systemctl" <<EOF
+#!/bin/bash
+case " \$* " in
+*"restart hollow-coturn "*)
+    [ -e $SHIM/coturn-restart-fails ] && exit 1
+    if [ -e $SHIM/kill-at-restart ]; then rm -f $SHIM/kill-at-restart; kill -TERM "\$PPID"; sleep 1; exit 1; fi ;;
+*" try-reload-or-restart hollow-turn-port-lock.service "*)
+    [ -e $SHIM/lock-reload-fails ] && exit 1 ;;
+esac
+exec $REAL_SYSTEMCTL "\$@"
+EOF
+chmod 0755 "$SHIM/systemctl"
+owed() { cat /run/hollow-address/pending 2>/dev/null; }
+rule_has() { nft list table inet hollow_turn | grep 'daddr {' | grep -qwF -- "$1"; }
+coturn_has() { grep -qwF -- "$1" <<<"$(coturn_cmd)"; }
+# a_failed_coturn_restart_keeps_the_old_peer_locked_and_retries: coturn still runs with
+# the old address as an allowed peer, so the lock has to keep covering it.
+systemctl reset-failed hollow-coturn
+c3=$(inv hollow-coturn)
+dns A "$NEW2"
+rm -f "$FOLLOW_STATE"
+stamp last_change "$long_ago"
+touch "$SHIM/coturn-restart-fails"
+out=$(follow)
+rc=$?
+no_ "a look whose coturn restart failed ends in failure" test "$rc" = 0
+has "and says so" "$out" "coturn did not restart with the new address"
+eq "coturn's settings hold the new address" "$(turn_ip)" "$NEW2"
+eq "while coturn runs on, not restarted" "$(inv hollow-coturn)" "$c3"
+has "with the old address" "$(coturn_cmd)" "--external-ip=$NEW/$L"
+eq "so the lock keeps the old peer beside the new" "$(peers)" "$NEW2 $L $NEW"
+yes_ "and so does the loaded rule" rule_has "$NEW"
+eq "the restart is owed" "$(owed)" coturn
+has "check-host says coturn has not restarted" "$(address_part)" "FAIL  coturn has not restarted with the follower's new address yet, so the TURN port lock keeps the old one too"
+out=$(follow)
+eq "a second look that still cannot restart it keeps the old peer" "$(peers) $(inv hollow-coturn)" "$NEW2 $L $NEW $c3"
+rm -f "$SHIM/coturn-restart-fails"
+out=$(follow)
+rc=$?
+eq "the next look that can restart it ends well" "$rc" 0
+no_ "and restarts coturn" test "$(inv hollow-coturn)" = "$c3"
+sleep 2
+has "which runs on the new address" "$(coturn_cmd)" "--external-ip=$NEW2/$L"
+no_ "and no longer lets the old one through" coturn_has "$NEW"
+eq "only then the lock lets the old peer go" "$(peers)" "$NEW2 $L"
+no_ "from the loaded rule too" rule_has "$NEW"
+eq "nothing is owed" "$(owed)" ""
+eq "and check-host fails nothing" "$(grep FAIL <<<"$(address_part)")" ""
+# a_run_killed_before_coturn_restarts_restarts_it_on_the_next_look
+systemctl reset-failed hollow-coturn
+c4=$(inv hollow-coturn)
+dns A "$NEW"
+stamp last_change "$long_ago"
+touch "$SHIM/kill-at-restart"
+out=$(follow)
+eq "a run killed after the rename, before the restart, leaves the new settings" "$(turn_ip) $(inv hollow-coturn)" "$NEW $c4"
+eq "with the old peer still locked" "$(peers)" "$NEW $L $NEW2"
+out=$(follow)
+no_ "the next look restarts coturn" test "$(inv hollow-coturn)" = "$c4"
+eq "and only then drops the old peer" "$(peers)" "$NEW $L"
+# a_lock_that_does_not_load_keeps_coturn_where_it_was
+systemctl reset-failed hollow-coturn
+c5=$(inv hollow-coturn)
+dns A "$NEW2"
+stamp last_change "$long_ago"
+touch "$SHIM/lock-reload-fails"
+out=$(follow)
+eq "while the lock does not load the new peers, coturn keeps its address and runs on" "$(turn_ip) $(inv hollow-coturn)" "$NEW $c5"
+yes_ "the loaded rule still holds it" rule_has "$NEW"
+eq "the reload is owed" "$(owed)" lock
+rm -f "$SHIM/lock-reload-fails"
+out=$(follow)
+eq "once the lock loads, coturn moves" "$(turn_ip) $(peers)" "$NEW2 $NEW2 $L"
+no_ "and restarts" test "$(inv hollow-coturn)" = "$c5"
+eq "with nothing owed" "$(owed)" ""
+# a_settings_file_that_cannot_be_written_keeps_the_old_peer: coturn's settings stay old,
+# so coturn is owed nothing and still allows the old peer.
+systemctl reset-failed hollow-coturn
+c6=$(inv hollow-coturn)
+dns A "$NEW"
+stamp last_change "$long_ago"
+touch "$SHIM/turn-env-unwritable"
+out=$(follow)
+rc=$?
+no_ "a look that could not write coturn's settings ends in failure" test "$rc" = 0
+eq "coturn keeps its settings and runs on" "$(turn_ip) $(inv hollow-coturn)" "$NEW2 $c6"
+eq "and the lock keeps the old peer" "$(peers)" "$NEW $L $NEW2"
+rm -f "$SHIM/turn-env-unwritable"
+out=$(follow)
+eq "the next look writes them and drops it" "$(turn_ip) $(peers)" "$NEW $NEW $L"
+# a_coturn_our_restart_left_failed_starts_again: a restart that stopped coturn and could
+# not start it leaves the unit failed once systemd stops trying (here at once), which
+# try-restart alone never starts.
+printf '[Service]\nRestart=no\nExecStartPre=/bin/sh -c "! test -e %s/coturn-start-fails"\n' "$SHIM" >"$UNIT_DIR/hollow-coturn.service.d/box-fail.conf"
+systemctl daemon-reload
+systemctl reset-failed hollow-coturn
+dns A "$NEW2"
+stamp last_change "$long_ago"
+touch "$SHIM/coturn-start-fails"
+out=$(follow)
+yes_ "a restart whose start fails leaves coturn failed" systemctl is-failed --quiet hollow-coturn
+eq "with the old peer still locked" "$(peers)" "$NEW2 $L $NEW"
+rm -f "$SHIM/coturn-start-fails"
+out=$(follow)
+yes_ "the next look starts it" systemctl is-active --quiet hollow-coturn
+sleep 2
+yes_ "on the new address" coturn_has "$NEW2"
+eq "and only then drops the old peer" "$(peers)" "$NEW2 $L"
+rm -f "$UNIT_DIR/hollow-coturn.service.d/box-fail.conf"
+systemctl daemon-reload
+rm -f "$SHIM/systemctl"
+# Back where the unit's own test starts.
+systemctl reset-failed hollow-coturn
+dns A "$NEW"
+stamp last_change "$long_ago"
+out=$(follow)
+eq "and a later change goes through as before" "$(turn_ip) $(peers)" "$NEW $NEW $L"
+
 echo "the address follower: its own unit"
 # the_follower_unit_follows_inside_its_sandbox
 printf '[Service]\nEnvironment=PATH=%s:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\nReadWritePaths=%s\n' "$SHIM" "$SHIM" \
@@ -681,6 +823,21 @@ has "coturn and the forwarder are recreated with it" "$(cat "$FD/calls" 2>/dev/n
 : >"$FD/calls"
 out=$(PATH="$FD:$SHIM:$PATH" bash "$INSTALLER_COPY/deploy/address-follow.sh" run 2>&1)
 eq "and a second look calls nothing" "$(cat "$FD/calls")" ""
+# a_failed_compose_up_keeps_the_old_peer_locked_and_retries
+printf '#!/bin/sh\necho "$*" >>%s/calls\n[ ! -e %s/fails ]\n' "$FD" "$FD" >"$FD/docker"
+touch "$FD/fails"
+dns A "$NEW2"
+stamp last_change "$long_ago"
+out=$(PATH="$FD:$SHIM:$PATH" bash "$INSTALLER_COPY/deploy/address-follow.sh" run 2>&1)
+eq "the stack's settings take the next address" "$(kv_get "$STACK_DIR/.env" PUBLIC_IP)" "$NEW2"
+eq "but while compose fails the lock keeps the old peer" "$(peers)" "$NEW2 $L $NEW"
+eq "and the restart is owed" "$(cat /run/hollow-address/pending 2>/dev/null)" compose
+rm -f "$FD/fails"
+: >"$FD/calls"
+out=$(PATH="$FD:$SHIM:$PATH" bash "$INSTALLER_COPY/deploy/address-follow.sh" run 2>&1)
+has "the next look runs compose again" "$(cat "$FD/calls")" "up -d --no-deps --no-build coturn forwarder"
+eq "and only then drops the old peer" "$(peers)" "$NEW2 $L"
+no_ "with nothing owed" test -e /run/hollow-address/pending
 rm -rf "$DOCKER_DIR"
 CFG_MODE=native
 

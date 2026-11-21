@@ -79,10 +79,12 @@ duckdns_check_token() {
 
 # Points the DuckDNS name at this machine, after the plan screen, and waits
 # until DNS shows it. Without a pinned address that is the address DuckDNS saw the
-# update come from, which may differ from the setup's answer once the line got a
-# new one (the address follower moves TURN there).
+# update come from. For an address this run measured, that has to be the same one:
+# two different ways out of this network leave TURN on an address nothing proved.
+# An address kept from install.conf may be older than the line's new one, which the
+# address follower then moves TURN to once it proves to be this machine.
 duckdns_point_now() {
-    local name=${CFG_HOST%.duckdns.org} resp want=$CFG_PUBLIC_IP seen
+    local name=${CFG_HOST%.duckdns.org} resp want=$CFG_PUBLIC_IP seen rc=0
     step "Pointing $CFG_HOST at ${CFG_DUCKDNS_IP:-this machine}"
     if [ "$DRY_RUN" = 1 ]; then
         say "  would update $CFG_HOST to ${CFG_DUCKDNS_IP:-the address DuckDNS sees} and wait for DNS to show it"
@@ -94,13 +96,26 @@ duckdns_point_now() {
     *) die "DuckDNS refused the update for $CFG_HOST. Check the token and the subdomain on your DuckDNS page, then run the setup again." ;;
     esac
     seen=$(printf '%s\n' "$resp" | sed -n 2p)
-    if [ -z "$CFG_DUCKDNS_IP" ] && [ "$(ip4_class "$seen")" = public ]; then want=$seen; fi
-    if dns_points_at "$CFG_HOST" "$want" 180; then
+    if [ -z "$CFG_DUCKDNS_IP" ] && [ "$(ip4_class "$seen")" = public ] && [ "$seen" != "$CFG_PUBLIC_IP" ]; then
+        [ "${PUBLIC_IP_MEASURED:-0}" = 1 ] &&
+            die "DuckDNS saw this machine at $seen, but the internet saw it at $CFG_PUBLIC_IP a moment ago, so I can't tell which address people reach. Run the setup again in a few minutes. If the two still differ, your network has more than one way out to the internet, and the relay needs the address people reach typed in, at the address question or as public_ip in an answer file."
+        want=$seen
+    fi
+    dns_points_at "$CFG_HOST" "$want" 180 || rc=$?
+    case "$rc" in
+    0)
         say "  it does"
         [ "$want" = "$CFG_PUBLIC_IP" ] || say "  DuckDNS sees this machine at $want, not $CFG_PUBLIC_IP. TURN and the forwarder move there once it proves to be this machine."
-        return 0
-    fi
+        return 0 ;;
+    2) say "  $(dns_lan_note "$CFG_HOST")"; return 0 ;;
+    esac
     die "$CFG_HOST still points at ${DNS_SEEN:-nothing} after three minutes, not $want. DuckDNS took the update, so DNS may just be slow. Wait a few minutes and run the setup again."
+}
+
+# dns_lan_note <name>: what to say when this network's DNS answers only with LAN
+# addresses, as a router or a Pi-hole does for the machines at home.
+dns_lan_note() {
+    printf "this network's DNS answers %s with %s, a LAN address, so the public record can't be checked from here. The certificate step checks it instead." "$1" "$DNS_SEEN"
 }
 
 # The A records of <name>, one per line, from this machine's DNS servers asked as
@@ -117,14 +132,21 @@ dns_a() {
 }
 
 # dns_points_at <name> <ip> <wait seconds>: waits for the name to resolve to the
-# address, since a fresh record takes a minute to show everywhere.
+# address, since a fresh record takes a minute to show everywhere. Returns 2 at once
+# when every answer is a LAN address, which no wait changes.
 dns_points_at() {
-    local name=$1 ip=$2 wait=${3:-0} t0 got
+    local name=$1 ip=$2 wait=${3:-0} t0 got a lan
     t0=$(date +%s)
     while :; do
         got=$(dns_a "$name" | tr '\n' ' ' || true)
         DNS_SEEN=${got% }
         [[ " $got " == *" $ip "* ]] && return 0
+        lan=0
+        for a in $got; do
+            if [ "$(ip4_class "$a")" = public ]; then lan=0; break; fi
+            lan=1
+        done
+        [ "$lan" = 0 ] || return 2
         [ $(( $(date +%s) - t0 )) -ge "$wait" ] && return 1
         sleep 10
     done

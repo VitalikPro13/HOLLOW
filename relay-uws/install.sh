@@ -123,7 +123,7 @@ trap cleanup EXIT
 [ -n "$ANSWERS_FILE" ] && ui_load_answers "$ANSWERS_FILE"
 ui_init
 APPLY_STARTED=0
-PF_BEHIND_NAT=0 PF_LOCAL_IP="" PF_PUBLIC_IP="" PF_PUBLIC_IPV6=""
+PF_BEHIND_NAT=0 PF_LOCAL_IP="" PF_PUBLIC_IP="" PF_PUBLIC_IPV6="" PUBLIC_IP_MEASURED=0
 SSH_PLAN=none SSH_RESULT="" CHECK_RESULT=""
 
 # ---------------------------------------------------------------- questions

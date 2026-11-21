@@ -902,6 +902,8 @@ follow_remove() {
         gone=1
     done
     [ "$gone" = 1 ] && run systemctl daemon-reload
+    # Its RAM stamps and the restarts it still owed: the setup's own run restarts what changed.
+    [ ! -d /run/hollow-address ] || run rm -rf /run/hollow-address
     if getent passwd "$FOLLOW_USER" >/dev/null; then run_ok userdel "$FOLLOW_USER"; fi
     if getent group "$FOLLOW_USER" >/dev/null; then run_ok groupdel "$FOLLOW_USER"; fi
     return 0

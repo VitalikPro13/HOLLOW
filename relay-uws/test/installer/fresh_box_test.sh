@@ -125,6 +125,8 @@ setup_tree() { # <dir> <mark>
     sed -i "1i # SETUP MARK $2" "$1/deploy/hollow-coturn.service"
 }
 ISSUED=$(date +%s)
+# The feed names a release per machine type; this box's is the one the setup asks for.
+case "$(uname -m)" in aarch64 | arm64) ARCH=linux-aarch64 ;; *) ARCH=linux-x86_64 ;; esac
 # publish <build> <kind>: kind setup (a release with its setup, marked
 # b<build>), old (programs only), extra, link, dotdot, big (a tampered setup),
 # noui or cannotstart (a setup that cannot start), badsettings (a setup whose
@@ -146,7 +148,7 @@ publish() {
     cannotstart) printf 'false\n' >>"$s/setup/deploy/lib/questions.sh" ;;
     badsettings) printf '#!/bin/sh\nexit 7\n' >"$s/setup/deploy/harden-host.sh" ;;
     esac
-    name="hollow-relay-$REL-b$b-linux-x86_64.tar.gz"
+    name="hollow-relay-$REL-b$b-$ARCH.tar.gz"
     case "$kind" in
     link | dotdot)
         local tf=()
@@ -158,8 +160,8 @@ publish() {
     sha=$(sha256sum "$FEED/$name" | cut -d' ' -f1)
     size=$(stat -c %s "$FEED/$name")
     ISSUED=$((ISSUED + 1))
-    printf '{"feed":"relay","version":"%s","build":%s,"issued":%s,"commit":"%s","artifacts":{"linux-x86_64":{"url":"https://anonlisten.com/hollow/releases/%s","sha256":"%s","size":%s}}}\n' \
-        "$REL" "$b" "$ISSUED" "$(printf '%040d' 0)" "$name" "$sha" "$size" >"$FEED/relay.json"
+    printf '{"feed":"relay","version":"%s","build":%s,"issued":%s,"commit":"%s","artifacts":{"%s":{"url":"https://anonlisten.com/hollow/releases/%s","sha256":"%s","size":%s}}}\n' \
+        "$REL" "$b" "$ISSUED" "$(printf '%040d' 0)" "$ARCH" "$name" "$sha" "$size" >"$FEED/relay.json"
     { printf 'hollow-feed-sig-v1\0relay\0'; cat "$FEED/relay.json"; } >"$W/msg"
     openssl pkeyutl -sign -inkey "$W/feed.pem" -rawin -in "$W/msg" -out "$W/sig.bin"
     { base64 -w0 "$W/sig.bin"; echo; } >"$FEED/relay.json.sig"

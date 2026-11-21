@@ -17,8 +17,14 @@
 # old address is dropped for this machine's own LAN address, but only when every look
 # over DROP_SECS and DROP_LOOKS in a row agrees: the old address is on no interface, a
 # pinned handshake there fails, DNS names the same public set without it, the LAN
-# address differs, and for a DuckDNS name DuckDNS itself (over HTTPS, by the updater)
-# saw this machine at one of those addresses. Dropping an allowed peer opens nothing.
+# address differs, and evidence beyond DNS says it is gone: for a DuckDNS name DuckDNS
+# itself (over HTTPS, by the updater) saw this machine at one of those addresses; for a
+# domain a pinned handshake to the current address worked before (LOOP4), since behind
+# a router without loopback it always fails. Dropping an allowed peer opens nothing.
+#
+# A restart or reload a rewritten file still owes is noted in RAM (PENDING) before the
+# rename and cleared once it worked, so a failed or cut-short look is retried, and the
+# port lock keeps every old peer until coturn runs with the new ones.
 #
 # What the follower decides lives in install.conf's turn_public_ip/turn_public_ipv6;
 # public_ip stays the setup's answer, which DuckDNS and every later setup run use.
@@ -46,6 +52,7 @@ LOCK_UNIT=hollow-turn-port-lock.service
 FOLLOW_UNIT=hollow-address-follow.service
 FOLLOW_TIMER=hollow-address-follow.timer
 STATE=${RUNTIME_DIRECTORY:-/run/hollow-address}/state
+PENDING=${STATE%/*}/pending
 PROBE=$HERE/address-probe.py
 PROBE_USER=hollow-addr
 # Seconds between two address changes, so a name that flaps restarts coturn at most
@@ -193,9 +200,10 @@ proven() {
 # over HTTPS (the address its last update came from, which hollow-duckdns keeps in RAM)
 # is one of the addresses the name names, which stale_look reaches only when all are
 # public and none is the current one. Other names pass.
+duckdns_follows() { [ "$ADDRESS" = duckdns ] && [ "$FIXED" != yes ]; }
 duckdns_agrees() {
     local seen stamp
-    [ "$ADDRESS" = duckdns ] && [ "$FIXED" != yes ] || return 0
+    duckdns_follows || return 0
     [ -f "$SEEN_FILE" ] && [ ! -L "$SEEN_FILE" ] || return 1
     stamp=$(stat -c %Y "$SEEN_FILE" 2>/dev/null) || return 1
     [ $((NOW - stamp)) -ge 0 ] && [ $((NOW - stamp)) -le "$SEEN_FRESH" ] || return 1
@@ -206,11 +214,13 @@ duckdns_agrees() {
 state_get() { sed -n "s/^$1=//p" "$STATE" 2>/dev/null | tail -n 1; }
 state_save() {
     install -d -m 0700 "${STATE%/*}" &&
-        printf 'last_change=%s\nw4_start=%s\nw4_looks=%s\nw4_set=%s\nw4_cur=%s\nw6_start=%s\nw6_looks=%s\nw6_cur=%s\n' \
-            "$LAST_CHANGE" "$W4_START" "$W4_LOOKS" "$W4_SET" "$W4_CUR" "$W6_START" "$W6_LOOKS" "$W6_CUR" >"$STATE"
+        printf 'last_change=%s\nloop4=%s\nw4_start=%s\nw4_looks=%s\nw4_set=%s\nw4_cur=%s\nw6_start=%s\nw6_looks=%s\nw6_cur=%s\n' \
+            "$LAST_CHANGE" "$LOOP4" "$W4_START" "$W4_LOOKS" "$W4_SET" "$W4_CUR" "$W6_START" "$W6_LOOKS" "$W6_CUR" >"$STATE"
 }
 state_load() {
     LAST_CHANGE=$(state_get last_change)
+    LOOP4=$(state_get loop4)
+    [ "$LOOP4" = yes ] || LOOP4=""
     W4_START=$(state_get w4_start) W4_LOOKS=$(state_get w4_looks) W4_SET=$(state_get w4_set) W4_CUR=$(state_get w4_cur)
     W6_START=$(state_get w6_start) W6_LOOKS=$(state_get w6_looks) W6_CUR=$(state_get w6_cur)
     [[ "$LAST_CHANGE" =~ ^[0-9]+$ ]] || LAST_CHANGE=0
@@ -237,8 +247,12 @@ stale_look() {
     else
         pin_proves "$CUR_IP"
         rc=$?
-        if [ "$rc" = 0 ]; then why="this relay's key still answers there"
+        if [ "$rc" = 0 ]; then
+            LOOP4=yes
+            why="this relay's key still answers there"
         elif [ "$rc" = 2 ]; then why="this machine's relay does not answer on 127.0.0.1:443, so nothing can be judged"
+        elif ! duckdns_follows && [ "$LOOP4" != yes ]; then
+            why="no handshake from here to its own public address has worked since this machine started (a router without NAT loopback), so a failed one says nothing"
         elif ! duckdns_agrees; then why="DuckDNS has not seen this machine at an address $HOST names"
         fi
     fi
@@ -269,12 +283,18 @@ decide_v4() {
     none) w4_reset; say "no answer from DNS for $HOST, so nothing changes"; return 0 ;;
     private) w4_reset; say "DNS gives $HOST a private address, which counts for nothing, so nothing changes"; return 0 ;;
     esac
-    if in_list "$CUR_IP" "${NAMES[@]}"; then w4_reset; return 0; fi
+    if in_list "$CUR_IP" "${NAMES[@]}"; then
+        w4_reset
+        # Until one works: whether a pinned handshake to its own address can work from here.
+        if [ "$LOOP4" != yes ] && pin_proves "$CUR_IP"; then LOOP4=yes; fi
+        return 0
+    fi
     for c in "${NAMES[@]}"; do
         n=$((n + 1))
         [ "$n" -le "$MAX_CANDIDATES" ] || break
         if why=$(proven "$c"); then
             NEW_IP=$c
+            in_list "$c" "${OWN[@]}" || LOOP4=yes
             w4_reset
             say "$HOST points at $c, $why"
             return 0
@@ -320,14 +340,28 @@ decide_v6() {
     fi
 }
 
+# What a rewritten file still owes, one word a line: coturn, forwarder, compose (the
+# Docker setup's containers) or lock (the TURN port lock's reload).
+pending_has() { grep -qx -- "$1" "$PENDING" 2>/dev/null; }
+pending_add() {
+    pending_has "$1" && return 0
+    install -d -m 0700 "${PENDING%/*}" && printf '%s\n' "$1" >>"$PENDING"
+}
+pending_del() {
+    local rest
+    [ -f "$PENDING" ] || return 0
+    rest=$(grep -vx -- "$1" "$PENDING")
+    if [ -n "$rest" ]; then printf '%s\n' "$rest" >"$PENDING"; else rm -f "$PENDING"; fi
+}
+
 # rewrite <file> <awk program> [awk options]: the file as the program prints it, in one
-# rename, with its mode and owner kept. WROTE=1 when anything changed.
-WROTE=0
+# rename, with its mode and owner kept. With OWES set, that restart is noted as owed
+# before the rename, or nothing is renamed.
 TMP_FILE=""
+OWES=""
 rewrite() {
     local f=$1 prog=$2
     shift 2
-    WROTE=0
     if [ ! -f "$f" ] || [ -L "$f" ]; then
         say "$f is missing or not a plain file, so I left it"
         return 1
@@ -335,12 +369,20 @@ rewrite() {
     TMP_FILE=$(mktemp "$f.follow.XXXXXX") || { TMP_FILE=""; return 1; }
     if ! awk "$@" "$prog" "$f" >"$TMP_FILE"; then drop_tmp; return 1; fi
     if cmp -s "$TMP_FILE" "$f"; then drop_tmp; return 0; fi
-    if ! chown --reference="$f" "$TMP_FILE" || ! chmod --reference="$f" "$TMP_FILE" || ! mv -f "$TMP_FILE" "$f"; then
+    if ! chown --reference="$f" "$TMP_FILE" || ! chmod --reference="$f" "$TMP_FILE"; then
+        drop_tmp
+        return 1
+    fi
+    if [ -n "$OWES" ] && ! pending_add "$OWES"; then
+        say "could not note in ${PENDING%/*} that $OWES needs a restart, so $f stays as it was"
+        drop_tmp
+        return 1
+    fi
+    if ! mv -f "$TMP_FILE" "$f"; then
         drop_tmp
         return 1
     fi
     TMP_FILE=""
-    WROTE=1
 }
 drop_tmp() {
     [ -z "$TMP_FILE" ] || rm -f "$TMP_FILE"
@@ -384,8 +426,9 @@ peers_for() {
 }
 
 lock_reload() {
-    systemctl try-reload-or-restart "$LOCK_UNIT" ||
-        say "the TURN port lock did not load again (journalctl -u $LOCK_UNIT)"
+    systemctl try-reload-or-restart "$LOCK_UNIT" && return 0
+    say "the TURN port lock did not load again (journalctl -u $LOCK_UNIT)"
+    return 1
 }
 
 compose() {
@@ -393,12 +436,24 @@ compose() {
         -f "$STACK_DIR/docker-compose.yml" "$@"
 }
 
+# restart_owed <unit>: restarts a unit a rewritten file still owes a restart. One a
+# restart of ours left failed starts again; one stopped by hand stays stopped.
+restart_owed() {
+    if systemctl is-failed --quiet "$1"; then systemctl restart "$1"; else systemctl try-restart "$1"; fi
+}
+
 # Writes NEW_IP, NEW_IP6 and LOCAL_IP wherever they differ and restarts only what read a
-# changed file. install.conf first, so a run cut short converges on the next look; the
-# port lock holds old and new peers while coturn restarts, so TURN never runs with a
-# peer the loaded rule does not cover.
+# changed file or still owes a restart from an earlier look. install.conf first, so a
+# run cut short converges on the next look. The port lock takes the new peers beside
+# the old ones before coturn's settings change, and loses the old ones only once every
+# write, restart and reload worked: coturn never runs with a peer the loaded rule does
+# not cover.
 apply_files() {
-    local old_peers new_peers union a l=$LOCAL_IP failed=0 svcs=()
+    local old_peers new_peers union a l=$LOCAL_IP failed=0 grown=1 svcs=()
+    # A restart owed to a service this relay no longer runs is owed no more.
+    [ "$TURN" = yes ] || { pending_del coturn; pending_del lock; }
+    [ "$FORWARDER" = yes ] || pending_del forwarder
+    if [ "$MODE" = docker ]; then pending_del coturn; pending_del forwarder; else pending_del compose; fi
     if [ "$NEW_IP" = "$SETUP_IP" ] && [ "$NEW_IP6" = "$SETUP_IP6" ]; then
         set_keys "$CONF" "turn_public_ip=" "turn_public_ipv6=" || failed=1
     else
@@ -409,36 +464,51 @@ apply_files() {
     new_peers=$(peers_for "$NEW_IP" "$l" "$NEW_IP6")
     if [ "$TURN" = yes ] && [ -f "$LOCK_ENV" ]; then
         old_peers=$(key_get "$LOCK_ENV" TURN_PEERS)
-        if [ "$old_peers" != "$new_peers" ]; then
-            union=$new_peers
-            # shellcheck disable=SC2086 # one word per address
-            for a in $old_peers; do in_list "$a" $union || union="$union $a"; done
-            set_keys "$LOCK_ENV" "TURN_PEERS=\"$union\"" || failed=1
-            [ "$WROTE" = 1 ] && lock_reload
+        union=$new_peers
+        # shellcheck disable=SC2086 # one word per address
+        for a in $old_peers; do in_list "$a" $union || union="$union $a"; done
+        if [ "$union" != "$old_peers" ]; then
+            OWES=lock set_keys "$LOCK_ENV" "TURN_PEERS=\"$union\"" || { failed=1; grown=0; }
         fi
+        if [ "$grown" = 1 ] && pending_has lock; then
+            if lock_reload; then pending_del lock; else failed=1; grown=0; fi
+        fi
+        # coturn's settings wait for a lock that holds their peers.
+        [ "$grown" = 1 ] || say "the TURN port lock does not hold the new peers yet, so coturn keeps its address until a later look"
     fi
     if [ "$MODE" = docker ]; then
-        set_keys "$STACK_DIR/.env" "PUBLIC_IP=$NEW_IP" "PUBLIC_IPV6=$NEW_IP6" ${LOCAL_IP:+"LOCAL_IP=$LOCAL_IP"} || failed=1
-        if [ "$WROTE" = 1 ]; then
-            [ "$TURN" = yes ] && svcs+=(coturn)
-            [ "$FORWARDER" = yes ] && svcs+=(forwarder)
-            if [ ${#svcs[@]} -gt 0 ]; then
-                compose up -d --no-deps --no-build "${svcs[@]}" || { say "the containers did not start again with the new address"; failed=1; }
+        [ "$TURN" = yes ] && svcs+=(coturn)
+        [ "$FORWARDER" = yes ] && svcs+=(forwarder)
+        if [ "$grown" = 1 ] && [ ${#svcs[@]} -gt 0 ]; then
+            OWES=compose set_keys "$STACK_DIR/.env" "PUBLIC_IP=$NEW_IP" "PUBLIC_IPV6=$NEW_IP6" ${LOCAL_IP:+"LOCAL_IP=$LOCAL_IP"} || failed=1
+            if pending_has compose; then
+                if compose up -d --no-deps --no-build "${svcs[@]}"; then pending_del compose
+                else say "the containers did not start again with the new address, so a later look tries again"; failed=1; fi
             fi
         fi
     else
-        if [ "$TURN" = yes ]; then
-            set_keys "$TURN_ENV" "PUBLIC_IP=$NEW_IP" "PUBLIC_IPV6=$NEW_IP6" ${LOCAL_IP:+"LOCAL_IP=$LOCAL_IP"} || failed=1
-            [ "$WROTE" = 1 ] && { systemctl try-restart hollow-coturn || failed=1; }
+        if [ "$TURN" = yes ] && [ "$grown" = 1 ]; then
+            OWES=coturn set_keys "$TURN_ENV" "PUBLIC_IP=$NEW_IP" "PUBLIC_IPV6=$NEW_IP6" ${LOCAL_IP:+"LOCAL_IP=$LOCAL_IP"} || failed=1
+            if pending_has coturn; then
+                if restart_owed hollow-coturn; then pending_del coturn
+                else say "coturn did not restart with the new address (journalctl -u hollow-coturn), so a later look tries again"; failed=1; fi
+            fi
         fi
         if [ "$FORWARDER" = yes ]; then
-            set_toml_ip "$FWD_TOML" "$NEW_IP" || failed=1
-            [ "$WROTE" = 1 ] && { systemctl try-restart hollow-forwarder || failed=1; }
+            OWES=forwarder set_toml_ip "$FWD_TOML" "$NEW_IP" || failed=1
+            if pending_has forwarder; then
+                if restart_owed hollow-forwarder; then pending_del forwarder
+                else say "the forwarder did not restart with the new address (journalctl -u hollow-forwarder), so a later look tries again"; failed=1; fi
+            fi
         fi
     fi
-    if [ "$TURN" = yes ] && [ -f "$LOCK_ENV" ] && [ "$(key_get "$LOCK_ENV" TURN_PEERS)" != "$new_peers" ]; then
-        set_keys "$LOCK_ENV" "TURN_PEERS=\"$new_peers\"" || failed=1
-        [ "$WROTE" = 1 ] && lock_reload
+    # The old peers go only once everything above worked and nothing is owed.
+    if [ "$TURN" = yes ] && [ -f "$LOCK_ENV" ] && [ "$failed" = 0 ] && [ ! -s "$PENDING" ] &&
+        [ "$(key_get "$LOCK_ENV" TURN_PEERS)" != "$new_peers" ]; then
+        OWES=lock set_keys "$LOCK_ENV" "TURN_PEERS=\"$new_peers\"" || failed=1
+        if pending_has lock; then
+            if lock_reload; then pending_del lock; else failed=1; fi
+        fi
     fi
     return "$failed"
 }
@@ -549,21 +619,41 @@ check_sandbox() {
     [ "$good" = 1 ] && ok "${FOLLOW_UNIT%.service} runs as root in a sandbox, its lookups as $PROBE_USER"
 }
 
-# check_one <what> <address>: the address a file gives against where the name points.
+# check_one <what> <give|gives> <address>: the address a file gives against where the
+# name points.
 check_one() {
-    [ -n "$2" ] || return 0
-    if in_list "${2,,}" "${NAMES[@]}"; then
-        ok "$1 give $2, the address $HOST points at"
+    [ -n "$3" ] || return 0
+    if in_list "${3,,}" "${NAMES[@]}"; then
+        ok "$1 $2 $3, the address $HOST points at"
     else
-        bad "$1 give $2, but $HOST points at ${NAMES[*]}. The follower takes a new address once it proves to be this machine; to set one now, run sudo hollow-relay-setup and choose Change a setting, then the address"
+        bad "$1 $2 $3, but $HOST points at ${NAMES[*]}. The follower takes a new address once it proves to be this machine; to set one now, run sudo hollow-relay-setup and choose Change a setting, then the address"
     fi
 }
 
+# check_owed: a restart or reload the follower still owes, which keeps the old peers in
+# the TURN port lock until it works.
+check_owed() {
+    local w
+    [ -f "$PENDING" ] || return 0
+    while read -r w; do
+        case "$w" in
+        coturn) bad "coturn has not restarted with the follower's new address yet, so the TURN port lock keeps the old one too. The follower tries again every five minutes (sudo journalctl -u ${FOLLOW_UNIT%.service} says why)" ;;
+        compose) bad "the Docker setup's containers have not restarted with the follower's new address yet, so the TURN port lock keeps the old one too. The follower tries again every five minutes (sudo journalctl -u ${FOLLOW_UNIT%.service} says why)" ;;
+        forwarder) bad "the forwarder has not restarted with the follower's new address yet. The follower tries again every five minutes (sudo journalctl -u ${FOLLOW_UNIT%.service} says why)" ;;
+        lock) bad "the TURN port lock has not loaded its new peers yet. The follower tries again every five minutes (sudo journalctl -u ${FOLLOW_UNIT%.service} says why)" ;;
+        esac
+    done <"$PENDING"
+}
+
 main_check() {
-    local peers what="your answers ($CONF)"
+    local peers what="your answers ($CONF)" verb=give follows=0
     [ -r "$CONF" ] || { echo "done"; return 0; }
     load_conf
-    [ "$CUR_IP" = "$SETUP_IP" ] || what="the follower's address in $CONF (your answer is $SETUP_IP)"
+    if [ "$CUR_IP" != "$SETUP_IP" ]; then
+        what="the follower's address in $CONF (your answer is $SETUP_IP)"
+        verb=gives
+    fi
+    wanted "$ADDRESS" "$TURN" "$FORWARDER" "$SETUP_IP" "$FIXED" && follows=1
     DNS_STATE=ok
     if [ "$ADDRESS" = ip ]; then
         NAMES=("$HOST")
@@ -573,30 +663,33 @@ main_check() {
         NAMES=() DNS_STATE=none
     fi
     if [ "$DNS_STATE" = none ]; then
-        skip "where $HOST points: no answer from this machine's DNS"
+        skip "no answer from this machine's DNS for where $HOST points"
+    elif [ "$DNS_STATE" = private ] && [ "$follows" = 1 ]; then
+        skip "this network's DNS answers $HOST with a LAN address, so the follower can't follow a new public address on this network"
     elif [ "$DNS_STATE" = private ]; then
-        skip "where $HOST points: this machine's DNS answers with a private address (a router's or a local DNS server's own entry), which the follower ignores"
+        skip "this network's DNS answers $HOST with a LAN address, so where it points on the internet can't be checked from here"
     else
-        check_one "$what" "$CUR_IP"
+        check_one "$what" "$verb" "$CUR_IP"
         if [ "$MODE" = docker ]; then
-            [ -f "$STACK_DIR/.env" ] && check_one "the Docker setup's settings ($STACK_DIR/.env)" "$(key_get "$STACK_DIR/.env" PUBLIC_IP)"
+            [ -f "$STACK_DIR/.env" ] && check_one "the Docker setup's settings ($STACK_DIR/.env)" give "$(key_get "$STACK_DIR/.env" PUBLIC_IP)"
         else
-            [ "$TURN" = yes ] && [ -f "$TURN_ENV" ] && check_one "coturn's settings ($TURN_ENV)" "$(key_get "$TURN_ENV" PUBLIC_IP)"
-            [ "$FORWARDER" = yes ] && [ -f "$FWD_TOML" ] && check_one "the forwarder's settings ($FWD_TOML)" "$(toml_ip "$FWD_TOML")"
+            [ "$TURN" = yes ] && [ -f "$TURN_ENV" ] && check_one "coturn's settings ($TURN_ENV)" give "$(key_get "$TURN_ENV" PUBLIC_IP)"
+            [ "$FORWARDER" = yes ] && [ -f "$FWD_TOML" ] && check_one "the forwarder's settings ($FWD_TOML)" give "$(toml_ip "$FWD_TOML")"
         fi
         if [ "$TURN" = yes ] && [ -f "$LOCK_ENV" ]; then
             peers=$(key_get "$LOCK_ENV" TURN_PEERS)
-            check_one "the TURN port lock's peers ($LOCK_ENV)" "${peers%% *}"
+            check_one "the TURN port lock's peers ($LOCK_ENV)" give "${peers%% *}"
         fi
     fi
+    [ "$follows" = 1 ] && check_owed
     if [ "$(systemctl show -p LoadState --value "$FOLLOW_UNIT" 2>/dev/null)" = loaded ]; then
         check_sandbox
     fi
-    if wanted "$ADDRESS" "$TURN" "$FORWARDER" "$SETUP_IP" "$FIXED"; then
-        if [ "$(systemctl is-active "$FOLLOW_TIMER" 2>/dev/null)" = active ]; then
-            ok "TURN and the forwarder follow a new address of $HOST ($FOLLOW_TIMER)"
-        else
+    if [ "$follows" = 1 ]; then
+        if [ "$(systemctl is-active "$FOLLOW_TIMER" 2>/dev/null)" != active ]; then
             bad "$FOLLOW_TIMER is not running, so TURN and the forwarder keep an old address after a change (sudo hollow-relay-setup puts it back)"
+        elif [ "$DNS_STATE" != private ]; then
+            ok "TURN and the forwarder follow a new address of $HOST ($FOLLOW_TIMER)"
         fi
     fi
     echo "done"

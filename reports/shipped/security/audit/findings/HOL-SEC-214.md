@@ -65,8 +65,13 @@ setup run use, and a new answer to the setup's address question clears the follo
 keys. Every renderer (coturn's settings, the Docker setup's `.env`, the port lock's peers,
 `forwarder.toml`) reads the follower's address when set. A change rewrites exactly those
 fields in one rename each, with mode and owner kept, and restarts coturn, the forwarder and
-the lock only when a file changed; the lock holds the old and the new peers while coturn
-restarts, then only the new. Changes are at least ten minutes apart. The follower takes the
+the lock only when a file changed. The lock takes the new peers beside the old ones (and
+must load them) before coturn's settings change; a restart or reload a renamed file owes is
+noted in RAM before the rename, retried on every look until it works, and only a look in
+which every write, restart and reload worked, with nothing owed, drops the old peers. So a
+failed `try-restart`, a failed `docker compose up` or a run killed between a rename and its
+restart never leaves coturn allowing a peer the loaded rule does not cover; check-host fails
+while anything is owed. Changes are at least ten minutes apart. The follower takes the
 setup's lock only around its writes, reads install.conf again once it holds it and writes
 nothing if a setup run changed it during the look; a run killed mid-write leaves no
 temporary file, and the next run sweeps any a power cut left.
@@ -78,8 +83,12 @@ is on none of this machine's interfaces; a pinned handshake there fails (a relay
 proves there is never dropped, and a relay that does not answer on 127.0.0.1 judges
 nothing); DNS gave the same non-empty set of public addresses each time, never containing
 the current one; and the LAN address is on an interface and differs from the current one.
-For a DuckDNS name that follows the machine, DuckDNS's own answer is evidence too: the
-updater asks with `verbose=true` over HTTPS and keeps the address DuckDNS saw in RAM
+A failed handshake alone means nothing behind a router without NAT loopback, where it
+always fails, so evidence beyond DNS is required. For a domain, a pinned handshake to the
+machine's own current address must have worked since boot (a steady-state look pins until
+one does; a pin-proven move counts), else the domain is never dropped and check-host fails
+naming both addresses. For a DuckDNS name that follows the machine, DuckDNS's own answer is
+the evidence: the updater asks with `verbose=true` over HTTPS and keeps the address DuckDNS saw in RAM
 (`/run/hollow-duckdns/seen`), and that address must be fresh (15 minutes), public, not the
 current one and in the DNS set. Any other look (no answer, SERVFAIL, NXDOMAIN, a private
 answer, an answer naming the current address, a changed set) starts the window again. The
@@ -88,12 +97,22 @@ needs the interface or the two proofs like any other. Dropping an allowed peer o
 nothing, and TURN through the name no longer reached the old address in any case. An IPv6
 address the machine no longer holds and that no longer proves goes after the same window.
 check-host's "Public address" section names any file whose address the name does not point
-at, skips (never fails) a private or missing DNS answer, and fails when the follower is off
-or its unit is weakened (a protection removed or a capability added).
+at, skips (never fails) a private or missing DNS answer (on a network whose DNS answers the
+name with a LAN address, one line says the follower can't follow there), fails while a
+restart is owed, and fails when the follower is off or its unit is weakened (a protection
+removed or a capability added).
+
+The setup's own DNS check (`dns_points_at`) treats an answer of only LAN addresses as one it
+cannot judge from inside a split-horizon network: it says so and lets the certificate step
+judge, instead of asking for a public record that may be right. On a fresh DuckDNS install
+the address DuckDNS saw the update come from must equal the address measured in the same
+run, or the setup stops naming both; only an address kept from install.conf gives way to
+DuckDNS's.
 
 Failure modes that remain, documented in SELF_HOSTING.md: behind a router without NAT
-loopback a changed address leaves TURN on the LAN address after half an hour until the
-operator confirms the new one (Change a setting, then the address); a router or Pi-hole
+loopback a changed DuckDNS address leaves TURN on the LAN address after half an hour, and a
+changed domain address leaves TURN on the old address, until the operator confirms the new
+one (Change a setting, then the address); a router or Pi-hole
 answering the name with a LAN address freezes the follower (nothing moves, nothing drops);
 a name pointing at a proxy in front of the server is never taken; a forwarder-only relay
 proves an address with the TLS pin alone, since no TURN server answers there. The follower
@@ -110,6 +129,14 @@ Tests: `relay-uws/test/installer/address_follow_box_test.sh`, run by
 `an_echo_of_our_own_turn_request_is_not_taken`,
 `a_turn_server_without_this_relays_secret_is_not_taken`, `every_probe_has_a_time_limit`,
 `the_lock_holds_old_and_new_peers_while_coturn_restarts`, `the_probes_run_as_hollow_addr`,
+`a_failed_coturn_restart_keeps_the_old_peer_locked_and_retries`,
+`a_run_killed_before_coturn_restarts_restarts_it_on_the_next_look`,
+`a_lock_that_does_not_load_keeps_coturn_where_it_was`,
+`a_settings_file_that_cannot_be_written_keeps_the_old_peer`,
+`a_coturn_our_restart_left_failed_starts_again`,
+`a_failed_compose_up_keeps_the_old_peer_locked_and_retries`,
+`a_domain_behind_a_router_without_loopback_is_not_dropped_on_dns_alone`,
+`the_follower_says_once_that_it_cannot_follow_on_a_split_horizon_network`,
 `no_change_restarts_nothing`, `a_private_address_is_never_taken`,
 `etc_hosts_and_the_hosts_own_name_never_answer`,
 `a_resolved_machine_is_asked_without_hosts_cache_or_synthesis`,
@@ -131,4 +158,6 @@ Tests: `relay-uws/test/installer/address_follow_box_test.sh`, run by
 `the_docker_setup_follows_through_compose`, `no_follower_for_a_bare_ip_or_a_lan_relay`,
 `uninstall_removes_the_follower`; `adopt_box_test.sh`
 `the_follower_follows_a_real_docker_stack_under_its_unit` (docker) and
-`adopt_rollback_removes_the_follower` (rollback, docker-rollback).
+`adopt_rollback_removes_the_follower` (rollback, docker-rollback); `run_tests.sh`
+`the_setup_explains_a_lan_answer_for_its_own_name`,
+`a_fresh_duckdns_install_stops_when_duckdns_and_the_echo_disagree`.
