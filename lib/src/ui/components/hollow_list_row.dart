@@ -54,6 +54,9 @@ class HollowListRow extends StatelessWidget {
   /// carry the choice (a restore point and who named it).
   final bool wrap;
 
+  /// Something the person muted: title and subtitle both in `textTertiary`.
+  final bool muted;
+
   /// The smallest a [touch] row may be.
   static const double touchMinHeight = 48;
 
@@ -75,6 +78,7 @@ class HollowListRow extends StatelessWidget {
     this.touch = false,
     this.flush,
     this.wrap = false,
+    this.muted = false,
   });
 
   @override
@@ -119,7 +123,11 @@ class HollowListRow extends StatelessWidget {
                     title,
                     paint: titlePaint == null
                         ? NamePaint([
-                            selected ? hollow.accentText : hollow.textPrimary
+                            selected
+                                ? hollow.accentText
+                                : muted
+                                    ? hollow.textTertiary
+                                    : hollow.textPrimary
                           ])
                         : selected
                             ? namePaintOnSelected(titlePaint!, hollow)
@@ -136,7 +144,10 @@ class HollowListRow extends StatelessWidget {
                       style: (touch
                               ? HollowTypography.body
                               : HollowTypography.bodySmall)
-                          .copyWith(color: hollow.textSecondary),
+                          .copyWith(
+                              color: muted
+                                  ? hollow.textTertiary
+                                  : hollow.textSecondary),
                       overflow: wrap ? null : TextOverflow.ellipsis,
                     ),
                 ],

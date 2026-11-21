@@ -487,12 +487,12 @@ class _ServerContentState extends State<_ServerContent> {
     final widgets = <Widget>[];
     final layout = effectiveLayoutFrom(_getParsedLayout(), w.channels);
 
-    String? currentCategory;
+    int? currentCategory;
     for (var index = 0; index < layout.length; index++) {
       final item = layout[index];
       switch (item) {
         case CategoryItem(:final name):
-          currentCategory = name;
+          currentCategory = index;
           widgets.add(_CategoryHeader(
             hollow: w.hollow,
             name: name,
@@ -519,7 +519,9 @@ class _ServerContentState extends State<_ServerContent> {
           final channel = w.channels[channelId];
           if (channel == null) break;
           final collapsed = currentCategory != null &&
-              (_categoryCollapsedState[currentCategory] ?? false);
+              (_categoryCollapsedState[
+                      _categoryKey(w.serverId, currentCategory)] ??
+                  false);
           final Widget tile;
           if (channel.channelType == ChannelType.voice) {
             tile = _VoiceChannelTile(
@@ -663,8 +665,12 @@ class _AnimatedChannelTile extends StatelessWidget {
   }
 }
 
-/// Top-level so a collapsed category survives a sidebar rebuild.
+/// Top-level so a collapsed category survives a sidebar rebuild. Keyed by
+/// server and layout index: two categories may share a name.
 final Map<String, bool> _categoryCollapsedState = {};
+
+String _categoryKey(String serverId, int layoutIndex) =>
+    '$serverId#$layoutIndex';
 
 /// Collapsible category header in the sidebar.
 class _CategoryHeader extends StatefulWidget {
@@ -694,10 +700,12 @@ class _CategoryHeader extends StatefulWidget {
 }
 
 class _CategoryHeaderState extends State<_CategoryHeader> {
-  bool get _collapsed => _categoryCollapsedState[widget.name] ?? false;
+  String get _key => _categoryKey(widget.serverId, widget.layoutIndex);
+
+  bool get _collapsed => _categoryCollapsedState[_key] ?? false;
 
   void _toggle() {
-    setState(() => _categoryCollapsedState[widget.name] = !_collapsed);
+    setState(() => _categoryCollapsedState[_key] = !_collapsed);
     widget.onToggle?.call();
   }
 

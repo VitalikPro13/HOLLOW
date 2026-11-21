@@ -17,8 +17,8 @@ import '../helpers/test_app.dart';
 /// returning null means every laid-out row/column fit at that scale.
 ///
 /// It exercises the surfaces hardened in Phase 3 stage 1: the chats tab (friend
-/// rows, DM/server rows), the bottom nav bar (icon + label tabs), and — by
-/// cycling tabs — the friends/archive/settings surfaces. It is a headless
+/// and DM rows), the bottom nav bar (icon + label tabs), and — by cycling tabs —
+/// the servers/friends/settings surfaces. It is a headless
 /// tripwire; Vitalik's on-device text-scale sweep is still the real sign-off.
 ///
 /// Tapping a nav tab by its (possibly duplicated) label, scoped to the nav bar.
@@ -64,7 +64,7 @@ void main() {
           textScaler: TextScaler.linear(scale),
         );
 
-        for (final tab in const ['Friends', 'Archive', 'Settings', 'Chats']) {
+        for (final tab in const ['Servers', 'Friends', 'Settings', 'Chats']) {
           await _tapNavTab(tester, tab);
           expect(
             tester.takeException(),
@@ -94,7 +94,7 @@ void main() {
         expect(find.byType(MobileShell), findsOneWidget);
         expect(find.byType(MobileNavBar), findsOneWidget);
 
-        for (final tab in const ['Friends', 'Archive', 'Settings', 'Chats']) {
+        for (final tab in const ['Servers', 'Friends', 'Settings', 'Chats']) {
           await _tapNavTab(tester, tab);
           expect(
             tester.takeException(),

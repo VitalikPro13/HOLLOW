@@ -201,15 +201,18 @@ Mobile layout is fully decoupled from the desktop shell. When `width < 600px`, `
 
 **MobileShell**: a `Stack` with one `Offstage` per tab. Switching tabs is instant; every tab stays mounted so its scroll and state survive the switch.
 
-**MobileNavBar** (`ConsumerWidget`): 56px, `hollow.surface` bg, top border. 4 tabs:
-- **Tab 0 (Chats):** `LucideIcons.messageCircle`. Badge: total DM + channel unread count.
-- **Tab 1 (Friends):** `LucideIcons.users`. Badge: pending incoming friend request count.
-- **Tab 2 (Archive):** `LucideIcons.archive`. No badge.
-- **Tab 3 (Settings):** `LucideIcons.settings`. No badge.
+**MobileNavBar** (`ConsumerWidget`): 56px, `hollow.surface` bg, top border. Five slots since #154 (0.14.3), tabs named by the `MobileTab` enum:
+- **Chats:** `LucideIcons.messageCircle`. Badge: DM unread (`dmUnreadBadgeProvider`).
+- **Servers:** `LucideIcons.layoutGrid`. Badge: channel mentions (red `@N`), else channel unread, across listed, unmuted servers (`mobileServersBadgeProvider`).
+- **centre +:** Add a server (`showCreateServerDialog`), no tab.
+- **Friends:** `LucideIcons.users`. Badge: pending incoming friend request count.
+- **Settings:** `LucideIcons.settings`. No badge.
 
-Active tab: `hollow.accent` + w600. Inactive: `hollow.textSecondary` + w400. Badge: red pill (top-right of icon), shows count or "99+".
+Active tab: `accentText`, one weight, and the sliding 32 x 2 accent bar. Badge: `HollowCountBadge` (top-right of icon), shows count or "99+".
 
-**MobileChatsTab** (`ConsumerStatefulWidget`): Telegram-style unified list mixing DMs and servers. DMs show avatar + status dot + name + last message preview + timestamp + unread dot. Servers show icon + name + member count + unread badge pill + expand chevron. Tap DM → push `MobileChatRoute`. Tap server → animated accordion with channels loaded on demand via `ChannelListNotifier.fetchChannels()`. The nav bar's centre "+" ("Add a server") opens `showCreateServerDialog`, the desktop Add a server dialog; add friend lives on the Friends tab. See `ui_mobile.md`.
+**MobileChatsTab** (`ConsumerStatefulWidget`): the Home inbox: DMs, Saved messages, mention rows (under Mentions), Active Now. The header carries Conferences, Archive (opens `MobileArchivePage`) and New message. Tap DM → push `MobileChatRoute`. No servers since #154.
+
+**MobileServersTab**: the servers in dock order (folders as section headers), parked joins, badges; tap opens the server's own page (`mobile/server/`), long press its actions sheet. See `ui_mobile.md`.
 
 **MobileFriendsTab**: search + Add friend button, then Received / Sent / Favourites / All friends sections (tap → push chat route, long press = the person sheet). See `ui_mobile.md`.
 
@@ -226,7 +229,7 @@ Active tab: `hollow.accent` + w600. Inactive: `hollow.textSecondary` + w400. Bad
 - `_ProfileSheet`: bottom sheet with 180px banner (AnimatedGifImage for GIFs, gradient fallback), avatar overlapping banner, name, online status, bio text.
 - File sending via `network_api.sendFile()` with `file_picker` and 34MB DM limit.
 
-**Provider:** `mobileTabProvider` (StateProvider<int>, default 0, defined in `mobile_nav.dart`) is reused.
+**Provider:** `mobileTabProvider` (`StateProvider<MobileTab>`, default `MobileTab.chats`, defined in `mobile_nav.dart`); never write a bare index.
 
 ## Split View System
 

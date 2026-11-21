@@ -96,7 +96,7 @@ The loop tracks `currentCategory` (nullable string) and switches on the sealed `
 
 **`SeparatorItem`** -- resets `currentCategory` to null. Adds a horizontal `Divider` wrapped in `Padding` (horizontal `HollowSpacing.lg`, vertical `HollowSpacing.sm`).
 
-**`ChannelItem`** -- looks the channel up in the `channels` map (a miss means the map changed mid-frame; normalisation already dropped dead ids). Computes `collapsed` from `currentCategory` plus `_categoryCollapsedState`, renders `_VoiceChannelTile` or `_ChannelTile`, and wraps it in `_AnimatedChannelTile` with `visible: !collapsed` and a `ValueKey('ach-$channelId')`.
+**`ChannelItem`** -- looks the channel up in the `channels` map (a miss means the map changed mid-frame; normalisation already dropped dead ids). Computes `collapsed` from `currentCategory` (the category's layout index) plus `_categoryCollapsedState`, renders `_VoiceChannelTile` or `_ChannelTile`, and wraps it in `_AnimatedChannelTile` with `visible: !collapsed` and a `ValueKey('ach-$channelId')`.
 
 **Why effective and not stored (issue #61).** The sidebar used to walk the raw JSON and then append the leftover channels in a SECOND loop, after the pass that tracks `currentCategory`. Two bugs followed, and both read as "the category does not really contain its channels":
 
@@ -107,15 +107,15 @@ The loop tracks `currentCategory` (nullable string) and switches on the sealed `
 
 ## Category Folding -- Collapsible Headers
 
-Category collapsed state is stored in a **module-level** `Map<String, bool>` called `_categoryCollapsedState`. This persists across widget rebuilds and even across server switches within the same app session, since it is keyed by category name string.
+Category collapsed state is stored in a **module-level** `Map<String, bool>` called `_categoryCollapsedState`. This persists across widget rebuilds and server switches within the same app session. It is keyed `serverId#layoutIndex` (`_categoryKey`), never by the name: two categories may share a name, and keyed by name they folded together (and a "Text" category folded in every server at once). Reordering categories moves a fold with the position, not the name. Test `test/widget/sidebar_duplicate_category_test.dart`.
 
 `file:_CategoryHeader` extends `StatefulWidget`. Props: `hollow`, `name`, `onToggle` (nullable `VoidCallback`), plus what its right-click menu needs: `layoutIndex` (position in the effective layout -- categories are addressed by POSITION, never by name, since duplicate names are legal), `serverId`, `layoutJson` and `canManage`. Secondary tap opens `showCategoryMenu` (`shell/channel_context_menus.dart`).
 
-`file:_CategoryHeaderState` reads `_categoryCollapsedState[widget.name] ?? false` to determine the collapsed state. The widget renders a `HollowPressable` (subtle mode) containing:
+`file:_CategoryHeaderState` reads `_categoryCollapsedState[_key] ?? false` (server and `layoutIndex`) to determine the collapsed state. The widget renders a `HollowPressable` (subtle mode) containing:
 - An `AnimatedRotation` chevron: `LucideIcons.chevronDown` (10px). When collapsed, rotates -0.25 turns (90 degrees clockwise, pointing right). When expanded, rotation is 0.
 - The category name exactly as the user typed it (no uppercase), `HollowTypography.label`, single line with ellipsis.
 
-Tapping toggles `_categoryCollapsedState[widget.name]` and calls both `setState()` (to rebuild the header's chevron) and `widget.onToggle?.call()` (to trigger `setState()` on `_ServerContentState`, which rebuilds the channel list and updates visibility).
+Tapping toggles `_categoryCollapsedState[_key]` and calls both `setState()` (to rebuild the header's chevron) and `widget.onToggle?.call()` (to trigger `setState()` on `_ServerContentState`, which rebuilds the channel list and updates visibility).
 
 Padding: `fromLTRB(HollowSpacing.sm + 2, HollowSpacing.md, HollowSpacing.sm, HollowSpacing.xs)`.
 

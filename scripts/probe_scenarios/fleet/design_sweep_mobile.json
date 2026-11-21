@@ -3,7 +3,7 @@
     "The mobile surfaces the design-language sweeps touched, shot on one iOS",
     "Simulator so desktop and mobile are judged from the same change.",
     "",
-    "The Archive tab is the one that mattered: its sub-tabs and inner tabs were",
+    "The Archive page (the Chats header's Archive icon since #154; it was a tab) is the one that mattered: its sub-tabs and inner tabs were",
     "two local pill classes, and the sub-tab used a SOLID accent fill for mere",
     "selection, which is the primary-button treatment. Both are HollowChip now.",
     "",
@@ -31,6 +31,8 @@
     { "peer": "a", "op": "shot", "name": "mobile-archive-imported" },
 
     { "peer": "a", "op": "log", "message": "settings, for the buttons and rows the sweep did not touch" },
+    { "peer": "a", "op": "tap", "target": "semantics:Back", "index": 0, "soft": true, "why": "leaves the Archive page" },
+    { "peer": "a", "op": "wait", "ms": 800 },
     { "peer": "a", "op": "tap", "target": "semantics:Settings", "index": 0, "soft": true },
     { "peer": "a", "op": "wait", "ms": 2000 },
     { "peer": "a", "op": "shot", "name": "mobile-settings" }

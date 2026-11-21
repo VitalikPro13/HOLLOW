@@ -294,16 +294,13 @@ void main() {
     );
   });
 
-  testWidgets('minimised call, floating and docked', (tester) async {
+  testWidgets('minimised call, docked', (tester) async {
     await shoot(
       tester,
       'phone_call_minimised',
       const Scaffold(
-        body: Stack(children: [
-          Column(children: [
-            SizedBox(height: 120),
-            MobileMinimisedCall(floating: false),
-          ]),
+        body: Column(children: [
+          SizedBox(height: 120),
           MobileMinimisedCall(),
         ]),
       ),

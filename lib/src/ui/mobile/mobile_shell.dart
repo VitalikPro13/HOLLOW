@@ -4,7 +4,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/age_gate.dart';
 import 'package:hollow/src/core/providers/app_lock_provider.dart';
-import 'package:hollow/src/core/providers/archive_provider.dart';
 import 'package:hollow/src/core/providers/background_provider.dart';
 import 'package:hollow/src/core/providers/channel_on_screen_provider.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
@@ -22,11 +21,11 @@ import 'package:hollow/src/ui/mobile/mobile_connection_indicator.dart';
 import 'package:hollow/src/ui/mobile/mobile_nav_bar.dart';
 import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_minimised_call.dart';
-import 'package:hollow/src/ui/mobile/tabs/mobile_archive_tab.dart';
+import 'package:hollow/src/ui/mobile/server/mobile_server_navigation.dart';
 import 'package:hollow/src/ui/mobile/tabs/mobile_chats_tab.dart'
     show MobileChatsTab;
-import 'package:hollow/src/ui/dialogs/create_server_dialog.dart';
 import 'package:hollow/src/ui/mobile/tabs/mobile_friends_tab.dart';
+import 'package:hollow/src/ui/mobile/tabs/mobile_servers_tab.dart';
 import 'package:hollow/src/ui/mobile/tabs/mobile_settings_tab.dart';
 import 'package:hollow/src/ui/shell/mobile_nav.dart';
 import 'package:hollow/src/ui/shell/clock_skew_banner.dart';
@@ -45,12 +44,12 @@ class MobileShell extends ConsumerStatefulWidget {
 }
 
 class _MobileShellState extends ConsumerState<MobileShell> {
-  static const _tabs = [
-    MobileChatsTab(),
-    MobileFriendsTab(),
-    MobileArchiveTab(),
-    MobileSettingsTab(),
-  ];
+  static const _tabs = {
+    MobileTab.chats: MobileChatsTab(),
+    MobileTab.servers: MobileServersTab(),
+    MobileTab.friends: MobileFriendsTab(),
+    MobileTab.settings: MobileSettingsTab(),
+  };
 
   /// Tells the node a channel was opened, so it pulls that channel's relay ring
   /// if this connection has not (unread channels of the server come along).
@@ -183,28 +182,10 @@ class _MobileShellState extends ConsumerState<MobileShell> {
       channelName = channels[channelId]?.name ?? '';
     } catch (_) {}
     if (!mounted || _holdWhileLocked(replay)) return;
-    ref.read(selectedServerProvider.notifier).state = serverId;
-    ref.read(selectedChannelProvider.notifier).state = channelId;
     _subscribeActiveChannel(serverId, channelId);
-    // Pop any chat route already on the stack, as in _openChatFromPush.
-    final nav = Navigator.of(context, rootNavigator: true);
-    nav.popUntil(
-        (r) => r.settings.name != MobileChatRoute.routeName || r.isFirst);
-    nav
-        .push(hollowMobileRoute(
-      settings: const RouteSettings(name: MobileChatRoute.routeName),
-      builder: (_) => MobileChatRoute(
-        serverId: serverId,
-        channelId: channelId,
-        channelName: channelName.isNotEmpty ? channelName : 'channel',
-      ),
-    ))
-        .then((_) {
-      if (mounted && ref.read(selectedChannelProvider) == channelId) {
-        ref.read(selectedServerProvider.notifier).state = null;
-        ref.read(selectedChannelProvider.notifier).state = null;
-      }
-    });
+    // Lands under that server's page, so a swipe back shows its channels.
+    await openMobileChannelOn(Navigator.of(context, rootNavigator: true),
+        serverId: serverId, channelId: channelId, channelName: channelName);
   }
 
   @override
@@ -212,16 +193,6 @@ class _MobileShellState extends ConsumerState<MobileShell> {
     final hollow = HollowTheme.of(context);
     final currentTab = ref.watch(mobileTabProvider);
     final bg = ref.watch(backgroundProvider);
-
-    // The archive list providers are non-autoDispose and cache their first
-    // result for the app lifetime, so without this refresh the tab shows counts
-    // from launch until the next one.
-    ref.listen<int>(mobileTabProvider, (prev, next) {
-      if (next == 2 && prev != 2) {
-        ref.invalidate(archiveDmListProvider);
-        ref.invalidate(archiveChannelListProvider);
-      }
-    });
 
     Widget scaffold = Scaffold(
       backgroundColor: bg.hasBackground ? Colors.transparent : hollow.background,
@@ -234,11 +205,13 @@ class _MobileShellState extends ConsumerState<MobileShell> {
                 children: [
                   // Switching tabs is instant; every tab stays mounted so
                   // its scroll and state survive the switch.
-                  for (int i = 0; i < _tabs.length; i++)
-                    Offstage(offstage: i != currentTab, child: _tabs[i]),
+                  for (final MapEntry(key: tab, value: body) in _tabs.entries)
+                    Offstage(offstage: tab != currentTab, child: body),
                 ],
               ),
             ),
+            // The call you are in, docked so it covers no row or strip.
+            const MobileMinimisedCall(),
             // Self-hides when there is nothing to announce.
             const SystemStatusBanner(anchor: StatusBannerAnchor.bottom),
             const ClockSkewBanner(anchor: StatusBannerAnchor.bottom),
@@ -246,7 +219,7 @@ class _MobileShellState extends ConsumerState<MobileShell> {
         ),
       ),
       bottomNavigationBar: MobileNavBar(
-        onAdd: () => showCreateServerDialog(context),
+        onAdd: () => showMobileAddServer(context),
       ),
     );
 
@@ -265,7 +238,6 @@ class _MobileShellState extends ConsumerState<MobileShell> {
         // No in-app banner here: the only mobile in-app notification is
         // MobileInChatBanner, shown while inside a chat. Outside one, mobile
         // relies on OS notifications.
-        const MobileMinimisedCall(),
         // Lives in the root overlay, over every route pushed on the phone.
         const MobileConnectionIndicatorHost(),
       ],

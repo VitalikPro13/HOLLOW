@@ -1,7 +1,10 @@
 ﻿import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/age_gate.dart';
 import 'package:hollow/src/core/reduce_motion.dart';
 import 'package:hollow/src/core/providers/friends_provider.dart';
+import 'package:hollow/src/core/providers/notification_provider.dart';
+import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -12,6 +15,26 @@ import 'package:hollow/src/ui/components/hollow_count_badge.dart';
 import 'package:hollow/src/ui/shell/mobile_nav.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
+/// The Servers tab's badge: channel mentions across the listed servers (red),
+/// else their unread posts. A muted server counts nothing, as on the dock, and
+/// a server the phone hides (age gate) never counts.
+final mobileServersBadgeProvider = Provider<({int count, bool mention})>((ref) {
+  final servers = ref.watch(serverListProvider);
+  final unread = ref.watch(unreadProvider);
+  final notif = ref.watch(notificationSettingsProvider);
+  final hidden = ref.watch(ageGateProvider.select((g) => g.hidden));
+  var mentions = 0;
+  var posts = 0;
+  for (final id in servers.keys) {
+    if (notif.isServerMuted(id) || hidden.contains(id)) continue;
+    mentions += unread.serverMentionCount(id);
+    posts += unread.serverUnreadCount(id);
+  }
+  return mentions > 0
+      ? (count: mentions, mention: true)
+      : (count: posts, mention: false);
+});
+
 class MobileNavBar extends ConsumerWidget {
   final VoidCallback? onAdd;
 
@@ -19,28 +42,15 @@ class MobileNavBar extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final hollow = HollowTheme.of(context);
     final currentTab = ref.watch(mobileTabProvider);
     final pendingFriends = ref.watch(pendingFriendCountProvider);
-    // The derived SUM, so this always-mounted bar rebuilds only when the total
-    // changes rather than on every unread mutation.
-    final totalUnread = ref.watch(unreadProvider.select((u) {
-      int total = 0;
-      for (final count in u.dmUnreadCounts.values) {
-        total += count;
-      }
-      for (final count in u.channelUnreadCounts.values) {
-        total += count;
-      }
-      return total;
-    }));
-    final totalMentions = ref.watch(unreadProvider.select((u) {
-      int total = 0;
-      for (final count in u.channelMentionCounts.values) {
-        total += count;
-      }
-      return total;
-    }));
+    // Mention rows live in Chats but count on Servers, where the channel is.
+    final dmUnread = ref.watch(dmUnreadBadgeProvider);
+    final servers = ref.watch(mobileServersBadgeProvider);
+    final hollow = HollowTheme.of(context);
+
+    void select(MobileTab tab) =>
+        ref.read(mobileTabProvider.notifier).state = tab;
 
     return Container(
       decoration: BoxDecoration(
@@ -54,8 +64,6 @@ class MobileNavBar extends ConsumerWidget {
           child: LayoutBuilder(
             builder: (context, constraints) {
               final slotWidth = constraints.maxWidth / 5;
-              // The centre slot is not a tab, so indexes past it shift by one.
-              final slotIndex = currentTab < 2 ? currentTab : currentTab + 1;
 
               return Stack(
                 children: [
@@ -65,7 +73,7 @@ class MobileNavBar extends ConsumerWidget {
                         ? Duration.zero
                         : HollowDurations.normal,
                     curve: HollowCurves.subtle,
-                    left: slotIndex * slotWidth +
+                    left: currentTab.slot * slotWidth +
                         (slotWidth - _indicatorWidth) / 2,
                     top: 0,
                     child: const NavSelectionMark(width: _indicatorWidth),
@@ -75,41 +83,37 @@ class MobileNavBar extends ConsumerWidget {
                       _NavTab(
                         icon: LucideIcons.messageCircle,
                         label: 'Chats',
-                        isActive: currentTab == 0,
-                        // A mention outranks plain unread, as on the dock.
-                        badge: totalMentions > 0 ? totalMentions : totalUnread,
-                        badgeMention: totalMentions > 0,
-                        badgeNoun: totalMentions > 0 ? 'mention' : 'unread',
-                        onTap: () =>
-                            ref.read(mobileTabProvider.notifier).state = 0,
+                        isActive: currentTab == MobileTab.chats,
+                        badge: dmUnread,
+                        badgeNoun: 'unread',
+                        onTap: () => select(MobileTab.chats),
                       ),
                       _NavTab(
-                        icon: LucideIcons.users,
-                        label: 'Friends',
-                        isActive: currentTab == 1,
-                        badge: pendingFriends,
-                        badgeNoun: 'friend request',
-                        onTap: () =>
-                            ref.read(mobileTabProvider.notifier).state = 1,
+                        icon: LucideIcons.layoutGrid,
+                        label: 'Servers',
+                        isActive: currentTab == MobileTab.servers,
+                        // A mention outranks plain unread, as on the dock.
+                        badge: servers.count,
+                        badgeMention: servers.mention,
+                        badgeNoun: servers.mention ? 'mention' : 'unread',
+                        onTap: () => select(MobileTab.servers),
                       ),
                       _AddButton(onTap: onAdd),
                       _NavTab(
-                        icon: LucideIcons.archive,
-                        label: 'Archive',
-                        isActive: currentTab == 2,
-                        badge: 0,
-                        badgeNoun: 'unread',
-                        onTap: () =>
-                            ref.read(mobileTabProvider.notifier).state = 2,
+                        icon: LucideIcons.users,
+                        label: 'Friends',
+                        isActive: currentTab == MobileTab.friends,
+                        badge: pendingFriends,
+                        badgeNoun: 'friend request',
+                        onTap: () => select(MobileTab.friends),
                       ),
                       _NavTab(
                         icon: LucideIcons.settings,
                         label: 'Settings',
-                        isActive: currentTab == 3,
+                        isActive: currentTab == MobileTab.settings,
                         badge: 0,
                         badgeNoun: 'unread',
-                        onTap: () =>
-                            ref.read(mobileTabProvider.notifier).state = 3,
+                        onTap: () => select(MobileTab.settings),
                       ),
                     ],
                   ),
@@ -124,7 +128,6 @@ class MobileNavBar extends ConsumerWidget {
 
   static const double _indicatorWidth = 32;
 }
-
 
 class _AddButton extends StatelessWidget {
   final VoidCallback? onTap;

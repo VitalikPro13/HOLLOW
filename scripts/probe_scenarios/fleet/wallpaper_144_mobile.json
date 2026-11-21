@@ -28,6 +28,13 @@
   },
   {
    "peer": "a",
+   "op": "tap",
+   "target": "semantics:Servers",
+   "index": 0,
+   "why": "#154: servers live on their own tab"
+  },
+  {
+   "peer": "a",
    "op": "wait_for",
    "target": "text:wallm-${RUN}",
    "timeout_ms": 30000
@@ -107,8 +114,20 @@
   {
    "peer": "a",
    "op": "tap",
-   "target": "semantics:Archive",
+   "target": "semantics:Chats",
    "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Archive",
+   "index": 0,
+   "why": "the Chats header's Archive icon (#154)"
   },
   {
    "peer": "a",
@@ -128,8 +147,9 @@
   {
    "peer": "a",
    "op": "tap",
-   "target": "semantics:Chats",
-   "index": 0
+   "target": "semantics:Back",
+   "index": 0,
+   "why": "#154: Archive is a page the Chats header opens, so Back returns to Chats"
   },
   {
    "peer": "a",

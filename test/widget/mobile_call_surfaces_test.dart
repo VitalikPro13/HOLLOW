@@ -151,8 +151,8 @@ void main() {
       expect(_semantic('Leave the call'), findsNothing);
     });
 
-    testWidgets('floating on the shell, outside any Scaffold, its text '
-        'carries no fallback underline', (tester) async {
+    testWidgets('outside any Scaffold, its text carries no fallback '
+        'underline', (tester) async {
       await _pump(
         tester,
         const Stack(children: [MobileMinimisedCall()]),
@@ -165,8 +165,8 @@ void main() {
                 startedAt: DateTime.now(),
               ))),
         ],
-        // The shell's stack sits outside any Scaffold, so the app's fallback
-        // text style (yellow double underline) is what reaches the bar.
+        // Outside any Scaffold the app's fallback text style (a yellow
+        // double underline) is what reaches the bar.
         builder: (context, child) => Stack(children: [
           child!,
           const MobileMinimisedCall(),

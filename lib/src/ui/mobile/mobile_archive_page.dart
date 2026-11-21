@@ -20,6 +20,7 @@ import 'package:hollow/src/ui/components/hollow_badge.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_chip_tabs.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
+import 'package:hollow/src/ui/components/hollow_icon_button.dart';
 import 'package:hollow/src/ui/components/hollow_list_row.dart';
 import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/components/hollow_sheet.dart';
@@ -33,63 +34,98 @@ import 'package:hollow/src/ui/mobile/mobile_archive_viewer_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_imported_archive_viewer_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
 import 'package:hollow/src/ui/share/share_card.dart' show ShareCard;
-import 'package:hollow/src/ui/shell/mobile_nav.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// The phone's Archive: the desktop place's three views at touch size.
-class MobileArchiveTab extends ConsumerWidget {
-  const MobileArchiveTab({super.key});
+/// Opens the phone's Archive page above the shell.
+void openMobileArchive(BuildContext context, WidgetRef ref) {
+  // The list providers keep their first result for the app's lifetime, so
+  // each visit reads the counts again.
+  ref.invalidate(archiveDmListProvider);
+  ref.invalidate(archiveChannelListProvider);
+  Navigator.of(context, rootNavigator: true).push(
+    hollowMobileRoute(builder: (_) => const MobileArchivePage()),
+  );
+}
+
+/// The phone's Archive: the desktop place's three views at touch size, as a
+/// page the Chats header opens. Pushed only on demand, so nothing here reads
+/// the message store before the app has opened it.
+class MobileArchivePage extends ConsumerWidget {
+  const MobileArchivePage({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
     final section = ref.watch(archiveSectionProvider);
 
-    // Deferred until the tab is visible: the message store may not be open
-    // when the app first boots.
-    if (ref.watch(mobileTabProvider) != 2) return const SizedBox.shrink();
-
-    return Column(
-      children: [
-        Container(
-          padding: const EdgeInsets.fromLTRB(HollowSpacing.lg,
-              HollowSpacing.md, HollowSpacing.lg, HollowSpacing.sm),
-          decoration: BoxDecoration(
-            border: Border(bottom: BorderSide(color: hollow.border)),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text('Archive',
-                  style: HollowTypography.heading
-                      .copyWith(color: hollow.textPrimary)),
-              const SizedBox(height: HollowSpacing.sm),
-              // The desktop place's tab row, equal widths on a phone.
-              HollowChipTabs<ArchiveSection>(
-                expand: true,
-                selected: section,
-                onSelected: (s) =>
-                    ref.read(archiveSectionProvider.notifier).state = s,
-                tabs: const [
-                  HollowChipTab(
-                      value: ArchiveSection.messages, label: 'Messages'),
-                  HollowChipTab(
-                      value: ArchiveSection.vault, label: 'Vault files'),
-                  HollowChipTab(
-                      value: ArchiveSection.imported, label: 'Imported'),
+    return Scaffold(
+      backgroundColor: hollow.background,
+      body: SafeArea(
+        child: Column(
+          children: [
+            Container(
+              decoration: BoxDecoration(
+                border: Border(bottom: BorderSide(color: hollow.border)),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: HollowSpacing.sm,
+                      vertical: HollowSpacing.xs,
+                    ),
+                    child: Row(
+                      children: [
+                        HollowIconButton(
+                          icon: LucideIcons.arrowLeft,
+                          label: 'Back',
+                          size: 44,
+                          onPressed: () => Navigator.of(context).pop(),
+                        ),
+                        const SizedBox(width: HollowSpacing.xs),
+                        Expanded(
+                          child: Text('Archive',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: HollowTypography.heading
+                                  .copyWith(color: hollow.textPrimary)),
+                        ),
+                      ],
+                    ),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(
+                        HollowSpacing.lg, 0, HollowSpacing.lg, HollowSpacing.sm),
+                    // The desktop place's tab row, equal widths on a phone.
+                    child: HollowChipTabs<ArchiveSection>(
+                      expand: true,
+                      selected: section,
+                      onSelected: (s) =>
+                          ref.read(archiveSectionProvider.notifier).state = s,
+                      tabs: const [
+                        HollowChipTab(
+                            value: ArchiveSection.messages, label: 'Messages'),
+                        HollowChipTab(
+                            value: ArchiveSection.vault, label: 'Vault files'),
+                        HollowChipTab(
+                            value: ArchiveSection.imported, label: 'Imported'),
+                      ],
+                    ),
+                  ),
                 ],
               ),
-            ],
-          ),
+            ),
+            Expanded(
+              child: switch (section) {
+                ArchiveSection.messages => const _MobileMessagesView(),
+                ArchiveSection.vault => const _MobileVaultView(),
+                ArchiveSection.imported => const _MobileImportedView(),
+              },
+            ),
+          ],
         ),
-        Expanded(
-          child: switch (section) {
-            ArchiveSection.messages => const _MobileMessagesView(),
-            ArchiveSection.vault => const _MobileVaultView(),
-            ArchiveSection.imported => const _MobileImportedView(),
-          },
-        ),
-      ],
+      ),
     );
   }
 }

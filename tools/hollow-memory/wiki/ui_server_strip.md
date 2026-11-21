@@ -18,7 +18,7 @@ File: `lib/src/core/models/strip_item.dart`
 
 File: `lib/src/core/providers/server_strip_layout_provider.dart`
 
-`serverStripLayoutProvider` is a `NotifierProvider<ServerStripLayoutNotifier, List<StripItem>>`. State is persisted as JSON in SQLCipher via `storage_api.saveSetting(key: 'server_strip_layout', ...)`.
+`serverStripLayoutProvider` is a `NotifierProvider<ServerStripLayoutNotifier, List<StripItem>>`. State is persisted as JSON in SQLCipher via `storage_api.saveSetting(key: 'server_strip_layout', ...)`. The phone has no strip but reads the same order: its Servers tab lists servers, folders (as section headers) and parked joins as this layout places them, and the server switcher sheet follows it too (#154, wiki `ui_mobile` MobileServersTab); a phone has no control that reorders it or makes folders.
 
 ### Lifecycle
 

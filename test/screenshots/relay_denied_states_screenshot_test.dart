@@ -23,6 +23,7 @@ import 'package:hollow/src/rust/frb_generated.dart';
 import 'package:hollow/src/theme/hollow_theme_data.dart';
 import 'package:hollow/src/ui/chat/channel_chat_pane.dart';
 import 'package:hollow/src/ui/mobile/mobile_chat_route.dart';
+import 'package:hollow/src/ui/mobile/mobile_nav_bar.dart';
 import 'package:hollow/src/ui/shell/conference_dashboard.dart';
 import 'package:hollow/src/ui/shell/member_list.dart';
 
@@ -285,6 +286,10 @@ void main() {
             pendingJoinsProvider.overrideWith(_Pending.new),
             deny(denied, kServerId2),
           ]);
+      // Parked joins live on the Servers tab (#154).
+      await tester.tap(find.descendant(
+          of: find.byType(MobileNavBar), matching: find.text('Servers')));
+      await tester.pumpAndSettle();
       await capture(tester, 'pending_row_$tag');
       final row = find.text(denied ? kPendingJoinDeniedTitle : 'Join request pending');
       await tester.tap(row.first);

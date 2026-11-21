@@ -269,7 +269,7 @@ void main() {
       final relay = await _shell(tester);
       await _downAndShown(tester, relay, RelayConnectionStatus.disconnected);
       final spot = tester.getCenter(_said(_noConnection));
-      for (final tab in ['Friends', 'Archive', 'Settings', 'Chats']) {
+      for (final tab in ['Servers', 'Friends', 'Settings', 'Chats']) {
         await _tapTab(tester, tab);
         expect(_said(_noConnection), findsOneWidget, reason: tab);
         expect(tester.getCenter(_said(_noConnection)), spot, reason: tab);

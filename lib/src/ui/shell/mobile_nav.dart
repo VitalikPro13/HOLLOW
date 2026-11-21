@@ -1,115 +1,16 @@
-﻿import 'package:flutter/material.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:hollow/src/theme/hollow_spacing.dart';
-import 'package:hollow/src/theme/hollow_theme.dart';
-import 'package:hollow/src/theme/hollow_typography.dart';
-import 'package:hollow/src/ui/components/hollow_pressable.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
+﻿import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-/// Which tab is active on mobile: Home, Chat, Members, Settings.
-final mobileTabProvider = StateProvider<int>((ref) => 0);
+/// The phone shell's tabs, in nav bar order. The bar's centre (+) adds a
+/// server and is no tab, so a tab's [slot] is its place in the bar.
+enum MobileTab {
+  chats,
+  servers,
+  friends,
+  settings;
 
-/// Bottom navigation bar for mobile layout.
-class MobileNav extends ConsumerWidget {
-  const MobileNav({super.key});
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final hollow = HollowTheme.of(context);
-    final currentTab = ref.watch(mobileTabProvider);
-
-    return Container(
-      height: 56,
-      decoration: BoxDecoration(
-        color: hollow.surface,
-        border: Border(
-          top: BorderSide(color: hollow.border),
-        ),
-      ),
-      child: Row(
-        children: [
-          _NavTab(
-            icon: LucideIcons.home,
-            activeIcon: LucideIcons.home,
-            label: 'Home',
-            isActive: currentTab == 0,
-            onTap: () => ref.read(mobileTabProvider.notifier).state = 0,
-          ),
-          _NavTab(
-            icon: LucideIcons.messageCircle,
-            activeIcon: LucideIcons.messageCircle,
-            label: 'Chat',
-            isActive: currentTab == 1,
-            onTap: () => ref.read(mobileTabProvider.notifier).state = 1,
-          ),
-          _NavTab(
-            icon: LucideIcons.users,
-            activeIcon: LucideIcons.users,
-            label: 'Members',
-            isActive: currentTab == 2,
-            onTap: () => ref.read(mobileTabProvider.notifier).state = 2,
-          ),
-          _NavTab(
-            icon: LucideIcons.settings,
-            activeIcon: LucideIcons.settings,
-            label: 'Settings',
-            isActive: currentTab == 3,
-            onTap: () => ref.read(mobileTabProvider.notifier).state = 3,
-          ),
-        ],
-      ),
-    );
-  }
+  /// Where the tab sits in the five-slot bar.
+  int get slot => index < 2 ? index : index + 1;
 }
 
-class _NavTab extends StatelessWidget {
-  final IconData icon;
-  final IconData activeIcon;
-  final String label;
-  final bool isActive;
-  final VoidCallback onTap;
-
-  const _NavTab({
-    required this.icon,
-    required this.activeIcon,
-    required this.label,
-    required this.isActive,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-
-    return Expanded(
-      child: HollowPressable(
-        onTap: onTap,
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(
-              isActive ? activeIcon : icon,
-              size: 22,
-              color: isActive ? hollow.accent : hollow.textSecondary,
-            ),
-            const SizedBox(height: HollowSpacing.xxs),
-            // Bottom-nav labels cap their scale so the fixed-height bar stays
-            // intact; content areas still honour the full OS scale.
-            MediaQuery.withClampedTextScaling(
-              maxScaleFactor: 1.3,
-              child: Text(
-                label,
-                style: HollowTypography.caption.copyWith(
-                  color: isActive ? hollow.accent : hollow.textSecondary,
-                  fontWeight: isActive ? FontWeight.w600 : FontWeight.w400,
-                ),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
+/// Which tab the phone shell shows.
+final mobileTabProvider = StateProvider<MobileTab>((ref) => MobileTab.chats);

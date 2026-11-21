@@ -25,6 +25,7 @@ import 'package:hollow/src/ui/mobile/mobile_conferences_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
 import 'package:hollow/src/core/shop_availability.dart';
 import 'package:hollow/src/ui/share/paste_link_dialog.dart';
+import 'package:hollow/src/ui/shell/mobile_nav.dart';
 import 'package:hollow/src/ui/shop/redeem_code_dialog.dart';
 
 /// Receives hollow:// deep links from the OS (browser clicks, other apps) on
@@ -198,6 +199,9 @@ class DeepLinkService {
       confirmLabel: 'Join',
     );
     if (confirmed != true) return;
+    // A phone lists servers on their own tab, not in Chats: land there to see
+    // the join arrive. The desktop shell never reads it.
+    _container?.read(mobileTabProvider.notifier).state = MobileTab.servers;
 
     try {
       await crdt_api.joinServer(

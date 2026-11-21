@@ -1,0 +1,272 @@
+{
+  "_": [
+    "#154 fix round (session C): the centre + landing on the Servers tab (M2), the tab with a dock folder and a mention from a second peer, the switcher sheet beside it, and the Chats greeting that sheds the name (L1).",
+    "Two THROWAWAY peers on the TEST relay. iOS: FLEET_RELAY=hollowtest.duckdns.org pwsh scripts/fleet.ps1 -Scenario nav154_fix_mobile -Peers a=i,b=m"
+  ],
+  "peers": [
+    "a",
+    "b"
+  ],
+  "steps": [
+    {
+      "peer": "all",
+      "op": "wait_for",
+      "provider": "connection",
+      "equals": "connected",
+      "timeout_ms": 120000
+    },
+    {
+      "peer": "all",
+      "op": "wait",
+      "ms": 3000
+    },
+    {
+      "peer": "all",
+      "op": "tap",
+      "target": "text:Hide",
+      "index": 0,
+      "soft": true
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "nf-00-chats-before-add"
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "semantics:Add a server",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 1200
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "nf-01-add-dialog"
+    },
+    {
+      "peer": "a",
+      "op": "enter_text",
+      "target": "hint:My Awesome Server",
+      "value": "Night Shift"
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "text:Create",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "text:Night Shift",
+      "timeout_ms": 30000
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 1500
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "nf-02-added-lands-on-servers"
+    },
+    {
+      "peer": "a",
+      "op": "seed_server",
+      "name": "Synth Lab",
+      "as": "INVITE"
+    },
+    {
+      "peer": "a",
+      "op": "seed_server",
+      "name": "Book Club",
+      "as": "INVITE2"
+    },
+    {
+      "peer": "a",
+      "op": "wait_for",
+      "target": "text:Book Club",
+      "timeout_ms": 30000
+    },
+    {
+      "peer": "a",
+      "op": "seed_folder",
+      "name": "Work stuff",
+      "servers": [
+        "Synth Lab",
+        "Book Club"
+      ]
+    },
+    {
+      "peer": "b",
+      "op": "seed_join",
+      "invite": "${INVITE}"
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "semantics:Servers",
+      "index": 0
+    },
+    {
+      "peer": "b",
+      "op": "wait_for",
+      "target": "text:Synth Lab",
+      "timeout_ms": 90000
+    },
+    {
+      "peer": "b",
+      "op": "wait",
+      "ms": 3000
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "text:Synth Lab",
+      "index": 0
+    },
+    {
+      "peer": "b",
+      "op": "wait_for",
+      "target": "text:general",
+      "timeout_ms": 30000
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "text:general",
+      "index": 0
+    },
+    {
+      "peer": "b",
+      "op": "wait_for",
+      "target": "field",
+      "timeout_ms": 15000
+    },
+    {
+      "peer": "b",
+      "op": "wait",
+      "ms": 3000
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "field",
+      "index": 0
+    },
+    {
+      "peer": "b",
+      "op": "enter_text",
+      "target": "field",
+      "value": "@probe-a the mix is up ${RUN}"
+    },
+    {
+      "peer": "b",
+      "op": "tap",
+      "target": "semantics:Send message",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 8000
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "nf-03-servers-folder-mention"
+    },
+    {
+      "peer": "a",
+      "op": "theme",
+      "value": "light"
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 800
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "nf-04-servers-folder-mention-light"
+    },
+    {
+      "peer": "a",
+      "op": "theme",
+      "value": "dark"
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 600
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "text:Synth Lab",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 1500
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "semantics:Synth Lab, switch server",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 1000
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "nf-05-switcher"
+    },
+    {
+      "peer": "a",
+      "op": "system_back"
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 600
+    },
+    {
+      "peer": "a",
+      "op": "system_back"
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 800
+    },
+    {
+      "peer": "a",
+      "op": "tap",
+      "target": "semantics:Chats",
+      "index": 0
+    },
+    {
+      "peer": "a",
+      "op": "wait",
+      "ms": 900
+    },
+    {
+      "peer": "a",
+      "op": "shot",
+      "name": "nf-06-chats-greeting"
+    }
+  ]
+}

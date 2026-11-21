@@ -7,7 +7,6 @@ import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/speaking_provider.dart';
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
-import 'package:hollow/src/theme/hollow_shadows.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -28,16 +27,12 @@ import 'package:hollow/src/ui/shell/voice_quick_controls.dart';
 import 'package:hollow/src/core/providers/name_color_provider.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// The mobile nav bar's height plus its top hairline.
-const double _kNavBarReserve = MobileCallMetrics.bar + 1;
-
 /// The call you are in, minimised: who it is with, the timer, Mute and a red
-/// Leave. Tapping it opens the call. The shell floats it above the nav bar; a
-/// chat docks it under its header.
+/// Leave. Tapping it opens the call. Docked in the page's own column (the
+/// shell above its status strips, a server page at its foot, a chat under its
+/// header), so it never covers a row or a strip.
 class MobileMinimisedCall extends ConsumerWidget {
-  final bool floating;
-
-  const MobileMinimisedCall({super.key, this.floating = true});
+  const MobileMinimisedCall({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -51,35 +46,22 @@ class MobileMinimisedCall extends ConsumerWidget {
 
     final bar = dm ? const _DmCallBar() : const _RoomCallBar();
     final hollow = HollowTheme.of(context);
-    final framed = DecoratedBox(
-      decoration: BoxDecoration(
-        color: hollow.overlay,
-        borderRadius: BorderRadius.circular(hollow.radiusXl),
-        border: Border.all(color: hollow.border),
-        boxShadow: floating ? HollowShadows.float : null,
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(
+          HollowSpacing.md, HollowSpacing.xs, HollowSpacing.md, HollowSpacing.xs),
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: hollow.overlay,
+          borderRadius: BorderRadius.circular(hollow.radiusXl),
+          border: Border.all(color: hollow.border),
+        ),
+        // A host outside any Scaffold would hand it the app's fallback text
+        // style (a yellow double underline).
+        child: DefaultTextStyle(
+          style: HollowTypography.label.copyWith(color: hollow.textPrimary),
+          child: SizedBox(height: MobileCallMetrics.bar, child: bar),
+        ),
       ),
-      // Floating in the shell's stack it sits outside any Scaffold, where the
-      // app's fallback text style (a yellow double underline) would reach it.
-      child: DefaultTextStyle(
-        style: HollowTypography.label.copyWith(color: hollow.textPrimary),
-        child: SizedBox(height: MobileCallMetrics.bar, child: bar),
-      ),
-    );
-    if (!floating) {
-      return Padding(
-        padding: const EdgeInsets.fromLTRB(
-            HollowSpacing.md, HollowSpacing.xs, HollowSpacing.md,
-            HollowSpacing.xs),
-        child: framed,
-      );
-    }
-    return Positioned(
-      left: HollowSpacing.md,
-      right: HollowSpacing.md,
-      bottom: MediaQuery.viewPaddingOf(context).bottom +
-          _kNavBarReserve +
-          HollowSpacing.md,
-      child: framed,
     );
   }
 }

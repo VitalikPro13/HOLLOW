@@ -231,7 +231,12 @@ const kHomeFirstRunLine =
 /// welcome on a first run.
 class HomeGreeting extends ConsumerStatefulWidget {
   final bool firstRun;
-  const HomeGreeting({super.key, required this.firstRun});
+
+  /// A phone header beside its actions: the name goes first when the line
+  /// would not fit, so the greeting itself is never cut.
+  final bool shedName;
+
+  const HomeGreeting({super.key, required this.firstRun, this.shedName = false});
 
   @override
   ConsumerState<HomeGreeting> createState() => _HomeGreetingState();
@@ -271,17 +276,32 @@ class _HomeGreetingState extends ConsumerState<HomeGreeting> {
             : ref.watch(profileProvider
                 .select((p) => chosenNameForPeer(p[localId], localId)))) ??
         kNamelessGreeting;
-    return Semantics(
-      header: true,
-      child: Text(
-        widget.firstRun
-            ? 'Welcome to Hollow, $name'
-            : '${greetingFor(DateTime.now())}, $name',
+    final opening =
+        widget.firstRun ? 'Welcome to Hollow' : greetingFor(DateTime.now());
+    final full = '$opening, $name';
+    final style = HollowTypography.heading.copyWith(color: hollow.textPrimary);
+    Widget line(String text) => Semantics(
+          header: true,
+          child: Text(
+            text,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: style,
+          ),
+        );
+    if (!widget.shedName) return line(full);
+    return LayoutBuilder(builder: (context, constraints) {
+      final painter = TextPainter(
+        text: TextSpan(text: full, style: style),
         maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-        style: HollowTypography.heading.copyWith(color: hollow.textPrimary),
-      ),
-    );
+        textDirection: Directionality.of(context),
+        textScaler: MediaQuery.textScalerOf(context),
+      )..layout();
+      final fits = !painter.didExceedMaxLines &&
+          painter.width <= constraints.maxWidth;
+      painter.dispose();
+      return line(fits ? full : opening);
+    });
   }
 }
 

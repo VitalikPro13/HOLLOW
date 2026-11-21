@@ -1,9 +1,18 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hollow/src/core/greeting.dart';
+import 'package:hollow/src/core/providers/voice_channel_provider.dart';
+import 'package:hollow/src/ui/mobile/mobile_minimised_call.dart';
+import 'package:hollow/src/ui/shell/home_dashboard.dart' show HomeGreeting;
+import 'package:hollow/src/ui/shell/mobile_nav.dart';
+import 'package:hollow/src/ui/shell/system_status_banner.dart';
+import 'package:hollow/src/ui/components/nav_selection_mark.dart';
 import 'package:hollow/src/ui/mobile/mobile_shell.dart';
 import 'package:hollow/src/ui/mobile/mobile_nav_bar.dart';
 import 'package:hollow/src/ui/mobile/tabs/mobile_chats_tab.dart';
 import 'package:hollow/src/ui/mobile/tabs/mobile_friends_tab.dart';
-import 'package:hollow/src/ui/mobile/tabs/mobile_archive_tab.dart';
+import 'package:hollow/src/ui/mobile/tabs/mobile_servers_tab.dart';
 import 'package:hollow/src/ui/mobile/tabs/mobile_settings_tab.dart';
 
 import '../helpers/test_app.dart';
@@ -28,25 +37,43 @@ void main() {
       expect(find.byType(MobileShell), findsOneWidget);
     });
 
-    testWidgets('shows bottom navigation bar with 4 tabs', (tester) async {
+    testWidgets('the bar reads Chats, Servers, add, Friends, Settings',
+        (tester) async {
       await pumpHollowMobile(tester);
-      expect(find.byType(MobileNavBar), findsOneWidget);
       final navBar = find.byType(MobileNavBar);
-      expect(
-          find.descendant(of: navBar, matching: find.text('Chats')),
-          findsOneWidget);
-      expect(
-          find.descendant(of: navBar, matching: find.text('Friends')),
-          findsOneWidget);
-      expect(
-          find.descendant(of: navBar, matching: find.text('Archive')),
-          findsOneWidget);
-      expect(
-          find.descendant(of: navBar, matching: find.text('Settings')),
-          findsOneWidget);
+      double x(Finder f) => tester.getCenter(f).dx;
+      final slots = [
+        find.descendant(of: navBar, matching: find.text('Chats')),
+        find.descendant(of: navBar, matching: find.text('Servers')),
+        find.descendant(of: navBar, matching: find.bySemanticsLabel('Add a server')),
+        find.descendant(of: navBar, matching: find.text('Friends')),
+        find.descendant(of: navBar, matching: find.text('Settings')),
+      ];
+      for (final slot in slots) {
+        expect(slot, findsOneWidget);
+      }
+      for (var i = 1; i < slots.length; i++) {
+        expect(x(slots[i]), greaterThan(x(slots[i - 1])));
+      }
+      expect(find.descendant(of: navBar, matching: find.text('Archive')),
+          findsNothing,
+          reason: 'Archive opens from the Chats header now');
     });
 
-    testWidgets('starts on Chats tab (index 0)', (tester) async {
+    testWidgets('the selection mark sits over the tab that is open',
+        (tester) async {
+      await pumpHollowMobile(tester);
+      for (final tab in ['Chats', 'Servers', 'Friends', 'Settings']) {
+        await _tapNavTab(tester, tab);
+        final label = find.descendant(
+            of: find.byType(MobileNavBar), matching: find.text(tab));
+        expect(tester.getCenter(find.byType(NavSelectionMark)).dx,
+            moreOrLessEquals(tester.getCenter(label).dx, epsilon: 1),
+            reason: tab);
+      }
+    });
+
+    testWidgets('starts on the Chats tab', (tester) async {
       await pumpHollowMobile(tester);
       expect(find.byType(MobileChatsTab), findsOneWidget);
     });
@@ -57,10 +84,11 @@ void main() {
       expect(find.byType(MobileFriendsTab), findsOneWidget);
     });
 
-    testWidgets('tap Archive tab switches view', (tester) async {
+    testWidgets('tap Servers tab switches view', (tester) async {
       await pumpHollowMobile(tester);
-      await _tapNavTab(tester, 'Archive');
-      expect(find.byType(MobileArchiveTab), findsOneWidget);
+      await _tapNavTab(tester, 'Servers');
+      expect(find.byType(MobileServersTab), findsOneWidget);
+      expect(find.byType(MobileChatsTab), findsNothing);
     });
 
     testWidgets('tap Settings tab switches view', (tester) async {
@@ -69,15 +97,84 @@ void main() {
       expect(find.byType(MobileSettingsTab), findsOneWidget);
     });
 
+    // Review M2: the server you add lands on the Servers tab, where you see
+    // it arrive; servers no longer show in Chats.
+    testWidgets('the centre add opens on the Servers tab', (tester) async {
+      await pumpHollowMobile(tester);
+      final container = ProviderScope.containerOf(
+          tester.element(find.byType(MobileShell)));
+      expect(container.read(mobileTabProvider), MobileTab.chats);
+      await tester.tap(find.descendant(
+          of: find.byType(MobileNavBar),
+          matching: find.bySemanticsLabel('Add a server')));
+      await tester.pumpAndSettle();
+      expect(container.read(mobileTabProvider), MobileTab.servers);
+    });
+
+    // Review M1: the call bar docks between the tab and the strips under it,
+    // so it never covers the last rows, the status strip or its close.
+    testWidgets('a minimised call docks above the status strip on every tab',
+        (tester) async {
+      await pumpHollowMobile(tester, extraOverrides: [
+        voiceChannelProvider.overrideWith(() => _InRoom(const VoiceChannelState(
+              currentServerId: 's1',
+              currentChannelId: 'v1',
+              currentChannelName: 'Jam room',
+            ))),
+      ]);
+      for (final tab in ['Chats', 'Servers']) {
+        await _tapNavTab(tester, tab);
+        final bar = find.byType(MobileMinimisedCall);
+        expect(bar, findsOneWidget);
+        expect(find.ancestor(of: bar, matching: find.byType(Positioned)),
+            findsNothing,
+            reason: 'floating over the tab on $tab');
+        final call = tester.getRect(bar);
+        final body = tester.getRect(find.byType(
+            tab == 'Chats' ? MobileChatsTab : MobileServersTab));
+        final strip = tester.getRect(find.byType(SystemStatusBanner));
+        expect(call.top, greaterThanOrEqualTo(body.bottom), reason: tab);
+        expect(call.bottom, lessThanOrEqualTo(strip.top), reason: tab);
+        expect(call.bottom,
+            lessThanOrEqualTo(tester.getRect(find.byType(MobileNavBar)).top),
+            reason: tab);
+      }
+    });
+
+    // Review L1: the phone header sheds the name before it cuts the
+    // greeting; a wide window keeps the whole line.
+    for (final (width, full) in [(320.0, false), (700.0, true)]) {
+      testWidgets('the greeting at $width wide ${full ? 'keeps' : 'sheds'} '
+          'the name', (tester) async {
+        await pumpHollowMobile(tester, viewportSize: Size(width, 800));
+        final text = tester.widget<Text>(find.descendant(
+            of: find.byType(HomeGreeting), matching: find.byType(Text)));
+        final greeting = greetingFor(DateTime.now());
+        if (full) {
+          expect(text.data, startsWith('$greeting, '));
+        } else {
+          expect(text.data, greeting);
+        }
+      });
+    }
+
     testWidgets('can cycle through all tabs and return to Chats',
         (tester) async {
       await pumpHollowMobile(tester);
 
-      for (final tab in ['Friends', 'Archive', 'Settings', 'Chats']) {
+      for (final tab in ['Servers', 'Friends', 'Settings', 'Chats']) {
         await _tapNavTab(tester, tab);
       }
 
       expect(find.byType(MobileChatsTab), findsOneWidget);
     });
   });
+}
+
+class _InRoom extends VoiceChannelNotifier {
+  final VoiceChannelState initial;
+  _InRoom(this.initial);
+
+  @override
+  VoiceChannelState build() => initial;
 }

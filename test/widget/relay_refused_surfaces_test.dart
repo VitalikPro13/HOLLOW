@@ -32,7 +32,8 @@ import 'package:hollow/src/ui/mobile/mobile_chat_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_connection_indicator.dart';
 import 'package:hollow/src/ui/mobile/mobile_nav_bar.dart';
 import 'package:hollow/src/ui/mobile/mobile_voice_channel_route.dart';
-import 'package:hollow/src/ui/mobile/tabs/mobile_archive_tab.dart';
+import 'package:hollow/src/ui/mobile/mobile_archive_page.dart';
+import 'package:hollow/src/ui/mobile/tabs/mobile_chats_tab.dart';
 import 'package:hollow/src/ui/mobile/tabs/mobile_friends_tab.dart';
 import 'package:hollow/src/ui/mobile/tabs/mobile_settings_tab.dart';
 import 'package:hollow/src/ui/settings/duress_section.dart';
@@ -371,18 +372,20 @@ void main() {
   });
 
   group('refused account: Archive and Settings open', () {
-    testWidgets('phone tab bar', (tester) async {
+    testWidgets('phone tab bar and the Chats header', (tester) async {
       await pumpHollowMobile(tester, extraOverrides: _link(refused: true));
       await _closeRefusalDialog(tester);
-      for (final (label, page) in [
-        ('Archive', MobileArchiveTab),
-        ('Settings', MobileSettingsTab),
-      ]) {
-        await tester.tap(find.descendant(
-            of: find.byType(MobileNavBar), matching: find.text(label)));
-        await tester.pumpAndSettle();
-        expect(find.byType(page), findsOneWidget, reason: label);
-      }
+      await tester.tap(find.descendant(
+          of: find.byType(MobileChatsTab),
+          matching: find.bySemanticsLabel('Archive')));
+      await tester.pumpAndSettle();
+      expect(find.byType(MobileArchivePage), findsOneWidget, reason: 'Archive');
+      await tester.tap(find.bySemanticsLabel('Back'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.descendant(
+          of: find.byType(MobileNavBar), matching: find.text('Settings')));
+      await tester.pumpAndSettle();
+      expect(find.byType(MobileSettingsTab), findsOneWidget, reason: 'Settings');
     });
 
     testWidgets('dock', (tester) async {

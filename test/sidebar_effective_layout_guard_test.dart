@@ -31,7 +31,7 @@ void main() {
   // hand-rolled version shipped on both.
   const surfaces = [
     'lib/src/ui/shell/channel_sidebar.dart',
-    'lib/src/ui/mobile/tabs/mobile_chats_tab.dart',
+    'lib/src/ui/mobile/server/mobile_server_channels.dart',
   ];
 
   for (final path in surfaces) {

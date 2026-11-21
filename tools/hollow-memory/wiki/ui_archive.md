@@ -1,6 +1,6 @@
 # Archive UI — Message History and Data Management
 
-The Archive system provides read-only access to the user's entire message history (DMs + channels), vault file management with erasure-coded shard status, imported archive verification/viewing, and recovery pool coordination. Desktop: accessed via the Archive dashboard in the shell. Mobile: bottom nav tab index 2 (`MobileArchiveTab`), with push navigation to `MobileArchiveViewerRoute` and `MobileImportedArchiveViewerRoute`. See `wiki/ui_mobile.md` for mobile-specific documentation.
+The Archive system provides read-only access to the user's entire message history (DMs + channels), vault file management with erasure-coded shard status, imported archive verification/viewing, and recovery pool coordination. Desktop: accessed via the Archive dashboard in the shell. Mobile: a page the Chats header's Archive icon opens (`MobileArchivePage` via `openMobileArchive`; a nav tab until #154), with push navigation to `MobileArchiveViewerRoute` and `MobileImportedArchiveViewerRoute`. See `wiki/ui_mobile.md` for mobile-specific documentation.
 
 ---
 
@@ -113,4 +113,4 @@ Since 2026-07-14 these are no longer copy-paste patterns — the rendering stack
 
 **Per-viewer:** data acquisition (live providers vs `importedArchiveDataProvider`), proof callbacks; saving is shared (`saveArchivedAttachment` desktop, `saveArchivedAttachmentMobile` phone), and proof-context computation (direction/source-dependent — never centralize).
 
-**Desktop vs mobile:** desktop passes `desktopChrome: true` (SelectionArea, hover actions, inline search bar); mobile uses `ArchiveListSearchBar` + `ArchiveMessageListController` outside the list, long-press actions, ReduceMotionController-aware scroll durations, and `ArchiveMobileToolbar`/`showArchiveFilterSheet` instead of the desktop toolbar/menu. Phone tab (`mobile_archive_tab.dart`): the same one chip row and one list at touch size (`HollowListRow(touch: true)`), long press for row actions.
+**Desktop vs mobile:** desktop passes `desktopChrome: true` (SelectionArea, hover actions, inline search bar); mobile uses `ArchiveListSearchBar` + `ArchiveMessageListController` outside the list, long-press actions, ReduceMotionController-aware scroll durations, and `ArchiveMobileToolbar`/`showArchiveFilterSheet` instead of the desktop toolbar/menu. Phone page (`mobile_archive_page.dart`, `MobileArchivePage`): the same one chip row and one list at touch size (`HollowListRow(touch: true)`), long press for row actions.

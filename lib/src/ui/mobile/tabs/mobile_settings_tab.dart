@@ -131,11 +131,12 @@ class MobileSettingsTab extends ConsumerWidget {
               const HomeStatusCard(),
               const SizedBox(height: HollowSpacing.lg),
               const HomeNewsCard(),
-              // All four mobile tabs stay mounted, so the load bars (and their
+              // Every mobile tab stays mounted, so the load bars (and their
               // poll) run only while this one shows.
               HomeRelayCard(
                   touch: true,
-                  loadBars: ref.watch(mobileTabProvider) == 3),
+                  loadBars:
+                      ref.watch(mobileTabProvider) == MobileTab.settings),
             ],
           ),
         ),

@@ -1,7 +1,7 @@
 {
   "_": [
     "Design sweep 5, the mobile half: the empty states a freshly onboarded peer",
-    "reaches with no friends, conversations or servers. Every surface here was",
+    "reaches with no friends, conversations or servers (Servers tab and the Archive page from the Chats header since #154). Every surface here was",
     "a hand-built column (big faded icon, heading-size title) and is",
     "HollowEmptyState now, the list-in-a-section ones dense.",
     "",
@@ -25,7 +25,13 @@
     { "peer": "a", "op": "wait", "ms": 1500 },
     { "peer": "a", "op": "shot", "name": "m5-03-friends", "soft": true },
 
-    { "peer": "a", "op": "tap", "target": "semantics:Archive", "index": 0 },
+    { "peer": "a", "op": "tap", "target": "semantics:Servers", "index": 0, "soft": true },
+    { "peer": "a", "op": "wait", "ms": 1500 },
+    { "peer": "a", "op": "shot", "name": "m5-03b-servers-empty", "soft": true },
+
+    { "peer": "a", "op": "tap", "target": "semantics:Chats", "index": 0 },
+    { "peer": "a", "op": "wait", "ms": 800 },
+    { "peer": "a", "op": "tap", "target": "semantics:Archive", "index": 0, "why": "the Chats header's Archive icon (#154)" },
     { "peer": "a", "op": "wait", "ms": 1500 },
     { "peer": "a", "op": "shot", "name": "m5-04-archive-dms" },
     { "peer": "a", "op": "tap", "target": "text:Vault files", "index": 0, "soft": true },
@@ -34,6 +40,8 @@
     { "peer": "a", "op": "tap", "target": "text:Imported", "index": 0, "soft": true },
     { "peer": "a", "op": "wait", "ms": 1200 },
     { "peer": "a", "op": "shot", "name": "m5-07-archive-imported", "soft": true },
+    { "peer": "a", "op": "tap", "target": "semantics:Back", "index": 0, "why": "leaves the Archive page" },
+    { "peer": "a", "op": "wait", "ms": 800 },
 
     { "peer": "a", "op": "tap", "target": "semantics:Settings", "index": 0 },
     { "peer": "a", "op": "wait", "ms": 1500 },

@@ -8,12 +8,13 @@ import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/server_strip_layout_provider.dart';
 import 'package:hollow/src/theme/hollow_theme_data.dart';
 import 'package:hollow/src/ui/components/pending_join_ui.dart';
+import 'package:hollow/src/ui/mobile/mobile_nav_bar.dart';
 import 'package:hollow/src/ui/shell/server_strip.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 import '../helpers/test_app.dart';
 
-/// The parked-join tile, on the Classic strip and in the mobile chats list.
+/// The parked-join tile, on the Classic strip and on the phone's Servers tab.
 ///
 /// The two things worth pinning: it is NOT selectable (there is no server
 /// behind it, so a click that navigated would open nothing), and it carries a
@@ -166,6 +167,7 @@ void main() {
     testWidgets('a pending join is a greyed row that says what it is',
         (tester) async {
       await pumpHollowMobile(tester, extraOverrides: pendingOverrides());
+      await _openServers(tester);
 
       expect(find.text('Join request pending'), findsOneWidget);
       expect(find.text('You will be added when a member comes online'),
@@ -182,6 +184,7 @@ void main() {
           reason: 'server_full:Night Shift:50',
         ),
       );
+      await _openServers(tester);
 
       expect(find.text('Join request declined'), findsOneWidget);
       expect(find.text('Night Shift is full'), findsOneWidget);
@@ -189,6 +192,7 @@ void main() {
 
     testWidgets('tapping the row opens the actions sheet', (tester) async {
       await pumpHollowMobile(tester, extraOverrides: pendingOverrides());
+      await _openServers(tester);
 
       await tester.tap(find.text('Join request pending'));
       await tester.pumpAndSettle();
@@ -197,6 +201,13 @@ void main() {
       expect(find.text('Discard request'), findsOneWidget);
     });
   });
+}
+
+/// Parked joins are servers, so they live on the Servers tab (#154).
+Future<void> _openServers(WidgetTester tester) async {
+  await tester.tap(find.descendant(
+      of: find.byType(MobileNavBar), matching: find.text('Servers')));
+  await tester.pumpAndSettle();
 }
 
 class _SeededLayout extends ServerStripLayoutNotifier {

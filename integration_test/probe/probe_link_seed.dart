@@ -5,13 +5,18 @@ import 'dart:ui' as ui;
 import 'package:flutter/painting.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hollow/src/core/models/channel_layout.dart';
+import 'package:hollow/src/core/models/strip_item.dart';
 import 'package:hollow/src/core/providers/background_provider.dart';
+import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/channel_chat_provider.dart';
 import 'package:hollow/src/core/providers/chat_provider.dart';
 import 'package:hollow/src/core/providers/file_transfer_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/relay_domain_provider.dart';
+import 'package:hollow/src/core/providers/server_banner_provider.dart';
+import 'package:hollow/src/core/providers/server_strip_layout_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt;
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
@@ -33,6 +38,9 @@ import 'package:path_provider/path_provider.dart';
 /// | `seed_avatar` | | a generated avatar on the own profile |
 /// | `seed_delete_server` | `name` | the owner deletes a server it created |
 /// | `seed_wallpaper` | `darken` (0.4 to 1.0) | a generated light, busy wallpaper at that Darken |
+/// | `seed_banner` | `name` | a generated banner on a server this peer owns |
+/// | `seed_layout` | `name`, `layout` | orders a server's channels: names, `category:X` |
+/// | `seed_folder` | `name`, `servers` (two server names) | puts two servers in one dock folder |
 const linkSeedOps = {
   'seed_server',
   'seed_join',
@@ -42,6 +50,9 @@ const linkSeedOps = {
   'seed_avatar',
   'seed_delete_server',
   'seed_wallpaper',
+  'seed_banner',
+  'seed_layout',
+  'seed_folder',
 };
 
 class LinkSeedFailure implements Exception {
@@ -125,6 +136,50 @@ Future<String> linkSeedOp(String op, WidgetTester tester,
         await notifier.setOpacity(darken);
       });
       return 'wallpaper at Darken ${(darken * 100).round()}%';
+    case 'seed_banner':
+      final name = arg('name');
+      await tester.runAsync(() async {
+        final id = await _serverId(name, const Duration(seconds: 5));
+        await crdt.setServerBanner(serverId: id, rawBytes: await _bannerArt());
+        await container.read(serverBannerProvider.notifier).applyLocalWrite(id, null);
+      });
+      return 'set a generated banner on $name';
+    case 'seed_layout':
+      final name = arg('name');
+      final spec = [for (final e in step['layout'] as List) '$e'];
+      await tester.runAsync(() async {
+        final id = await _serverId(name, const Duration(seconds: 5));
+        final channels = await ChannelListNotifier.fetchChannels(id);
+        final byName = {for (final c in channels.values) c.name: c.channelId};
+        final layout = container.read(channelLayoutProvider.notifier);
+        layout.setLayout(await ChannelLayoutNotifier.fetchLayout(id),
+            serverId: id);
+        layout.mutate(id, channels, (_) => [
+              for (final e in spec)
+                if (e.startsWith('category:'))
+                  CategoryItem(e.substring('category:'.length))
+                else if (byName[e] != null)
+                  ChannelItem(byName[e]!),
+            ]);
+      });
+      return 'laid out $name';
+    case 'seed_folder':
+      final name = arg('name');
+      final names = [for (final e in step['servers'] as List) '$e'];
+      if (names.length != 2) throw LinkSeedFailure('seed_folder needs two servers');
+      final ids = await tester.runAsync(() async => [
+            for (final n in names) await _serverId(n, const Duration(seconds: 10)),
+          ]);
+      final strip = container.read(serverStripLayoutProvider.notifier);
+      strip.createFolder(ids![0], ids[1]);
+      final folder = container
+          .read(serverStripLayoutProvider)
+          .whereType<FolderStripItem>()
+          .where((f) => f.serverIds.contains(ids[0]))
+          .firstOrNull;
+      if (folder == null) throw LinkSeedFailure('no folder holds ${names[0]}');
+      strip.renameFolder(folder.id, name);
+      return 'folded ${names.join(' and ')} into $name';
     case 'seed_delete_server':
       final name = arg('name');
       await tester.runAsync(() async =>
@@ -225,6 +280,32 @@ Future<Uint8List> _busyWallpaper() async {
         ui.Rect.fromLTWH((i * 137) % 1500.0, (i * 89) % 900.0, 160, 110),
         fill(i.isEven ? 0xFF9A9A9A : 0xFFC8B27A));
   }
+  final image = await recorder.endRecording().toImage(w.toInt(), h.toInt());
+  final data = await image.toByteData(format: ui.ImageByteFormat.png);
+  return data!.buffer.asUint8List();
+}
+
+/// Dark art with a few shapes and lines, like the #154 mockup's banner, so
+/// the scrims and the controls over it are judged on a real picture.
+Future<Uint8List> _bannerArt() async {
+  const w = 1440.0, h = 480.0;
+  final recorder = ui.PictureRecorder();
+  final canvas = ui.Canvas(recorder);
+  ui.Paint fill(int argb) => ui.Paint()..color = ui.Color(argb);
+  canvas.drawRect(const ui.Rect.fromLTWH(0, 0, w, h), fill(0xFF0E2A2F));
+  canvas.drawCircle(const ui.Offset(1170, 140), 230, fill(0xFF17454C));
+  canvas.drawCircle(const ui.Offset(260, 380), 200, fill(0xFF2A2050));
+  canvas.drawCircle(const ui.Offset(740, 70), 96, fill(0xFF1F3A5E));
+  final line = ui.Paint()
+    ..color = const ui.Color(0xFF3FD9C2)
+    ..style = ui.PaintingStyle.stroke
+    ..strokeWidth = 7;
+  final path = ui.Path()..moveTo(0, 280);
+  for (var x = 0.0; x < w; x += 180) {
+    path.quadraticBezierTo(x + 45, 190, x + 90, 280);
+    path.quadraticBezierTo(x + 135, 370, x + 180, 280);
+  }
+  canvas.drawPath(path, line);
   final image = await recorder.endRecording().toImage(w.toInt(), h.toInt());
   final data = await image.toByteData(format: ui.ImageByteFormat.png);
   return data!.buffer.asUint8List();

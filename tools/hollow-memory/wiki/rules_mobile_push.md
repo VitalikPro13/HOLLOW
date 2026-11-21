@@ -8,10 +8,15 @@ device, device targeting, channel push fan-out, the NSE) stay in CLAUDE.md; wiki
 
 ## Mobile UI and lifecycle
 
-- Mobile UI lives in `lib/src/ui/mobile/`; `MobileShell` (4 tabs) below 600px on a desktop and
-  at every width on Android and iOS (tablets included, `hollow_shell.dart`); floating
-  pills in the MobileShell + MobileChatRoute stacks, NEVER the `app.dart` builder;
-  selection providers are cleared in `.then()`, NOT `dispose()`. `feedback_mobile_ui_patterns`.
+- Mobile UI lives in `lib/src/ui/mobile/`; `MobileShell` (tabs named by `MobileTab`, never a bare
+  index: Chats, Servers, Friends, Settings around the centre +) below 600px on a desktop and
+  at every width on Android and iOS (tablets included, `hollow_shell.dart`); the minimised
+  call DOCKS in each page's own column (shell, server page, chat), never floats over rows,
+  NEVER the `app.dart` builder; selection providers are cleared in `.then()`, NOT
+  `dispose()`. `feedback_mobile_ui_patterns`.
+- A drag that brings a page in (`HollowSwipeIn`) lands nothing once its page is no longer
+  current: a route pushed mid-drag (the lock cover, a call, a dialog) cancels the finger
+  as a RELEASE, and must stay on top. Its preview is a raw entry: `OverlayHosts`.
 - The ONE thing meant to sit over every phone route is the connection indicator
   (`mobile_connection_indicator.dart`): a ROOT-overlay entry that `MobileShell` owns (so the
   narrow desktop layout gets it too), registered with `OverlayHosts` so the lock removes it

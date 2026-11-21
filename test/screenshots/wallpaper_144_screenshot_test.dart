@@ -19,10 +19,9 @@ import 'package:hollow/src/theme/hollow_theme_data.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/chat/message_action_bar.dart';
 import 'package:hollow/src/ui/mobile/mobile_conferences_route.dart';
-import 'package:hollow/src/ui/mobile/tabs/mobile_archive_tab.dart';
+import 'package:hollow/src/ui/mobile/mobile_archive_page.dart';
 import 'package:hollow/src/ui/mobile/tabs/mobile_settings_tab.dart';
 import 'package:hollow/src/ui/settings/settings_place.dart';
-import 'package:hollow/src/ui/shell/mobile_nav.dart';
 import 'package:hollow/src/ui/components/wallpaper_backdrop.dart';
 
 import '../helpers/test_app.dart';
@@ -307,10 +306,9 @@ void main() {
     );
     await pump(tester,
         size: const Size(390, 500),
-        home: const Scaffold(body: SafeArea(child: MobileArchiveTab())),
+        home: const MobileArchivePage(),
         wallpaperTheme: false,
         extra: [
-          mobileTabProvider.overrideWith((ref) => 2),
           archiveDmListProvider.overrideWith((ref) async => const []),
           archiveChannelListProvider.overrideWith((ref) async => const [group]),
         ]);

@@ -110,6 +110,8 @@ const _allowed = <String, (int, String)>{
       (2, 'gated: overlay_image_bytes (shown)'),
   'lib/src/ui/shell/channel_sidebar.dart':
       (1, 'gated: the server banner via get_server_banner (rail)'),
+  'lib/src/ui/mobile/server/mobile_server_route.dart':
+      (1, 'gated: the server banner via get_server_banner (rail), as the sidebar'),
   'lib/src/ui/components/wallpaper_backdrop.dart':
       (1, 'own: the chat background the user picked'),
   'lib/src/ui/shop/hollowpack_import.dart':

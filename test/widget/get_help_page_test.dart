@@ -1027,7 +1027,7 @@ void main() {
         tester.element(find.byType(MobileShell)),
       );
       await tester.runAsync(() => c.read(helpResourcesProvider.future));
-      c.read(mobileTabProvider.notifier).state = 3;
+      c.read(mobileTabProvider.notifier).state = MobileTab.settings;
       await tester.pumpAndSettle();
       await tester.scrollUntilVisible(
         find.text('Get help'),

@@ -8,6 +8,7 @@ import 'package:hollow/src/core/services/deep_link_service.dart';
 import 'package:hollow/src/theme/hollow_theme_data.dart';
 import 'package:hollow/src/ui/app.dart' show hollowNavigatorKey;
 import 'package:hollow/src/ui/components/hollow_toast.dart';
+import 'package:hollow/src/ui/shell/mobile_nav.dart';
 
 import '../helpers/test_app.dart';
 
@@ -83,5 +84,21 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Join Server?'), findsOneWidget);
     await _closeConfirm(tester);
+  });
+
+  // #154 review M2: servers left the phone's Chats, so a joined server lands
+  // on the Servers tab where it shows up.
+  testWidgets('a confirmed server invite opens the phone on Servers',
+      (tester) async {
+    final container = await _app(tester);
+    expect(container.read(mobileTabProvider), MobileTab.chats);
+    DeepLinkService.instance.handleUrl(_invite);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Join'));
+    await tester.pumpAndSettle();
+    expect(container.read(mobileTabProvider), MobileTab.servers);
+    // The "Joining server" toast runs out.
+    await tester.pump(const Duration(seconds: 10));
+    await tester.pumpAndSettle();
   });
 }

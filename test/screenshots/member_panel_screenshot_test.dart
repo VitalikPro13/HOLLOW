@@ -94,8 +94,6 @@ void main() {
     }
   }
 
-  late BuildContext host;
-
   Future<void> pumpHost(
     WidgetTester tester,
     Size size, {
@@ -125,12 +123,7 @@ void main() {
         child: MaterialApp(
           debugShowCheckedModeBanner: false,
           theme: light ? HollowThemeData.light() : HollowThemeData.dark(),
-          home: Scaffold(
-            body: Builder(builder: (context) {
-              host = context;
-              return home ?? const SizedBox.expand();
-            }),
-          ),
+          home: Scaffold(body: home ?? const SizedBox.expand()),
         ),
       ),
     ));
@@ -158,8 +151,14 @@ void main() {
       await capture(t, 'desktop_$tag');
     });
     testWidgets('phone $tag', (t) async {
-      await pumpHost(t, const Size(390, 844), light: light);
-      showMobileMemberPanel(host, _server);
+      final panel = GlobalKey<MobileMemberSidePanelState>();
+      await pumpHost(t, const Size(390, 844),
+          light: light,
+          home: Stack(children: [
+            Positioned.fill(
+                child: MobileMemberSidePanel(key: panel, serverId: _server)),
+          ]));
+      panel.currentState!.open();
       await settle(t);
       await capture(t, 'phone_$tag');
     });

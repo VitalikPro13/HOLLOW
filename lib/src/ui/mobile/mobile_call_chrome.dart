@@ -36,6 +36,7 @@ import 'package:hollow/src/ui/mobile/mobile_chat_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_screen_share_sheet.dart';
 import 'package:hollow/src/ui/mobile/mobile_voice_channel_route.dart';
+import 'package:hollow/src/ui/mobile/server/mobile_server_navigation.dart';
 import 'package:hollow/src/core/providers/name_color_provider.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -118,12 +119,21 @@ void openMobileCallChat(
           container.read(selectedChannelProvider) == channelId;
   nav.pop();
   if (showing) return;
-  if (peer != null) {
-    container.read(selectedPeerProvider.notifier).state = peer;
-    container.read(selectedServerProvider.notifier).state = null;
-  } else {
+  if (peer == null) {
+    // A room's chat sits under its server's page, as every channel does.
+    // A meeting has no server page: its chat stacks as before.
+    if (serverId != null &&
+        channelId != null &&
+        !serverId.startsWith('conf:')) {
+      openMobileChannelOn(nav,
+          serverId: serverId, channelId: channelId, channelName: channelName);
+      return;
+    }
     container.read(selectedServerProvider.notifier).state = serverId;
     container.read(selectedChannelProvider.notifier).state = channelId;
+  } else {
+    container.read(selectedPeerProvider.notifier).state = peer;
+    container.read(selectedServerProvider.notifier).state = null;
   }
   nav.popUntil(
       (r) => r.settings.name != MobileChatRoute.routeName || r.isFirst);

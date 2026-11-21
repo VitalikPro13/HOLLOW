@@ -1830,7 +1830,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
         ref.read(selectedPeerProvider.notifier).state = peerId;
         final lastMsg = ref.read(lastDmMessageProvider)[peerId];
         ref.read(unreadProvider.notifier).markDmSeen(peerId, lastMsg?.messageId);
-        ref.read(mobileTabProvider.notifier).state = 1;
+        ref.read(mobileTabProvider.notifier).state = MobileTab.chats;
         requestComposerFocus(ref.read, ComposerInsert.dmScope(peerId));
       },
       lastMessage: (peerId) => _lastMessage(peerId, lastMessages),
@@ -1857,7 +1857,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
           requestComposerFocus(
               ref.read, ComposerInsert.channelScope(serverId, channelId));
         }
-        ref.read(mobileTabProvider.notifier).state = 1;
+        ref.read(mobileTabProvider.notifier).state = MobileTab.servers;
       },
       onCreateChannel: () {
         if (selectedServer != null) {

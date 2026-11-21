@@ -15,6 +15,7 @@ import 'package:hollow/src/rust/frb_generated.dart';
 import 'package:hollow/src/theme/hollow_theme_data.dart';
 import 'package:hollow/src/ui/components/server_name_text.dart';
 import 'package:hollow/src/ui/mobile/tabs/mobile_chats_tab.dart';
+import 'package:hollow/src/ui/mobile/tabs/mobile_servers_tab.dart';
 import 'package:hollow/src/ui/settings/settings_kit.dart';
 
 import 'helpers/test_app.dart';
@@ -178,7 +179,8 @@ void main() {
       expect(c.read(ageHoldHidesServersProvider), isFalse);
     });
 
-    // What the Chats tab shows for one flagged server, held or listed.
+    // What the Chats tab's checklist counts for one flagged server, held or
+    // listed.
     Future<String> pumpChats(WidgetTester tester, {required bool held}) async {
       tester.view.physicalSize = const Size(400, 1200);
       tester.view.devicePixelRatio = 1;
@@ -211,17 +213,36 @@ void main() {
     }
 
     testWidgets(
-        'a phone holding its only server keeps the filters and the server step done',
+        'a phone holding its only server keeps the server step done',
         (tester) async {
       final listedCount = await pumpChats(tester, held: false);
       final heldCount = await pumpChats(tester, held: true);
-      expect(find.text(kAgeHoldNoticeText), findsOneWidget, reason: 'setup');
-      expect(find.text('Unread'), findsOneWidget,
-          reason: 'the filters stay while the server is only held');
-      expect(find.text('Join or create a server'), findsNothing,
-          reason: 'the checklist does not open up while held');
       expect(heldCount, listedCount,
           reason: 'a held server still counts as joined');
+    });
+
+    testWidgets('the Servers tab says the held server is coming, not "none"',
+        (tester) async {
+      tester.view.physicalSize = const Size(400, 1200);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      const server = ServerInfo(
+          serverId: 'flagged', name: 'flagged', memberCount: 2, isNsfw: true);
+      await tester.pumpWidget(ProviderScope(
+        overrides: hollowTestOverrides(extra: [
+          ageGateModeProvider.overrideWithValue(AgeGateMode.phoneRemote),
+          ageGateProvider.overrideWith(() =>
+              _Gate(const AgeGateState(allowedHere: true, held: true))),
+          heldServersProvider.overrideWithValue({'flagged': server}),
+        ]),
+        child: MaterialApp(
+            theme: HollowThemeData.dark(),
+            home: const Scaffold(body: MobileServersTab())),
+      ));
+      await tester.pump();
+      expect(find.text(kAgeHoldNoticeText), findsOneWidget);
+      expect(find.text('No servers yet'), findsNothing);
+      expect(find.text('flagged'), findsNothing);
     });
 
     testWidgets('reads as one plain line', (tester) async {

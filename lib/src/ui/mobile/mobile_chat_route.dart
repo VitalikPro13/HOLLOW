@@ -95,6 +95,7 @@ import 'package:hollow/src/ui/chat/pinned_messages.dart';
 import 'package:hollow/src/ui/components/hollow_list_row.dart';
 import 'package:hollow/src/ui/components/peer_id_text.dart';
 import 'package:hollow/src/ui/mobile/mobile_member_panel.dart';
+import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_notification_banner.dart';
 import 'package:hollow/src/ui/mobile/mobile_minimised_call.dart';
 import 'package:hollow/src/ui/mobile/mobile_message_actions.dart';
@@ -1518,7 +1519,7 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute>
               if (widget.isDm)
                 IdentityDestroyedBanner(peerId: widget.peerId!),
               // The call you are in, from any chat: tap it to open the call.
-              const MobileMinimisedCall(floating: false),
+              const MobileMinimisedCall(),
               if (widget.isDm && !_watchDmPeerBlocked())
                 MobileCallElsewhereBar(
                     peerMaster: ref
@@ -1528,9 +1529,11 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute>
               // Its own context: the header's see-through chrome over a
               // wallpaper, not the route's opaque theme.
               if (_searchOpen && !_watchDmPeerBlocked())
-                Builder(
-                    builder: (context) =>
-                        _buildSearchBar(HollowTheme.of(context))),
+                HollowPageSwipeExclusion(
+                  child: Builder(
+                      builder: (context) =>
+                          _buildSearchBar(HollowTheme.of(context))),
+                ),
               if (!widget.isDm) _buildSyncIndicator(hollow),
               if (!widget.isDm && !_isConference)
                 ServerRecoveryNotices(serverId: widget.serverId!, touch: true),
@@ -1546,42 +1549,44 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute>
               // Just above the input cluster, where the thumb already rests.
               const SystemStatusBanner(anchor: StatusBannerAnchor.bottom),
               const ClockSkewBanner(anchor: StatusBannerAnchor.bottom),
-              _TypingBar(
-                contextKey: widget.isDm ? widget.peerId! : _channelKey,
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    if (_mentionCandidates.isNotEmpty) _buildMentionPanel(hollow),
-                    if (_emoteCandidates.isNotEmpty) _buildEmotePanel(hollow),
-                    if (_replyToMessageId != null)
-                      ChatReplyPreviewBar(
-                        senderName: _replyToSenderName ?? '',
-                        text: _replyToText ?? '',
-                        imagePath: null,
-                        onCancel: _cancelReply,
+              HollowPageSwipeExclusion(
+                child: _TypingBar(
+                  contextKey: widget.isDm ? widget.peerId! : _channelKey,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      if (_mentionCandidates.isNotEmpty) _buildMentionPanel(hollow),
+                      if (_emoteCandidates.isNotEmpty) _buildEmotePanel(hollow),
+                      if (_replyToMessageId != null)
+                        ChatReplyPreviewBar(
+                          senderName: _replyToSenderName ?? '',
+                          text: _replyToText ?? '',
+                          imagePath: null,
+                          onCancel: _cancelReply,
+                        ),
+                      StagedLinkArea(
+                        hollowLink: _stagedHollowLink,
+                        previewUrl: _stagedPreviewUrl,
+                        preview: _stagedPreview,
+                        previewLoading: _stagedPreviewLoading,
+                        onDismissHollowLink: _dismissStagedHollowLink,
+                        onDismissPreview: _dismissStagedPreview,
                       ),
-                    StagedLinkArea(
-                      hollowLink: _stagedHollowLink,
-                      previewUrl: _stagedPreviewUrl,
-                      preview: _stagedPreview,
-                      previewLoading: _stagedPreviewLoading,
-                      onDismissHollowLink: _dismissStagedHollowLink,
-                      onDismissPreview: _dismissStagedPreview,
-                    ),
-                    if (_staged.isNotEmpty)
-                      StagedAttachmentStrip(
-                        items: _staged,
-                        onRemove: (i) =>
-                            setState(() => _staged = [..._staged]..removeAt(i)),
-                        onReorder: (from, to) => setState(
-                            () => _staged = reorderStaged(_staged, from, to)),
-                      ),
-                    if (!widget.isDm && _slowModeReadyAt != null)
-                      _buildSlowModeNotice(hollow),
-                    _buildComposerOrBanner(hollow),
-                    const MobileKeyboardSpacer(),
-                  ],
+                      if (_staged.isNotEmpty)
+                        StagedAttachmentStrip(
+                          items: _staged,
+                          onRemove: (i) =>
+                              setState(() => _staged = [..._staged]..removeAt(i)),
+                          onReorder: (from, to) => setState(
+                              () => _staged = reorderStaged(_staged, from, to)),
+                        ),
+                      if (!widget.isDm && _slowModeReadyAt != null)
+                        _buildSlowModeNotice(hollow),
+                      _buildComposerOrBanner(hollow),
+                      const MobileKeyboardSpacer(),
+                    ],
+                  ),
                 ),
               ),
             ],
@@ -1592,13 +1597,27 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute>
 
     scaffold = WallpaperBackdrop(child: scaffold);
 
+    // A server's channel: a drag anywhere toward the reading end goes back to
+    // the channel list, the other way pulls the members in.
+    scaffold = HollowPageSwipe(
+      back: _listedServerId != null,
+      onSwipeLeft: _hasMemberPanel ? _dragMembersIn : null,
+      child: scaffold,
+    );
+
     return LeaveWithServer(
       serverId: _listedServerId,
       child: Stack(
         children: [
           scaffold,
-          // For messages arriving in OTHER conversations. Offset below the
-          // status bar and chat header so it cannot cover the header controls.
+          if (_hasMemberPanel)
+            Positioned.fill(
+              child: MobileMemberSidePanel(
+                  key: _memberPanel, serverId: widget.serverId!),
+            ),
+          // For messages arriving in OTHER conversations, above the members
+          // panel too. Offset below the status bar and chat header so it
+          // cannot cover the header controls.
           MobileInChatBanner(
             currentPeerId: widget.peerId,
             currentServerId: widget.serverId,
@@ -1608,6 +1627,20 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute>
         ],
       ),
     );
+  }
+
+  final _memberPanel = GlobalKey<MobileMemberSidePanelState>();
+
+  bool get _hasMemberPanel => !widget.isDm && widget.serverId != null;
+
+  HollowSwipeDrive? _dragMembersIn() {
+    _dismissKeyboard();
+    return _memberPanel.currentState?.startDrag();
+  }
+
+  void _openMembers() {
+    _dismissKeyboard();
+    _memberPanel.currentState?.open();
   }
 
   /// ref.listen registrations, called unconditionally from build(), which is all
@@ -1704,6 +1737,8 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute>
       searchOpen: _searchOpen,
       onSearchToggle: _toggleSearch,
       onJumpToMessage: _jumpToMessageId,
+      onMembers: _hasMemberPanel ? _openMembers : null,
+      backToChannels: _listedServerId != null,
     );
   }
 
@@ -3072,6 +3107,106 @@ class _MobileChatRouteState extends ConsumerState<MobileChatRoute>
 /// Below this a DM header cannot fit the Offline status beside its buttons.
 const double _kDmHeaderFullWidth = 360;
 
+/// A channel's glyph wherever the phone names it (its list row, its page's
+/// header): voice, a lock for a restricted channel, else a hash.
+IconData mobileChannelGlyph(ChannelInfo? channel, {bool live = false}) =>
+    channel?.channelType == ChannelType.voice
+        ? (live ? LucideIcons.volume2 : LucideIcons.volume1)
+        : channel?.restricted ?? false
+            ? LucideIcons.lock
+            : LucideIcons.hash;
+
+/// What slides in while a drag brings a channel back: the page's own header,
+/// canvas and composer frame, until the page itself lands on the release.
+class MobileChannelPagePreview extends ConsumerStatefulWidget {
+  final String serverId;
+  final String channelId;
+  final String channelName;
+
+  const MobileChannelPagePreview({
+    super.key,
+    required this.serverId,
+    required this.channelId,
+    required this.channelName,
+  });
+
+  @override
+  ConsumerState<MobileChannelPagePreview> createState() =>
+      _MobileChannelPagePreviewState();
+}
+
+class _MobileChannelPagePreviewState
+    extends ConsumerState<MobileChannelPagePreview> {
+  final _controller = EmoteComposerController();
+  final _focus = FocusNode(canRequestFocus: false);
+  final _link = LayerLink();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    _focus.dispose();
+    super.dispose();
+  }
+
+  static void _inert() {}
+
+  @override
+  Widget build(BuildContext context) {
+    final bg = ref.watch(backgroundProvider);
+    return IgnorePointer(
+      child: ExcludeSemantics(
+        child: WallpaperBackdrop(
+          // Read under the backdrop, as the page does: over a wallpaper its
+          // canvas is clear.
+          child: Builder(builder: (context) {
+            final hollow = HollowTheme.of(context);
+            return Scaffold(
+              backgroundColor:
+                  bg.hasBackground ? Colors.transparent : hollow.background,
+              resizeToAvoidBottomInset: false,
+              body: SafeArea(
+                bottom: false,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    _MobileChatHeader(
+                      serverId: widget.serverId,
+                      channelId: widget.channelId,
+                      channelName: widget.channelName,
+                      onSearchToggle: _inert,
+                      onMembers: _inert,
+                      backToChannels: true,
+                    ),
+                    const Expanded(child: SizedBox.shrink()),
+                    chatInputBarShell(
+                      hollow,
+                      flushTop: false,
+                      child: ChatComposerRow(
+                        controller: _controller,
+                        focusNode: _focus,
+                        layerLink: _link,
+                        hintText: 'Message #${widget.channelName}',
+                        onChanged: (_) {},
+                        onKey: (_) => KeyEventResult.ignored,
+                        onAttach: _inert,
+                        onRecord: _inert,
+                        onExpressions: (_) {},
+                        onSend: _inert,
+                        autofocus: false,
+                      ),
+                    ),
+                    const MobileKeyboardSpacer(),
+                  ],
+                ),
+              ),
+            );
+          }),
+        ),
+      ),
+    );
+  }
+}
+
 class _MobileChatHeader extends ConsumerWidget {
   final String? peerId;
   final String? serverId;
@@ -3083,6 +3218,12 @@ class _MobileChatHeader extends ConsumerWidget {
   /// Scrolls the chat to a message, for a pinned message tapped in the sheet.
   final void Function(String messageId)? onJumpToMessage;
 
+  /// Opens the members panel.
+  final VoidCallback? onMembers;
+
+  /// Back lands on the server's channel list.
+  final bool backToChannels;
+
   const _MobileChatHeader({
     this.peerId,
     this.serverId,
@@ -3091,6 +3232,8 @@ class _MobileChatHeader extends ConsumerWidget {
     this.onSearchToggle,
     this.searchOpen = false,
     this.onJumpToMessage,
+    this.onMembers,
+    this.backToChannels = false,
   });
 
   @override
@@ -3125,7 +3268,7 @@ class _MobileChatHeader extends ConsumerWidget {
           children: [
             HollowIconButton(
               icon: LucideIcons.arrowLeft,
-              label: 'Back',
+              label: backToChannels ? 'Back to channels' : 'Back',
               size: 44,
               onPressed: () => Navigator.of(context).pop(),
             ),
@@ -3176,7 +3319,15 @@ class _MobileChatHeader extends ConsumerWidget {
                 online: !blocked && identityIsOnline(ref, peerId!),
                 ring: hollow.surface,
               )
-            : Icon(LucideIcons.hash, size: 20, color: hollow.textTertiary);
+            : Icon(
+                // A meeting's chat has no channel list to read.
+                serverId == null || serverId!.startsWith('conf:')
+                    ? LucideIcons.hash
+                    : mobileChannelGlyph(ref.watch(
+                        serverChannelsProvider(serverId!)
+                            .select((c) => c.valueOrNull?[channelId]))),
+                size: 20,
+                color: hollow.textTertiary);
 
     return HollowPressable(
       onTap: isDm && !isSaved
@@ -3287,12 +3438,12 @@ class _MobileChatHeader extends ConsumerWidget {
           onPressed: () => _showPinnedMessagesSheet(
               context, ref, serverId!, channelId!, pinnedIds),
         ),
-      if (serverId != null)
+      if (onMembers != null)
         HollowIconButton(
           icon: LucideIcons.users,
           label: 'Members',
           size: 44,
-          onPressed: () => showMobileMemberPanel(context, serverId!),
+          onPressed: onMembers,
         ),
       if (onSearchToggle != null) _searchButton(),
     ];

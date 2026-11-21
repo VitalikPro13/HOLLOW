@@ -1,11 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/system_notification_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
-import 'package:hollow/src/core/services/channel_topic_service.dart';
 import 'package:hollow/src/theme/hollow_shadows.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -15,6 +13,7 @@ import 'package:hollow/src/ui/chat/emote_image.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/mobile/mobile_chat_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
+import 'package:hollow/src/ui/mobile/server/mobile_server_navigation.dart';
 
 /// The ONLY mobile in-app notification, mounted inside [MobileChatRoute] so a
 /// message arriving in ANOTHER conversation still surfaces. Outside a chat
@@ -168,37 +167,8 @@ class _MobileInChatBannerState extends ConsumerState<MobileInChatBanner>
       final alreadyHere = serverId == widget.currentServerId &&
           channelId == widget.currentChannelId;
       if (!alreadyHere) {
-        ChannelListNotifier.fetchChannels(serverId).then((channels) async {
-          final layout = await ChannelLayoutNotifier.fetchLayout(serverId);
-          if (!mounted) return;
-          ref.read(channelListProvider.notifier).setChannels(channels);
-          ref.read(channelLayoutProvider.notifier)
-              .setLayout(layout, serverId: serverId);
-          ref.read(selectedChannelProvider.notifier).state = channelId;
-          ref.read(selectedServerProvider.notifier).state = serverId;
-          ref.read(selectedPeerProvider.notifier).state = null;
-          // Pulls the opened channel's relay ring if this connection has not.
-          // The helper never throws and retries until the node is up.
-          subscribeChannelTopics(serverId: serverId, channelIds: [channelId]);
-          final channelName = channels[channelId]?.name ?? '';
-          nav.popUntil(
-              (r) => r.settings.name != MobileChatRoute.routeName || r.isFirst);
-          nav
-              .push(hollowMobileRoute(
-            settings: const RouteSettings(name: MobileChatRoute.routeName),
-            builder: (_) => MobileChatRoute(
-              serverId: serverId,
-              channelId: channelId,
-              channelName: channelName.isNotEmpty ? channelName : 'channel',
-            ),
-          ))
-              .then((_) {
-            if (container.read(selectedChannelProvider) == channelId) {
-              container.read(selectedServerProvider.notifier).state = null;
-              container.read(selectedChannelProvider.notifier).state = null;
-            }
-          });
-        });
+        // Under that server's page, so a swipe back lands on its channels.
+        openMobileChannelOn(nav, serverId: serverId, channelId: channelId);
       }
     }
 

@@ -38,7 +38,7 @@ import 'package:hollow/src/ui/components/profile_card_body.dart'
 import 'package:hollow/src/ui/dialogs/confirm_remove_friend.dart';
 import 'package:hollow/src/ui/mobile/mobile_channel_actions.dart';
 import 'package:hollow/src/ui/mobile/mobile_message_actions.dart';
-import 'package:hollow/src/ui/mobile/tabs/mobile_chats_tab.dart';
+import 'package:hollow/src/ui/mobile/tabs/mobile_servers_tab.dart';
 import 'package:hollow/src/ui/mobile/tabs/mobile_friends_tab.dart';
 import 'package:hollow/src/ui/shell/channel_context_menus.dart'
     show confirmClearLabelGate;
@@ -434,7 +434,7 @@ void main() {
   });
   testWidgets('server sheet', (t) async {
     await pumpHost(t, _phone,
-        home: const MobileChatsTab(),
+        home: const MobileServersTab(),
         extra: [
           serverListProvider.overrideWith(_Servers.new),
           myRoleProvider.overrideWith((ref, id) async => 'owner'),

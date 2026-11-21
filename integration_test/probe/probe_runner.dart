@@ -68,6 +68,7 @@ import 'probe_targets.dart';
 /// | `right_click_at` | same as `tap_at` | secondary click on a point |
 /// | `enter_text` | `value`, `target` (default `field`) | types into a field |
 /// | `key` | `value` (`escape`, `enter`, `tab`, ...) | one key press |
+/// | `system_back` | | Android's back, as the OS hands it to the app |
 /// | `scroll` | `target`, `dy`, `dx` | drags a scrollable |
 /// | `wait` | `ms` or `frames` | pumps frames |
 /// | `shot` | `name` | writes a PNG |
@@ -533,6 +534,12 @@ class ProbeRunner {
         await _hover(point);
         await settle(frames: step['frames'] as int? ?? 25);
         return 'hovering ${point.dx.round()},${point.dy.round()}';
+
+      case 'system_back':
+        // Android's back button or gesture, as the OS hands it to the app.
+        await tester.binding.handlePopRoute();
+        await settle(frames: step['frames'] as int? ?? 25);
+        return 'system back';
 
       case 'drag_at':
         // A drag from a fixed point, for gestures that care where they start

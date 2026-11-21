@@ -10,8 +10,7 @@ import 'package:hollow/src/theme/hollow_theme_data.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_icon_button.dart';
 import 'package:hollow/src/ui/mobile/mobile_conferences_route.dart';
-import 'package:hollow/src/ui/mobile/tabs/mobile_archive_tab.dart';
-import 'package:hollow/src/ui/shell/mobile_nav.dart';
+import 'package:hollow/src/ui/mobile/mobile_archive_page.dart';
 
 import '../helpers/test_app.dart';
 
@@ -68,8 +67,7 @@ void main() {
         ),
       ],
     );
-    await _pump(tester, const Scaffold(body: MobileArchiveTab()), extra: [
-      mobileTabProvider.overrideWith((ref) => 2),
+    await _pump(tester, const MobileArchivePage(), extra: [
       archiveDmListProvider.overrideWith((ref) async => const []),
       archiveChannelListProvider.overrideWith((ref) async => const [group]),
     ]);

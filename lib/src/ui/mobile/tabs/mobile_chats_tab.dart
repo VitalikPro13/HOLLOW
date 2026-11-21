@@ -1,63 +1,44 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/name_color_provider.dart';
-import 'package:hollow/src/core/providers/event_provider.dart' show showEventToast;
-import 'package:hollow/src/core/providers/relay_denial_provider.dart';
-import 'package:hollow/src/ui/components/hollow_divider.dart';
 import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/message_preview.dart';
-import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
 import 'package:hollow/src/core/models/channel_info.dart';
-import 'package:hollow/src/core/models/channel_layout.dart';
-import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/chat_provider.dart';
 import 'package:hollow/src/core/providers/friends_provider.dart';
 import 'package:hollow/src/core/providers/hidden_archive_dm_provider.dart';
 import 'package:hollow/src/core/providers/notification_provider.dart';
-import 'package:hollow/src/core/providers/pending_join_provider.dart';
 import 'package:hollow/src/core/providers/saved_messages_provider.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
-import 'package:hollow/src/core/providers/voice_channel_provider.dart';
 import 'package:hollow/src/core/time_labels.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/conversation_row.dart';
-import 'package:hollow/src/ui/components/hollow_badge.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
-import 'package:hollow/src/ui/components/hollow_count_badge.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_section_header.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/saved_messages_avatar.dart';
-import 'package:hollow/src/ui/components/server_avatar.dart';
-import 'package:hollow/src/ui/components/server_name_text.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
-import 'package:hollow/src/ui/components/pending_join_ui.dart';
 import 'package:hollow/src/ui/animations/ambient_background.dart';
-import 'package:hollow/src/ui/animations/hollow_curves.dart';
 import 'package:hollow/src/ui/dialogs/export_archive_dialog.dart';
-import 'package:hollow/src/ui/dialogs/invite_dialog.dart';
-import 'package:hollow/src/ui/dialogs/create_channel_dialog.dart';
-import 'package:hollow/src/ui/dialogs/create_server_dialog.dart';
+import 'package:hollow/src/ui/mobile/tabs/mobile_servers_tab.dart'
+    show showMobileAddServer;
 import 'package:hollow/src/ui/components/hollow_list_row.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
-import 'package:hollow/src/ui/server_settings/server_settings_catalog.dart'
-    show confirmDeleteServer, confirmLeaveServer;
-import 'package:hollow/src/ui/shell/server_context_menus.dart'
-    show markServerRead;
 import 'package:hollow/src/ui/dialogs/new_message_dialog.dart';
-import 'package:hollow/src/ui/mobile/mobile_channel_actions.dart';
 import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_chat_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_conferences_route.dart';
-import 'package:hollow/src/ui/mobile/mobile_voice_channel_route.dart';
+import 'package:hollow/src/ui/mobile/server/mobile_server_navigation.dart';
+import 'package:hollow/src/ui/mobile/mobile_archive_page.dart'
+    show openMobileArchive;
 import 'package:hollow/src/core/providers/settings_place_provider.dart';
-import 'package:hollow/src/ui/mobile/mobile_server_settings_route.dart';
 import 'package:hollow/src/ui/mobile/tabs/mobile_friends_tab.dart'
     show showMobileAddFriendSheet;
 import 'package:hollow/src/core/providers/settings_place_provider.dart'
@@ -67,19 +48,16 @@ import 'package:hollow/src/ui/mobile/tabs/mobile_settings_tab.dart'
 import 'package:hollow/src/ui/shell/home_dashboard.dart';
 import 'package:hollow/src/ui/shell/home_inbox.dart';
 import 'package:hollow/src/ui/shell/home_rail.dart';
-import 'package:hollow/src/ui/shell/voice_room_switch.dart';
-import 'package:hollow/src/core/providers/relay_domain_provider.dart';
 import 'package:hollow/src/ui/components/hollow_sheet.dart';
-import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:flutter/services.dart';
 
 /// The phone's Home: the desktop inbox (greeting, Needs Attention, the setup
-/// checklist, All / Unread / Mentions) plus the server list, which on a phone
-/// has no dock to live in.
+/// checklist, All / Unread / Mentions). Servers have their own tab; channels
+/// that mention you stay here, under Mentions.
 ///
 /// Brief (design language 5.1). Job: see what needs me and get back into my
-/// conversations and servers. Focal point: the list. Primary action: none on
+/// conversations. Focal point: the list. Primary action: none on
 /// the list itself (a row is the action); New message sits in the title row
 /// because the nav bar's centre button already carries the accent.
 class MobileChatsTab extends ConsumerStatefulWidget {
@@ -106,7 +84,7 @@ class _MobileHomeActions extends HomeActions {
   void addFriend(BuildContext context) => showMobileAddFriendSheet(context);
 
   @override
-  void addServer(BuildContext context) => showCreateServerDialog(context);
+  void addServer(BuildContext context) => showMobileAddServer(context);
 
   @override
   void editProfile(BuildContext context) => openMobileProfileSettings(context);
@@ -129,7 +107,6 @@ const double _kAvatar = 48;
 const int _kRoomCap = 2;
 
 class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
-  final _expandedServers = <String>{};
   HomeFilter _filter = HomeFilter.all;
   String _query = '';
 
@@ -229,214 +206,6 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
     );
   }
 
-  /// The desktop strip menu's rows, minus folders, which a phone has none of.
-  /// An owner deletes and everyone else leaves: an owner cannot leave.
-  void _showServerSheet(
-      BuildContext context, String serverId, String serverName) {
-    final role = ref.read(myRoleProvider(serverId)).valueOrNull ?? 'member';
-    final perms = ref.read(myPermissionsProvider(serverId)).valueOrNull ?? 0;
-    final isOwner = role == 'owner';
-    final canManageChannels = (perms & Permission.manageChannels) != 0;
-    final muted =
-        ref.read(notificationSettingsProvider).isServerMuted(serverId);
-    showHollowSheet<void>(
-      context: context,
-      builder: (sheetContext) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            HollowSheetTitle(serverName),
-            _sheetRow(sheetContext, LucideIcons.checkCheck, 'Mark as read',
-                () => markServerRead(ref, serverId)),
-            _sheetRow(
-                sheetContext,
-                muted ? LucideIcons.bell : LucideIcons.bellOff,
-                muted ? 'Unmute server' : 'Mute server',
-                () => _report(
-                    // Unmuting goes back to the default, never to "All messages".
-                    muted
-                        ? ref
-                            .read(notificationSettingsProvider.notifier)
-                            .resetServerLevel(serverId)
-                        : ref
-                            .read(notificationSettingsProvider.notifier)
-                            .setServerLevel(serverId, NotificationLevel.nothing),
-                    'Could not change notifications',
-                    done: muted
-                        ? 'Notifications unmuted'
-                        : 'Notifications muted')),
-            _sheetRow(sheetContext, LucideIcons.userPlus, 'Invite people',
-                () => showInviteDialog(
-                    context,
-                    serverInviteLinkFor(serverId,
-                        relay: ref.read(relayDomainProvider)),
-                    serverId)),
-            if (canManageChannels)
-              _sheetRow(sheetContext, LucideIcons.plusCircle, 'Create channel',
-                  () => showCreateChannelDialog(context, serverId)),
-            _sheetRow(sheetContext, LucideIcons.settings, 'Server settings',
-                () => Navigator.of(context, rootNavigator: true).push(
-                      hollowMobileRoute(
-                        builder: (_) =>
-                            MobileServerSettingsRoute(serverId: serverId),
-                      ),
-                    )),
-            _sheetRow(sheetContext, LucideIcons.copy, 'Copy server ID',
-                () => _report(Clipboard.setData(ClipboardData(text: serverId)),
-                    'Could not copy the server ID',
-                    done: 'Server ID copied')),
-            const HollowDivider(),
-            _sheetRow(
-                sheetContext,
-                isOwner ? LucideIcons.trash2 : LucideIcons.logOut,
-                isOwner ? 'Delete server' : 'Leave server',
-                () => isOwner
-                    ? confirmDeleteServer(context, ref, serverId)
-                    : confirmLeaveServer(context, ref, serverId)),
-            const SizedBox(height: HollowSpacing.sm),
-          ],
-        ),
-      ),
-    );
-  }
-
-  void _openChannelChat(String serverId, String channelId, String channelName) {
-    ref.read(selectedServerProvider.notifier).state = serverId;
-    ref.read(selectedChannelProvider.notifier).state = channelId;
-    Navigator.of(context, rootNavigator: true).push(
-      hollowMobileRoute(
-        settings: const RouteSettings(name: MobileChatRoute.routeName),
-        builder: (_) => MobileChatRoute(
-          serverId: serverId,
-          channelId: channelId,
-          channelName: channelName,
-        ),
-      ),
-    ).then((_) {
-      // Guarded: a notification tap may have replaced this chat already.
-      if (mounted && ref.read(selectedChannelProvider) == channelId) {
-        ref.read(selectedServerProvider.notifier).state = null;
-        ref.read(selectedChannelProvider.notifier).state = null;
-      }
-    });
-  }
-
-  Future<void> _openVoiceChannel(String serverId, ChannelInfo channel) async {
-    // Nothing opens: a room pushed here would bury the refusal's toast and sit
-    // on "Joining the room" until its deadline.
-    if (ref.read(serverRelayDeniedProvider(serverId))) {
-      showEventToast(kServerDeniedText,
-          kind: 'relay_denied_voice', id: serverId.toLowerCase());
-      return;
-    }
-    if (ref.read(serverElsewhereProvider(serverId)) != null) {
-      showEventToast(kVoiceElsewhereText,
-          kind: 'relay_elsewhere_voice', id: serverId.toLowerCase());
-      return;
-    }
-    final vcState = ref.read(voiceChannelProvider);
-    final callState = ref.read(callProvider);
-
-    if (callState.status != CallStatus.idle) {
-      if (mounted) {
-        HollowToast.show(context, 'Leave your call first',
-            type: HollowToastType.error);
-      }
-      return;
-    }
-
-    // Already in THIS voice channel.
-    if (vcState.currentServerId == serverId &&
-        vcState.currentChannelId == channel.channelId) {
-      if (!mounted) return;
-      final nav = Navigator.of(context, rootNavigator: true);
-      // No chat under the call while the room's text chat is off (#107).
-      if (channel.chatOpen) {
-        ref.read(selectedServerProvider.notifier).state = serverId;
-        ref.read(selectedChannelProvider.notifier).state = channel.channelId;
-        nav.push(
-          hollowMobileRoute(
-            settings: const RouteSettings(name: MobileChatRoute.routeName),
-            builder: (_) => MobileChatRoute(
-              serverId: serverId,
-              channelId: channel.channelId,
-              channelName: channel.name,
-            ),
-          ),
-        ).then((_) {
-          // Guarded: a notification tap may have replaced this chat already.
-          if (mounted &&
-              ref.read(selectedChannelProvider) == channel.channelId) {
-            ref.read(selectedServerProvider.notifier).state = null;
-            ref.read(selectedChannelProvider.notifier).state = null;
-          }
-        });
-      }
-      nav.push(hollowMobileRoute(
-        transition: HollowRouteTransition.slideUp,
-        builder: (_) => MobileVoiceChannelRoute(
-          serverId: serverId,
-          channelId: channel.channelId,
-          channelName: channel.name,
-        ),
-      ));
-      return;
-    }
-
-    if (!await confirmVoiceRoomSwitch(context, ref,
-            serverId: serverId,
-            channelId: channel.channelId,
-            channelName: channel.name) ||
-        !mounted) {
-      return;
-    }
-
-    // Text chat is pushed first, so the back arrow reveals it under the voice
-    // route.
-    final join = ref
-        .read(voiceChannelProvider.notifier)
-        .joinChannel(serverId, channel.channelId);
-    join.catchError((Object e) {
-      if (mounted) {
-        HollowToast.show(
-            context, friendlyError(e, fallback: "Couldn't join the voice room"),
-            type: HollowToastType.error);
-      }
-    });
-    if (!mounted) return;
-    final nav = Navigator.of(context, rootNavigator: true);
-    // No chat under the call while the room's text chat is off (#107).
-    if (channel.chatOpen) {
-      ref.read(selectedServerProvider.notifier).state = serverId;
-      ref.read(selectedChannelProvider.notifier).state = channel.channelId;
-      nav.push(
-        hollowMobileRoute(
-          settings: const RouteSettings(name: MobileChatRoute.routeName),
-          builder: (_) => MobileChatRoute(
-            serverId: serverId,
-            channelId: channel.channelId,
-            channelName: channel.name,
-          ),
-        ),
-      ).then((_) {
-        // Guarded: a notification tap may have replaced this chat already.
-        if (mounted && ref.read(selectedChannelProvider) == channel.channelId) {
-          ref.read(selectedServerProvider.notifier).state = null;
-          ref.read(selectedChannelProvider.notifier).state = null;
-        }
-      });
-    }
-    nav.push(hollowMobileRoute(
-      transition: HollowRouteTransition.slideUp,
-      builder: (_) => MobileVoiceChannelRoute(
-        serverId: serverId,
-        channelId: channel.channelId,
-        channelName: channel.name,
-        join: join,
-      ),
-    ));
-  }
-
   Future<void> _openVoiceRoom(HomeVoiceRoom room) async {
     final Map<String, ChannelInfo> channels;
     try {
@@ -451,7 +220,7 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
     }
     final channel = channels[room.channelId];
     if (channel == null || !mounted) return;
-    await _openVoiceChannel(room.serverId, channel);
+    await openMobileVoiceChannel(context, ref, room.serverId, channel);
   }
 
   void _newMessage() => showNewMessageDialog(
@@ -463,30 +232,16 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
-    final servers = ref.watch(serverListProvider);
     final hasFriends = ref.watch(sortedFriendsProvider).isNotEmpty;
     final firstRun = homeIsFirstRun(ref);
     final showSetup = homeShowsSetup(ref);
-    final unread = ref.watch(unreadProvider);
     final hiddenDms = ref.watch(hiddenArchiveDmsProvider);
 
+    // Unread first, then newest; servers live on their own tab.
     final dms = [
       for (final c in homeDmConversations(ref))
         if (!hiddenDms.contains(c.peerId)) _DmEntry(c),
-    ];
-    final serverEntries = [
-      for (final server in servers.values)
-        _ServerEntry(
-          serverId: server.serverId,
-          name: server.name,
-          memberCount: server.memberCount,
-          unread: unread.serverUnreadCount(server.serverId),
-          mentions: unread.serverMentionCount(server.serverId),
-        ),
-    ];
-    // Servers carry no time, so what is unread leads and the rest keep a
-    // stable order under the DMs.
-    final ranked = <_Entry>[...dms, ...serverEntries]..sort((a, b) {
+    ]..sort((a, b) {
         if (a.isUnread != b.isUnread) return a.isUnread ? -1 : 1;
         final at = a.at ?? DateTime(2000);
         final bt = b.at ?? DateTime(2000);
@@ -502,27 +257,17 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
     bool matches(_Entry e) => q.isEmpty || e.searchText.contains(q);
 
     final savedId = ref.watch(savedMessagesPeerIdProvider);
-    final pendingJoins = ref.watch(pendingJoinsProvider);
     final List<_Entry> shown = switch (_filter) {
-      // Saved messages and parked joins are pinned above the ranking: one is
-      // a note to yourself, the other has no name or activity to rank by.
+      // Saved messages is pinned above the ranking: a note to yourself.
       HomeFilter.all => [
           if (savedId != null && matches(_SavedEntry(savedId))) _SavedEntry(savedId),
-          if (q.isEmpty)
-            for (final id in pendingJoins.keys) _PendingEntry(id),
-          ...ranked.where(matches),
+          ...dms.where(matches),
         ],
-      HomeFilter.unread => ranked.where((e) => e.isUnread && matches(e)).toList(),
+      HomeFilter.unread => dms.where((e) => e.isUnread && matches(e)).toList(),
       HomeFilter.mentions => mentions.where(matches).toList(),
     };
-    // A held server is still one of ours: the layout must not flip to first run.
-    final hasConversations =
-        ranked.isNotEmpty || ref.watch(ageHoldHidesServersProvider);
+    final hasConversations = dms.isNotEmpty || mentions.isNotEmpty;
     final rooms = homeVoiceRooms(ref);
-    // Stands in for the empty state too: the person has servers, just not yet.
-    final holdNotice = _filter == HomeFilter.all &&
-        q.isEmpty &&
-        ref.watch(ageHoldHidesServersProvider);
 
     return AmbientBackground(
       color1: hollow.accent,
@@ -540,7 +285,9 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
             ),
             child: Row(
               children: [
-                Expanded(child: HomeGreeting(firstRun: firstRun)),
+                Expanded(
+                  child: HomeGreeting(firstRun: firstRun, shedName: true),
+                ),
                 _HeaderAction(
                   icon: LucideIcons.video,
                   label: 'Conferences',
@@ -551,6 +298,12 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
                       ),
                     );
                   },
+                ),
+                // The Archive page, which on a phone has no tab of its own.
+                _HeaderAction(
+                  icon: LucideIcons.archive,
+                  label: 'Archive',
+                  onTap: () => openMobileArchive(context, ref),
                 ),
                 if (hasFriends)
                   _HeaderAction(
@@ -619,7 +372,7 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
                             alignment: Alignment.centerLeft,
                             child: HomeFilters(
                               selected: _filter,
-                              unreadCount: ranked.where((e) => e.isUnread).length,
+                              unreadCount: dms.where((e) => e.isUnread).length,
                               mentionCount: mentions.length,
                               onSelect: (f) => setState(() => _filter = f),
                             ),
@@ -652,7 +405,7 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
                             ),
                           ),
                   )
-                else if (shown.isEmpty && !holdNotice)
+                else if (shown.isEmpty)
                   SliverToBoxAdapter(
                     child: Padding(
                       padding: const EdgeInsets.symmetric(
@@ -663,16 +416,14 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
                         nothingAtAll: !hasConversations,
                         query: _query,
                         filter: _filter,
-                        emptyDescription:
-                            'Add a friend or join a server to start chatting.',
                       ),
                     ),
                   )
                 else if (shown.isNotEmpty)
                   SliverList.builder(
                     itemCount: shown.length,
-                    // Keyed by identity: this list mixes DMs and servers and
-                    // reorders constantly, and without keys Flutter re-parents
+                    // Keyed by identity: this list reorders constantly, and
+                    // without keys Flutter re-parents
                     // row State across DIFFERENT conversations.
                     findChildIndexCallback: (key) {
                       final i = shown.indexWhere((e) => ValueKey(e.key) == key);
@@ -683,8 +434,6 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
                       child: _row(context, shown[i]),
                     ),
                   ),
-                if (holdNotice)
-                  const SliverToBoxAdapter(child: AgeHoldNotice()),
                 const SliverToBoxAdapter(
                     child: SizedBox(height: HollowSpacing.xl)),
               ],
@@ -710,19 +459,6 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
           time: last == null ? null : conversationTimeLabel(last.timestamp),
           onTap: () => _openDmChat(peerId),
         );
-      case _PendingEntry(:final serverId):
-        // Tap and long press open the same sheet: there is no server to
-        // navigate into, and a tap that did nothing would read as broken.
-        void openSheet() => showPendingJoinSheet(
-              context: context,
-              ref: ref,
-              serverId: serverId,
-            );
-        return _PendingJoinRow(
-          serverId: serverId,
-          onTap: openSheet,
-          onLongPress: openSheet,
-        );
       case _DmEntry(:final c):
         return ConversationRow(
           touch: true,
@@ -746,55 +482,12 @@ class _MobileChatsTabState extends ConsumerState<MobileChatsTab> {
           time: c.at == null ? null : conversationTimeLabel(c.at!),
           unread: c.unread,
           mention: true,
-          onTap: () => _openChannelChat(
-              c.serverId!, c.channelId!, c.channelName ?? ''),
-        );
-      case _ServerEntry():
-        final id = entry.serverId;
-        return _ServerRow(
-          serverId: id,
-          name: entry.name,
-          unreadCount: entry.unread,
-          mentionCount: entry.mentions,
-          memberCount: entry.memberCount,
-          isExpanded: _expandedServers.contains(id),
-          onTap: () => setState(() {
-            if (!_expandedServers.remove(id)) _expandedServers.add(id);
-          }),
-          onLongPress: () => _showServerSheet(context, id, entry.name),
-          onChannelTap: (channel) {
-            if (channel.channelType == ChannelType.voice) {
-              _openVoiceChannel(id, channel);
-            } else {
-              _openChannelChat(id, channel.channelId, channel.name);
-            }
-          },
+          onTap: () => openMobileChannel(context, ref,
+              serverId: c.serverId!,
+              channelId: c.channelId!,
+              channelName: c.channelName),
         );
     }
-  }
-}
-
-const kAgeHoldNoticeText =
-    'Age-restricted servers appear once Hollow connects.';
-
-/// Where the phone's hold keeps flagged servers off the list, so a failed or
-/// slow connection never reads as "you have no such servers".
-class AgeHoldNotice extends StatelessWidget {
-  const AgeHoldNotice({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    return Padding(
-      padding: const EdgeInsets.symmetric(
-        horizontal: HollowSpacing.lg,
-        vertical: HollowSpacing.md,
-      ),
-      child: Text(
-        kAgeHoldNoticeText,
-        style: HollowTypography.bodySmall.copyWith(color: hollow.textSecondary),
-      ),
-    );
   }
 }
 
@@ -843,17 +536,6 @@ class _SavedEntry extends _Entry {
   String get searchText => 'saved messages';
 }
 
-class _PendingEntry extends _Entry {
-  final String serverId;
-  const _PendingEntry(this.serverId);
-  @override
-  String get key => 'pending-$serverId';
-  @override
-  String get name => '';
-  @override
-  String get searchText => '';
-}
-
 class _DmEntry extends _Entry {
   final HomeConversation c;
   const _DmEntry(this.c);
@@ -882,802 +564,4 @@ class _MentionEntry extends _Entry {
   bool get isUnread => true;
   @override
   DateTime? get at => c.at;
-}
-
-class _ServerEntry extends _Entry {
-  final String serverId;
-  @override
-  final String name;
-  final int memberCount;
-  final int unread;
-  final int mentions;
-
-  const _ServerEntry({
-    required this.serverId,
-    required this.name,
-    required this.memberCount,
-    required this.unread,
-    required this.mentions,
-  });
-
-  @override
-  String get key => 'srv-$serverId';
-  @override
-  String get searchText => name.toLowerCase();
-  @override
-  bool get isUnread => unread > 0 || mentions > 0;
-}
-
-/// A join we asked for that nobody has answered yet.
-///
-/// Greyed on purpose: there is nothing to open, and all we know about the
-/// server is the id from the invite link. No spinner either, because the wait
-/// is for another person to open their app.
-class _PendingJoinRow extends ConsumerWidget {
-  final String serverId;
-  final VoidCallback onTap;
-  final VoidCallback onLongPress;
-
-  const _PendingJoinRow({
-    required this.serverId,
-    required this.onTap,
-    required this.onLongPress,
-  });
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final hollow = HollowTheme.of(context);
-    final info = ref.watch(pendingJoinsProvider)[serverId];
-    final rejected = info?.isRejected ?? false;
-    final denied = ref.watch(serverRelayDeniedProvider(serverId));
-
-    return HollowPressable(
-      onTap: onTap,
-      onLongPress: onLongPress,
-      semanticLabel:
-          '${pendingJoinTitle(rejected: rejected, denied: denied)}, show actions',
-      subtle: true,
-      borderRadius: BorderRadius.zero,
-      padding: const EdgeInsets.symmetric(
-        horizontal: HollowSpacing.lg,
-        vertical: HollowSpacing.md,
-      ),
-      child: Row(
-        children: [
-          Container(
-            width: _kAvatar,
-            height: _kAvatar,
-            decoration: BoxDecoration(
-              color: hollow.elevated,
-              borderRadius: BorderRadius.circular(hollow.radiusMd),
-            ),
-            alignment: Alignment.center,
-            child: Icon(
-              rejected || denied ? LucideIcons.ban : LucideIcons.clock,
-              size: 20,
-              color: hollow.textTertiary,
-            ),
-          ),
-          const SizedBox(width: HollowSpacing.md),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  pendingJoinTitle(rejected: rejected, denied: denied),
-                  style: HollowTypography.subheading.copyWith(
-                    color: hollow.textSecondary,
-                    fontWeight: FontWeight.w500,
-                  ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-                Text(
-                  pendingJoinSubtitle(
-                    rejected: rejected,
-                    reason: info?.reason ?? '',
-                    denied: denied,
-                  ),
-                  style: HollowTypography.body
-                      .copyWith(color: hollow.textTertiary),
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _ServerRow extends ConsumerWidget {
-  final String serverId;
-  final String name;
-  final int unreadCount;
-  final int mentionCount;
-  final int memberCount;
-  final bool isExpanded;
-  final VoidCallback onTap;
-  final VoidCallback onLongPress;
-  final void Function(ChannelInfo) onChannelTap;
-
-  const _ServerRow({
-    required this.serverId,
-    required this.name,
-    required this.unreadCount,
-    required this.mentionCount,
-    required this.memberCount,
-    required this.isExpanded,
-    required this.onTap,
-    required this.onLongPress,
-    required this.onChannelTap,
-  });
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final hollow = HollowTheme.of(context);
-    final hot = unreadCount > 0 || mentionCount > 0;
-
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        HollowPressable(
-          onTap: onTap,
-          onLongPress: onLongPress,
-          subtle: true,
-          borderRadius: BorderRadius.zero,
-          padding: const EdgeInsets.symmetric(
-            horizontal: HollowSpacing.lg,
-            vertical: HollowSpacing.md,
-          ),
-          child: Row(
-            children: [
-              // No hover on touch, so an expanded row counts as watched.
-              ServerAvatar(
-                serverId: serverId,
-                name: name,
-                size: _kAvatar,
-                animate: isExpanded,
-              ),
-              const SizedBox(width: HollowSpacing.md),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    ServerNameText(
-                      name,
-                      isNsfw: ref.watch(serverListProvider
-                          .select((m) => m[serverId]?.isNsfw ?? false)),
-                      style: HollowTypography.subheading.copyWith(
-                        fontWeight: hot ? FontWeight.w600 : FontWeight.w500,
-                        color: hollow.textPrimary,
-                      ),
-                    ),
-                    Text(
-                      memberCount == 1 ? '1 member' : '$memberCount members',
-                      style: HollowTypography.body.copyWith(
-                        color: hollow.textSecondary,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(width: HollowSpacing.sm),
-              // Admitted after a parked join, still waiting for a member to
-              // finish the MLS setup.
-              if (ref.watch(awaitingSetupProvider
-                  .select((s) => s.contains(serverId)))) ...[
-                const AwaitingSetupBadge(),
-                const SizedBox(width: HollowSpacing.sm),
-              ],
-              if (hot) ...[
-                HollowCountBadge(
-                  count: mentionCount > 0 ? mentionCount : unreadCount,
-                  mention: mentionCount > 0,
-                ),
-                const SizedBox(width: HollowSpacing.sm),
-              ],
-              AnimatedRotation(
-                turns: isExpanded ? 0.5 : 0.0,
-                duration: HollowDurations.fast,
-                curve: HollowCurves.enter,
-                child: Icon(
-                  LucideIcons.chevronDown,
-                  size: 20,
-                  color: hollow.textSecondary,
-                ),
-              ),
-            ],
-          ),
-        ),
-        AnimatedCrossFade(
-          firstChild: const SizedBox.shrink(),
-          secondChild: _ChannelList(
-            serverId: serverId,
-            onChannelTap: onChannelTap,
-          ),
-          crossFadeState:
-              isExpanded ? CrossFadeState.showSecond : CrossFadeState.showFirst,
-          duration: HollowDurations.fast,
-          sizeCurve: HollowCurves.enter,
-        ),
-      ],
-    );
-  }
-}
-
-/// Channel rows start under the server name.
-const double _kTreeIndent = _kAvatar + HollowSpacing.lg + HollowSpacing.md;
-
-/// The tree line runs down the server avatar's centre.
-const double _kTreeLeft = HollowSpacing.lg + _kAvatar / 2;
-
-class _ChannelList extends ConsumerStatefulWidget {
-  final String serverId;
-  final void Function(ChannelInfo) onChannelTap;
-
-  const _ChannelList({
-    required this.serverId,
-    required this.onChannelTap,
-  });
-
-  @override
-  ConsumerState<_ChannelList> createState() => _ChannelListState();
-}
-
-class _ChannelListState extends ConsumerState<_ChannelList> {
-  List<_DisplayItem> _displayItems = [];
-  final _collapsedCategories = <String, bool>{};
-  bool _loading = true;
-  bool _failed = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _loadChannels();
-  }
-
-  @override
-  void didUpdateWidget(covariant _ChannelList oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    // A State reused for a DIFFERENT server still holds the old one's cached
-    // display items.
-    if (oldWidget.serverId != widget.serverId) {
-      setState(() {
-        _displayItems = [];
-        _collapsedCategories.clear();
-        _loading = true;
-        _failed = false;
-      });
-      _loadChannels();
-    }
-  }
-
-  Future<void> _loadChannels() async {
-    final serverId = widget.serverId;
-    final List<Object> results;
-    try {
-      results = await Future.wait([
-        ChannelListNotifier.fetchChannels(serverId),
-        ChannelLayoutNotifier.fetchLayout(serverId),
-      ]);
-    } catch (_) {
-      if (!mounted || serverId != widget.serverId) return;
-      // A list already on screen stays; only a first read shows the failure.
-      if (_loading) {
-        setState(() {
-          _loading = false;
-          _failed = true;
-        });
-      }
-      return;
-    }
-    if (!mounted || serverId != widget.serverId) return;
-    final channelMap = results[0] as Map<String, ChannelInfo>;
-    final layoutJson = results[1] as String;
-    setState(() {
-      _displayItems = _buildDisplayItems(channelMap, layoutJson);
-      _loading = false;
-      _failed = false;
-    });
-  }
-
-  void _retry() {
-    setState(() {
-      _failed = false;
-      _loading = true;
-    });
-    _loadChannels();
-  }
-
-  List<_DisplayItem> _buildDisplayItems(
-    Map<String, ChannelInfo> allChannels,
-    String layoutJson,
-  ) {
-    // `meCanSee` is Rust's full access predicate (tier, label gates, grants);
-    // never re-implement the ladder here.
-    final channels = <String, ChannelInfo>{
-      for (final e in allChannels.entries)
-        if (e.value.meCanSee) e.key: e.value,
-    };
-
-    final items = <_DisplayItem>[];
-    String? currentCategory;
-
-    // Channel LISTS render the normalised layout, never the stored one. The
-    // appended channels must come out of this same call: tracked in a separate
-    // loop they fall outside the pass that follows the open category, and a
-    // channel under a trailing category survives collapsing it.
-    final layout = effectiveLayoutFrom(parseLayoutJson(layoutJson), channels);
-    for (final entry in layout) {
-      switch (entry) {
-        case CategoryItem(:final name):
-          currentCategory = name;
-          items.add(_CategoryDisplayItem(name));
-        case SeparatorItem():
-          currentCategory = null;
-          items.add(_SeparatorDisplayItem());
-        case ChannelItem(:final channelId):
-          final ch = channels[channelId];
-          if (ch == null) break;
-          items.add(_ChannelDisplayItem(
-            channel: ch,
-            category: currentCategory,
-          ));
-      }
-    }
-
-    for (int i = 0; i < items.length; i++) {
-      if (items[i] is _ChannelDisplayItem) {
-        final next = i + 1 < items.length ? items[i + 1] : null;
-        final isLast = next == null ||
-            next is _CategoryDisplayItem ||
-            next is _SeparatorDisplayItem;
-        (items[i] as _ChannelDisplayItem).isLastInGroup = isLast;
-      }
-    }
-
-    return items;
-  }
-
-  void _showChannelActions(BuildContext context, ChannelInfo channel, bool canManage) {
-    showMobileChannelActions(
-      context: context,
-      serverId: widget.serverId,
-      channel: channel,
-      canManage: canManage,
-      onChanged: _loadChannels,
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    // Only THIS server's participant map, so mute, camera and share changes
-    // elsewhere do not rebuild the whole channel tree.
-    final voiceParticipantsByChannel = ref.watch(
-        voiceChannelProvider.select((s) => s.participants[widget.serverId]));
-    final unread = ref.watch(unreadProvider);
-    final perms = ref.watch(myPermissionsProvider(widget.serverId)).valueOrNull ?? 0;
-    final canManage = (perms & Permission.manageChannels) != 0;
-
-    ref.listen(serverListProvider.select((s) => s[widget.serverId]),
-        (prev, next) {
-      if (prev != next) _loadChannels();
-    });
-    ref.listen(channelListProvider, (prev, next) {
-      if (prev != next) _loadChannels();
-    });
-    // Visibility, posting and role changes must refresh THIS list even when no
-    // server is selected, which is the common Chats-tab case where
-    // `channelListProvider` is stale.
-    ref.listen(serverChannelsProvider(widget.serverId), (prev, next) {
-      _loadChannels();
-    });
-    ref.listen(myRoleProvider(widget.serverId), (prev, next) {
-      if (prev?.valueOrNull != next.valueOrNull) _loadChannels();
-    });
-    ref.listen(myPermissionsProvider(widget.serverId), (prev, next) {
-      if (prev?.valueOrNull != next.valueOrNull) _loadChannels();
-    });
-
-    if (_loading) {
-      return const Padding(
-        padding: EdgeInsets.only(
-          left: _kTreeIndent,
-          bottom: HollowSpacing.sm,
-          top: HollowSpacing.xs,
-        ),
-        child: HollowSpinner(delayed: true),
-      );
-    }
-
-    if (_failed) {
-      return Padding(
-        padding: const EdgeInsets.only(
-          left: _kTreeIndent,
-          right: HollowSpacing.lg,
-          bottom: HollowSpacing.sm,
-        ),
-        child: HollowEmptyState(
-          dense: true,
-          title: "Channels didn't load",
-          action: HollowButton.ghost(
-            touch: true,
-            onPressed: _retry,
-            child: const Text('Try again'),
-          ),
-        ),
-      );
-    }
-
-    final hasChannels = _displayItems.any((i) => i is _ChannelDisplayItem);
-    if (!hasChannels && !canManage) {
-      return const Padding(
-        padding: EdgeInsets.only(
-          left: _kTreeIndent,
-          bottom: HollowSpacing.sm,
-        ),
-        child: HollowEmptyState(dense: true, title: 'No channels'),
-      );
-    }
-
-    final widgets = <Widget>[];
-    for (final item in _displayItems) {
-      if (item is _CategoryDisplayItem) {
-        final collapsed = _collapsedCategories[item.name] ?? false;
-        widgets.add(_CategoryHeaderRow(
-          name: item.name,
-          isCollapsed: collapsed,
-          onToggle: () => setState(() {
-            _collapsedCategories[item.name] = !collapsed;
-          }),
-        ));
-      } else if (item is _SeparatorDisplayItem) {
-        widgets.add(const _TreeSeparatorRow());
-      } else if (item is _ChannelDisplayItem) {
-        final collapsed = item.category != null &&
-            (_collapsedCategories[item.category] ?? false);
-        if (!collapsed) {
-          final ch = item.channel;
-          widgets.add(_TreeChannelRow(
-            channel: ch,
-            serverId: widget.serverId,
-            unreadCount: unread.channelUnreadCount(widget.serverId, ch.channelId),
-            mentionCount:
-                unread.channelMentions(widget.serverId, ch.channelId),
-            voiceParticipants: ch.channelType == ChannelType.voice
-                ? (voiceParticipantsByChannel?[ch.channelId]?.length ?? 0)
-                : 0,
-            isLast: item.isLastInGroup && !canManage,
-            onTap: () => widget.onChannelTap(ch),
-            onLongPress: () => _showChannelActions(context, ch, canManage),
-          ));
-        }
-      }
-    }
-
-    if (canManage) {
-      widgets.add(_CreateChannelRow(
-        isLast: true,
-        onTap: () => showCreateChannelDialog(
-          context, widget.serverId, onCreated: (_) => _loadChannels()),
-      ));
-    }
-    widgets.add(const SizedBox(height: HollowSpacing.xs));
-
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: widgets,
-    );
-  }
-}
-
-sealed class _DisplayItem {}
-
-class _CategoryDisplayItem extends _DisplayItem {
-  final String name;
-  _CategoryDisplayItem(this.name);
-}
-
-class _SeparatorDisplayItem extends _DisplayItem {}
-
-class _ChannelDisplayItem extends _DisplayItem {
-  final ChannelInfo channel;
-  final String? category;
-  bool isLastInGroup = false;
-  _ChannelDisplayItem({required this.channel, required this.category});
-}
-
-class _TreeSeparatorRow extends StatelessWidget {
-  const _TreeSeparatorRow();
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    final lineColor = hollow.textSecondary.withValues(alpha: 0.7);
-    const double treeLeft = _kTreeLeft;
-
-    return SizedBox(
-      height: 12,
-      child: Stack(
-        children: [
-          Positioned(
-            left: treeLeft,
-            top: 0,
-            bottom: 0,
-            child: SizedBox(
-              width: 1,
-              child: ColoredBox(color: lineColor),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _CategoryHeaderRow extends StatelessWidget {
-  final String name;
-  final bool isCollapsed;
-  final VoidCallback onToggle;
-
-  const _CategoryHeaderRow({
-    required this.name,
-    required this.isCollapsed,
-    required this.onToggle,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    return HollowPressable(
-      onTap: onToggle,
-      subtle: true,
-      padding: const EdgeInsets.only(
-        left: _kTreeIndent,
-        right: HollowSpacing.lg,
-        top: HollowSpacing.sm,
-        bottom: HollowSpacing.xs,
-      ),
-      child: Row(
-        children: [
-          AnimatedRotation(
-            turns: isCollapsed ? -0.25 : 0,
-            duration: HollowDurations.fast,
-            curve: HollowCurves.enter,
-            child: Icon(LucideIcons.chevronDown, size: 14, color: hollow.textSecondary),
-          ),
-          const SizedBox(width: HollowSpacing.xs),
-          Text(
-            name,
-            style: HollowTypography.bodySmall.copyWith(
-              color: hollow.textSecondary,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _TreeChannelRow extends StatelessWidget {
-  final ChannelInfo channel;
-  final String serverId;
-  final int unreadCount;
-  final int mentionCount;
-  final int voiceParticipants;
-  final bool isLast;
-  final VoidCallback onTap;
-  final VoidCallback? onLongPress;
-
-  const _TreeChannelRow({
-    required this.channel,
-    required this.serverId,
-    required this.unreadCount,
-    required this.mentionCount,
-    required this.voiceParticipants,
-    required this.isLast,
-    required this.onTap,
-    this.onLongPress,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    final lineColor = hollow.textSecondary.withValues(alpha: 0.7);
-    const double treeLeft = _kTreeLeft;
-
-    return Stack(
-      children: [
-        Positioned(
-          left: treeLeft,
-          top: 0,
-          bottom: isLast ? null : 0,
-          child: SizedBox(
-            width: 1,
-            height: isLast ? null : double.infinity,
-            child: ColoredBox(color: lineColor),
-          ),
-        ),
-        Positioned(
-          left: treeLeft,
-          top: 18,
-          child: SizedBox(
-            width: 12,
-            height: 1,
-            child: ColoredBox(color: lineColor),
-          ),
-        ),
-        if (isLast)
-          Positioned(
-            left: treeLeft,
-            top: 0,
-            child: SizedBox(
-              width: 1,
-              height: 19,
-              child: ColoredBox(color: lineColor),
-            ),
-          ),
-        _ChannelRow(
-          channel: channel,
-          serverId: serverId,
-          unreadCount: unreadCount,
-          mentionCount: mentionCount,
-          voiceParticipants: voiceParticipants,
-          onTap: onTap,
-          onLongPress: onLongPress,
-        ),
-      ],
-    );
-  }
-}
-
-class _CreateChannelRow extends StatelessWidget {
-  final bool isLast;
-  final VoidCallback onTap;
-
-  const _CreateChannelRow({required this.isLast, required this.onTap});
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    final lineColor = hollow.textSecondary.withValues(alpha: 0.7);
-    const double treeLeft = _kTreeLeft;
-
-    return Stack(
-      children: [
-        Positioned(
-          left: treeLeft,
-          top: 0,
-          child: SizedBox(
-            width: 1,
-            height: 19,
-            child: ColoredBox(color: lineColor),
-          ),
-        ),
-        Positioned(
-          left: treeLeft,
-          top: 18,
-          child: SizedBox(
-            width: 12,
-            height: 1,
-            child: ColoredBox(color: lineColor),
-          ),
-        ),
-        HollowPressable(
-          onTap: onTap,
-          subtle: true,
-          padding: const EdgeInsets.only(
-            left: _kTreeIndent,
-            right: HollowSpacing.lg,
-            top: HollowSpacing.sm,
-            bottom: HollowSpacing.sm,
-          ),
-          child: Row(
-            children: [
-              Icon(LucideIcons.plus, size: 14, color: hollow.textSecondary),
-              const SizedBox(width: HollowSpacing.sm),
-              Text(
-                'New channel',
-                style: HollowTypography.body.copyWith(
-                  color: hollow.textSecondary,
-                ),
-              ),
-            ],
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-class _ChannelRow extends StatelessWidget {
-  final ChannelInfo channel;
-  final String serverId;
-  final int unreadCount;
-  final int mentionCount;
-  final int voiceParticipants;
-  final VoidCallback onTap;
-  final VoidCallback? onLongPress;
-
-  const _ChannelRow({
-    required this.channel,
-    required this.serverId,
-    required this.unreadCount,
-    required this.mentionCount,
-    required this.voiceParticipants,
-    required this.onTap,
-    this.onLongPress,
-  });
-
-  bool get hasUnread => unreadCount > 0 || mentionCount > 0;
-
-  @override
-  Widget build(BuildContext context) {
-    final hollow = HollowTheme.of(context);
-    final isVoice = channel.channelType == ChannelType.voice;
-
-    return HollowPressable(
-      onTap: onTap,
-      onLongPress: onLongPress,
-      subtle: true,
-      padding: const EdgeInsets.only(
-        left: _kTreeIndent,
-        right: HollowSpacing.lg,
-        top: HollowSpacing.sm,
-        bottom: HollowSpacing.sm,
-      ),
-      child: Row(
-        children: [
-          Icon(
-            isVoice ? LucideIcons.volume2 : LucideIcons.hash,
-            size: 16,
-            color: hasUnread ? hollow.textPrimary : hollow.textSecondary,
-          ),
-          const SizedBox(width: HollowSpacing.sm),
-          Expanded(
-            child: Text(
-              channel.name,
-              style: HollowTypography.body.copyWith(
-                fontWeight: hasUnread ? FontWeight.w600 : FontWeight.w400,
-                color: hasUnread ? hollow.textPrimary : hollow.textSecondary,
-              ),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-            ),
-          ),
-          // Public indicator (#44).
-          if (channel.isPublic) ...[
-            const SizedBox(width: HollowSpacing.xs),
-            Semantics(
-              label: 'Public channel',
-              child: Icon(
-                LucideIcons.globe,
-                size: 14,
-                color: hollow.textTertiary,
-              ),
-            ),
-          ],
-          if (isVoice && voiceParticipants > 0) ...[
-            const SizedBox(width: HollowSpacing.sm),
-            HollowBadge(
-              '$voiceParticipants',
-              kind: HollowBadgeKind.success,
-              icon: LucideIcons.users,
-            ),
-          ],
-          if (hasUnread && !isVoice) ...[
-            const SizedBox(width: HollowSpacing.sm),
-            HollowCountBadge(
-              count: mentionCount > 0 ? mentionCount : unreadCount,
-              mention: mentionCount > 0,
-            ),
-          ],
-        ],
-      ),
-    );
-  }
 }

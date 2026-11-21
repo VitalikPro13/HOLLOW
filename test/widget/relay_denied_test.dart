@@ -28,7 +28,7 @@ import 'package:hollow/src/ui/dialogs/relay_denied_dialog.dart';
 import 'package:hollow/src/ui/mobile/mobile_chat_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_connection_indicator.dart';
 import 'package:hollow/src/ui/mobile/mobile_voice_channel_route.dart';
-import 'package:hollow/src/ui/mobile/tabs/mobile_chats_tab.dart';
+import 'package:hollow/src/ui/mobile/server/mobile_server_route.dart';
 import 'package:hollow/src/ui/shell/user_bar.dart';
 
 import '../helpers/test_app.dart';
@@ -389,12 +389,11 @@ void main() {
           // The toast rides the root overlay, as event toasts do in the app.
           navigatorKey: hollowNavigatorKey,
           theme: HollowThemeData.dark(),
-          home: const Scaffold(body: MobileChatsTab()),
+          // The server's page, whose voice rows open rooms (#154).
+          home: const MobileServerRoute(serverId: kServerId1),
         ),
       ));
       await tester.pump();
-      await tester.pump(const Duration(milliseconds: 400));
-      await tester.tap(find.text('Test Server').first);
       for (var i = 0; i < 10; i++) {
         await tester.pump(const Duration(milliseconds: 100));
       }

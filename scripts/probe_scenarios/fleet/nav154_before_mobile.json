@@ -1,0 +1,474 @@
+{
+ "_": [
+  "#154 BEFORE renders (session C): today's phone server navigation, one throwaway peer.",
+  "Server accordion in Chats, channel tree, channel page, long-press sheets, dark + light.",
+  "run (Mac mini): FLEET_RELAY=<test relay> pwsh scripts/fleet.ps1 -Scenario nav154_before_mobile -Peers i"
+ ],
+ "peers": [
+  "i"
+ ],
+ "steps": [
+  {
+   "peer": "all",
+   "op": "wait_for",
+   "provider": "connection",
+   "equals": "connected",
+   "timeout_ms": 120000
+  },
+  {
+   "op": "wait",
+   "ms": 2000,
+   "peer": "i"
+  },
+  {
+   "op": "seed_server",
+   "name": "Synth Lab",
+   "as": "INVITE",
+   "peer": "i"
+  },
+  {
+   "op": "wait_for",
+   "target": "text:Synth Lab",
+   "timeout_ms": 30000,
+   "peer": "i"
+  },
+  {
+   "op": "tap",
+   "target": "text:Hide",
+   "index": 0,
+   "soft": true,
+   "peer": "i"
+  },
+  {
+   "op": "wait",
+   "ms": 1500,
+   "peer": "i"
+  },
+  {
+   "op": "shot",
+   "name": "nb-01-chats-collapsed",
+   "peer": "i"
+  },
+  {
+   "op": "long_press",
+   "target": "text:Synth Lab",
+   "index": 0,
+   "peer": "i"
+  },
+  {
+   "op": "wait",
+   "ms": 1000,
+   "peer": "i"
+  },
+  {
+   "op": "tap",
+   "target": "text:Create channel",
+   "index": 0,
+   "peer": "i"
+  },
+  {
+   "op": "wait_for",
+   "target": "dialog > type:EditableText",
+   "timeout_ms": 10000,
+   "peer": "i"
+  },
+  {
+   "op": "enter_text",
+   "target": "dialog > type:EditableText",
+   "value": "patches",
+   "peer": "i"
+  },
+  {
+   "op": "tap",
+   "target": "dialog > text:Create",
+   "index": 0,
+   "peer": "i"
+  },
+  {
+   "op": "wait_for",
+   "gone": "dialog",
+   "timeout_ms": 15000,
+   "peer": "i"
+  },
+  {
+   "op": "wait",
+   "ms": 800,
+   "peer": "i"
+  },
+  {
+   "op": "long_press",
+   "target": "text:Synth Lab",
+   "index": 0,
+   "peer": "i"
+  },
+  {
+   "op": "wait",
+   "ms": 1000,
+   "peer": "i"
+  },
+  {
+   "op": "tap",
+   "target": "text:Create channel",
+   "index": 0,
+   "peer": "i"
+  },
+  {
+   "op": "wait_for",
+   "target": "dialog > type:EditableText",
+   "timeout_ms": 10000,
+   "peer": "i"
+  },
+  {
+   "op": "enter_text",
+   "target": "dialog > type:EditableText",
+   "value": "releases",
+   "peer": "i"
+  },
+  {
+   "op": "tap",
+   "target": "dialog > text:Create",
+   "index": 0,
+   "peer": "i"
+  },
+  {
+   "op": "wait_for",
+   "gone": "dialog",
+   "timeout_ms": 15000,
+   "peer": "i"
+  },
+  {
+   "op": "wait",
+   "ms": 800,
+   "peer": "i"
+  },
+  {
+   "op": "long_press",
+   "target": "text:Synth Lab",
+   "index": 0,
+   "peer": "i"
+  },
+  {
+   "op": "wait",
+   "ms": 1000,
+   "peer": "i"
+  },
+  {
+   "op": "tap",
+   "target": "text:Create channel",
+   "index": 0,
+   "peer": "i"
+  },
+  {
+   "op": "wait_for",
+   "target": "dialog > type:EditableText",
+   "timeout_ms": 10000,
+   "peer": "i"
+  },
+  {
+   "op": "enter_text",
+   "target": "dialog > type:EditableText",
+   "value": "off-topic",
+   "peer": "i"
+  },
+  {
+   "op": "tap",
+   "target": "dialog > text:Create",
+   "index": 0,
+   "peer": "i"
+  },
+  {
+   "op": "wait_for",
+   "gone": "dialog",
+   "timeout_ms": 15000,
+   "peer": "i"
+  },
+  {
+   "op": "wait",
+   "ms": 800,
+   "peer": "i"
+  },
+  {
+   "op": "long_press",
+   "target": "text:Synth Lab",
+   "index": 0,
+   "peer": "i"
+  },
+  {
+   "op": "wait",
+   "ms": 1000,
+   "peer": "i"
+  },
+  {
+   "op": "tap",
+   "target": "text:Create channel",
+   "index": 0,
+   "peer": "i"
+  },
+  {
+   "op": "wait_for",
+   "target": "dialog > type:EditableText",
+   "timeout_ms": 10000,
+   "peer": "i"
+  },
+  {
+   "op": "tap",
+   "target": "dialog > text:Voice",
+   "index": 0,
+   "peer": "i"
+  },
+  {
+   "op": "enter_text",
+   "target": "dialog > type:EditableText",
+   "value": "Lounge",
+   "peer": "i"
+  },
+  {
+   "op": "tap",
+   "target": "dialog > text:Create",
+   "index": 0,
+   "peer": "i"
+  },
+  {
+   "op": "wait_for",
+   "gone": "dialog",
+   "timeout_ms": 15000,
+   "peer": "i"
+  },
+  {
+   "op": "wait",
+   "ms": 800,
+   "peer": "i"
+  },
+  {
+   "op": "seed_channel",
+   "server": "Synth Lab",
+   "channel": "general",
+   "text": "did the stems export finish",
+   "peer": "i"
+  },
+  {
+   "op": "wait",
+   "ms": 300,
+   "peer": "i"
+  },
+  {
+   "op": "seed_channel",
+   "server": "Synth Lab",
+   "channel": "general",
+   "text": "almost, uploading them now",
+   "peer": "i"
+  },
+  {
+   "op": "wait",
+   "ms": 300,
+   "peer": "i"
+  },
+  {
+   "op": "seed_channel",
+   "server": "Synth Lab",
+   "channel": "general",
+   "text": "I want to try the new filter envelope tonight",
+   "peer": "i"
+  },
+  {
+   "op": "wait",
+   "ms": 300,
+   "peer": "i"
+  },
+  {
+   "op": "seed_channel",
+   "server": "Synth Lab",
+   "channel": "general",
+   "text": "the reverb tail on bar 12 is too long",
+   "peer": "i"
+  },
+  {
+   "op": "wait",
+   "ms": 300,
+   "peer": "i"
+  },
+  {
+   "op": "seed_channel",
+   "server": "Synth Lab",
+   "channel": "general",
+   "text": "pushed v3 of the pad, check it",
+   "peer": "i"
+  },
+  {
+   "op": "wait",
+   "ms": 300,
+   "peer": "i"
+  },
+  {
+   "op": "wait",
+   "ms": 1500,
+   "peer": "i"
+  },
+  {
+   "op": "tap",
+   "target": "text:Synth Lab",
+   "index": 0,
+   "peer": "i"
+  },
+  {
+   "op": "wait_for",
+   "target": "text:general",
+   "timeout_ms": 30000,
+   "peer": "i"
+  },
+  {
+   "op": "wait",
+   "ms": 1200,
+   "peer": "i"
+  },
+  {
+   "op": "shot",
+   "name": "nb-02-chats-expanded",
+   "peer": "i"
+  },
+  {
+   "op": "long_press",
+   "target": "text:patches",
+   "index": 0,
+   "peer": "i"
+  },
+  {
+   "op": "wait",
+   "ms": 1000,
+   "peer": "i"
+  },
+  {
+   "op": "shot",
+   "name": "nb-03-channel-sheet",
+   "peer": "i"
+  },
+  {
+   "op": "tap",
+   "target": "semantics:Back",
+   "index": 0,
+   "soft": true,
+   "peer": "i"
+  },
+  {
+   "op": "key",
+   "peer": "i",
+   "value": "escape",
+   "soft": true
+  },
+  {
+   "op": "wait",
+   "ms": 800,
+   "peer": "i"
+  },
+  {
+   "op": "tap",
+   "target": "text:general",
+   "index": 0,
+   "peer": "i"
+  },
+  {
+   "op": "wait_for",
+   "target": "field",
+   "timeout_ms": 15000,
+   "peer": "i"
+  },
+  {
+   "op": "wait",
+   "ms": 2500,
+   "peer": "i"
+  },
+  {
+   "op": "shot",
+   "name": "nb-04-channel-open",
+   "peer": "i"
+  },
+  {
+   "op": "tap",
+   "target": "semantics:Back",
+   "index": 0,
+   "soft": true,
+   "peer": "i"
+  },
+  {
+   "op": "wait",
+   "ms": 1200,
+   "peer": "i"
+  },
+  {
+   "op": "long_press",
+   "target": "text:Synth Lab",
+   "index": 0,
+   "peer": "i"
+  },
+  {
+   "op": "wait",
+   "ms": 1000,
+   "peer": "i"
+  },
+  {
+   "op": "shot",
+   "name": "nb-05-server-sheet",
+   "peer": "i"
+  },
+  {
+   "op": "key",
+   "peer": "i",
+   "value": "escape",
+   "soft": true
+  },
+  {
+   "op": "tap",
+   "target": "semantics:Back",
+   "index": 0,
+   "soft": true,
+   "peer": "i"
+  },
+  {
+   "op": "wait",
+   "ms": 800,
+   "peer": "i"
+  },
+  {
+   "op": "theme",
+   "value": "light",
+   "peer": "i"
+  },
+  {
+   "op": "wait",
+   "ms": 800,
+   "peer": "i"
+  },
+  {
+   "op": "shot",
+   "name": "nb-06-chats-expanded-light",
+   "peer": "i"
+  },
+  {
+   "op": "tap",
+   "target": "text:general",
+   "index": 0,
+   "peer": "i"
+  },
+  {
+   "op": "wait_for",
+   "target": "field",
+   "timeout_ms": 15000,
+   "peer": "i"
+  },
+  {
+   "op": "wait",
+   "ms": 1500,
+   "peer": "i"
+  },
+  {
+   "op": "shot",
+   "name": "nb-07-channel-open-light",
+   "peer": "i"
+  },
+  {
+   "op": "theme",
+   "value": "dark",
+   "peer": "i"
+  }
+ ]
+}
