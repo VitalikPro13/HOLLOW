@@ -6,8 +6,8 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `candidates`, `check_kept_at`, `day_of`, `dotted_name`, `email_at`, `ends_with_extension`, `export_copy`, `file_list`, `forget_unmarked_slots`, `frame_method_at`, `holds_key`, `hollow_dotted`, `in_use`, `instance_lock_held`, `ipv4_at`, `is_hex`, `is_kept_name`, `is_key_file`, `is_v6`, `keep_key_at`, `kept_aside_of`, `kept_aside`, `kept_from`, `kept_key_in_place`, `kept_keys_gone`, `kept_named_of`, `kept_named`, `kept_uri`, `keychain_key`, `keychain_locked`, `last_component`, `link_time_estimate`, `listed`, `loaded_identity`, `mark_set_aside_at`, `move_all`, `move_identity_aside`, `move_one`, `names_something`, `not_ready`, `now_ms`, `open_kept`, `ordered`, `origin_of`, `path_at`, `phone_at`, `present`, `probe`, `redact`, `relink_at`, `relink_in_progress`, `remove_kept_aside`, `remove_kept_entry`, `repair_at`, `replace_at`, `report_for`, `same_folder`, `same_path`, `set_aside_digest`, `set_aside_welcome_at`, `settle_relink_at`, `settle_set_aside_at`, `starts_free`, `stays_on_relink`, `stays_on_repair`, `tail`, `take_instance_lock`, `tree_size`, `trouble_of`, `unique_in`, `url_at`, `write_synced`, `zero_kept_aside`
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `InstanceLock`, `Journal`, `KeptCheck`, `MoveFailed`, `Origin`, `Probe`
+// These functions are ignored because they are not marked as `pub`: `candidates`, `check_kept_at`, `day_of`, `dotted_name`, `email_at`, `ends_with_extension`, `export_copy`, `file_list`, `forget_unmarked_slots`, `frame_method_at`, `holds_key`, `hollow_dotted`, `in_use`, `instance_lock_held`, `ipv4_at`, `is_hex`, `is_kept_name`, `is_key_file`, `is_v6`, `keep_key_at`, `kept_aside_of`, `kept_aside`, `kept_from`, `kept_key_in_place`, `kept_keys_gone`, `kept_named_of`, `kept_named`, `kept_uri`, `keychain_key`, `keychain_locked`, `last_component`, `link_time_estimate`, `listed`, `loaded_identity`, `mark_set_aside_at`, `move_all`, `move_identity_aside`, `move_one`, `names_something`, `not_ready`, `now_ms`, `open_kept`, `ordered`, `origin_of`, `path_at`, `phone_at`, `present`, `probe`, `read_mark`, `redact`, `relink_at`, `relink_in_progress`, `remove_kept_aside`, `remove_kept_entry`, `repair_at`, `replace_at`, `report_for`, `same_folder`, `same_path`, `set_aside_digest`, `set_aside_welcome_at`, `settle_relink_at`, `settle_set_aside_at`, `starts_free`, `stays_on_relink`, `stays_on_repair`, `tail`, `take_instance_lock`, `tree_size`, `trouble_of`, `unique_in`, `url_at`, `write_set_aside_welcome`, `write_synced`, `zero_kept_aside`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `InstanceLock`, `Journal`, `KeptCheck`, `MoveFailed`, `Origin`, `Probe`, `SetAsideMark`, `SetAsideNote`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`
 
 /// What is wrong with this profile's database. Read-only: nothing on disk changes.
@@ -37,9 +37,9 @@ Future<String?> relinkWelcome() =>
 Future<void> clearRelinkWelcome() =>
     RustLib.instance.api.crateApiRecoveryClearRelinkWelcome();
 
-/// Whether "Type my phrase again" set an identity aside since Welcome last said so:
+/// Set when "Type my phrase again" set an identity aside since Welcome last said so:
 /// Welcome opens on the phrase step with its line. `settle_relink` makes the move.
-Future<bool> setAsideWelcome() =>
+Future<SetAsideWelcome?> setAsideWelcome() =>
     RustLib.instance.api.crateApiRecoverySetAsideWelcome();
 
 /// Welcome has said the identity was set aside.
@@ -73,6 +73,25 @@ class RepairOutcome {
           runtimeType == other.runtimeType &&
           folder == other.folder &&
           restored == other.restored;
+}
+
+/// What Welcome needs after "Type my phrase again" set an identity aside.
+class SetAsideWelcome {
+  /// The relay the set-aside identity used: Welcome restores against it, never the
+  /// default unasked. `None` for the default relay or when unknown.
+  final String? relay;
+
+  const SetAsideWelcome({this.relay});
+
+  @override
+  int get hashCode => relay.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is SetAsideWelcome &&
+          runtimeType == other.runtimeType &&
+          relay == other.relay;
 }
 
 /// Why the database did not open, as far as a read-only probe can tell.

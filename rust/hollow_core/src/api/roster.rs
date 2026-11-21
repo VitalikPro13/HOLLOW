@@ -70,8 +70,7 @@ pub fn welcome_restore_state() -> Result<Option<WelcomeRestoreState>, String> {
     let store = MessageStore::open(&c.db_path, &c.db_passphrase)?;
     let now = crate::node::roster_book::now_ms();
     let Some(mark) = crate::node::phrase_restore::current(&store, &c.device.peer_id(), now) else { return Ok(None) };
-    let no_wait = crate::node::roster_book::load(&store, &c.master.peer_id())
-        .is_some_and(|r| crate::node::roster_book::fold(&store, &r).no_wait);
+    let no_wait = chosen_no_wait(&c);
     Ok(Some(WelcomeRestoreState { at_ms: mark.at_ms, branch: mark.branch.as_str().to_string(), empty: mark.empty, no_wait }))
 }
 
@@ -223,12 +222,10 @@ pub(crate) fn sign_restore(
         RestoreSign::Admit => {
             crate::node::roster_book::admit_by_phrase(&c.master, recovery, &c.device, &c.db_path, &c.db_passphrase).map(|_| ())
         }
-        RestoreSign::Recover { lost_since_ms, no_wait } => {
-            let (_, state) =
-                crate::node::roster_book::recover(&c.master, recovery, &c.device, &[], no_wait, &c.db_path, &c.db_passphrase)?;
-            let store = MessageStore::open(&c.db_path, &c.db_passphrase)?;
-            crate::node::roster_book::note_recovery_lost_since(&store, &state.base, lost_since_ms)
-        }
+        RestoreSign::Recover { lost_since_ms, no_wait } => crate::node::roster_book::recover(
+            &c.master, recovery, &c.device, &[], no_wait, Some(lost_since_ms), &c.db_path, &c.db_passphrase,
+        )
+        .map(|_| ()),
     })
 }
 
@@ -246,14 +243,24 @@ fn erase_stored_phrase(db_path: &str, db_passphrase: &str) {
 pub fn recover_with_phrase(phrase: String, keep: Vec<String>, lost_since_ms: i64) -> Result<(), String> {
     let c = ctx()?;
     let (master, recovery) = crate::identity::recovery::recovery_key_for(&c.master.peer_id(), &phrase)?;
-    let no_wait = crate::node::roster_book::own(&c.master.peer_id(), &c.db_path, &c.db_passphrase)
-        .is_some_and(|(_, s)| s.no_wait);
+    let no_wait = chosen_no_wait(&c);
     changed(&c, |c| {
-        let (_, state) =
-            crate::node::roster_book::recover(&master, &recovery, &c.device, &keep, no_wait, &c.db_path, &c.db_passphrase)?;
-        let store = MessageStore::open(&c.db_path, &c.db_passphrase)?;
-        crate::node::roster_book::note_recovery_lost_since(&store, &state.base, lost_since_ms)
+        crate::node::roster_book::recover(&master, &recovery, &c.device, &keep, no_wait, Some(lost_since_ms), &c.db_path, &c.db_passphrase)
+            .map(|_| ())
     })
+}
+
+/// Whether a restored backup needs approval, as the person last chose it: a recovery of
+/// ours that a later base outdated keeps its own choice (signed again with it), else
+/// the held base decides.
+fn chosen_no_wait(c: &Ctx) -> bool {
+    let Ok(store) = MessageStore::open(&c.db_path, &c.db_passphrase) else { return false };
+    let Some(roster) = crate::node::roster_book::load(&store, &c.master.peer_id()) else { return false };
+    let state = crate::node::roster_book::fold(&store, &roster);
+    match crate::node::roster_book::own_phrase_outdated(&store, &roster, &state, &c.device.peer_id()) {
+        Some(own) if own.kind == crate::node::roster_book::PhraseKind::Recover => own.no_wait,
+        _ => state.no_wait,
+    }
 }
 
 /// The other devices a recovery keeps unless unticked, for devices last had at
@@ -282,7 +289,7 @@ pub fn set_backup_wait(phrase: String, allowed: bool) -> Result<(), String> {
     }
     let keep: Vec<String> = state.members.into_iter().collect();
     changed(&c, |c| {
-        crate::node::roster_book::recover(&master, &recovery, &c.device, &keep, !allowed, &c.db_path, &c.db_passphrase)
+        crate::node::roster_book::recover(&master, &recovery, &c.device, &keep, !allowed, None, &c.db_path, &c.db_passphrase)
             .map(|_| ())
     })
 }
@@ -331,7 +338,7 @@ pub fn confirm_stored_phrase(phrase: String) -> Result<(), String> {
         .map(|(_, s)| (s.members.into_iter().collect::<Vec<_>>(), s.no_wait))
         .unwrap_or_default();
     changed(&c, |c| {
-        crate::node::roster_book::recover(&master, &recovery, &c.device, &keep, no_wait, &c.db_path, &c.db_passphrase)
+        crate::node::roster_book::recover(&master, &recovery, &c.device, &keep, no_wait, None, &c.db_path, &c.db_passphrase)
             .map(|_| ())
     })
 }
@@ -569,6 +576,63 @@ mod tests {
         assert_eq!(status.dropped_by_recovery_at_ms, None, "too early wins over left out");
         join_with_phrase(PHRASE.into()).unwrap();
         assert!(roster_status().unwrap().member, "typing the phrase again dates it past the base");
+    }
+
+    /// Review (Dart half, b): our recovery said "backups need approval"; a base dated
+    /// after it says otherwise. Typing the phrase again keeps the person's choice, and the
+    /// Home card reports it, before and after.
+    #[test]
+    fn a_too_early_recovery_keeps_the_first_recoverys_no_wait() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = crate::api::storage::store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        // SAFETY: serialized by the locks above.
+        unsafe { std::env::set_var("HOLLOW_DATA_DIR", tmp.path()) };
+        crate::identity::encryption::clear_session_key();
+        let c = fresh_identity_on_disk(tmp.path());
+        let (master, recovery) = crate::identity::recovery::keys_from_phrase(PHRASE).unwrap();
+        sign_restore(&master, &c.device, &recovery, RestoreSign::Recover { lost_since_ms: 1_000, no_wait: true }, &c.db_path, &c.db_passphrase).unwrap();
+        let mark = crate::node::phrase_restore::Mark {
+            at_ms: crate::node::roster_book::now_ms(),
+            branch: crate::node::phrase_restore::Branch::Recover,
+            empty: true,
+            device: c.device.peer_id(),
+        };
+        crate::node::phrase_restore::write(&MessageStore::open(&c.db_path, &c.db_passphrase).unwrap(), &mark).unwrap();
+        recovery_elsewhere(&c, crate::node::roster_book::now_ms() + 5 * 60 * 1000);
+        let status = roster_status().unwrap();
+        assert_eq!(status.too_early.as_deref(), Some("recover"));
+        assert_eq!(status.too_early_lost_since_ms, Some(1_000));
+        assert!(welcome_restore_state().unwrap().unwrap().no_wait, "the card reports the outdated base's choice");
+
+        recover_with_phrase(PHRASE.into(), Vec::new(), status.too_early_lost_since_ms.unwrap()).unwrap();
+
+        let status = roster_status().unwrap();
+        assert!(status.member);
+        assert!(!status.backup_wait, "typing the phrase again let restored backups wait in");
+        assert!(welcome_restore_state().unwrap().unwrap().no_wait);
+    }
+
+    /// Review (Dart half, finding 1): a recovery's T lands before its base does, so no
+    /// crash between the two writes leaves a recovery whose T is unknown.
+    #[test]
+    fn a_recovery_records_its_t_before_its_roster() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = crate::api::storage::store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        // SAFETY: serialized by the locks above.
+        unsafe { std::env::set_var("HOLLOW_DATA_DIR", tmp.path()) };
+        crate::identity::encryption::clear_session_key();
+        let c = fresh_identity_on_disk(tmp.path());
+        let (master, recovery) = crate::identity::recovery::keys_from_phrase(PHRASE).unwrap();
+        // The roster save is refused (a crash right before it): the T is there already.
+        crate::node::authority_view::refuse_book_for_test(&c.device.peer_id(), &master.peer_id());
+        let signed = crate::node::roster_book::recover(&master, &recovery, &c.device, &[], true, Some(7_000), &c.db_path, &c.db_passphrase);
+        crate::node::authority_view::unrefuse_book_for_test(&c.device.peer_id());
+        let (roster, _) = signed.unwrap();
+        let store = MessageStore::open(&c.db_path, &c.db_passphrase).unwrap();
+        assert!(crate::node::roster_book::load(&store, &master.peer_id()).is_none(), "precondition: the roster never landed");
+        assert_eq!(crate::node::roster_book::recovery_lost_since(&store, &roster.base()), Some(7_000));
     }
 
     /// D3b: a device that counted, left out by a recovery typed on another device.

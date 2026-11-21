@@ -607,8 +607,11 @@ fn move_identity_aside(root: &Path, now: i64, set_aside: bool) -> Result<PathBuf
         }
         return Err(HELD.to_string());
     }
-    let welcome = if set_aside { SET_ASIDE_WELCOME } else { RELINK_WELCOME };
-    let _ = std::fs::write(root.join(welcome), target.to_string_lossy().as_bytes());
+    if set_aside {
+        write_set_aside_welcome(root, &target);
+    } else {
+        let _ = std::fs::write(root.join(RELINK_WELCOME), target.to_string_lossy().as_bytes());
+    }
     // The commit point: from here a start-up sees a finished relink.
     let _ = std::fs::remove_file(root.join(RELINK_JOURNAL));
     hollow_log!("[HOLLOW-REPAIR] Moved {} entr(ies) aside to link this device again", names.len());
@@ -642,9 +645,14 @@ pub(crate) fn settle_relink_at(root: &Path) {
             hollow_log!("[HOLLOW-REPAIR] The old data's keychain key did not keep; the relink finishes at a later start");
             return;
         }
-        let welcome = if origin_of(&target).is_some_and(|o| o.set_aside) { SET_ASIDE_WELCOME } else { RELINK_WELCOME };
+        let set_aside = origin_of(&target).is_some_and(|o| o.set_aside);
+        let welcome = if set_aside { SET_ASIDE_WELCOME } else { RELINK_WELCOME };
         if !present(&root.join(welcome)) {
-            let _ = std::fs::write(root.join(welcome), journal.target.as_bytes());
+            if set_aside {
+                write_set_aside_welcome(root, &target);
+            } else {
+                let _ = std::fs::write(root.join(welcome), journal.target.as_bytes());
+            }
         }
         hollow_log!("[HOLLOW-REPAIR] Finished a relink a restart cut short");
     } else {
@@ -707,12 +715,44 @@ fn set_aside_digest(root: &Path) -> Option<[u8; 32]> {
     Some(h.finalize().into())
 }
 
+/// The set-aside mark: the key it is bound to, and the relay this profile used, which
+/// lives in the database the move takes away (Welcome must offer it again, never fall
+/// back to the default relay unasked).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SetAsideMark {
+    digest: String,
+    #[serde(default)]
+    relay: Option<String>,
+}
+
+/// What Welcome reads after a set-aside.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SetAsideNote {
+    folder: String,
+    #[serde(default)]
+    relay: Option<String>,
+}
+
+fn read_mark(root: &Path) -> Option<SetAsideMark> {
+    serde_json::from_slice(&std::fs::read(root.join(SET_ASIDE_MARK)).ok()?).ok()
+}
+
+/// Welcome's note for a set-aside into `target`, carrying the mark's relay.
+fn write_set_aside_welcome(root: &Path, target: &Path) {
+    let note = SetAsideNote { folder: target.to_string_lossy().into_owned(), relay: read_mark(root).and_then(|m| m.relay) };
+    if let Ok(json) = serde_json::to_vec(&note) {
+        let _ = std::fs::write(root.join(SET_ASIDE_WELCOME), json);
+    }
+}
+
 /// "Type my phrase again" (PHRASE_RESTORE_DESIGN 6.2): marks the identity in `root` to be
-/// set aside at the next launch, bound to its key so a mark left behind moves nothing.
-/// Nothing moves while this process holds the identity open.
-pub(crate) fn mark_set_aside_at(root: &Path) -> Result<(), String> {
-    let digest = set_aside_digest(root).ok_or(IDENTITY_NOT_READY)?;
-    write_synced(&root.join(SET_ASIDE_MARK), &digest).map_err(|e| format!("Failed to mark the identity to set aside: {e}"))
+/// set aside at the next launch, bound to its key so a mark left behind moves nothing,
+/// with the relay this profile used. Nothing moves while this process holds the
+/// identity open.
+pub(crate) fn mark_set_aside_at(root: &Path, relay: Option<String>) -> Result<(), String> {
+    let digest = hex::encode(set_aside_digest(root).ok_or(IDENTITY_NOT_READY)?);
+    let json = serde_json::to_vec(&SetAsideMark { digest, relay }).map_err(|e| e.to_string())?;
+    write_synced(&root.join(SET_ASIDE_MARK), &json).map_err(|e| format!("Failed to mark the identity to set aside: {e}"))
 }
 
 /// At launch: moves a marked identity whole into a `<root>-old-<day>` folder marked as
@@ -721,7 +761,10 @@ pub(crate) fn mark_set_aside_at(root: &Path) -> Result<(), String> {
 pub(crate) fn settle_set_aside_at(root: &Path, now: i64) {
     use subtle::ConstantTimeEq;
     let mark = root.join(SET_ASIDE_MARK);
-    let Ok(marked) = std::fs::read(&mark) else { return };
+    if !present(&mark) {
+        return;
+    }
+    let marked = read_mark(root).and_then(|m| hex::decode(m.digest).ok()).unwrap_or_default();
     let ours = set_aside_digest(root).is_some_and(|d| marked.len() == d.len() && bool::from(d.ct_eq(marked.as_slice())));
     if !ours {
         hollow_log!("[HOLLOW-REPAIR] A set-aside mark names another identity key; nothing moved");
@@ -780,15 +823,24 @@ pub fn clear_relink_welcome() -> Result<(), String> {
     Ok(())
 }
 
-/// Whether "Type my phrase again" set an identity aside since Welcome last said so:
+/// What Welcome needs after "Type my phrase again" set an identity aside.
+pub struct SetAsideWelcome {
+    /// The relay the set-aside identity used: Welcome restores against it, never the
+    /// default unasked. `None` for the default relay or when unknown.
+    pub relay: Option<String>,
+}
+
+/// Set when "Type my phrase again" set an identity aside since Welcome last said so:
 /// Welcome opens on the phrase step with its line. `settle_relink` makes the move.
 #[frb]
-pub fn set_aside_welcome() -> Result<bool, String> {
+pub fn set_aside_welcome() -> Result<Option<SetAsideWelcome>, String> {
     Ok(set_aside_welcome_at(&crate::identity::data_dir()?))
 }
 
-fn set_aside_welcome_at(root: &Path) -> bool {
-    present(&root.join(SET_ASIDE_WELCOME))
+fn set_aside_welcome_at(root: &Path) -> Option<SetAsideWelcome> {
+    let bytes = std::fs::read(root.join(SET_ASIDE_WELCOME)).ok()?;
+    let relay = serde_json::from_slice::<SetAsideNote>(&bytes).ok().and_then(|n| n.relay).filter(|r| !r.trim().is_empty());
+    Some(SetAsideWelcome { relay })
 }
 
 /// Welcome has said the identity was set aside.
@@ -1696,7 +1748,7 @@ mod tests {
         root_with(&root, 0x59, 0x59, "typo");
         put(&root.join("identity.duress"), b"slot");
         put(&root.join("profiles.json"), b"{}");
-        mark_set_aside_at(&root).unwrap();
+        mark_set_aside_at(&root, Some("relay.example.org".into())).unwrap();
 
         settle_set_aside_at(&root, DAY);
 
@@ -1708,7 +1760,11 @@ mod tests {
         assert!(origin_of(&target).is_some_and(|o| o.set_aside), "the folder is not marked as set aside");
         assert_eq!(names(&root), ["profiles.json", SET_ASIDE_WELCOME], "the root is not at Welcome");
         assert_eq!(tree_digest(&real), real_before, "the real identity's kept data changed");
-        assert!(set_aside_welcome_at(&root));
+        assert_eq!(
+            set_aside_welcome_at(&root).map(|w| w.relay),
+            Some(Some("relay.example.org".into())),
+            "Welcome lost the relay the set-aside identity used",
+        );
     }
 
     #[test]
@@ -1716,7 +1772,7 @@ mod tests {
         let tmp = crate::test_tmp::tempdir().unwrap();
         let root = tmp.path().join("data");
         root_with(&root, 0x5a, 0x5a, "typo");
-        mark_set_aside_at(&root).unwrap();
+        mark_set_aside_at(&root, None).unwrap();
         put(&root.join(WIPE_MARKER), b"");
         settle_set_aside_at(&root, DAY);
         assert!(root.join(SET_ASIDE_MARK).exists() && root.join("identity.key").exists(), "moved while a wipe was unfinished");
@@ -1740,7 +1796,7 @@ mod tests {
         let tmp = crate::test_tmp::tempdir().unwrap();
         let root = tmp.path().join("data");
         root_with(&root, 0x5c, 0x5c, "typo");
-        mark_set_aside_at(&root).unwrap();
+        mark_set_aside_at(&root, None).unwrap();
         settle_set_aside_at(&root, DAY);
         let target = tmp.path().join("data-old-2025-10-10");
         assert!(target.exists());

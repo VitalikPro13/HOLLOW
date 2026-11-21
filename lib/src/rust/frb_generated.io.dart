@@ -159,6 +159,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ServerBannerData dco_decode_box_autoadd_server_banner_data(dynamic raw);
 
   @protected
+  SetAsideWelcome dco_decode_box_autoadd_set_aside_welcome(dynamic raw);
+
+  @protected
   StoredFileInfo dco_decode_box_autoadd_stored_file_info(dynamic raw);
 
   @protected
@@ -564,6 +567,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ServerBannerData? dco_decode_opt_box_autoadd_server_banner_data(dynamic raw);
 
   @protected
+  SetAsideWelcome? dco_decode_opt_box_autoadd_set_aside_welcome(dynamic raw);
+
+  @protected
   StoredFileInfo? dco_decode_opt_box_autoadd_stored_file_info(dynamic raw);
 
   @protected
@@ -737,6 +743,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ServerSticker dco_decode_server_sticker(dynamic raw);
+
+  @protected
+  SetAsideWelcome dco_decode_set_aside_welcome(dynamic raw);
 
   @protected
   SettingEntry dco_decode_setting_entry(dynamic raw);
@@ -996,6 +1005,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ServerBannerData sse_decode_box_autoadd_server_banner_data(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  SetAsideWelcome sse_decode_box_autoadd_set_aside_welcome(
     SseDeserializer deserializer,
   );
 
@@ -1525,6 +1539,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  SetAsideWelcome? sse_decode_opt_box_autoadd_set_aside_welcome(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   StoredFileInfo? sse_decode_opt_box_autoadd_stored_file_info(
     SseDeserializer deserializer,
   );
@@ -1724,6 +1743,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ServerSticker sse_decode_server_sticker(SseDeserializer deserializer);
+
+  @protected
+  SetAsideWelcome sse_decode_set_aside_welcome(SseDeserializer deserializer);
 
   @protected
   SettingEntry sse_decode_setting_entry(SseDeserializer deserializer);
@@ -2053,6 +2075,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_box_autoadd_server_banner_data(
     ServerBannerData self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_set_aside_welcome(
+    SetAsideWelcome self,
     SseSerializer serializer,
   );
 
@@ -2750,6 +2778,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_opt_box_autoadd_set_aside_welcome(
+    SetAsideWelcome? self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_opt_box_autoadd_stored_file_info(
     StoredFileInfo? self,
     SseSerializer serializer,
@@ -3027,6 +3061,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_server_sticker(ServerSticker self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_set_aside_welcome(
+    SetAsideWelcome self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_setting_entry(SettingEntry self, SseSerializer serializer);

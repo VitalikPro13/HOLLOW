@@ -40093,7 +40093,7 @@ async fn a_waiting_backup_asks_again_when_the_wait_is_turned_off() {
         "the owner's device must be asked about the restored backup",
     );
 
-    super::roster_book::recover(&tag_kp(O_MASTER), &recovery_kp(O_MASTER), &tag_kp(O_DEV), &[o_dev.clone()], true, &o.db_path, &o.passphrase)
+    super::roster_book::recover(&tag_kp(O_MASTER), &recovery_kp(O_MASTER), &tag_kp(O_DEV), &[o_dev.clone()], true, None, &o.db_path, &o.passphrase)
         .expect("the phrase turns the wait off");
     let new_base = super::roster_book::own(&o_master, &o.db_path, &o.passphrase).unwrap().0.base();
     drain_events(&mut o);
@@ -40878,7 +40878,7 @@ async fn authz_the_phrase_takes_the_identity_back_from_a_stolen_device() {
 
     // The owner types the phrase on the removed device and keeps only it.
     let (before, _) = super::roster_book::own(&o_master, &o.db_path, &o.passphrase).map(|(_, s)| (s.members, ())).unwrap();
-    super::roster_book::recover(&tag_kp(O_MASTER), &recovery_kp(O_MASTER), &tag_kp(O_DEV), &[], false, &o.db_path, &o.passphrase)
+    super::roster_book::recover(&tag_kp(O_MASTER), &recovery_kp(O_MASTER), &tag_kp(O_DEV), &[], false, None, &o.db_path, &o.passphrase)
         .expect("the phrase recovers");
     let after = super::roster_book::own(&o_master, &o.db_path, &o.passphrase).unwrap().1.members;
     assert_eq!(after.iter().cloned().collect::<Vec<_>>(), vec![o_dev.clone()]);
@@ -62515,7 +62515,7 @@ async fn t14d_a_recovery_that_drops_a_device_moves_the_lock() {
     let start = relay_tip(&relay, &server_id).n;
     drop(mc);
 
-    super::roster_book::recover(&tag_kp(M), &recovery_kp(M), &tag_kp(MB), &[], true, &mb.db_path, &mb.passphrase)
+    super::roster_book::recover(&tag_kp(M), &recovery_kp(M), &tag_kp(MB), &[], true, None, &mb.db_path, &mb.passphrase)
         .expect("M recovers keeping only this device");
     let dropped = tag_kp(MC).peer_id();
     mb.cmd_tx.send(NodeCommand::RosterChanged { newly_revoked: vec![dropped.clone()] }).await.unwrap();
@@ -62546,7 +62546,7 @@ async fn t14d_our_own_recovery_moves_the_lock() {
     let id = |t: u8| NativeKeypair::from_secret_bytes(&seed_bytes(t)).peer_id();
     let b_tag = if id(180) == b.device_id { 180 } else { 181 };
     let start = relay_tip(&relay, &server_id).n;
-    super::roster_book::recover(&tag_kp(M), &recovery_kp(M), &tag_kp(b_tag), &[], true, &b.db_path, &b.passphrase)
+    super::roster_book::recover(&tag_kp(M), &recovery_kp(M), &tag_kp(b_tag), &[], true, None, &b.db_path, &b.passphrase)
         .expect("the owner recovers keeping only this device");
     b.cmd_tx.send(NodeCommand::RosterChanged { newly_revoked: vec![c.device_id.clone()] }).await.unwrap();
     assert!(

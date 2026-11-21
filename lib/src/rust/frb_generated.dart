@@ -1430,7 +1430,7 @@ abstract class RustLibApi extends BaseApi {
 
   Future<void> crateApiIdentitySetAsideThisIdentity();
 
-  Future<bool> crateApiRecoverySetAsideWelcome();
+  Future<SetAsideWelcome?> crateApiRecoverySetAsideWelcome();
 
   Future<void> crateApiNetworkSetAutoDownloadConfig({
     required int thresholdMb,
@@ -13871,7 +13871,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(debugName: "set_aside_this_identity", argNames: []);
 
   @override
-  Future<bool> crateApiRecoverySetAsideWelcome() {
+  Future<SetAsideWelcome?> crateApiRecoverySetAsideWelcome() {
     return handler.executeNormal(
       NormalTask(
         callFfi: (port_) {
@@ -13884,7 +13884,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           );
         },
         codec: SseCodec(
-          decodeSuccessData: sse_decode_bool,
+          decodeSuccessData: sse_decode_opt_box_autoadd_set_aside_welcome,
           decodeErrorData: sse_decode_String,
         ),
         constMeta: kCrateApiRecoverySetAsideWelcomeConstMeta,
@@ -18631,6 +18631,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  SetAsideWelcome dco_decode_box_autoadd_set_aside_welcome(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_set_aside_welcome(raw);
+  }
+
+  @protected
   StoredFileInfo dco_decode_box_autoadd_stored_file_info(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return dco_decode_stored_file_info(raw);
@@ -20649,6 +20655,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  SetAsideWelcome? dco_decode_opt_box_autoadd_set_aside_welcome(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null ? null : dco_decode_box_autoadd_set_aside_welcome(raw);
+  }
+
+  @protected
   StoredFileInfo? dco_decode_opt_box_autoadd_stored_file_info(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw == null ? null : dco_decode_box_autoadd_stored_file_info(raw);
@@ -21377,6 +21389,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       w: dco_decode_u_32(arr[4]),
       h: dco_decode_u_32(arr[5]),
     );
+  }
+
+  @protected
+  SetAsideWelcome dco_decode_set_aside_welcome(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 1)
+      throw Exception('unexpected arr length: expect 1 but see ${arr.length}');
+    return SetAsideWelcome(relay: dco_decode_opt_String(arr[0]));
   }
 
   @protected
@@ -22412,6 +22433,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return (sse_decode_server_banner_data(deserializer));
+  }
+
+  @protected
+  SetAsideWelcome sse_decode_box_autoadd_set_aside_welcome(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_set_aside_welcome(deserializer));
   }
 
   @protected
@@ -25498,6 +25527,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  SetAsideWelcome? sse_decode_opt_box_autoadd_set_aside_welcome(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_box_autoadd_set_aside_welcome(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
   StoredFileInfo? sse_decode_opt_box_autoadd_stored_file_info(
     SseDeserializer deserializer,
   ) {
@@ -26328,6 +26370,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       w: var_w,
       h: var_h,
     );
+  }
+
+  @protected
+  SetAsideWelcome sse_decode_set_aside_welcome(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_relay = sse_decode_opt_String(deserializer);
+    return SetAsideWelcome(relay: var_relay);
   }
 
   @protected
@@ -27430,6 +27479,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_server_banner_data(self, serializer);
+  }
+
+  @protected
+  void sse_encode_box_autoadd_set_aside_welcome(
+    SetAsideWelcome self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_set_aside_welcome(self, serializer);
   }
 
   @protected
@@ -30236,6 +30294,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_opt_box_autoadd_set_aside_welcome(
+    SetAsideWelcome? self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_box_autoadd_set_aside_welcome(self, serializer);
+    }
+  }
+
+  @protected
   void sse_encode_opt_box_autoadd_stored_file_info(
     StoredFileInfo? self,
     SseSerializer serializer,
@@ -30879,6 +30950,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_bool(self.animated, serializer);
     sse_encode_u_32(self.w, serializer);
     sse_encode_u_32(self.h, serializer);
+  }
+
+  @protected
+  void sse_encode_set_aside_welcome(
+    SetAsideWelcome self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_opt_String(self.relay, serializer);
   }
 
   @protected

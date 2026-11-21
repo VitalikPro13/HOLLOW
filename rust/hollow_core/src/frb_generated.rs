@@ -21092,6 +21092,19 @@ impl SseDecode for Option<crate::api::crdt::ServerBannerData> {
     }
 }
 
+impl SseDecode for Option<crate::api::recovery::SetAsideWelcome> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<crate::api::recovery::SetAsideWelcome>::sse_decode(
+                deserializer,
+            ));
+        } else {
+            return None;
+        }
+    }
+}
+
 impl SseDecode for Option<crate::api::storage::StoredFileInfo> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -22036,6 +22049,14 @@ impl SseDecode for crate::api::stickers::ServerSticker {
             w: var_w,
             h: var_h,
         };
+    }
+}
+
+impl SseDecode for crate::api::recovery::SetAsideWelcome {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_relay = <Option<String>>::sse_decode(deserializer);
+        return crate::api::recovery::SetAsideWelcome { relay: var_relay };
     }
 }
 
@@ -27853,6 +27874,23 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::stickers::ServerSticker>
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::recovery::SetAsideWelcome {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [self.relay.into_into_dart().into_dart()].into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::recovery::SetAsideWelcome
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::recovery::SetAsideWelcome>
+    for crate::api::recovery::SetAsideWelcome
+{
+    fn into_into_dart(self) -> crate::api::recovery::SetAsideWelcome {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for crate::api::storage::SettingEntry {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         [
@@ -31530,6 +31568,16 @@ impl SseEncode for Option<crate::api::crdt::ServerBannerData> {
     }
 }
 
+impl SseEncode for Option<crate::api::recovery::SetAsideWelcome> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <crate::api::recovery::SetAsideWelcome>::sse_encode(value, serializer);
+        }
+    }
+}
+
 impl SseEncode for Option<crate::api::storage::StoredFileInfo> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -32181,6 +32229,13 @@ impl SseEncode for crate::api::stickers::ServerSticker {
         <bool>::sse_encode(self.animated, serializer);
         <u32>::sse_encode(self.w, serializer);
         <u32>::sse_encode(self.h, serializer);
+    }
+}
+
+impl SseEncode for crate::api::recovery::SetAsideWelcome {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <Option<String>>::sse_encode(self.relay, serializer);
     }
 }
 

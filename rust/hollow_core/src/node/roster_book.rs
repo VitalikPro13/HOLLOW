@@ -837,12 +837,17 @@ fn phrase_time(r: &Roster) -> i64 {
 
 /// The phrase starts a new base keeping `keep` and this device. `no_wait` decides
 /// whether a restored backup may still join the new base by seven quiet days.
+/// `lost_since_ms`, when the person said when they last had the dropped devices, is
+/// stored for the new base before the roster is: a crash between never leaves a
+/// recovery whose T is unknown.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn recover(
     master: &NativeKeypair,
     recovery: &NativeKeypair,
     device: &NativeKeypair,
     keep: &[String],
     no_wait: bool,
+    lost_since_ms: Option<i64>,
     db_path: &str,
     db_passphrase: &str,
 ) -> Result<(Roster, RosterState), String> {
@@ -860,9 +865,14 @@ pub(crate) fn recover(
         }
         at = phrase_time(r);
         let rec = roster::sign_recovery(master, recovery, at, &keep, no_wait);
+        if let Some(t) = lost_since_ms {
+            let base = roster::base_id(&r.master, &roster::r_pub_of(recovery), &rec);
+            let store = MessageStore::lease(db_path, db_passphrase)?;
+            note_recovery_lost_since(&store, &base, t)?;
+        }
         r.add_phrase_statement(&roster::r_pub_of(recovery), Some(rec), None)
     })?;
-    note_own_phrase(db_path, db_passphrase, OwnPhrase { kind: PhraseKind::Recover, at_ms: at, base: state.base.clone() });
+    note_own_phrase(db_path, db_passphrase, OwnPhrase { kind: PhraseKind::Recover, at_ms: at, base: state.base.clone(), no_wait });
     Ok((roster, state))
 }
 
@@ -883,7 +893,7 @@ pub(crate) fn admit_by_phrase(
         let pa = roster::sign_phrase_admit(master, recovery, at, &device.peer_id());
         r.add_phrase_statement(&roster::r_pub_of(recovery), None, Some(pa))
     })?;
-    note_own_phrase(db_path, db_passphrase, OwnPhrase { kind: PhraseKind::Admit, at_ms: at, base: state.base.clone() });
+    note_own_phrase(db_path, db_passphrase, OwnPhrase { kind: PhraseKind::Admit, at_ms: at, base: state.base.clone(), no_wait: state.no_wait });
     Ok((roster, state))
 }
 
@@ -905,6 +915,9 @@ pub(crate) struct OwnPhrase {
     pub(crate) at_ms: i64,
     /// The base current once it was signed (a recovery's own).
     pub(crate) base: String,
+    /// A recovery's "backups need approval": a later base must never quietly undo it.
+    #[serde(default)]
+    pub(crate) no_wait: bool,
 }
 
 fn note_own_phrase(db_path: &str, db_passphrase: &str, own: OwnPhrase) {
@@ -2465,7 +2478,7 @@ mod tests {
             "the owner's device must learn it was removed",
         );
 
-        let (_, state) = recover(&me.master, &recovery, &me.device, &[], false, &me.db, &me.pass).unwrap();
+        let (_, state) = recover(&me.master, &recovery, &me.device, &[], false, None, &me.db, &me.pass).unwrap();
         assert!(state.is_member(&me.device.peer_id()));
         assert!(!state.is_member(&thief.peer_id()), "the thief survived the recovery");
         let mut late = roster.clone();
@@ -2756,7 +2769,7 @@ mod tests {
         let me = Observer::new(0x01, 0x02);
         let recovery = kp(0x03);
         let genesis = held_from_ahead(&me, &recovery);
-        let (_, state) = recover(&me.master, &recovery, &me.device, &[], false, &me.db, &me.pass).unwrap();
+        let (_, state) = recover(&me.master, &recovery, &me.device, &[], false, None, &me.db, &me.pass).unwrap();
         assert_ne!(state.base, genesis.base(), "the recovery was dated before the base it meant to replace");
 
         let other = Observer::new(0x01, 0x09);
@@ -2789,7 +2802,7 @@ mod tests {
         assert!(!me.state_of(&own_master).is_member(&thief.peer_id()), "a forged recovery key admitted its device");
         me.own();
         assert_eq!(stored_phrase(&me).as_deref(), Some(PHRASE), "the stored phrase was erased for a forged key");
-        let (_, state) = recover(&me.master, &recovery, &me.device, &[], false, &me.db, &me.pass)
+        let (_, state) = recover(&me.master, &recovery, &me.device, &[], false, None, &me.db, &me.pass)
             .expect("the real phrase was locked out");
         assert!(state.protected && state.is_member(&me.device.peer_id()));
 
@@ -2817,9 +2830,9 @@ mod tests {
         let _g = guard();
         let me = Observer::new(0x01, 0x02);
         me.own();
-        recover(&me.master, &kp(0x03), &me.device, &[], false, &me.db, &me.pass).unwrap();
+        recover(&me.master, &kp(0x03), &me.device, &[], false, None, &me.db, &me.pass).unwrap();
         assert!(
-            recover(&me.master, &kp(0x04), &me.device, &[], false, &me.db, &me.pass).is_err(),
+            recover(&me.master, &kp(0x04), &me.device, &[], false, None, &me.db, &me.pass).is_err(),
             "a second recovery key replaced the pinned one",
         );
     }

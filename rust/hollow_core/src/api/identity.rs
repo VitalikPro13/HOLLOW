@@ -171,18 +171,19 @@ fn keychain_default_after_restore(root: &std::path::Path, phrase: &str) -> bool 
 /// within 30 days that no friend accepted and no server holds.
 #[frb]
 pub fn may_set_aside_this_identity() -> bool {
-    set_aside_gate().is_ok_and(|(_, allowed)| allowed)
+    set_aside_gate().is_ok_and(|(_, allowed, _)| allowed)
 }
 
-/// The data root and whether this identity may be set aside now.
-fn set_aside_gate() -> Result<(std::path::PathBuf, bool), String> {
+/// The data root, whether this identity may be set aside now, and its relay.
+fn set_aside_gate() -> Result<(std::path::PathBuf, bool, Option<String>), String> {
     let id = identity::load_existing_identity()?.ok_or("There is no identity on this device yet.")?;
     let root = crate::identity::data_dir()?;
     let db = root.join("messages.db");
     let pass = crate::api::storage::db_key_of(&id.keypair)?;
     let store = crate::storage::MessageStore::open(db.to_str().ok_or("Invalid path encoding")?, &pass)?;
     let allowed = crate::node::phrase_restore::may_set_aside(&store, &id.device_peer_id, crate::node::roster_book::now_ms());
-    Ok((root, allowed))
+    let relay = store.load_setting(crate::node::fetch::RELAY_DOMAIN_KEY).ok().flatten();
+    Ok((root, allowed, relay))
 }
 
 /// Sets this identity aside (moved, never erased) at the next launch, after which the
@@ -191,12 +192,12 @@ fn set_aside_gate() -> Result<(std::path::PathBuf, bool), String> {
 #[frb]
 pub fn set_aside_this_identity() -> Result<(), String> {
     crate::log::init();
-    let (root, allowed) = set_aside_gate()?;
+    let (root, allowed, relay) = set_aside_gate()?;
     if !allowed {
         return Err("Hollow couldn't set this identity aside. Try again.".into());
     }
     crate::api::storage::refuse_while_not_ready()?;
-    crate::api::recovery::mark_set_aside_at(&root)
+    crate::api::recovery::mark_set_aside_at(&root, relay)
 }
 
 pub(crate) const NOT_BUILT: &str = "Not built yet";
@@ -4616,8 +4617,16 @@ mod welcome_restore_tests {
         crate::node::phrase_restore::write(&store, &mark).unwrap();
         drop(store);
 
+        open().save_setting(crate::node::fetch::RELAY_DOMAIN_KEY, "relay.example.org").unwrap();
         set_aside_this_identity().unwrap();
         assert!(root.join("set_aside.pending").exists());
         assert!(root.join("identity.key").exists(), "nothing moves while this process runs");
+
+        // Review (Dart half, a): the next launch moves it, and Welcome still knows the
+        // relay, whose setting went with the database.
+        crate::api::recovery::settle_relink().unwrap();
+        assert!(!root.join("identity.key").exists() && !root.join("messages.db").exists(), "the identity was not set aside");
+        let welcome = crate::api::recovery::set_aside_welcome().unwrap().expect("Welcome is told");
+        assert_eq!(welcome.relay.as_deref(), Some("relay.example.org"), "the next restore would land on the default relay");
     }
 }
