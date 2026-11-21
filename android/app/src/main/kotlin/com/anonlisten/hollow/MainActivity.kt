@@ -30,6 +30,7 @@ class MainActivity : FlutterFragmentActivity() {
         HollowHwKey.register()
         registerPrivacyChannel(flutterEngine)
         VideoPoster.register(flutterEngine.dartExecutor.binaryMessenger)
+        HollowSfx.register(this, flutterEngine.dartExecutor.binaryMessenger)
 
         val relayTriggers =
             MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "hollow/relay_triggers")

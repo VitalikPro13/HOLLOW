@@ -135,6 +135,14 @@ the signal whitelist's four touches, the stream overlay consent detail, share ba
   plaintext copy); a second audioplayers player created mid-setup froze the Windows UI
   (platform and UI threads are merged), while Rust kept logging. No fixed player ids.
   regress_voice3 3/18 -> 0/34 (s42, `test/sound_service_player_test.dart`).
+- Phones play cues ONLY through the native `hollow/sfx` player (iOS `HollowSfxPlayer`, Android
+  `HollowSfx.kt`), never audioplayers: setting an audioplayers context on Android writes the
+  GLOBAL mode (MODE_NORMAL) and `isSpeakerphoneOn = false`, which took live calls out of
+  MODE_IN_COMMUNICATION and off the speaker (#154, 0.14.3). The native players never touch
+  AudioManager or audio focus; Android only READS the mode to play an in-call cue as call
+  signalling (follows the call's route), media otherwise. A new audioplayers player on Android that calls
+  `setAudioContext` (or `AudioPlayer.global.setAudioContext`) brings the bug back.
+  `test/sound_service_native_test.dart`, wiki `services_media_storage` (SoundService).
 - Mic gain/loudness: WebRTC APM AGC is DISABLED, NEVER re-enable it. Voice Enhancement
   owns loudness (`setCaptureGain`/`setVoiceEnhance`; `setVolume()` = NO-OP); NEVER a
   per-sample leveler or a bypass of iOS VPIO. Chain/servo/3 ports + g++ harness:

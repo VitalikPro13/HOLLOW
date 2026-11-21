@@ -153,7 +153,7 @@ Uses `network_api.logFromDart()` to write to `hollow_debug.log` (visible in rele
 
 File: `lib/src/core/services/sound_service.dart`
 
-Plays the short one-shot UI cues and the outgoing-call ringback, on top of `audioplayers`. Singleton (`SoundService.instance`), fire-and-forget by design: every entry point is a `void` that swallows its own failures, so a missing codec on some Linux box can never take a channel join or a mute toggle down with it.
+Plays the short one-shot UI cues and the outgoing-call ringback: on the desktops through `audioplayers`, on both phones through a native player over the `hollow/sfx` channel. Singleton (`SoundService.instance`), fire-and-forget by design: every entry point is a `void` that swallows its own failures, so a missing codec on some Linux box can never take a channel join or a mute toggle down with it.
 
 ### HollowSound enum
 
@@ -178,8 +178,8 @@ The seventh bundled asset, `sounds/default_ringtone.wav`, is not in the enum: it
 
 1. Returns immediately when `enabled` is false.
 2. Throttle: one play per sound per 150 ms (`_minGap`, a `_lastPlayed` map). Five peers joining at once, for instance a channel filling up after a relay reconnect, collapses to one sound.
-3. **iOS goes through a native player, everything else through `audioplayers`** (`_useNative => Platform.isIOS`). See below.
-4. One `AudioPlayer` per `HollowSound`, built lazily and kept in `_players` (`playerId: 'hollow-sfx-<name>'`, `ReleaseMode.stop`). Each play does `stop()` then `play(AssetSource(...), volume: volume)`, so a re-trigger past the throttle window restarts from the top instead of queueing behind the previous tail.
+3. **iOS and Android go through a native player, the desktops through `audioplayers`** (`_useNative`: `SoundService.platform` is `ios` or `android`; tests set `platform`, `test/sound_service_native_test.dart`). See below.
+4. Desktops: one `AudioPlayer` per `HollowSound`, held in `_players` as its setup Future from the moment setup starts (no fixed player ids, `ReleaseMode.stop`). Each play does `stop()` then `play(AssetSource(...), volume: volume)`, so a re-trigger past the throttle window restarts from the top instead of queueing behind the previous tail.
 
 ### iOS: `HollowSfxPlayer`, not audioplayers
 
@@ -189,7 +189,13 @@ iOS now routes through **`HollowSfxPlayer` in `ios/Runner/AppDelegate.swift`** o
 
 **Iron rule inside that class: NEVER `setCategory`, NEVER `setActive(false)`.** The single `setActive(true)` is opt-in from Dart and sent only when no call owns the session — which is what `duringCall` now means. It no longer silences anything; keep passing it for every call/VC cue. Asset keys cross as `'assets/${sound.asset}'` and resolve via `FlutterDartProject.lookupKey(forAsset:)` + `Bundle.main.path`.
 
-Android, desktop and the INCOMING ringtone (`mobile_incoming_call.dart`, a `DeviceFileSource`) are unchanged.
+### Android: `HollowSfx`, not audioplayers (#154, 0.14.3)
+
+`audioplayers_android` 5.2.1 `WrappedPlayer.updateAudioContext` writes the GLOBAL `audioManager.mode = MODE_NORMAL` and `isSpeakerphoneOn = false` (WrappedPlayer.kt 171-172) whenever a player's context differs from the one it holds, which our no-focus context always does. So the first cue of each sound in a session, and every ringback (a new player each dial), took a live call out of MODE_IN_COMMUNICATION and dropped the speakerphone route the call had asked for: a speaker call went back to the earpiece and the voice path lost its communication mode. The dumpsys trail is `abandonAudioFocus` from audioplayers' `ModernFocusManager`, then `setMode(MODE_NORMAL)` and `setSpeakerphoneOn(false)` from our pid. `AudioPlayer.global.setAudioContext` writes the mode the same way, so no audioplayers context avoids it.
+
+Android now plays through **`HollowSfx` (`android/app/src/main/kotlin/com/anonlisten/hollow/HollowSfx.kt`, registered in `MainActivity.configureFlutterEngine`)**: one kept `MediaPlayer` per (asset, attributes), restarted from the top (`seekTo(0)` + `start()`), and a fresh looping one for the ringback; `setVolume(v, v)` = the linear volume audioplayers applied. Attributes are picked per cue from the live mode, READ only: in MODE_IN_COMMUNICATION or MODE_IN_CALL a cue plays as USAGE_VOICE_COMMUNICATION_SIGNALLING / SONIFICATION, so it follows the call's route and in-call volume (at the ear on an earpiece call, on the loudspeaker on a speaker call); otherwise it keeps USAGE_MEDIA / CONTENT_TYPE_MUSIC as the audioplayers cues had, so volume and routing outside a call are unchanged. The ringback always plays as media: it runs while dialling, before the call picks its route. **Iron rule inside it: NEVER touch AudioManager (mode, speakerphone, communication device) and NEVER request or abandon audio focus.** Assets resolve through `FlutterLoader.getLookupKeyForAsset` + `assets.openFd`, with a cache copy if an asset was stored compressed. `activateSession` is ignored on Android. Calls arrive one at a time on the platform thread, so a cue during a player's setup cannot build a second one (the "one player per sound" rule holds natively too).
+
+The desktops and the INCOMING ringtone (`call_ringtone.dart`, still audioplayers on the default context) are unchanged; the voice-message bubble and the settings previews also stay on audioplayers, none of them sets a context, so none writes the mode.
 
 **Audio context:** `AudioContextConfig(focus: AudioContextConfigFocus.mixWithOthers)`, shared by every player including the ringback. No audio focus is requested and playback mixes with whatever else is running, so a mute blip can never duck or interrupt call audio.
 
@@ -197,7 +203,7 @@ Android, desktop and the INCOMING ringtone (`mobile_incoming_call.dart`, a `Devi
 
 ### startRingback() / stopRingback()
 
-The looping outgoing-call ring: you pressed Call and are waiting for the other side to pick up. `startRingback()` is idempotent (a second start while ringing is ignored rather than layering a second loop) and plays `sounds/default_ringtone.wav` on a dedicated `hollow-ringback` player in `ReleaseMode.loop` at `ringtoneVolume`. It deliberately uses the BUNDLED ringtone, never the user's custom pick: the custom one identifies an INCOMING call, and hearing your own alert song back at you while dialling reads as a bug. `stopRingback()` stops, disposes and clears the player, and is safe to call when nothing is ringing (every call teardown path funnels through it). Idempotence lives on a `_ringbackOn` bool rather than the player field, because on iOS the player is null: **the ringback also goes through `HollowSfxPlayer` (`startLoop`/`stopLoop`, `numberOfLoops = -1`)**. It matters more there than for the one-shots, since the ringback runs for the whole dial, i.e. straight through call setup, so letting audioplayers restate the session category there was a standing risk to the OUTGOING mic.
+The looping outgoing-call ring: you pressed Call and are waiting for the other side to pick up. `startRingback()` is idempotent (a second start while ringing is ignored rather than layering a second loop) and plays `sounds/default_ringtone.wav` on a dedicated player (a fresh one per dial) in `ReleaseMode.loop` at `ringtoneVolume`. It deliberately uses the BUNDLED ringtone, never the user's custom pick: the custom one identifies an INCOMING call, and hearing your own alert song back at you while dialling reads as a bug. `stopRingback()` stops, disposes and clears the player, and is safe to call when nothing is ringing (every call teardown path funnels through it). Idempotence lives on a `_ringbackOn` bool rather than the player field, because on iOS the player is null: **the ringback also goes through the native player (`startLoop`/`stopLoop`; `numberOfLoops = -1` on iOS, `isLooping` on Android)**. It matters more there than for the one-shots, since the ringback runs for the whole dial, i.e. straight through call setup, so letting audioplayers restate the iOS session category, or reset Android's mode, there was a standing risk to the OUTGOING mic.
 
 ---
 

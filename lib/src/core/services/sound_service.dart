@@ -84,20 +84,28 @@ class SoundService {
     focus: AudioContextConfigFocus.mixWithOthers,
   ).build();
 
-  /// iOS-only native player (`HollowSfxPlayer` in `ios/Runner/AppDelegate.swift`).
+  /// The phones' native player: `HollowSfxPlayer` (`ios/Runner/AppDelegate.swift`)
+  /// and `HollowSfx` (`android/.../HollowSfx.kt`).
   ///
-  /// audioplayers is unusable for in-call cues on iOS: it applies the shared
-  /// `AVAudioSession` CATEGORY when a player's context is set and calls
-  /// `setActive(false)` when its last player stops, and either one aimed at a
-  /// live `playAndRecord` session takes the mic down mid-sentence. AVAudioPlayer
-  /// plays into whatever session exists and never reconfigures it.
-  static const MethodChannel _iosSfx = MethodChannel('hollow/sfx');
+  /// audioplayers is unusable for in-call cues on a phone. On iOS it applies
+  /// the shared `AVAudioSession` CATEGORY when a player's context is set and
+  /// calls `setActive(false)` when its last player stops, and either one aimed
+  /// at a live `playAndRecord` session takes the mic down mid-sentence. On
+  /// Android setting a player's context writes the GLOBAL audio mode
+  /// (MODE_NORMAL) and turns the speakerphone off, which drops a live call out
+  /// of communication mode and pulls a speaker call to the earpiece (#154).
+  /// Both native players play into whatever route exists and never touch it.
+  static const MethodChannel _nativeSfx = MethodChannel('hollow/sfx');
+
+  /// The OS this process runs on; tests stand in for a phone.
+  @visibleForTesting
+  static String platform = Platform.operatingSystem;
 
   /// Route this platform's playback through the native player.
-  static bool get _useNative => Platform.isIOS;
+  static bool get _useNative => platform == 'ios' || platform == 'android';
 
   void _invokeNative(String method, [Map<String, dynamic>? args]) {
-    unawaited(_iosSfx.invokeMethod<void>(method, args).catchError((e) {
+    unawaited(_nativeSfx.invokeMethod<void>(method, args).catchError((e) {
       // Fire-and-forget: a missing channel (an older Runner) must not take
       // down a channel join, and a sync try/catch would not catch this.
       debugPrint('[HOLLOW-SFX] native $method failed: $e');
@@ -109,7 +117,8 @@ class SoundService {
   /// [duringCall] marks a cue whose clip can still be playing while WebRTC
   /// owns the audio session, the join cue included since it fires a beat
   /// before the mic opens. On iOS that means "do not activate the session";
-  /// elsewhere every cue plays on the no-focus context above.
+  /// Android's native player never touches the session in any case, and the
+  /// desktops play every cue on the no-focus context above.
   void play(HollowSound sound, {bool duringCall = false}) {
     if (!enabled) return;
 
@@ -170,8 +179,8 @@ class SoundService {
     _ringbackOn = true;
     if (_useNative) {
       // Matters more here than for the one-shots: the ringback runs right
-      // through call setup, so letting audioplayers restate the session
-      // category there was a standing risk to the outgoing mic.
+      // through call setup, where audioplayers restated the iOS session
+      // category and reset Android's audio mode under the outgoing mic.
       _invokeNative('startLoop', {
         'asset': 'assets/sounds/default_ringtone.wav',
         'volume': ringtoneVolume,
