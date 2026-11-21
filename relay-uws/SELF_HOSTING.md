@@ -89,7 +89,10 @@ TURN and the forwarder move there once the new address proves to be this
 server. The setup connects to it, and the far end has to answer with your
 relay's own certificate key and with your TURN server's secret. A DNS answer
 alone never moves them, so a forged one cannot send TURN traffic to someone
-else's machine.
+else's machine. A relay with the media forwarder but no TURN has no TURN secret
+to check at the new address, so the forwarder moves only to an address the
+server itself holds; behind a router you confirm a new address yourself with
+**Change a setting**, then the address.
 
 Some home routers can't connect from inside the network to their own public
 address, so the check can't run from the server. Then the setup takes nothing

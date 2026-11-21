@@ -115,7 +115,10 @@ changed domain address leaves TURN on the old address, until the operator confir
 one (Change a setting, then the address); a router or Pi-hole
 answering the name with a LAN address freezes the follower (nothing moves, nothing drops);
 a name pointing at a proxy in front of the server is never taken; a forwarder-only relay
-proves an address with the TLS pin alone, since no TURN server answers there. The follower
+(no TURN) moves only to an address one of the machine's interfaces holds, since the TLS pin
+alone would also pass a port-443 passthrough (sslh, a front HAProxy, the same key elsewhere),
+so one behind NAT is confirmed by hand, and check-host fails naming both addresses until it
+is (second review finding 5, option C, Vitalik Nov 21). The follower
 also puts hand edits of these address fields back within five minutes.
 
 A bare IP address or a LAN address typed for a relay only the home network uses gets no
@@ -135,6 +138,7 @@ Tests: `relay-uws/test/installer/address_follow_box_test.sh`, run by
 `a_settings_file_that_cannot_be_written_keeps_the_old_peer`,
 `a_coturn_our_restart_left_failed_starts_again`,
 `a_failed_compose_up_keeps_the_old_peer_locked_and_retries`,
+`a_forwarder_only_relay_moves_only_to_an_address_this_machine_holds`,
 `a_domain_behind_a_router_without_loopback_is_not_dropped_on_dns_alone`,
 `the_follower_says_once_that_it_cannot_follow_on_a_split_horizon_network`,
 `no_change_restarts_nothing`, `a_private_address_is_never_taken`,
@@ -161,3 +165,19 @@ Tests: `relay-uws/test/installer/address_follow_box_test.sh`, run by
 `adopt_rollback_removes_the_follower` (rollback, docker-rollback); `run_tests.sh`
 `the_setup_explains_a_lan_answer_for_its_own_name`,
 `a_fresh_duckdns_install_stops_when_duckdns_and_the_echo_disagree`.
+
+Follow-up for 0.15 (option A, not built): let a forwarder-only relay behind NAT prove a new
+address with the forwarder's own answer. The server-mode forwarder keeps one standing UDP
+probe socket on `udp_port_max`, taken out of the leg allocator (today its sockets are legs
+bound on demand, so nothing answers on its range without a live leg). A request carries the
+magic `hollow-fwd-probe1` and a 32-byte nonce, padded so the reply is never larger than the
+request, rate-limited globally and per source. The reply is an Ed25519 signature with the
+forwarder's existing identity key over `hollow-fwd-addr1` || relay domain || nonce. A new
+`--print-public-key` flag lets the setup store the key under `/etc/hollow-forwarder`;
+`address-probe.py fwd` runs as hollow-addr and verifies with `openssl pkeyutl -verify
+-rawin`; `proven()` without TURN then takes pin AND this answer, which also works through
+Docker's published port range. A forwarder too old to answer fails closed (no move, check-host
+fails). Tests: Rust unit tests for the responder (signature, domain, padding, rate limit) and
+the box test `a_forwarder_only_relay_needs_the_forwarders_own_answer`. Rejected: a loop of
+UDP back to this machine from the installer alone (Docker's DNAT delivers it into the
+container, and a reflector passes it).

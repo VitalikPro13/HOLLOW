@@ -8,8 +8,10 @@
 # resolver, and an answer naming any private address counts for nothing. A new address
 # counts only once it is proven to be this machine: an address this machine holds, or
 # one where a TLS handshake for the relay's name completes with the key the relay
-# serves (curl --pinnedpubkey) AND, with TURN on, coturn answers an authenticated
-# Allocate signed with this relay's TURN secret (address-probe.py turn). A DNS answer
+# serves (curl --pinnedpubkey) AND coturn answers an authenticated Allocate signed with
+# this relay's TURN secret (address-probe.py turn). A relay without TURN has nothing
+# there but the TLS key, which a passthrough for 443 also shows, so it takes only an
+# address this machine holds. A DNS answer
 # alone never moves TURN, so a forged one cannot point coturn's peer lock at someone
 # else's machine.
 #
@@ -187,12 +189,18 @@ proven() {
         echo "an address of this machine"
         return 0
     fi
+    [ "$TURN" = yes ] || return 1
     pin_proves "$1" || return 1
+    turn_proves "$1" || return 1
+    echo "and both this relay's TLS key and its TURN secret answered there"
+}
+
+# not_taken <address>: why a candidate that did not prove stays out.
+not_taken() {
     if [ "$TURN" = yes ]; then
-        turn_proves "$1" || return 1
-        echo "and both this relay's TLS key and its TURN secret answered there"
+        say "$HOST points at $1, which did not prove to be this machine, so TURN does not take it"
     else
-        echo "and this relay's TLS key answered there"
+        say "$HOST points at $1, which this machine does not hold, so the forwarder does not take it (a relay without TURN takes only an address this machine holds)"
     fi
 }
 
@@ -299,7 +307,7 @@ decide_v4() {
             say "$HOST points at $c, $why"
             return 0
         fi
-        say "$HOST points at $c, which did not prove to be this machine, so TURN does not take it"
+        not_taken "$c"
     done
     stale_look
 }
@@ -626,7 +634,11 @@ check_one() {
     if in_list "${3,,}" "${NAMES[@]}"; then
         ok "$1 $2 $3, the address $HOST points at"
     else
-        bad "$1 $2 $3, but $HOST points at ${NAMES[*]}. The follower takes a new address once it proves to be this machine; to set one now, run sudo hollow-relay-setup and choose Change a setting, then the address"
+        if [ "$TURN" = yes ]; then
+            bad "$1 $2 $3, but $HOST points at ${NAMES[*]}. The follower takes a new address once it proves to be this machine; to set one now, run sudo hollow-relay-setup and choose Change a setting, then the address"
+        else
+            bad "$1 $2 $3, but $HOST points at ${NAMES[*]}. A relay without TURN moves the forwarder only to an address this machine holds; to set one now, run sudo hollow-relay-setup and choose Change a setting, then the address"
+        fi
     fi
 }
 

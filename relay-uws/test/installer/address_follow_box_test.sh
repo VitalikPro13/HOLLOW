@@ -760,6 +760,29 @@ stamp last_change "$long_ago"
 out=$(follow)
 eq "and a later change goes through as before" "$(turn_ip) $(peers)" "$NEW $NEW $L"
 
+echo "the address follower: a relay without TURN"
+# a_forwarder_only_relay_moves_only_to_an_address_this_machine_holds: with no TURN secret
+# to answer there, the TLS key alone (a 443 passthrough shows it too) moves nothing.
+sed -i 's/^turn=.*/turn=no/' "$CONF_FILE"
+f7=$(inv hollow-forwarder)
+dns A "$NEW2"
+stamp last_change "$long_ago"
+out=$(follow)
+eq "a relay without TURN does not move to an address where only its TLS key answers" "$(fwd_ip)" "$NEW"
+has "and says why" "$out" "a relay without TURN takes only an address this machine holds"
+eq "nor restarts the forwarder" "$(inv hollow-forwarder)" "$f7"
+has "check-host names both addresses" "$(address_part)" "FAIL  the forwarder's settings ($FWD_ETC/forwarder.toml) give $NEW, but $NAME points at $NEW2. A relay without TURN moves the forwarder only to an address this machine holds"
+ip addr add "$NEW2/32" dev lo
+out=$(follow)
+ip addr del "$NEW2/32" dev lo
+eq "an address this machine holds is taken" "$(fwd_ip)" "$NEW2"
+no_ "and the forwarder restarts" test "$(inv hollow-forwarder)" = "$f7"
+sed -i 's/^turn=.*/turn=yes/' "$CONF_FILE"
+dns A "$NEW"
+stamp last_change "$long_ago"
+out=$(follow)
+eq "with TURN back the next proven change moves both again" "$(turn_ip) $(peers) $(fwd_ip)" "$NEW $NEW $L $NEW"
+
 echo "the address follower: its own unit"
 # the_follower_unit_follows_inside_its_sandbox
 printf '[Service]\nEnvironment=PATH=%s:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\nReadWritePaths=%s\n' "$SHIM" "$SHIM" \
@@ -768,8 +791,9 @@ systemctl daemon-reload
 dns A "$NEW2"
 rm -f "$FOLLOW_STATE"
 : >"$SHIM/who"
-# The sections above restarted coturn more often than systemd's start limit allows.
-systemctl reset-failed hollow-coturn
+# The sections above restarted coturn and the forwarder more often than systemd's start
+# limit allows.
+systemctl reset-failed hollow-coturn hollow-forwarder
 systemctl restart hollow-coturn
 c2=$(inv hollow-coturn)
 systemctl start hollow-address-follow.service
