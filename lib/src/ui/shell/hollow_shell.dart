@@ -678,13 +678,15 @@ class _HollowShellState extends ConsumerState<HollowShell>
     final done = Completer<void>();
     _startOffers = done.future;
     try {
+      // First: the offers below concern the identity this copy runs on, and the
+      // person may want the other one.
+      await _noteDefaultProfileLeftBehind();
       await _askTermsAgreement();
       await _offerPhraseUpgrade();
       await _offerProtection();
       if (!setUpThisLaunch) await _offerKeychainLock();
       await _finishKeychainRekey();
       await _restoreOffers.atStart(countedAtStart: counted);
-      await _noteDefaultProfileLeftBehind();
     } finally {
       done.complete();
     }
@@ -695,7 +697,8 @@ class _HollowShellState extends ConsumerState<HollowShell>
   /// app lock's cover.
   Future<void> _noteDefaultProfileLeftBehind() async {
     await _untilUnlocked();
-    if (!mounted || defaultProfileLeftBehind() == null) return;
+    final defaultRoot = defaultProfileLeftBehind();
+    if (!mounted || defaultRoot == null) return;
     final shown = await storage_api
         .loadSetting(key: _kDefaultProfileNoteKey)
         .catchError((_) => null);
@@ -709,7 +712,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
         .catchError((_) {});
     await showHollowDialog<void>(
       context: context,
-      builder: (_) => const DefaultProfileNoteDialog(),
+      builder: (_) => DefaultProfileNoteDialog(defaultRoot: defaultRoot),
     );
   }
 

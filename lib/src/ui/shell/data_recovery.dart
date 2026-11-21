@@ -607,22 +607,47 @@ class DiagnosticsDialog extends StatelessWidget {
 /// Said once when this copy runs on the folder beside the app while the person's
 /// earlier identity sits in the Default profile (#155: an update of 0.14.1 or
 /// older could move a copy there).
-class DefaultProfileNoteDialog extends StatelessWidget {
-  const DefaultProfileNoteDialog({super.key});
+class DefaultProfileNoteDialog extends StatefulWidget {
+  /// The Default profile's folder.
+  final String defaultRoot;
+
+  /// Pins the profile and restarts onto it.
+  final Future<void> Function(String path) switchTo;
+
+  const DefaultProfileNoteDialog({
+    super.key,
+    required this.defaultRoot,
+    this.switchTo = switchProfileAndRestart,
+  });
+
+  @override
+  State<DefaultProfileNoteDialog> createState() =>
+      _DefaultProfileNoteDialogState();
+}
+
+class _DefaultProfileNoteDialogState extends State<DefaultProfileNoteDialog>
+    with HollowDialogAction {
+  Future<void> _switch() async {
+    await runDialogAction(() => widget.switchTo(widget.defaultRoot),
+        fallback: "Hollow couldn't switch to the Default profile. Try again.");
+  }
 
   @override
   Widget build(BuildContext context) {
     return HollowDialog(
       title: 'Your other identity is still here',
+      showClose: true,
+      busy: actionRunning,
+      error: actionError,
       content: const HollowDialogText(
           'Hollow is using the profile in the folder next to the app. The '
           'identity you had before is still on this computer, in the Default '
-          'profile. To go back to it, open Settings, then Files & storage, and '
-          'switch to Default.'),
+          'profile. To switch later, open Settings, then Files & storage.'),
       actions: [
         HollowButton.filled(
-          onPressed: () => Navigator.of(context).pop(),
-          child: const Text('OK'),
+          loading: actionRunning,
+          onPressed: _switch,
+          child: const Text('Switch to Default'),
         ),
       ],
     );

@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:flutter/services.dart';
+import 'package:hollow/src/core/profile_registry.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/updater.dart' as updater_api;
 
@@ -51,6 +52,14 @@ Future<Never> relaunchApp() async {
     await Future<void>.delayed(const Duration(milliseconds: 200));
   } catch (_) {}
   exit(0);
+}
+
+/// Pins [path] as the active profile and restarts onto it. Pinned even for the
+/// Default profile: the pin has to beat portable auto-detection on the way back.
+Future<Never> switchProfileAndRestart(String path) async {
+  await saveProfileRegistry(
+      readProfileRegistrySync().copyWith(activePath: path));
+  return relaunchApp();
 }
 
 /// Ends the process for a relay change, the one exit every relay switch takes.

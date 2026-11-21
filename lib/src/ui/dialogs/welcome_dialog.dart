@@ -114,11 +114,7 @@ class _WelcomeContentState extends State<_WelcomeContent> {
     if (_switchingPath != null) return;
     setState(() => _switchingPath = row.path);
     try {
-      final registry = readProfileRegistrySync();
-      // Pinned explicitly even for Default: the pin has to beat portable
-      // auto-detection on the way back to the OS root.
-      await saveProfileRegistry(registry.copyWith(activePath: row.path));
-      await relaunchApp();
+      await switchProfileAndRestart(row.path);
     } catch (e) {
       if (!mounted) return;
       setState(() => _switchingPath = null);
