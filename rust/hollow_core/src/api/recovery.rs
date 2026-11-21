@@ -1717,7 +1717,15 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let dir = kept_from_root(&root, "2025-10-01", 0x54, "kept", false);
         let before = tree_digest(&dir);
-        assert!(matches!(check_kept_at(&root, &pass_of(0x54)), KeptCheck::Match(_)));
+        // A kept copy this process may not write to still answers: it is opened read-only.
+        let db = dir.join("messages.db");
+        let mut perms = std::fs::metadata(&db).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&db, perms.clone()).unwrap();
+        assert!(matches!(check_kept_at(&root, &pass_of(0x54)), KeptCheck::Match(_)), "the check opened a kept copy for writing");
+        #[allow(clippy::permissions_set_readonly_false)]
+        perms.set_readonly(false);
+        std::fs::set_permissions(&db, perms).unwrap();
         assert_eq!(check_kept_at(&root, &pass_of(0x55)), KeptCheck::NoneOpens);
         assert_eq!(tree_digest(&dir), before, "the check changed a kept folder");
     }
