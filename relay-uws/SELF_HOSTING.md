@@ -942,7 +942,12 @@ By hand, the keys live in `keys.json` (`relay-uws/keys/keys.json` under Docker,
 
 A key is four groups of four characters, each `A-Z` or `0-9`, with hyphens
 between them. The relay reads the file every 30 seconds, so changes need no
-restart. Under Docker the file is mounted read-only and is gitignored, so you
+restart. If `keys.json` exists but can't be read when the relay starts (a typo in
+the JSON, or the wrong permissions), the relay refuses every login until it can,
+and its log says so. Fix the file and the relay picks it up within 30 seconds;
+`check-host.sh` fails while the relay can't read it. Turning `enabled` from false
+to true disconnects everyone who got in without a key, and they need one to come
+back. Turning it from true to false disconnects nobody. Under Docker the file is mounted read-only and is gitignored, so you
 can't commit it by accident.
 
 ### Public stats
@@ -1269,15 +1274,17 @@ connected to, and the relay accepts only its own address (`RELAY_HOST`, or
 points at the same server won't sign in.
 
 **Members see Access key full.** One access key lets in 5 devices at once. A
-sixth is turned away, and its app says **Access key full** until a seat frees up,
-which happens as soon as one of those devices closes Hollow. Give each person a
-key of their own rather than one key for the group. The relay notes these
+sixth is turned away, and its app says **Access key full** until a seat frees up.
+A seat comes back as soon as the device holding it closes Hollow. A device that
+lost its network keeps its seat until the relay notices, within about 45 seconds.
+Give each person a key of their own rather than one key for the group. The relay notes these
 refusals in its log at most once a minute, without saying who, as a line that
 says every device seat of an access key was taken. Run
 `sudo journalctl -u hollow-relay` (under Docker,
 `sudo docker compose -p hollow-relay logs relay`) within the hour, since the
-journal keeps only the last hour. `/server-stats` counts these refusals as
-`seats_full` under `license`.
+journal keeps only the last hour. While `PUBLIC_STATS` is on, `/server-stats`
+also counts these refusals as `seats_full` under `license`; with
+`PUBLIC_STATS=off` it leaves them out.
 
 **The app says the relay has no TURN server.** TURN is off, or coturn isn't
 running. Check `systemctl status hollow-coturn`, or `docker compose ps` and
@@ -1465,7 +1472,14 @@ Notes for people who already run a relay, newest first.
   disconnects the phones that were only fetching notifications (#153).
 - The log says, at most once a minute, when logins are refused because a key is
   full, a device is paused or an address has no connection left, with counts and
-  nothing about who. `/server-stats` counts full-key refusals.
+  nothing about who. While `PUBLIC_STATS` is on, `/server-stats` counts full-key
+  refusals.
+- A members-only relay whose `keys.json` couldn't be read when it started let
+  everyone in, and fixing the file later left those connections in place. It now
+  refuses every login until the file reads, and `check-host.sh` fails while it
+  doesn't. Turning `enabled` on in `keys.json` disconnects everyone who got in
+  without a key; turning it off disconnects nobody. Removing a key also ends the
+  sessions its devices left waiting to reconnect.
 
 ### 0.14
 

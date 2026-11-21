@@ -1230,10 +1230,10 @@ Everything the relay holds in memory is carried across a relay software update i
 
 The relay supports optional access keys for an operator who wants to restrict who may connect to their own relay. The official public relay runs with them disabled and is open to everyone.
 
-- Keys are stored in a `keys.json` file loaded at startup. The system can be enabled or disabled via a toggle.
+- Keys are stored in a `keys.json` file loaded at startup. The system can be enabled or disabled via a toggle. A file that exists but can't be read at startup keeps the relay closed to everyone until it can, rather than open.
 - Keys are validated during WebSocket authentication. An unknown key is rejected; one key admits up to five devices at once, so a person's linked devices can share it. A seat belongs to the connection that took it and is given back when that connection closes, however it closes, so a login refused after its key was checked holds nothing.
 - The key file is hot-reloaded every 30 seconds, allowing key revocation without relay restart.
-- Active connections using a revoked key, notification fetches included, are terminated on the next reload cycle.
+- Active connections using a revoked key, notification fetches included, are terminated on the next reload cycle, and sessions waiting for a device that used it end too. Turning the toggle on terminates every connection that came in without a key; turning it off terminates none.
 - License keys are cached client-side in the encrypted SQLCipher database.
 
 ### 12.9 Server Statistics Endpoint

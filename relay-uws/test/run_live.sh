@@ -10,7 +10,7 @@
 #   RELAY_LIVE_JOBS=n         compile at most n objects at once
 #   RELAY_LIVE_VARIANTS="a b" run only these variants (main, deny, exempt, backpressure,
 #                             breaker_shadow, breaker_enforce, oom, batch, shadow_env, window,
-#                             window_total, connected, cgnat, people, license); "none" builds only
+#                             window_total, connected, cgnat, people, license, license_unread, license_grace); "none" builds only
 cd "$(dirname "$0")" || exit 1
 # The carrier-NAT cases hold about 600 sockets on each side.
 ulimit -n 8192 2> /dev/null || ulimit -n 4096 2> /dev/null || true
@@ -178,6 +178,24 @@ else
     echo "  FAIL --check-denylist legacy: ($legacy_rc) $legacy_out"
     fail=1
 fi
+# --check-keys (check-host.sh): only a keys file that is there but does not read fails, since
+# the relay then refuses everyone (HOL-SEC-220); it prints counts, never a key.
+printf '{"enabled":true,"keys":["CHECK-KEY-ONE","CHECK-KEY-TWO"]}' > "$dir/keys_good.json"
+printf '{"enabled":true,"keys":["CHECK-KEY-ONE"' > "$dir/keys_bad.json"
+kgood_out=$("$dir/relay_main" --check-keys "$dir/keys_good.json" 2>&1)
+kgood_rc=$?
+kbad_out=$("$dir/relay_main" --check-keys "$dir/keys_bad.json" 2>&1)
+kbad_rc=$?
+kmissing_out=$("$dir/relay_main" --check-keys "$dir/keys_none.json" 2>&1)
+kmissing_rc=$?
+if [ $kgood_rc = 0 ] && [ "$kgood_out" = "ok: members only, 2 key(s)" ] && [ $kbad_rc = 1 ] &&
+    grep -q "^unreadable: " <<<"$kbad_out" && [ $kmissing_rc = 0 ] && grep -q "^missing: " <<<"$kmissing_out" &&
+    ! grep -q "CHECK-KEY" <<<"$kgood_out$kbad_out"; then
+    echo "  ok   --check-keys fails only a keys file that does not read, naming no key"
+else
+    echo "  FAIL --check-keys: good ($kgood_rc) $kgood_out / bad ($kbad_rc) $kbad_out / missing ($kmissing_rc) $kmissing_out"
+    fail=1
+fi
 # A push port that is no port refuses the start, before any socket or file is touched.
 port_refusals=0
 for bad in 0 70000 abc " 3001" 3001x -1; do
@@ -205,7 +223,7 @@ free_port() {
 run_variant() {
     local v=$1 name=${2:-$1} exempt=${3-} backpressure=${4-} breaker=${5-} budget=${6-} port tries=0 log=$dir/relay_${2:-$1}.log
     local extra=() args=() only=${RELAY_LIVE_ONLY-} stall= denylist=$dir/denylist_${2:-$1}.json mode=enforce
-    local keys=$dir/no-keys.json
+    local keys=$dir/no-keys.json client_timeout=240
     local push_port
     push_port=$(free_port)
     # Three sockets an address, ten new ones a minute after a burst of thirty; a carrier-NAT
@@ -241,6 +259,22 @@ run_variant() {
         keys=$dir/keys_license.json
         printf '{"enabled":true,"keys":["LIVE-SEAT-IPLIMIT","LIVE-SEAT-COOLDOWN","LIVE-SEAT-SUPERSEDE","LIVE-SEAT-PATHS","LIVE-SEAT-REVOKE"]}\n' > "$keys"
         extra=(HOLLOW_RELAY_TEST_BREAKER_W=100 HOLLOW_RELAY_TEST_BREAKER_T=60)
+        # Three keys.json reloads, each up to 30 s apart.
+        client_timeout=420
+    elif [ "$name" = license_grace ]; then
+        # Graces of two minutes outlive a keys.json reload; room for the logins that watch
+        # for each reload.
+        only=license_grace
+        keys=$dir/keys_grace.json
+        printf '{"enabled":true,"keys":["LIVE-GRACE-A","LIVE-GRACE-B"]}\n' > "$keys"
+        limits=(CONN_LIMIT_IPV4=64 CONN_RATE_IPV4=6000)
+        extra=(HOLLOW_RELAY_TEST_GRACE=120)
+        client_timeout=300
+    elif [ "$name" = license_unread ]; then
+        # A members-only relay whose keys.json does not read at boot (HOL-SEC-220).
+        only=license_unread
+        keys=$dir/keys_unread.json
+        printf '{"enabled":true,"keys":["LIVE-UNREAD"' > "$keys"
     elif [ "$name" = shadow_env ]; then
         # An operator's BREAKER_MODE=shadow on a relay built to enforce.
         only=batch
@@ -301,7 +335,7 @@ run_variant() {
     # The client's last case sends the relay SIGTERM itself (the drain hint); its pid
     # also lets a probe read the relay's memory. Under ASan the run takes about 96 s.
     RELAY_LIVE_DENYLIST=$denylist RELAY_LIVE_KEYS=$keys RELAY_LIVE_BREAKER_MODE=$mode \
-    RELAY_LIVE_PUSH_PORT=$push_port RELAY_LIVE_ONLY=$only RELAY_LIVE_BACKPRESSURE=$backpressure RELAY_LIVE_SEND_BUDGET=$budget RELAY_LIVE_STALL_MS=$stall RELAY_LIVE_SANITIZED=${SANITIZE:-0} RELAY_LIVE_PID=$relay_pid timeout 240 "$dir/client" "$port" "$domain" \
+    RELAY_LIVE_PUSH_PORT=$push_port RELAY_LIVE_ONLY=$only RELAY_LIVE_BACKPRESSURE=$backpressure RELAY_LIVE_SEND_BUDGET=$budget RELAY_LIVE_STALL_MS=$stall RELAY_LIVE_SANITIZED=${SANITIZE:-0} RELAY_LIVE_PID=$relay_pid timeout "$client_timeout" "$dir/client" "$port" "$domain" \
         > "$dir/client_$name.log" 2>&1
     local rc=$?
     # A relay that does not exit on SIGTERM is down until systemd kills it.
@@ -347,6 +381,12 @@ run_variant() {
             said="a refusal line names a device, an address or a key"
         fi
     fi
+    if [ "$name" = license_unread ]; then
+        grep -q '^\[license\] .* is there but does not read: every login is refused until it does' "$log" ||
+            said="no line that keys.json does not read"
+        ! grep -q 'license system disabled' "$log" || said="it said the license system is off"
+        ! grep -q 'LIVE-UNREAD' "$log" || said="a line names a key"
+    fi
     local checks
     checks=$(grep -c '  ok' "$dir/client_$name.log")
     if [ $rc = 0 ] && [ $exited = 1 ] && [ $relay_rc = 0 ] && [ "$said" = ok ] &&
@@ -391,6 +431,10 @@ wanted cgnat && run_variant main cgnat
 wanted people && run_variant main people
 # Access-key seats on a members-only relay: every refusal and close gives its seat back (#153).
 wanted license && run_variant main license
+# A keys.json that does not read at boot shuts the relay until it does (HOL-SEC-220).
+wanted license_unread && run_variant main license_unread
+# Sessions in grace across keys.json reloads: a dropped key or a gate turned on ends them.
+wanted license_grace && run_variant main license_grace
 # A 32 MiB send-buffer memory budget and a 5 s stall window: honest traffic passes, effects stay bounded.
 wanted oom && run_variant main oom "" "" "" 33554432
 exit $fail

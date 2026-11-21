@@ -47,6 +47,9 @@ enum class LicenseResult {
     InvalidKey,
     KeyInUse,
     KeyRequired,
+    // keys.json is there but has not read since the relay started: nobody is let in
+    // until it does, and the refusal is one a client retries (HOL-SEC-220).
+    Unreadable,
 };
 
 // The key registry and who holds each key right now. Pure, so test/ can build it
@@ -64,22 +67,40 @@ enum class LicenseResult {
 // that supersedes its own ghost keeps it.
 using SeatToken = uintptr_t;
 
+// The sockets a reload of keys.json ends. A keyless socket was let in while the gate was
+// off; with the gate on again its relogin is judged like any other (HOL-SEC-220).
+struct Kicks {
+    std::vector<SeatToken> revoked;  // held a seat of a key the file no longer lists
+    std::vector<SeatToken> keyless;
+    bool empty() const { return revoked.empty() && keyless.empty(); }
+};
+
 struct LicensePool {
     static constexpr size_t MAX_DEVICES_PER_KEY = 5;
 
     bool enabled = false;
+    // The file exists but did not read at boot: every login is refused until a reload
+    // reads it. Running open instead let anyone in on a members-only relay (HOL-SEC-220).
+    bool unread = false;
     std::unordered_set<std::string> keys;
     // key -> device -> its sockets holding a seat; a key's devices are its seats.
     std::unordered_map<std::string, std::unordered_map<std::string, std::unordered_set<SeatToken>>> holders;
     // Each socket holding a seat, with the key and device it holds it for.
     std::unordered_map<SeatToken, std::pair<std::string, std::string>> seats;
+    // Each socket let in while the gate was off, until its close or the gate turns on.
+    std::unordered_set<SeatToken> keyless;
     // Logins refused because every seat of their key was taken, for /server-stats.
     uint64_t seats_full_refused = 0;
 
     // Judges `key` for `peer_id`'s socket `token`; Ok with the gate on means the socket
     // now holds a seat until release(token).
     LicenseResult validate(const std::string* key, const std::string& peer_id, SeatToken token) {
-        if (!enabled) return LicenseResult::NotRequired;
+        if (unread) return LicenseResult::Unreadable;
+        if (!enabled) {
+            release(token);
+            keyless.insert(token);
+            return LicenseResult::NotRequired;
+        }
         if (!key || key->empty()) return LicenseResult::KeyRequired;
         if (keys.find(*key) == keys.end()) return LicenseResult::InvalidKey;
 
@@ -97,6 +118,7 @@ struct LicensePool {
 
     // The socket is gone: its seat goes with it, and its device's with its last socket.
     void release(SeatToken token) {
+        keyless.erase(token);
         auto s = seats.find(token);
         if (s == seats.end()) return;
         auto k = holders.find(s->second.first);
@@ -111,6 +133,19 @@ struct LicensePool {
         seats.erase(s);
     }
 
+    // A file that exists but does not read: shut the gate until one reads.
+    void refuse_unread() {
+        unread = true;
+        enabled = true;
+        keys.clear();
+    }
+
+    // Whether a session last let in under `key` ("" = none was needed) may stay. A
+    // session in grace holds no seat, so a reload judges it by this.
+    bool admits(const std::string& key) const {
+        return !unread && (!enabled || keys.count(key) != 0);
+    }
+
     // How many devices hold a seat of `key`.
     size_t seats_of(const std::string& key) const {
         auto it = holders.find(key);
@@ -119,31 +154,38 @@ struct LicensePool {
 
     // A reload of keys.json from `text`: false, changing nothing, when it does not read;
     // else the keys are swapped and `kicked` names the sockets holding keys that went.
-    bool reload_text(std::string_view text, std::vector<SeatToken>& kicked) {
+    bool reload_text(std::string_view text, Kicks& kicked) {
         std::optional<KeysFile> file = parse_keys_file(text);
         if (!file) return false;
         kicked = replace_keys(std::move(file->keys), file->enabled);
         return true;
     }
 
-    // Swap in the reloaded file. Returns every socket holding a key that vanished (fetch
-    // and guest sockets too), in no particular order, their seats forgotten.
-    std::vector<SeatToken> replace_keys(std::unordered_set<std::string> new_keys, bool new_enabled) {
-        std::vector<SeatToken> kicked;
-        for (auto it = holders.begin(); it != holders.end(); ) {
-            if (new_keys.find(it->first) == new_keys.end()) {
-                for (const auto& [peer, tokens] : it->second) {
-                    for (SeatToken t : tokens) {
-                        kicked.push_back(t);
-                        seats.erase(t);
+    // Swap in the reloaded file. With the gate on, returns every socket holding a key that
+    // vanished (fetch and guest sockets too) and every socket let in while it was off, in
+    // no particular order, all forgotten. With the gate off nobody is ended: a relay that
+    // needs no key has no reason to, and the seats stay counted for when it turns on again.
+    Kicks replace_keys(std::unordered_set<std::string> new_keys, bool new_enabled) {
+        Kicks kicked;
+        if (new_enabled) {
+            for (auto it = holders.begin(); it != holders.end();) {
+                if (new_keys.find(it->first) == new_keys.end()) {
+                    for (const auto& [peer, tokens] : it->second) {
+                        for (SeatToken t : tokens) {
+                            kicked.revoked.push_back(t);
+                            seats.erase(t);
+                        }
                     }
+                    it = holders.erase(it);
+                } else {
+                    ++it;
                 }
-                it = holders.erase(it);
-            } else {
-                ++it;
             }
+            kicked.keyless.assign(keyless.begin(), keyless.end());
+            keyless.clear();
         }
         enabled = new_enabled;
+        unread = false;
         keys = std::move(new_keys);
         return kicked;
     }

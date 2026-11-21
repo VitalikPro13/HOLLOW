@@ -29,7 +29,12 @@ bool LicenseState::load_from_file(const std::string& path) {
         file.reset();
     }
     if (!file) {
-        if (stamp.exists) fprintf(stderr, "[license] Failed to parse %s\n", path.c_str());
+        // A members-only relay whose file broke must not open to everyone (HOL-SEC-220).
+        if (stamp.exists) {
+            refuse_unread();
+            fprintf(stderr, "[license] %s is there but does not read: every login is refused until it does\n",
+                    path.c_str());
+        }
         return false;
     }
     enabled = file->enabled;
@@ -49,15 +54,15 @@ void LicenseState::release_seat(SeatToken socket) {
     release(socket);
 }
 
-void LicenseState::try_reload(RelayState& state) {
-    if (file_path.empty()) return;
+bool LicenseState::try_reload(RelayState& state) {
+    if (file_path.empty()) return false;
 
     const FileStamp stamp = file_stamp(file_path);
-    if (!stamp.exists || stamp == last_stamp) return;
+    if (!stamp.exists || stamp == last_stamp) return false;
 
     // Judged once per change: the previous keys stay until the file reads.
     last_stamp = stamp;
-    std::vector<SeatToken> sockets_to_kick;
+    Kicks sockets_to_kick;
     bool read = false;
     try {
         std::optional<std::string> text = read_text(file_path);
@@ -66,22 +71,26 @@ void LicenseState::try_reload(RelayState& state) {
         read = false;
     }
     if (!read) {
-        fprintf(stderr, "[license] Failed to parse on reload, keeping the previous keys\n");
-        return;
+        fprintf(stderr, unread ? "[license] Still does not read on reload, every login stays refused\n"
+                               : "[license] Failed to parse on reload, keeping the previous keys\n");
+        return false;
     }
     // No logging of the revoked peer_ids (user-identifying).
 
     fprintf(stderr, "[license] Reloaded: %zu key(s), enabled=%s\n",
             keys.size(), enabled ? "true" : "false");
 
-    // Every socket a revoked key let in goes, fetch and guest sockets too. Each was
-    // still open (its close gives its seat back), so the lookup only guards a close
-    // that one of these ends brought about.
-    for (SeatToken token : sockets_to_kick) {
+    // Every socket a revoked key let in goes, fetch and guest sockets too, and with the
+    // gate turned on every socket the open gate let in. Each was still open (its close
+    // gives its seat back), so the lookup only guards a close one of these ends brought
+    // about. The 1008 ends each one's session too, so a relogin is judged afresh.
+    auto end = [&state](SeatToken token, const char* error, const char* reason) {
         auto* ws = reinterpret_cast<SSLWebSocket*>(token);
-        if (!state.open_sockets.count(ws) || ws->getUserData()->closing) continue;
-        std::string err = R"({"type":"auth_failed","error":"invalid_license_key"})";
-        ws->send(err, uWS::OpCode::TEXT);
-        ws->end(1008, "license_revoked");
-    }
+        if (!state.open_sockets.count(ws) || ws->getUserData()->closing) return;
+        ws->send(std::string(R"({"type":"auth_failed","error":")") + error + "\"}", uWS::OpCode::TEXT);
+        ws->end(1008, reason);
+    };
+    for (SeatToken token : sockets_to_kick.revoked) end(token, "invalid_license_key", "license_revoked");
+    for (SeatToken token : sockets_to_kick.keyless) end(token, "license_key_required", "license_required");
+    return true;
 }

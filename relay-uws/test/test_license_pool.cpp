@@ -72,7 +72,7 @@ int main() {
     check("keeping the key kicks nobody", pool.replace_keys({k, other}, true).empty());
     check("key survives the reload", pool.keys.count(k) == 1 && pool.keys.count(other) == 1);
     check("(a socket on the kept key)", pool.validate(&other, "device9", sock(20)) == LicenseResult::Ok);
-    auto kicked = pool.replace_keys({other}, true);
+    auto kicked = pool.replace_keys({other}, true).revoked;
     std::sort(kicked.begin(), kicked.end());
     check("dropping the key kicks every socket on it, a device's second one too",
           kicked == std::vector<SeatToken>{sock(2), sock(3), sock(4), sock(5), sock(6), sock(12)});
@@ -115,7 +115,7 @@ int main() {
     held.enabled = true;
     held.keys = {k};
     held.validate(&k, "member", sock(1));
-    std::vector<SeatToken> gone;
+    Kicks gone;
     bool reread = false;
     for (const char* text : {R"({"enabled":"yes","keys":["QQ44-RT19-ZZ08-MN71"]})",
                              R"({"enabled":true,"keys":"QQ44-RT19-ZZ08-MN71"})", R"(["QQ44-RT19-ZZ08-MN71"])",
@@ -134,7 +134,80 @@ int main() {
     check("a good keys.json still reloads",
           held.reload_text(R"({"enabled":true,"keys":["QQ44-RT19-ZZ08-MN71",5]})", gone) &&
               held.keys == std::unordered_set<std::string>{other} &&
-              gone.size() == 2 && held.seats.empty());
+              gone.revoked.size() == 2 && gone.keyless.empty() && held.seats.empty());
+    // HOL-SEC-220: a keys.json that is there but does not read at boot shuts the gate,
+    // never opens it, and the refusal is one a client retries.
+    LicensePool broken;
+    broken.refuse_unread();
+    check("an unread keys file refuses every login, with a key or without",
+          broken.validate(&k, "p1", sock(1)) == LicenseResult::Unreadable &&
+              broken.validate(nullptr, "p2", sock(2)) == LicenseResult::Unreadable);
+    check("and lets nobody in to be judged later", broken.seats.empty() && broken.keyless.empty());
+    check("it says a key is needed", broken.enabled);
+    check("and admits no session in grace", !broken.admits("") && !broken.admits(k));
+    Kicks none;
+    check("a file that reads lifts it",
+          broken.reload_text(R"({"enabled":true,"keys":["AB12-CD32-BA30-LJ50"]})", none) && !broken.unread &&
+              broken.validate(&k, "p1", sock(1)) == LicenseResult::Ok);
+    LicensePool broken_open;
+    broken_open.refuse_unread();
+    check("one that turns the gate off opens it",
+          broken_open.reload_text(R"({"enabled":false})", none) &&
+              broken_open.validate(nullptr, "p1", sock(1)) == LicenseResult::NotRequired);
+
+    // Reviewer's checks (fix/153 review 1, items 1 and 2).
+    {
+        LicensePool p;
+        p.enabled = true;
+        p.keys = {"K"};
+        std::string key = "K";
+        p.validate(&key, "d1", 1);
+        p.validate(&key, "d2", 2);
+        auto kicks = p.replace_keys({}, false);
+        check("turning the gate off kicks nobody", kicks.empty());
+    }
+    {
+        LicensePool p;
+        p.enabled = false;
+        p.validate(nullptr, "stranger", 7);
+        auto kicks = p.replace_keys({"K"}, true);
+        std::string key = "K";
+        for (int i = 0; i < 5; i++) p.validate(&key, "dev" + std::to_string(i), 100 + i);
+        check("turning the gate on closes (or seats) the sockets it let in keyless",
+              kicks.keyless == std::vector<SeatToken>{7} && kicks.revoked.empty());
+    }
+
+    // The gate off and on again: a seat taken before it went off stays if its key does, a
+    // key the file dropped meanwhile ends its sockets once the gate is back.
+    LicensePool cycle;
+    cycle.enabled = true;
+    cycle.keys = {k, other};
+    cycle.validate(&k, "a", sock(1));
+    cycle.validate(&other, "b", sock(2));
+    check("(the gate off, both keys dropped)", cycle.replace_keys({}, false).empty());
+    check("a socket let in while the gate is off holds no seat",
+          cycle.validate(&k, "c", sock(3)) == LicenseResult::NotRequired && cycle.seats.count(sock(3)) == 0 &&
+              cycle.keyless.count(sock(3)) == 1);
+    cycle.validate(nullptr, "d", sock(4));
+    cycle.release(sock(4));
+    auto back = cycle.replace_keys({k}, true);
+    std::sort(back.revoked.begin(), back.revoked.end());
+    check("the gate back on ends the socket whose key the file dropped meanwhile",
+          back.revoked == std::vector<SeatToken>{sock(2)});
+    check("and every socket the open gate let in, a closed one not again",
+          back.keyless == std::vector<SeatToken>{sock(3)} && cycle.keyless.empty());
+    check("a seat taken before the gate went off stays while its key does",
+          cycle.seats.count(sock(1)) == 1 && cycle.seats_of(k) == 1);
+    check("a socket judged with the gate on again sheds its keyless mark",
+          cycle.validate(&k, "c", sock(3)) == LicenseResult::Ok && cycle.keyless.empty());
+
+    // What a reload asks of a session in grace (it holds no seat): the key its last login
+    // held, "" when the gate let it in without one.
+    check("with the gate on, a session in grace stays only under a listed key",
+          cycle.admits(k) && !cycle.admits(other) && !cycle.admits(""));
+    cycle.replace_keys({k}, false);
+    check("with the gate off every one stays", cycle.admits("") && cycle.admits(other));
+
     auto defaults = parse_keys_file("{}");
     check("missing fields read as off with no keys", defaults && !defaults->enabled && defaults->keys.empty());
 

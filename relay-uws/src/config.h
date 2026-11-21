@@ -3,6 +3,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
+#include <sstream>
 #include <string>
 
 #include <unistd.h>
@@ -11,6 +13,7 @@
 #include "conn_limits.h"
 #include "conn_rate_exempt.h"
 #include "deny_list.h"
+#include "license_pool.h"
 #include "push_port.h"
 #include "server_stats.h"
 #include "session.h"
@@ -91,6 +94,7 @@ inline void print_help() {
         "  --keys-file <path>    License keys JSON file (default: keys.json)\n"
         "  --denylist-file <path>  Servers, identities and addresses this relay refuses (default: denylist.json)\n"
         "  --check-denylist <path> Read a denylist file the way the relay would, print its counts or its first error, and exit\n"
+        "  --check-keys <path>   Read an access-key file the way the relay would, print whether it reads and how many keys it lists, and exit (non-zero only for a file that is there but does not read)\n"
         "  --check-limits        Print the connection limits and breaker mode the environment sets, and exit (non-zero if any value was not taken as written)\n"
         "  --reports-file <path> User reports JSON file (default: reports.json)\n"
         "  --cert-file <path>    TLS certificate file\n"
@@ -121,6 +125,31 @@ inline int check_denylist(const char* path) {
                "that id. Keep it only if you are sure it names a server.\n",
                n, n == 1 ? "entry has" : "entries have");
     }
+    return 0;
+}
+
+// --check-keys: check-host.sh's look at keys.json. A file that is there but does not read
+// shuts the relay to everyone (HOL-SEC-220), so only that exits non-zero; a missing file
+// is an open relay. Prints counts, never a key.
+inline int check_keys(const char* path) {
+    std::ifstream f(path);
+    if (!f.is_open()) {
+        if (access(path, F_OK) != 0) {
+            printf("missing: the relay is open to everyone\n");
+            return 0;
+        }
+        printf("unreadable: %s cannot be opened\n", path);
+        return 1;
+    }
+    std::stringstream text;
+    text << f.rdbuf();
+    const std::optional<KeysFile> file = parse_keys_file(text.str());
+    if (!file) {
+        printf("unreadable: %s is not a keys file (an object with \"enabled\" true or false and a \"keys\" list)\n",
+               path);
+        return 1;
+    }
+    printf("ok: %s, %zu key(s)\n", file->enabled ? "members only" : "open to everyone", file->keys.size());
     return 0;
 }
 
@@ -157,6 +186,14 @@ inline Config parse_args(int argc, char** argv) {
     Config config;
     for (int i = 1; i < argc; i++) {
         if (std::string(argv[i]) == "--check-limits") exit(check_limits());
+    }
+    for (int i = 1; i < argc; i++) {
+        if (std::string(argv[i]) != "--check-keys") continue;
+        if (i + 1 >= argc) {
+            fprintf(stderr, "[config] --check-keys takes the file to check\n");
+            exit(2);
+        }
+        exit(check_keys(argv[i + 1]));
     }
     for (int i = 1; i < argc; i++) {
         if (std::string(argv[i]) != "--check-denylist") continue;

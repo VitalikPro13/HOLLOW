@@ -13,5 +13,7 @@ struct LicenseState : LicensePool {
     bool load_from_file(const std::string& path);
     LicenseResult validate_key(const std::string* key, const std::string& peer_id, SeatToken socket);
     void release_seat(SeatToken socket);
-    void try_reload(RelayState& state);
+    // True when the file changed and read: the caller then ends what it no longer admits
+    // beyond the sockets this closes (sessions in grace, ws_handler.h).
+    bool try_reload(RelayState& state);
 };

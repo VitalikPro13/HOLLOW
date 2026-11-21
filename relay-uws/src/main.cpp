@@ -89,7 +89,7 @@ int main(int argc, char** argv) {
 
     RelayState state;
 
-    if (!state.license.load_from_file(config.keys_file)) {
+    if (!state.license.load_from_file(config.keys_file) && !state.license.unread) {
         fprintf(stderr, "[main] No keys file, license system disabled\n");
     }
     // The report key rides the snapshot, so the reports file is judged after it.
@@ -150,7 +150,7 @@ int main(int argc, char** argv) {
             us_timer_set(license_timer, [](struct us_timer_t* t) {
                 auto* s = *reinterpret_cast<RelayState**>(us_timer_ext(t));
                 try {
-                    s->license.try_reload(*s);
+                    if (s->license.try_reload(*s)) end_unlicensed_grace(*s);
                 } catch (...) {
                     fprintf(stderr, "[license] reload failed, keeping the previous keys\n");
                 }

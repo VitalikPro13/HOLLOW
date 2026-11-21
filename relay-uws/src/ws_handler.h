@@ -41,6 +41,11 @@ void deny_start(RelayState& state, const std::string& path);
 void deny_tick(RelayState& state, const std::string& path);
 void deny_settle(RelayState& state);
 
+// After keys.json reloaded: every session in grace whose last login the file no longer
+// admits ends as on expiry (its socket's close already gave its seat back). Called from
+// main's license timer.
+void end_unlicensed_grace(RelayState& state);
+
 // The breaker's anonymous trip counts (breaker.h): by kind, never ids. In shadow mode,
 // the trips enforcement would have made.
 nlohmann::json breaker_stats();

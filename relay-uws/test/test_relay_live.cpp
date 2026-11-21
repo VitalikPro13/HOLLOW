@@ -7139,6 +7139,24 @@ int main(int argc, char** argv) {
         if (failures) printf("%d FAILED\n", failures);
         return failures ? 1 : 0;
     }
+    // =license_grace: sessions in grace across keys.json reloads (HOL-SEC-220).
+    if (only && std::string(only) == "license_grace") {
+        const char* keys = getenv("RELAY_LIVE_KEYS");
+        g_keys_file = keys ? keys : "";
+        test_license_grace();
+        SSL_CTX_free(g_ctx);
+        if (failures) printf("%d FAILED\n", failures);
+        return failures ? 1 : 0;
+    }
+    // =license_unread: a members-only relay whose keys.json does not read (HOL-SEC-220).
+    if (only && std::string(only) == "license_unread") {
+        const char* keys = getenv("RELAY_LIVE_KEYS");
+        g_keys_file = keys ? keys : "";
+        test_license_unread();
+        SSL_CTX_free(g_ctx);
+        if (failures) printf("%d FAILED\n", failures);
+        return failures ? 1 : 0;
+    }
     // =stats: what /server-stats tells anyone.
     if (only && std::string(only) == "stats") {
         test_public_stats();

@@ -135,6 +135,7 @@ TURN_SECRET=your_secret ./build/hollow-relay \
 | `--domain` | `relay.anonlisten.com` | Public host clients connect to. The TURN URIs handed to clients are built from it, so a self-hosted relay must set it |
 | `--keys-file` | `keys.json` | License keys JSON path |
 | `--denylist-file` | `denylist.json` | Operator denylist: servers, identities and addresses this relay refuses; re-read within about 2 seconds of a change |
+| `--check-keys <path>` | | Reads an access-key file the way the relay does and prints whether it reads and how many keys it lists (never a key); exits 1 only for a file that is there but does not read, which makes the relay refuse every login until it does |
 | `--check-denylist <path>` | | Reads a denylist file the way the relay does, prints its counts or its first error, and exits (0 only for a good file); warns, by count, of 32-hex server entries, which an older server id shares with DM and own-device rooms |
 | `--reports-file` | `reports.json` | User report counts JSON path; the dedup key lives only in memory and the restart snapshot (a `<path>.key` left by an older relay is zeroed and removed) |
 | `--cert-file` | `/etc/letsencrypt/live/relay.anonlisten.com/fullchain.pem` | TLS certificate chain |

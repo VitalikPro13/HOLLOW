@@ -22,7 +22,7 @@ static std::unique_ptr<Peer> login_key(const Ident& id, const std::string& key, 
     p->nonce = ch->value("nonce", "");
     p->relay_key = ch->value("door_key", "");
     const uint64_t ts = client_now_secs();
-    const std::string digest = sha256_hex(key);
+    const std::string digest = key.empty() ? std::string() : sha256_hex(key);
     json a = {{"type", "auth"},  {"peer_id", id.peer},     {"public_key", id.pub_b64}, {"timestamp", ts},
               {"nonce", p->nonce}, {"domain", g_domain}, {"license_key", key}};
     if (v2) {
@@ -69,6 +69,40 @@ static void key_back_to_zero(const std::string& key, const std::string& label) {
     auto extra = login_key(Ident(), key);
     check(label + ": and refuses a sixth", key_full(*extra));
     for (auto& p : fresh) p->ws.close_clean();
+}
+
+// keys.json as `file`; the relay reads it again within 30 s.
+static void write_keys(const json& file) {
+    if (FILE* f = fopen(g_keys_file.c_str(), "wb")) {
+        const std::string text = file.dump();
+        fwrite(text.data(), 1, text.size(), f);
+        fclose(f);
+    }
+}
+
+static json kept_keys() {
+    json kept = json::array();
+    for (size_t i = 0; i + 1 < LICENSE_KEYS.size(); i++) kept.push_back(LICENSE_KEYS[i]);
+    return kept;
+}
+
+// Waits out the next reload (40 s at most) for the relay to close `p`, answering `keep`'s
+// pings meanwhile so its socket outlives the wait.
+static bool closed_within_reload(Peer& p, Peer* keep = nullptr) {
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(40'000);
+    while (!p.ws.closed() && left_ms(deadline) > 0) {
+        p.ws.pump(std::min(left_ms(deadline), 500));
+        if (keep && !keep->ws.closed()) keep->ws.pump(1);
+    }
+    return p.ws.closed();
+}
+
+// A device whose socket dropped, its session left in grace.
+static std::unique_ptr<Peer> into_grace(const Ident& id, const std::string& key) {
+    auto p = login_key(id, key);
+    p->ws.abort();
+    sleep_ms(300);
+    return p;
 }
 
 static void close_all(std::vector<std::unique_ptr<Peer>>& ps) {
@@ -248,18 +282,9 @@ static void license_revoked_key_closes_every_socket() {
     auto fetch = login_key(idd, key, "", 0, "fetch", true);
     auto guest = login_key(Ident(), key, "", 0, "guest", true);
     check("(a full, a fetch and a guest socket on the key)", full->ok && fetch->ok && guest->ok);
-    json kept = json::array();
-    for (size_t i = 0; i + 1 < LICENSE_KEYS.size(); i++) kept.push_back(LICENSE_KEYS[i]);
-    if (FILE* f = fopen(g_keys_file.c_str(), "wb")) {
-        const std::string text = json{{"enabled", true}, {"keys", kept}}.dump();
-        fwrite(text.data(), 1, text.size(), f);
-        fclose(f);
-    }
-    // The relay re-reads keys.json every 30 s.
+    write_keys(json{{"enabled", true}, {"keys", kept_keys()}});
     auto revoked = [](Peer& p) {
-        auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(40'000);
-        while (!p.ws.closed() && left_ms(deadline) > 0) p.ws.pump(std::min(left_ms(deadline), 1000));
-        return p.ws.closed() && p.ws.close_code == 1008 && p.ws.close_reason == "license_revoked";
+        return closed_within_reload(p) && p.ws.close_code == 1008 && p.ws.close_reason == "license_revoked";
     };
     check("the full socket is closed license_revoked", revoked(*full));
     check("so is the fetch socket", revoked(*fetch));
@@ -267,6 +292,136 @@ static void license_revoked_key_closes_every_socket() {
     auto again = login_key(Ident(), key);
     check("the key admits nobody now", !again->ok && refused_with(*again, "invalid_license_key"));
     key_back_to_zero(LICENSE_KEYS[0], "a kept key after the reload");
+}
+
+// Review item 2: a reload that turns the gate off, its keys dropped too, ends nobody.
+static std::unique_ptr<Peer> g_seated;
+static void license_gate_off_kicks_nobody() {
+    printf("license: turning the gate off ends nobody\n");
+    g_seated = login_key(Ident(), LICENSE_KEYS[0]);
+    check("(a device holds a seat)", g_seated->ok);
+    write_keys(json{{"enabled", false}, {"keys", json::array()}});
+    check("its socket stays through the reload", !closed_within_reload(*g_seated));
+    auto keyless = login_key(Ident(), "");
+    check("(the reload is in: a login without a key gets in)", keyless->ok);
+    keyless->ws.close_clean();
+}
+
+// HOL-SEC-220: a reload that turns the gate on ends every socket and session in grace the
+// open gate let in; a seat taken before the gate went off stays while its key does.
+static void license_gate_on_ends_the_keyless() {
+    printf("license: turning the gate on ends what the open gate let in\n");
+    auto full = login_key(Ident(), "");
+    auto fetch = login_key(Ident(), "", "", 0, "fetch", true);
+    auto keyed = login_key(Ident(), LICENSE_KEYS[1]);
+    check("(a full, a fetch and a keyed socket, let in with the gate off)", full->ok && fetch->ok && keyed->ok);
+    write_keys(json{{"enabled", true}, {"keys", kept_keys()}});
+    auto ended = [](Peer& p) {
+        return closed_within_reload(p, g_seated.get()) && p.ws.close_code == 1008 &&
+               p.ws.close_reason == "license_required";
+    };
+    check("the keyless full socket is closed license_required", ended(*full));
+    check("so is the fetch socket", ended(*fetch));
+    check("and one that sent a key the open gate never judged", ended(*keyed));
+    check("a seat taken before the gate went off stays", !g_seated->ws.closed());
+    auto fresh = login_key(Ident(), "");
+    check("a login without a key is refused again", !fresh->ok && refused_with(*fresh, "license_key_required"));
+    g_seated->ws.close_clean();
+    g_seated.reset();
+    key_back_to_zero(LICENSE_KEYS[0], "after the gate went off and on");
+}
+
+// =license_grace (review item 7, HOL-SEC-220): run_live.sh starts this relay with graces
+// of two minutes, so a session in grace outlives a keys.json reload, and keys.json listing
+// LIVE-GRACE-A and LIVE-GRACE-B. A reload ends every session in grace its file no longer
+// admits, and only those.
+static bool resumed_with(const Ident& id, const Peer& gone, const std::string& key) {
+    auto back = login_key(id, key, gone.sid, gone.ws.counted);
+    const bool resumed = back->ok && answer_type(*back) == "resumed";
+    back->ws.close_clean();
+    return resumed;
+}
+
+static bool ended_with(const Ident& id, const Peer& gone, const std::string& key) {
+    auto back = login_key(id, key, gone.sid, gone.ws.counted);
+    const bool ended = back->ok && answer_type(*back) == "auth_ok" && resume_failed(*back) == "unknown";
+    back->ws.close_clean();
+    return ended;
+}
+
+// Logs in with `key` until `in` says the relay read keys.json again (40 s at most).
+static bool reloaded(const std::string& key, bool in) {
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(40'000);
+    while (left_ms(deadline) > 0) {
+        // A v2 login holds no session, so the watching leaves no grace behind.
+        auto p = login_key(Ident(), key, "", 0, "full", true);
+        const bool ok = p->ok;
+        if (!p->ws.closed()) p->ws.close_clean();
+        if (ok == in) return true;
+        sleep_ms(1000);
+    }
+    return false;
+}
+
+static void test_license_grace() {
+    printf("license: a keys.json reload ends the sessions in grace it no longer admits\n");
+    signal(SIGPIPE, SIG_IGN);
+    const std::string ka = "LIVE-GRACE-A", kb = "LIVE-GRACE-B";
+    Ident ida, idb;
+    auto a = into_grace(ida, ka);
+    auto b = into_grace(idb, kb);
+    check("(two devices in grace, one on each key)", a->ok && b->ok && !a->sid.empty() && !b->sid.empty());
+    write_keys(json{{"enabled", true}, {"keys", json::array({kb})}});
+    check("(the reload that drops a key is in)", reloaded(ka, false));
+    check("a session in grace under the revoked key ended with it", ended_with(ida, *a, kb));
+    check("one under a kept key goes on", resumed_with(idb, *b, kb));
+    auto held = into_grace(idb, kb);
+    write_keys(json{{"enabled", false}, {"keys", json::array({kb})}});
+    check("(the reload that turns the gate off is in)", reloaded("", true));
+    Ident idc, idd;
+    auto c = into_grace(idc, "");
+    auto d = into_grace(idd, kb);
+    check("(two devices let in with the gate off, now in grace)", c->ok && d->ok);
+    write_keys(json{{"enabled", true}, {"keys", json::array({kb})}});
+    check("(the reload that turns the gate on is in)", reloaded("", false));
+    check("a session in grace the open gate let in ended", ended_with(idc, *c, kb));
+    check("so did one whose login sent a key the open gate never judged", ended_with(idd, *d, kb));
+    check("one that held a seat of a kept key before the gate went off goes on", resumed_with(idb, *held, kb));
+}
+
+// =license_unread (HOL-SEC-220): run_live.sh starts this relay with a keys.json that does
+// not read. It refuses everyone, with a code no client takes as final, until it reads.
+static void test_license_unread() {
+    printf("license: a keys.json that does not read at boot shuts the relay\n");
+    signal(SIGPIPE, SIG_IGN);
+    Socket s;
+    const auto body = s.get("/relay-status");
+    const json st = body ? json::parse(*body, nullptr, false) : json();
+    check("it says it needs a key", st.is_object() && st.value("license_required", false));
+    auto refused = [](Peer& p) {
+        return !p.ok && p.answer.value("error", "") == "keys_unreadable" && closed_by_relay(p) &&
+               p.ws.close_code == 1013;
+    };
+    auto keyless = login_key(Ident(), "");
+    check("a login without a key is refused, to retry", refused(*keyless));
+    auto keyed = login_key(Ident(), "LIVE-UNREAD");
+    check("so is one with the key the operator meant to list", refused(*keyed));
+    auto fetch = login_key(Ident(), "LIVE-UNREAD", "", 0, "fetch", true);
+    check("and a fetch login", refused(*fetch));
+    write_keys(json{{"enabled", true}, {"keys", json::array({"LIVE-UNREAD"})}});
+    std::unique_ptr<Peer> in;
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(40'000);
+    while (left_ms(deadline) > 0) {
+        in = login_key(Ident(), "LIVE-UNREAD");
+        if (in->ok) break;
+        in->ws.close_clean();
+        sleep_ms(2000);
+    }
+    check("once the file reads, its key gets in", in && in->ok);
+    auto none = login_key(Ident(), "");
+    check("and a login without one is refused as on any members-only relay",
+          !none->ok && refused_with(*none, "license_key_required"));
+    if (in) in->ws.close_clean();
 }
 
 static void test_license_seats() {
@@ -281,4 +436,6 @@ static void test_license_seats() {
     license_every_path_back_to_zero();
     license_stats_count_full_keys();
     license_revoked_key_closes_every_socket();
+    license_gate_off_kicks_nobody();
+    license_gate_on_ends_the_keyless();
 }

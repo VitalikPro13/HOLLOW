@@ -332,6 +332,21 @@ if [[ " ${units[*]} " == *" hollow-relay "* ]]; then
             bad "$deny does not read ($out): the relay keeps its previous list until it does"
         fi
     fi
+    # Access keys (SELF_HOSTING.md "Members-only relay"): a keys.json that is there but does
+    # not read shuts the relay to everyone until it does (HOL-SEC-220). No file = open relay.
+    echo "Access keys"
+    keys=$(grep -oE -- '--keys-file [^ ;]+' <<<"$relay_exec" | head -n 1 | cut -d' ' -f2)
+    if [ -z "$keys" ] || [ ! -e "$keys" ]; then
+        ok "no keys file: the relay is open to everyone"
+    elif [ -n "$relay_user" ] && ! sudo -u "$relay_user" test -r "$keys" 2>/dev/null; then
+        bad "the relay cannot read $keys, so it refuses every login: make it 640 root:${relay_group:-hollow-relay}"
+    elif [ -z "$relay_bin" ] || [ ! -x "$relay_bin" ]; then
+        bad "the relay's program is not there to read $keys"
+    elif out=$("$relay_bin" --check-keys "$keys" 2>&1); then
+        ok "$keys reads: $(head -1 <<<"${out#ok: }")"
+    else
+        bad "$keys does not read, so the relay refuses every login until it does (${out#unreadable: })"
+    fi
 fi
 # The connection limits and breaker mode the relay's environment sets (SELF_HOSTING.md
 # "Connection limits"): read the way the relay reads them, numbers only.

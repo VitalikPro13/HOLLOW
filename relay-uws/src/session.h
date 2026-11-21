@@ -483,6 +483,9 @@ struct Session {
     bool breaker_free = false;
     // Its grace is in RelayState::long_grace_ends (a breaker pause).
     bool long_grace = false;
+    // The access key its last socket held a seat of, "" when the gate was off; unknown
+    // back from a snapshot (a resume judges the key again anyway). Never snapshotted.
+    std::optional<std::string> license_key;
 
     // A stream frame from the device arrived at `now`. True when an ack must be queued for
     // it (RelayState::acks_due), due at `ack_due`. One is queued per session at a time: a

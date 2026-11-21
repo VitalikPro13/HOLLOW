@@ -680,6 +680,11 @@ static bool handle_auth(SSLWebSocket* ws, PerSocketData* data,
             send_json(ws, {{"type", "auth_failed"}, {"error", "license_key_required"}});
             ws->end(1008, "bad_license");
             return false;
+        case LicenseResult::Unreadable:
+            // The operator's file broke, not the key: a code no client takes as final.
+            close_once(ws, 1013, "keys_unreadable",
+                       json{{"type", "auth_failed"}, {"error", "keys_unreadable"}}.dump());
+            return false;
     }
 
     // A full login of a device the breaker paused waits out the pause before it binds
@@ -724,7 +729,8 @@ static bool handle_auth(SSLWebSocket* ws, PerSocketData* data,
     // Auth succeeded
     data->peer_id = peer_id;
     data->authenticated = true;
-    data->license_key = license_key_val;
+    // The key this socket holds a seat of; "" when the gate let it in without one.
+    data->license_key = lr == LicenseResult::Ok ? license_key_val : std::string();
 
     if (guest) {
         data->is_guest = true;
@@ -3774,6 +3780,7 @@ static void enter_grace(RelayState& state, SSLWebSocket* ws, PerSocketData* data
     }
     note_clean(state, s);
     s.mailbox_mark = data->mailbox_mark;
+    s.license_key = data->license_key;
     s.state = session::State::Grace;
     s.unacked_in = 0;
     if (s.breaker_until_ms > steady_ms()) {
@@ -3791,6 +3798,16 @@ static void enter_grace(RelayState& state, SSLWebSocket* ws, PerSocketData* data
     session_bounds::hold_ip_slot(state, s, data->ip_key);
     s.grace_until = std::chrono::steady_clock::now() + std::chrono::seconds(g_grace_secs);
     state.grace_ends.emplace_back(s.grace_until, peer);
+}
+
+void end_unlicensed_grace(RelayState& state) {
+    std::vector<std::string> ended;
+    for (const auto& [peer, s] : state.sessions) {
+        if (s.state == session::State::Grace && s.license_key && !state.license.admits(*s.license_key)) {
+            ended.push_back(peer);
+        }
+    }
+    for (const auto& peer : ended) end_session(state, peer);
 }
 
 // Whether the relay's fold of the identity's rosters still counts `peer` an owner of
@@ -5180,8 +5197,10 @@ void setup_ws_handler(uWS::SSLApp& app, RelayState& state, const Config& config)
     g_state = &state;
     g_forwarder_peer_id = config.forwarder_peer_id;
 #ifdef HOLLOW_RELAY_TEST_GRACE_SECS
-    // The live tests (test/run_live.sh) watch graces run out in seconds.
-    g_grace_secs = HOLLOW_RELAY_TEST_GRACE_SECS;
+    // The live tests (test/run_live.sh) watch graces run out in seconds; a variant whose
+    // graces must outlast a keys.json reload asks for longer ones.
+    const char* test_grace = getenv("HOLLOW_RELAY_TEST_GRACE");
+    g_grace_secs = test_grace && *test_grace ? std::atoll(test_grace) : HOLLOW_RELAY_TEST_GRACE_SECS;
 #else
     g_grace_secs = std::clamp(config.session_grace_secs, session::MIN_GRACE_SECS, session::MAX_GRACE_SECS);
 #endif

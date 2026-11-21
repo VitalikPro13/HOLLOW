@@ -402,8 +402,9 @@ and `test_auth_frame.cpp` to the Rust client's `relay_session.rs` tests.
   the snapshot.
 - **Close reasons**: the relay closes 1000 `moved` (the session moved to a newer socket),
   `superseded` (another login of the device), `end` (after the client's `end`), `session_lost` (a
-  live session evicted by the table cap); a 1008 close (`license_revoked` and the other policy
-  closes) ends the session. The client closes 1000 with `suspend`, `drain` or `end`.
+  live session evicted by the table cap); a 1008 close (`license_revoked`, `license_required` and
+  the other policy closes) ends the session, and a keys.json reload also ends the sessions in grace
+  it no longer admits (`end_unlicensed_grace`). The client closes 1000 with `suspend`, `drain` or `end`.
 - **Nothing about sessions is logged**, not even a count in the snapshot lines.
 
 ## config.h — Configuration
@@ -638,7 +639,7 @@ using SSLWebSocket = uWS::WebSocket<true, true, struct PerSocketData>;
 2. **`parse_args()`** — Parse CLI args into `Config` struct.
 3. **Banner** — Print port and startup info to stderr.
 4. **`RelayState` construction** — Default-constructed (all maps empty).
-5. **License loading** — `state.license.load_from_file(config.keys_file)`. Non-fatal if missing (license system disabled).
+5. **License loading** — `state.license.load_from_file(config.keys_file)`. A missing file = an open relay ("No keys file, license system disabled"); a file that is there but does not read SHUTS the gate (`refuse_unread`, HOL-SEC-220), never opens it.
 6. **Signal handlers** — `SIGINT` and `SIGTERM` set `should_shutdown` atomic bool.
 
 ### TLS setup
@@ -848,17 +849,20 @@ The ONE thing the relay persists about peers. Small, but since file v3 (0.14) no
 | `InvalidKey` | Key not found in the valid key set |
 | `KeyInUse` | Key is valid but already held by `MAX_DEVICES_PER_KEY` (5) other peer_ids |
 | `KeyRequired` | License system is enabled but no key was provided |
+| `Unreadable` | keys.json is there but has not read since boot: every login refused `keys_unreadable`, close 1013 (clients retry) |
 
 ### LicensePool / LicenseState structs
 
 `LicensePool` (`license_pool.h`, header-only, pure, unit-tested by `test/test_license_pool.cpp`) holds the registry; `LicenseState` derives from it and adds the file. Since 2026-09-17 one key admits up to `MAX_DEVICES_PER_KEY = 5` DEVICES (peer ids) at once: a person's linked devices share one key (the linked device inherits it with the imported database) and the relay keeps a dead socket for up to its 45 s idle timeout, so a cap of one refused every second device and every reconnect that raced its own ghost (issue #86's surprise license prompt).
 
-**A seat belongs to the SOCKET that took it (#153).** `validate(key, peer, token)` takes it (token = the socket pointer, `seat_token`), and the ONLY release is `release_seat(token)` at the top of the `.close` handler, run for every socket whatever ended it. A device counts once while ANY of its sockets holds a seat (full, fetch, guest, a superseded ghost, a session moving sockets), and gives the seat back with its last one. Two bugs this shape closed: (1) `handle_auth` judges the key BEFORE the cooldown (1013) and `settle_login` ip_limit (1008) refusals, which close with `authenticated == false`, so the old release in `cleanup_peer` never ran and the refused device kept a seat with no socket (a breaker-paused device for its whole pause); (2) a fresh relogin while the old socket lingered ran `cleanup_peer(ghost) -> go_offline -> release_key(P)` AFTER the successor's validate, so the live successor held no seat (a sixth device got in). Trap: never release a seat by peer id again, and never from `go_offline`/`cleanup_peer`: any refusal added to `handle_auth` later is covered only because the release is per socket in `.close`. Grace holds no seat (the session has no socket); a resume or a fresh login validates again; a restart starts with no seats (sockets do not survive it, holders are not in the snapshot). A full-key refusal counts `seats_full_refused` (`/server-stats` `license.seats_full`, only on a members-only relay, dropped with `PUBLIC_STATS=off`) and writes the operator's `[license]` line (`operator_note.h`, at most once a minute per kind, counts only; the cooldown and ip_limit refusals have `[breaker]` and `[limits]` lines of their own). Live proof: `run_live.sh` variant `license` (`live_license.inc`).
+**A seat belongs to the SOCKET that took it (#153).** `validate(key, peer, token)` takes it (token = the socket pointer, `seat_token`), and the ONLY release is `release_seat(token)` at the top of the `.close` handler, run for every socket whatever ended it. A device counts once while ANY of its sockets holds a seat (full, fetch, guest, a superseded ghost, a session moving sockets), and gives the seat back with its last one. Two bugs this shape closed: (1) `handle_auth` judges the key BEFORE the cooldown (1013) and `settle_login` ip_limit (1008) refusals, which close with `authenticated == false`, so the old release in `cleanup_peer` never ran and the refused device kept a seat with no socket (a breaker-paused device for its whole pause); (2) a fresh relogin while the old socket lingered ran `cleanup_peer(ghost) -> go_offline -> release_key(P)` AFTER the successor's validate, so the live successor held no seat (a sixth device got in). Trap: never release a seat by peer id again, and never from `go_offline`/`cleanup_peer`: any refusal added to `handle_auth` later is covered only because the release is per socket in `.close`. Grace holds no seat (the session has no socket); a resume or a fresh login validates again; a restart starts with no seats (sockets do not survive it, holders are not in the snapshot). **The gate off and on (HOL-SEC-220):** a socket let in while the gate is off goes into `keyless` (no seat, out again at its close). A reload that turns the gate on closes every `keyless` socket (`license_key_required`, 1008 `license_required`, which ends its session) besides the holders of dropped keys; a reload that turns it off closes nobody and keeps `holders` as they were, so a seat taken before the gate went off stays while its key does and a key dropped meanwhile ends its sockets once the gate is back. Sessions in grace hold no seat, so `enter_grace` records the key the socket held a seat of in `Session::license_key` ("" = the gate let it in without one, unknown after a restore: a resume judges the key again anyway), and after every reload that reads `end_unlicensed_grace` (main.cpp's timer) ends each one `admits()` no longer covers, as on expiry. A full-key refusal counts `seats_full_refused` (`/server-stats` `license.seats_full`, only on a members-only relay, dropped with `PUBLIC_STATS=off`) and writes the operator's `[license]` line (`operator_note.h`, at most once a minute per kind, counts only; the cooldown and ip_limit refusals have `[breaker]` and `[limits]` lines of their own). Live proof: `run_live.sh` variant `license` (`live_license.inc`).
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `enabled` | `bool` | Whether license enforcement is active |
+| `unread` | `bool` | keys.json did not read at boot: every login refused until a reload reads it (also sets `enabled`, so `/relay-status` says a key is needed) |
 | `keys` | `unordered_set<string>` | Set of valid license key strings |
+| `keyless` | `unordered_set<SeatToken>` | sockets let in while the gate was off; closed when it turns on |
 | `holders` | `unordered_map<string, unordered_map<string, unordered_set<SeatToken>>>` | license_key -> peer_id -> the sockets holding its seat; a key's seats = its peer ids |
 | `seats` | `unordered_map<SeatToken, pair<string, string>>` | socket -> (key, peer_id) it holds a seat for |
 | `seats_full_refused` | `uint64_t` | logins refused `KeyInUse`, for `/server-stats` |
@@ -880,12 +884,12 @@ Initial load on startup:
 1. Take the file's stamp (`file_stamp.h`: mtime with nanoseconds, size, inode, device), then read it.
 2. `parse_keys_file` (`license_pool.h`, never throws): a non-object, an `enabled` that is not a boolean or `keys` that is not a list read as nothing (HOL-SEC-203: `j.value("enabled", false)` on a string threw out of the reload timer and ended the relay with no snapshot). Missing fields: off, no keys; non-text keys skipped.
 3. Log key count and enabled status to stderr.
-4. Returns `false` if the file doesn't exist or doesn't read (non-fatal: the license system stays disabled).
+4. Returns `false` if the file doesn't exist (an open relay) or doesn't read. A file that is THERE but does not read calls `refuse_unread()` and logs `[license] <path> is there but does not read: every login is refused until it does` (HOL-SEC-220: it used to leave the gate off, so a members-only relay with a typo ran open). check-host's "Access keys" check runs `hollow-relay --check-keys <path>` (exit 1 only for a file that is there and does not read; prints counts, never a key) and checks the relay account can read the file. Live variant `license_unread`.
 
 ### license.cpp:validate_key()
 
 Called during WebSocket auth (`handle_auth()`):
-1. If `!enabled`, return `NotRequired` (all peers connect freely).
+1. If `unread`, return `Unreadable`. If `!enabled`, the socket goes into `keyless` and `NotRequired` is returned (all peers connect freely).
 2. If no key provided (`key == nullptr || key->empty()`), return `KeyRequired`.
 3. If key not in `keys` set, return `InvalidKey`.
 4. If the key already has `MAX_DEVICES_PER_KEY` devices and this peer_id is not one of them, count `seats_full_refused` and return `KeyInUse`.
@@ -899,8 +903,8 @@ Called at the top of the `.close` handler for EVERY socket, authenticated or ref
 
 Called every 30 seconds by the license reload timer:
 1. Take the stamp; an unchanged one (or a missing file) returns. The stamp is kept whatever the outcome, so a broken file is judged once per change.
-2. `reload_text`: a file that does not read changes nothing ("keeping the previous keys"); else `replace_keys()` returns every holder of a key NOT in the new set as `peers_to_kick`, forgotten, and `enabled` and `keys` are swapped in. The timer callback in `main.cpp` sits in try/catch too.
-3. **Active connection revocation:** `replace_keys` returns every SOCKET holding a dropped key (full, fetch and guest alike; before #153 only `peer_sockets`, so a fetch socket of a revoked key stayed), forgets their seats, and each still-open one (`open_sockets`, not `closing`) gets `{"type":"auth_failed","error":"invalid_license_key"}` and `ws->end(1008, "license_revoked")`. Live `license_revoked_key_closes_every_socket`.
+2. `reload_text`: a file that does not read changes nothing ("keeping the previous keys", or while `unread` "every login stays refused"); else `replace_keys()` swaps in `enabled` and `keys` and clears `unread`. Returns true only then; the timer callback in `main.cpp` (in try/catch) then runs `end_unlicensed_grace`.
+3. **Active connection revocation:** with the new gate ON, `replace_keys` returns `Kicks{revoked, keyless}`: every SOCKET holding a dropped key (full, fetch and guest alike; before #153 only `peer_sockets`, so a fetch socket of a revoked key stayed), seats forgotten, and every socket the open gate let in. Each still-open one (`open_sockets`, not `closing`) gets `{"type":"auth_failed","error":"invalid_license_key"}` + `ws->end(1008, "license_revoked")`, or `license_key_required` + 1008 `license_required`; the 1008 ends its session. With the new gate OFF it returns nothing. Then every session in grace the new file does not admit ends. Live `license_revoked_key_closes_every_socket`, `license_gate_off_kicks_nobody`, `license_gate_on_ends_the_keyless`, and variant `license_grace` for sessions in grace (test builds keep graces at 5 s; `HOLLOW_RELAY_TEST_GRACE=120`, read only in test builds, makes them outlive a 30 s reload).
 
 The 30-second reload cycle means key revocation takes at most 30 seconds to take effect on active connections.
 
@@ -992,7 +996,8 @@ Authentication protocol (first message after WebSocket open):
    - `InvalidKey`: send `{"type":"auth_failed","error":"invalid_license_key"}`, close with "bad_license".
    - `KeyInUse`: send `{"type":"auth_failed","error":"license_key_in_use"}`, close with "bad_license" (the operator's once-a-minute `[license]` line).
    - `KeyRequired`: send `{"type":"auth_failed","error":"license_key_required"}`, close with "bad_license".
-   The seat an `Ok` took is the socket's from here on: the cooldown and ip_limit refusals below give it back through `.close` (#153).
+   - `Unreadable` (keys.json did not read at boot, HOL-SEC-220): `close_once(1013, "keys_unreadable")` with `{"type":"auth_failed","error":"keys_unreadable"}`; the client reads it as a plain refusal and retries.
+   `data->license_key` keeps the key only when it took a seat (`Ok`), "" otherwise; `enter_grace` copies it into the session. The seat an `Ok` took is the socket's from here on: the cooldown and ip_limit refusals below give it back through `.close` (#153).
 
 **On success:**
 1. Set `data->peer_id`, `data->authenticated = true`, `data->license_key`.
