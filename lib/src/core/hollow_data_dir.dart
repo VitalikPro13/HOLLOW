@@ -1,5 +1,7 @@
 import 'dart:io';
 
+import 'package:crypto/crypto.dart';
+
 import 'package:hollow/src/core/profile_registry.dart';
 import 'package:path_provider/path_provider.dart';
 
@@ -115,6 +117,62 @@ bool portableFolderHoldsIdentity(String dir) {
   final sep = Platform.pathSeparator;
   return const ['identity.key', 'identity.device']
       .any((m) => File('$dir$sep$m').existsSync());
+}
+
+/// A file Windows releases 0.12.1 to 0.14.1 shipped in `<app>\hollow_data` (#155):
+/// the build machine's database and lock, byte-identical in every one of them.
+class ShippedStrayFile {
+  final String name;
+  final int size;
+  final String sha256;
+
+  const ShippedStrayFile(this.name, this.size, this.sha256);
+}
+
+/// Taken from the published hollow-0.14.1-win64.zip; 0.12.1 to 0.14.0 carry the same bytes.
+const shippedStrayFiles = [
+  ShippedStrayFile('messages.db', 475136,
+      'c69bfe5028c930ad5e69fab0ae3977f45d269ea758437473707d728d0b0e7499'),
+  ShippedStrayFile('hollow.lock', 5,
+      '9614e2d3d87b46db466fc1ee4d7cbe57ee95a24458c311796db423364a54eff1'),
+];
+
+/// Removes from [dir] what the old releases shipped there: only files whose size
+/// and SHA-256 match [shipped], only while the folder holds no `identity.*` file,
+/// then the folder itself if that left it empty. A database that differs by one
+/// byte is someone's and stays. Returns the names it removed. Never throws.
+List<String> removeShippedStrayData(String dir,
+    {List<ShippedStrayFile> shipped = shippedStrayFiles}) {
+  final removed = <String>[];
+  try {
+    final folder = Directory(dir);
+    if (!folder.existsSync()) return removed;
+    final sep = Platform.pathSeparator;
+    final names = folder
+        .listSync(followLinks: false)
+        .map((e) => e.path.substring(e.path.lastIndexOf(sep) + 1))
+        .toList();
+    if (names.any((n) => n.toLowerCase().startsWith('identity.'))) {
+      return removed;
+    }
+    for (final f in shipped) {
+      final file = File('$dir$sep${f.name}');
+      try {
+        if (FileSystemEntity.typeSync(file.path, followLinks: false) !=
+                FileSystemEntityType.file ||
+            file.lengthSync() != f.size ||
+            sha256.convert(file.readAsBytesSync()).toString() != f.sha256) {
+          continue;
+        }
+        file.deleteSync();
+        removed.add(f.name);
+      } catch (_) {}
+    }
+    if (removed.isNotEmpty && folder.listSync(followLinks: false).isEmpty) {
+      folder.deleteSync();
+    }
+  } catch (_) {}
+  return removed;
 }
 
 /// The OS default profile, when it holds an identity and this launch went to the

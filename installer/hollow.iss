@@ -83,10 +83,11 @@ Type: files; Name: "{app}\shoes.exe"
 ; Bundle the signed Release folder (exe, dlls, data/, etc.).
 ; Exclude build/link artifacts and any local debug log that must NOT ship to users,
 ; and any profile data or portable marker: one moves every install onto it (#155).
-; build_release.ps1 refuses a Release folder holding them before this runs.
+; build_release.ps1 refuses a Release folder holding them before this runs. No
+; createallsubdirs: it still creates an EXCLUDED folder, empty (seen with hollow_data).
 Source: "{#SourceDir}\*"; DestDir: "{app}"; \
     Excludes: "*.lib,*.exp,*.pdb,hollow_debug.log,hollow_crash.log,*.log,\hollow_data\,\hollow_data\*,*.db,*.db-wal,*.db-shm,hollow.lock,identity.*,portable,portable.txt,portable.txt.txt"; \
-    Flags: ignoreversion recursesubdirs createallsubdirs
+    Flags: ignoreversion recursesubdirs
 
 [Registry]
 ; hollow:// URL protocol — per-user (HKCU, no admin needed). Lets browsers and
@@ -126,10 +127,92 @@ begin
   Sleep(700);
 end;
 
+{ ---- #155: profile data beside the exe ----
+  Setups 0.12.1 to 0.14.1 shipped the build machine's hollow_data\messages.db and
+  hollow.lock, and their uninstall logs (unins000.dat) still name both: an uninstall
+  would delete the database of anyone whose own profile now lives in that folder. }
+
+const
+  StrayDbSize = 475136;
+  StrayDbSha256 = 'c69bfe5028c930ad5e69fab0ae3977f45d269ea758437473707d728d0b0e7499';
+  StrayLockSha256 = '9614e2d3d87b46db466fc1ee4d7cbe57ee95a24458c311796db423364a54eff1';
+  KeptSuffix = '.kept-by-uninstall';
+
+var
+  { Where the uninstall set a profile aside, '' when it did not. }
+  KeptDir: String;
+
+function PortableDir: String;
+begin
+  Result := ExpandConstant('{app}\hollow_data');
+end;
+
+{ Any identity.* file: a key, a device, a locked or wrapped copy. }
+function HoldsIdentity(Dir: String): Boolean;
+var
+  F: TFindRec;
+begin
+  Result := FindFirst(AddBackslash(Dir) + 'identity.*', F);
+  if Result then
+    FindClose(F);
+end;
+
+{ True only for the exact bytes the old setups shipped: same size and SHA-256. }
+function IsShippedFile(Path: String; Size: Integer; Sha256: String): Boolean;
+var
+  Actual: Integer;
+begin
+  Result := False;
+  if not FileExists(Path) then
+    exit;
+  if not FileSize(Path, Actual) then
+    exit;
+  if Actual <> Size then
+    exit;
+  try
+    Result := CompareText(GetSHA256OfFile(Path), Sha256) = 0;
+  except
+    Result := False;
+  end;
+end;
+
+function IsShippedDb(Path: String): Boolean;
+begin
+  Result := IsShippedFile(Path, StrayDbSize, StrayDbSha256);
+end;
+
+{ Removes what the old setups shipped, from a folder holding no identity; a
+  database that differs is someone's and stays. RemoveDir only takes an empty folder. }
+procedure RemoveShippedStray;
+var
+  Dir: String;
+  Removed: Boolean;
+begin
+  Dir := PortableDir;
+  if not DirExists(Dir) or HoldsIdentity(Dir) then
+    exit;
+  Removed := False;
+  if IsShippedDb(Dir + '\messages.db') then
+    Removed := DeleteFile(Dir + '\messages.db') or Removed;
+  if IsShippedFile(Dir + '\hollow.lock', 5, StrayLockSha256) then
+    Removed := DeleteFile(Dir + '\hollow.lock') or Removed;
+  if Removed then
+    RemoveDir(Dir);
+end;
+
+{ A folder that is someone's profile: an identity, or a database that is not the
+  shipped one. }
+function IsSomeonesProfile(Dir: String): Boolean;
+begin
+  Result := DirExists(Dir) and (HoldsIdentity(Dir) or
+    (FileExists(Dir + '\messages.db') and not IsShippedDb(Dir + '\messages.db')));
+end;
+
 { ---- Install side: close a running instance before copying files (upgrades) ---- }
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
   KillHollow;
+  RemoveShippedStray;
   Result := '';
 end;
 
@@ -144,9 +227,34 @@ end;
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
   DataDir: String;
+  N: Integer;
 begin
+  { Before the logged files go: a profile in <app>\hollow_data steps aside, so the
+    old setups' log entries find nothing to delete, and comes back afterwards. }
+  if CurUninstallStep = usUninstall then
+  begin
+    KeptDir := '';
+    if IsSomeonesProfile(PortableDir) then
+    begin
+      KeptDir := PortableDir + KeptSuffix;
+      N := 2;
+      while DirExists(KeptDir) or FileExists(KeptDir) do
+      begin
+        KeptDir := PortableDir + KeptSuffix + '-' + IntToStr(N);
+        N := N + 1;
+      end;
+      if not RenameFile(PortableDir, KeptDir) then
+      begin
+        Log('#155: could not set the profile in ' + PortableDir + ' aside');
+        KeptDir := '';
+      end;
+    end;
+  end;
   if CurUninstallStep = usPostUninstall then
   begin
+    if (KeptDir <> '') and not DirExists(PortableDir) then
+      if not RenameFile(KeptDir, PortableDir) then
+        Log('#155: the profile stays in ' + KeptDir);
     DataDir := ExpandConstant('{userappdata}\Hollow');
     if DirExists(DataDir) then
     begin

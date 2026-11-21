@@ -257,12 +257,29 @@ release pipeline is the `release` skill.
   username's paths decode). macOS passes `--args` and a `HOLLOW_DATA_DIR` override as
   `open --env` (LaunchServices gives the app its own environment), every path `sh_quote`d.
   Only the RUNNING build's script counts: an update FROM 0.14.1 or older still drops them.
-  `update_bat_tests` runs the real script under `cmd /V:ON` on Windows.
+  `update_bat_tests` runs the real script under `cmd /V:ON` on Windows. A `hollow:` link
+  the app was started with is never carried (`carried_args`): the relaunch would open the
+  invite or share again.
 - `update.bat` waits for the pid that wrote it (`tasklist /FI "PID eq"` plus the image name),
   never for every `hollow.exe` (another install or profile held updates forever), and a failed
-  `xcopy` relaunches NOTHING (a half-copied app starts on mismatched parts): it says so and
-  `pause`s, keeping the staged files. Over ssh `tasklist` answers "Access denied", so the
-  pid-wait test returns early there and is run in a desktop session.
+  `xcopy` relaunches NOTHING (a half-copied app starts on mismatched parts): it tries again 5
+  times 2 s apart, then names the staged folder and tries again on every key press (the
+  copy is idempotent from the kept staging). The delay is `ping`: `timeout` fails at once
+  without console input. Over ssh `tasklist` answers "Access denied", so the pid-wait test
+  returns early there and is run in a desktop session.
+- An update never deletes the person's data in the app folder (#155 review). Linux tarball:
+  the swap moves the whole folder aside, so `hollow_data` and the portable markers move into
+  the new build before it starts and back on a rollback, the update stages beside the folder
+  when the data root is inside it, a folder still holding data is never `rm -rf`'d, and a
+  data root elsewhere inside the folder refuses the update. macOS: refuses when the data
+  root is inside the `.app` (portable data sits beside it). Windows `xcopy` deletes nothing.
+- Windows releases 0.12.1 to 0.14.1 left a stray `<app>\hollow_data` (messages.db 475136
+  bytes, SHA-256 `c69bfe50...`, and `hollow.lock`). The installer (`RemoveShippedStray`) and the
+  app at start (`removeShippedStrayData`, Windows) delete only those exact bytes, only from a
+  folder with no `identity.*`, and the folder if that empties it. Their uninstall logs still
+  list both files, so the uninstaller moves a folder that is someone's profile (an identity,
+  or a database that is not the shipped one) aside at `usUninstall` and back at
+  `usPostUninstall`.
 - The self-restart (`relaunchApp`, `self_restart_snippet`) hands `Start-Process` ONE command
   line (`argv_quote` + `ps_quote`): as a list, Windows PowerShell joined it unquoted and an
   argument with a space split. A non-Unicode argv refuses instead of panicking; macOS keeps

@@ -109,6 +109,13 @@ Future<void> main(List<String> args) async {
 
   registerRustLicenses();
 
+  // #155: Windows releases 0.12.1 to 0.14.1 left their build machine's database
+  // in <app>\hollow_data; the installer clears it too, the zip has only this.
+  // Before detection, so the folder is judged without it.
+  final strayDir = Platform.isWindows ? portableCandidatePath() : null;
+  final strayRemoved =
+      strayDir == null ? const <String>[] : removeShippedStrayData(strayDir);
+
   // Must run before the single-instance lock, so a portable copy locks inside
   // its own data folder, and before any file I/O.
   await initHollowDataDir(forcePortable: args.contains('--portable'));
@@ -160,6 +167,13 @@ Future<void> main(List<String> args) async {
             message: '[PORTABLE] $portableDetectionNote'
                 '${isPortableMode ? ' (ACTIVE, data root: $hollowDataDir)' : ''}')
         .catchError((_) {});
+    if (strayRemoved.isNotEmpty) {
+      network_api
+          .logFromDart(
+              message: '[PORTABLE] removed the stray ${strayRemoved.join(', ')} '
+                  'an old release shipped beside the app')
+          .catchError((_) {});
+    }
   }
 
   // Frame-stall logger plus slow platform-channel watchdog. Anomalies only.
