@@ -1,0 +1,637 @@
+{
+ "peers": [
+  "j",
+  "k"
+ ],
+ "steps": [
+  {
+   "peer": "all",
+   "op": "wait_for",
+   "provider": "connection",
+   "equals": "connected",
+   "timeout_ms": 120000
+  },
+  {
+   "peer": "j",
+   "op": "capture",
+   "from": "provider",
+   "key": "peerId",
+   "as": "PEER_A"
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "semantics:Friends",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "text:Add friend",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "enter_text",
+   "target": "hint:Paste an ID, or type a nickname",
+   "value": "${PEER_A}"
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "target": "text:${PEER_A}",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "text:Send request",
+   "index": 0
+  },
+  {
+   "peer": "j",
+   "op": "wait_for",
+   "target": "semantics:Friends, 1 friend request",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "j",
+   "op": "tap",
+   "target": "semantics:Friends",
+   "index": 0
+  },
+  {
+   "peer": "j",
+   "op": "wait_for",
+   "target": "semantics:Accept friend request",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "j",
+   "op": "tap",
+   "target": "semantics:Accept friend request",
+   "index": 0
+  },
+  {
+   "peer": "j",
+   "op": "log",
+   "message": "the accepted friend must reach the UI on BOTH sides, not just the friends table"
+  },
+  {
+   "peer": "j",
+   "op": "wait_for",
+   "target": "text:probe-k",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "target": "text:probe-j",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "text:probe-j"
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "target": "field",
+   "timeout_ms": 15000
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "field",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "enter_text",
+   "target": "field",
+   "value": "dm from b ${RUN}"
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "semantics:Send message",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "target": "text:dm from b ${RUN}",
+   "timeout_ms": 15000
+  },
+  {
+   "peer": "j",
+   "op": "tap",
+   "target": "semantics:Chats",
+   "index": 0
+  },
+  {
+   "peer": "j",
+   "op": "wait_for",
+   "target": "text:dm from b ${RUN}",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "j",
+   "op": "tap",
+   "target": "text:probe-k"
+  },
+  {
+   "peer": "j",
+   "op": "wait_for",
+   "target": "field",
+   "timeout_ms": 15000
+  },
+  {
+   "peer": "j",
+   "op": "tap",
+   "target": "field",
+   "index": 0
+  },
+  {
+   "peer": "j",
+   "op": "enter_text",
+   "target": "field",
+   "value": "dm from a ${RUN}"
+  },
+  {
+   "peer": "j",
+   "op": "tap",
+   "target": "semantics:Send message",
+   "index": 0
+  },
+  {
+   "peer": "j",
+   "op": "wait_for",
+   "target": "text:dm from a ${RUN}",
+   "timeout_ms": 15000
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "target": "text:dm from a ${RUN}",
+   "timeout_ms": 60000
+  },
+  {
+   "peer": "all",
+   "op": "log",
+   "message": "#154 OS call: k places a DM call; the OS hears it from the first ring"
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "semantics:Voice call",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "provider": "osCall",
+   "equals": "dm placing",
+   "timeout_ms": 15000
+  },
+  {
+   "peer": "k",
+   "op": "dump",
+   "name": "os-placing"
+  },
+  {
+   "peer": "j",
+   "op": "wait_for",
+   "target": "semantics:Accept",
+   "timeout_ms": 45000
+  },
+  {
+   "peer": "j",
+   "op": "wait_for",
+   "provider": "osCall",
+   "equals": "none",
+   "timeout_ms": 2000
+  },
+  {
+   "peer": "j",
+   "op": "tap",
+   "target": "semantics:Accept",
+   "index": 0
+  },
+  {
+   "peer": "j",
+   "op": "wait_for",
+   "provider": "callStatus",
+   "equals": "active",
+   "timeout_ms": 45000
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "provider": "callStatus",
+   "equals": "active",
+   "timeout_ms": 45000
+  },
+  {
+   "peer": "j",
+   "op": "wait_for",
+   "provider": "osCall",
+   "equals": "dm live",
+   "timeout_ms": 15000
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "provider": "osCall",
+   "equals": "dm live",
+   "timeout_ms": 15000
+  },
+  {
+   "peer": "all",
+   "op": "wait",
+   "ms": 6000
+  },
+  {
+   "peer": "all",
+   "op": "dump",
+   "name": "os-dm-live"
+  },
+  {
+   "peer": "all",
+   "op": "shot",
+   "name": "c154-os-01-dm-live"
+  },
+  {
+   "peer": "k",
+   "op": "log",
+   "message": "k mutes in the app: the OS is told"
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "semantics:Mute",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "provider": "osCallMuted",
+   "equals": true,
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "semantics:Unmute",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "provider": "osCallMuted",
+   "equals": false,
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "semantics:Leave the call",
+   "index": 0
+  },
+  {
+   "peer": "j",
+   "op": "wait_for",
+   "provider": "osCall",
+   "equals": "none",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "provider": "osCall",
+   "equals": "none",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "all",
+   "op": "wait",
+   "ms": 2000
+  },
+  {
+   "peer": "all",
+   "op": "log",
+   "message": "#154 OS call: a voice room on both phones"
+  },
+  {
+   "peer": "all",
+   "op": "tap",
+   "target": "semantics:Back",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "all",
+   "op": "wait",
+   "ms": 1000
+  },
+  {
+   "peer": "all",
+   "op": "tap",
+   "target": "semantics:Chats",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "all",
+   "op": "wait",
+   "ms": 1000
+  },
+  {
+   "peer": "j",
+   "op": "tap",
+   "target": "semantics:Add a server",
+   "index": 0
+  },
+  {
+   "peer": "j",
+   "op": "wait",
+   "ms": 1000
+  },
+  {
+   "peer": "j",
+   "op": "enter_text",
+   "target": "hint:My Awesome Server",
+   "value": "osc-${RUN}"
+  },
+  {
+   "peer": "j",
+   "op": "tap",
+   "target": "text:Create",
+   "index": 0
+  },
+  {
+   "peer": "j",
+   "op": "wait_for",
+   "target": "text:osc-${RUN}",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "j",
+   "op": "wait",
+   "ms": 1000
+  },
+  {
+   "peer": "j",
+   "op": "long_press",
+   "target": "text:osc-${RUN}",
+   "index": 0
+  },
+  {
+   "peer": "j",
+   "op": "wait",
+   "ms": 1000
+  },
+  {
+   "peer": "j",
+   "op": "tap",
+   "target": "text:Create channel",
+   "index": 0
+  },
+  {
+   "peer": "j",
+   "op": "wait_for",
+   "target": "dialog > text:Voice",
+   "timeout_ms": 10000
+  },
+  {
+   "peer": "j",
+   "op": "tap",
+   "target": "dialog > text:Voice",
+   "index": 0
+  },
+  {
+   "peer": "j",
+   "op": "enter_text",
+   "target": "dialog > type:EditableText",
+   "value": "room-${RUN}"
+  },
+  {
+   "peer": "j",
+   "op": "tap",
+   "target": "dialog > text:Create",
+   "index": 0
+  },
+  {
+   "peer": "j",
+   "op": "wait_for",
+   "gone": "dialog",
+   "timeout_ms": 15000
+  },
+  {
+   "peer": "j",
+   "op": "wait_for",
+   "target": "text:room-${RUN}",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "j",
+   "op": "long_press",
+   "target": "text:osc-${RUN}",
+   "index": 0
+  },
+  {
+   "peer": "j",
+   "op": "wait",
+   "ms": 1000
+  },
+  {
+   "peer": "j",
+   "op": "tap",
+   "target": "text:Invite people",
+   "index": 0
+  },
+  {
+   "peer": "j",
+   "op": "wait_for",
+   "target": "type:HollowCopyField",
+   "timeout_ms": 20000
+  },
+  {
+   "peer": "j",
+   "op": "capture",
+   "target": "type:HollowCopyField",
+   "as": "INVITE"
+  },
+  {
+   "peer": "j",
+   "op": "tap",
+   "target": "dialog > semantics:Close",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "semantics:Add a server",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "wait",
+   "ms": 1000
+  },
+  {
+   "peer": "k",
+   "op": "enter_text",
+   "target": "hint:Invite link",
+   "value": "${INVITE}"
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "text:Join",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "target": "text:room-${RUN}",
+   "timeout_ms": 120000
+  },
+  {
+   "peer": "j",
+   "op": "tap",
+   "target": "semantics:Chats",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "j",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "j",
+   "op": "tap",
+   "target": "text:osc-${RUN}",
+   "index": 0
+  },
+  {
+   "peer": "j",
+   "op": "wait",
+   "ms": 1000
+  },
+  {
+   "peer": "j",
+   "op": "tap",
+   "target": "text:room-${RUN}",
+   "index": 0
+  },
+  {
+   "peer": "j",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "j",
+   "op": "wait_for",
+   "target": "semantics:Leave the room",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "semantics:Chats",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "k",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "text:osc-${RUN}",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "wait",
+   "ms": 1000
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "text:room-${RUN}",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "target": "semantics:Leave the room",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "j",
+   "op": "wait_for",
+   "provider": "osCall",
+   "equals": "room live",
+   "timeout_ms": 15000
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "provider": "osCall",
+   "equals": "room live",
+   "timeout_ms": 15000
+  },
+  {
+   "peer": "all",
+   "op": "wait",
+   "ms": 6000
+  },
+  {
+   "peer": "all",
+   "op": "dump",
+   "name": "os-room-live"
+  },
+  {
+   "peer": "all",
+   "op": "shot",
+   "name": "c154-os-02-room-live"
+  },
+  {
+   "peer": "j",
+   "op": "tap",
+   "target": "semantics:Leave the room",
+   "index": 0
+  },
+  {
+   "peer": "j",
+   "op": "wait_for",
+   "provider": "osCall",
+   "equals": "none",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "semantics:Leave the room",
+   "index": 0
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "provider": "osCall",
+   "equals": "none",
+   "timeout_ms": 30000
+  }
+ ]
+}

@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
+import 'package:hollow/src/core/services/os_call_service.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/services/link_resilience.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
@@ -296,9 +297,12 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
     final ringingOut = call.status == CallStatus.ringing &&
         call.direction == CallDirection.outgoing;
     return [
-      muteControl(muted: call.isMuted, onTap: live ? calls.toggleMute : null),
+      muteControl(
+          muted: call.isMuted,
+          onTap: unlessOsHeld(ref.read, live ? calls.toggleMute : null)),
       deafenControl(
-          deafened: call.isDeafened, onTap: active ? calls.toggleDeafen : null),
+          deafened: call.isDeafened,
+          onTap: unlessOsHeld(ref.read, active ? calls.toggleDeafen : null)),
       if (isPhoneCallPlatform)
         speakerControl(
           context,

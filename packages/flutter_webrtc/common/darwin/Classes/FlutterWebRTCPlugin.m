@@ -107,6 +107,42 @@ NSArray<RTC_OBJC_TYPE(RTCVideoCodecInfo) *>* motifyH264ProfileLevelId(
 }
 @end
 
+#if TARGET_OS_IPHONE
+// Hollow fork (#154): remote audio track ids per peer connection id, for the
+// safety net. Main thread only: the RTCPeerConnectionDelegate callbacks run on
+// WebRTC's signaling thread and hop here, so the net never reads a dictionary
+// another thread writes.
+static NSMutableDictionary<NSString*, NSMutableSet<NSString*>*>* gHollowRemoteAudio;
+#endif
+
+void hollowNoteRemoteAudio(NSString* _Nullable peerConnectionId,
+                           NSString* _Nullable trackId,
+                           BOOL added) {
+#if TARGET_OS_IPHONE
+  if (peerConnectionId == nil || trackId == nil) {
+    return;
+  }
+  dispatch_async(dispatch_get_main_queue(), ^{
+    if (gHollowRemoteAudio == nil) {
+      gHollowRemoteAudio = [NSMutableDictionary new];
+    }
+    NSMutableSet<NSString*>* tracks = gHollowRemoteAudio[peerConnectionId];
+    if (added) {
+      if (tracks == nil) {
+        tracks = [NSMutableSet new];
+        gHollowRemoteAudio[peerConnectionId] = tracks;
+      }
+      [tracks addObject:trackId];
+    } else if (tracks != nil) {
+      [tracks removeObject:trackId];
+      if (tracks.count == 0) {
+        [gHollowRemoteAudio removeObjectForKey:peerConnectionId];
+      }
+    }
+  });
+#endif
+}
+
 void postEvent(FlutterEventSink _Nullable sink, id _Nullable event) {
     if (sink == nil) {
         NSLog(@"postEvent: sink is nil, skipping event dispatch");
@@ -216,6 +252,10 @@ static NSString* HollowStringArg(id value) {
   // Hollow fork: media-path PCM player for received screen-share audio, driven
   // by startScreenAudioPlayer / writeScreenAudioPcm / stopScreenAudioPlayer.
   ScreenAudioPlayer* _screenAudioPlayer;
+
+  // Hollow fork (#154): the CallKit-mode safety net's once-a-second check.
+  BOOL _hollowNetArmed;
+  CFAbsoluteTime _hollowNetSince;
 }
 
 static FlutterWebRTCPlugin *sharedSingleton;
@@ -317,13 +357,13 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
 
     // Hollow fork: bake MixWithOthers into libwebrtc's own session template
     // (it re-applies webRTCConfiguration whenever its audio unit restarts,
-    // which would drop the flag set by AudioUtils). Without MixWithOthers,
-    // another app's non-mixable playback (music) INTERRUPTS the call session;
-    // a backgrounded call then has no live audio unit and iOS suspends the
-    // app ~45s later — the whole call collapses (device-proven 2026-07-05).
+    // which would drop the flag set by AudioUtils), by the ONE rule: on while
+    // no CallKit call owns the session, off under one (#154). Without it,
+    // another app's non-mixable playback INTERRUPTS a non-CallKit call session
+    // and a backgrounded call collapses (device-proven 2026-07-05).
     RTCAudioSessionConfiguration* webRTCConfig =
         [RTCAudioSessionConfiguration webRTCConfiguration];
-    webRTCConfig.categoryOptions |= AVAudioSessionCategoryOptionMixWithOthers;
+    webRTCConfig.categoryOptions = [HollowCallAudio categoryOptions:webRTCConfig.categoryOptions];
     [RTCAudioSessionConfiguration setWebRTCConfiguration:webRTCConfig];
 #endif
 #if TARGET_OS_IPHONE || TARGET_OS_OSX
@@ -409,11 +449,96 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
   // reason filter misses them. The receiver check inside the helper is the
   // real guard. Async: never mutate the session from inside the
   // route-change notification (CoreAudio re-entrancy).
+  // One exception (#154, RISK iOS-1): the person picked the receiver in the
+  // system call UI (an override while the app is not in front). That is
+  // their choice; speaker mode ends instead of being fought.
+  const BOOL systemPick =
+      routeChangeReason == AVAudioSessionRouteChangeReasonOverride &&
+      [HollowCallAudio callKitCalls] > 0;
   dispatch_async(dispatch_get_main_queue(), ^{
+    if (systemPick &&
+        [UIApplication sharedApplication].applicationState != UIApplicationStateActive &&
+        [self hollowOutputOnReceiver]) {
+      self->_speakerOn = NO;
+      self->_speakerOnButPreferBluetooth = NO;
+      return;
+    }
     [self healSpeakerRouteIfClobbered];
   });
 #endif
 }
+
+#if TARGET_OS_IPHONE
+- (BOOL)hollowOutputOnReceiver {
+  for (AVAudioSessionPortDescription* output in
+       [AVAudioSession sharedInstance].currentRoute.outputs) {
+    if ([output.portType isEqualToString:AVAudioSessionPortBuiltInReceiver]) {
+      return YES;
+    }
+  }
+  return NO;
+}
+
+// Hollow fork (#154, DESIGN_OS_CALLS 2.4b): fail open natively. A call whose
+// audio nobody enabled for 3 s while no CallKit call exists (none requested,
+// live or held, so a pending start or a hold is never overridden) gets the
+// session from HollowCallAudio, whatever Dart did or missed.
+- (void)hollowArmSafetyNet {
+  if (_hollowNetArmed || ![HollowCallAudio callKitMode]) {
+    return;
+  }
+  _hollowNetArmed = YES;
+  _hollowNetSince = 0;
+  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
+                 dispatch_get_main_queue(), ^{
+                   [self hollowSafetyNetTick];
+                 });
+}
+
+- (void)hollowSafetyNetTick {
+  if (![self hollowNeedsCallAudio]) {
+    _hollowNetArmed = NO;
+    _hollowNetSince = 0;
+    [HollowCallAudio setSafetyNet:NO];
+    return;
+  }
+  const CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+  if ([HollowCallAudio callKitCalls] > 0) {
+    // A CallKit call owns the audio (requested, live or held): never the net.
+    _hollowNetSince = 0;
+    [HollowCallAudio setSafetyNet:NO];
+  } else if ([RTCAudioSession sharedInstance].isAudioEnabled) {
+    _hollowNetSince = 0;
+  } else if (_hollowNetSince == 0) {
+    _hollowNetSince = now;
+  } else if (now - _hollowNetSince >= 3.0) {
+    NSLog(@"[HOLLOW-OSCALL] safety net: call audio was off for 3 s with no OS call; enabling it");
+    _hollowNetSince = 0;
+    [HollowCallAudio setSafetyNet:YES];
+  }
+  dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)),
+                 dispatch_get_main_queue(), ^{
+                   [self hollowSafetyNetTick];
+                 });
+}
+
+// A local audio track or a received voice: a data-channel-only connection (a
+// file transfer, share data) never needs the call session.
+- (BOOL)hollowNeedsCallAudio {
+  if ([self hasLocalAudioTrack]) {
+    return YES;
+  }
+  for (NSString* peerConnectionId in gHollowRemoteAudio.allKeys) {
+    if (_peerConnections[peerConnectionId] == nil) {
+      // Closed: its tracks went with it.
+      [gHollowRemoteAudio removeObjectForKey:peerConnectionId];
+    } else if (gHollowRemoteAudio[peerConnectionId].count > 0) {
+      return YES;
+    }
+  }
+  return NO;
+}
+#endif
 
 #if TARGET_OS_IPHONE
 // Hollow fork: keep the speaker-mode route honest across route changes. Two
@@ -581,6 +706,9 @@ static __weak id<RTCAudioDeviceModuleDelegate> gAudioDeviceModuleObserver = nil;
 }
 
 - (void)handleMethodCall:(FlutterMethodCall*)call result:(FlutterResult)result {
+#if TARGET_OS_IPHONE
+  [self hollowArmSafetyNet];
+#endif
   if ([@"initialize" isEqualToString:call.method]) {
     NSDictionary* argsMap = call.arguments;
     NSDictionary* options = argsMap[@"options"];

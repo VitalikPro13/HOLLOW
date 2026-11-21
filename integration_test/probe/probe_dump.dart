@@ -18,6 +18,7 @@ import 'package:hollow/src/core/providers/friends_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
+import 'package:hollow/src/core/services/os_call_service.dart';
 import 'package:hollow/src/core/providers/conference_provider.dart';
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
 import 'package:hollow/src/core/providers/overlay_mic_provider.dart';
@@ -456,6 +457,10 @@ class ProbeDump {
       // Hands-free (#154): the speaker, or a headset that beat it.
       out['callSpeakerOn'] = call.isSpeakerOn;
     }
+    // The call as the OS was told it (#154): CallKit or Telecom, or the
+    // fallback that runs without them.
+    final osCall = read(osCallServiceProvider);
+    if (osCall != null) out.addAll(osCall.probe);
     // A meeting by state: a voice room alone cannot show a stranded meeting.
     final meeting = read(conferenceProvider);
     if (meeting != null) {

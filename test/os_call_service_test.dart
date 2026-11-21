@@ -1,0 +1,886 @@
+/// The OS call mirror (#154, DESIGN_OS_CALLS rev 3): which session the OS
+/// sees, the order native hears about it, OS actions through the app's own
+/// paths, the hold guard, the fallback and reset paths, and the title rule.
+library;
+
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:hollow/src/core/hidden_notification.dart';
+import 'package:hollow/src/core/models/call_record.dart';
+import 'package:hollow/src/core/models/server_info.dart';
+import 'package:hollow/src/core/providers/app_lock_provider.dart';
+import 'package:hollow/src/core/providers/call_provider.dart';
+import 'package:hollow/src/core/providers/conference_provider.dart';
+import 'package:hollow/src/core/providers/duress_provider.dart';
+import 'package:hollow/src/core/providers/os_call_provider.dart';
+import 'package:hollow/src/core/providers/profile_provider.dart';
+import 'package:hollow/src/core/providers/server_provider.dart';
+import 'package:hollow/src/core/providers/settings_provider.dart';
+import 'package:hollow/src/core/age_gate.dart';
+import 'package:hollow/src/core/providers/voice_channel_provider.dart';
+import 'package:hollow/src/core/services/os_call_service.dart';
+import 'package:hollow/src/rust/api/identity.dart' as identity_api;
+import 'package:hollow/src/rust/api/storage.dart' as storage_api;
+import 'package:hollow/src/theme/hollow_theme_data.dart';
+import 'package:hollow/src/ui/call/call_stage_bar.dart';
+
+// --- fakes -------------------------------------------------------------------
+
+class _Native implements OsCallChannel {
+  final calls = <(String, Map<String, Object?>)>[];
+  Future<Object?> Function(String method, Map<Object?, Object?> args)? handler;
+
+  /// What `begin` answers; a throw stands in for a broken native side.
+  Object? Function(Map<String, Object?> args) onBegin = (_) => {'ok': true};
+
+  @override
+  Future<Object?> invoke(String method, [Map<String, Object?>? args]) async {
+    final a = args ?? const <String, Object?>{};
+    calls.add((method, a));
+    if (method == 'begin') return onBegin(a);
+    if (method == 'available') return true;
+    return null;
+  }
+
+  @override
+  void setHandler(
+          Future<Object?> Function(String, Map<Object?, Object?>)? handler) =>
+      this.handler = handler;
+
+  Future<void> send(String method, [Map<String, Object?> args = const {}]) =>
+      handler!(method, args);
+
+  List<String> get methods =>
+      [for (final c in calls) if (c.$1 != 'available') c.$1];
+  List<Map<String, Object?>> of(String method) =>
+      [for (final c in calls) if (c.$1 == method) c.$2];
+  Map<String, Object?> lastOf(String method) => of(method).last;
+  void clear() => calls.clear();
+}
+
+class _Call extends CallNotifier {
+  CallState seed;
+  _Call(this.seed);
+  int ends = 0, mutes = 0, deafens = 0;
+  bool refuseMute = false;
+  CallEndCause? cause;
+
+  @override
+  CallState build() => seed;
+
+  void set(CallState s) => state = s;
+
+  @override
+  CallEndCause? get lastEndCause => cause;
+
+  @override
+  Future<void> endCall() async {
+    ends++;
+    cause = CallEndCause.localHangup;
+    state = const CallState();
+  }
+
+  @override
+  void toggleMute() {
+    mutes++;
+    if (refuseMute || state.status != CallStatus.active) return;
+    state = state.copyWith(isMuted: !state.isMuted);
+  }
+
+  @override
+  void toggleDeafen() {
+    deafens++;
+    if (state.status != CallStatus.active) return;
+    final d = !state.isDeafened;
+    state = state.copyWith(isDeafened: d, isMuted: d ? true : state.isMuted);
+  }
+}
+
+class _Voice extends VoiceChannelNotifier {
+  VoiceChannelState seed;
+  _Voice(this.seed);
+  int leaves = 0, mutes = 0, deafens = 0;
+
+  @override
+  VoiceChannelState build() => seed;
+
+  void set(VoiceChannelState s) => state = s;
+
+  @override
+  Future<void> leaveChannel() async {
+    leaves++;
+    state = const VoiceChannelState();
+  }
+
+  @override
+  void toggleMute() {
+    mutes++;
+    state = state.copyWith(isMuted: !state.isMuted);
+  }
+
+  @override
+  void toggleDeafen() {
+    deafens++;
+    final d = !state.isDeafened;
+    state = state.copyWith(isDeafened: d, isMuted: d ? true : state.isMuted);
+  }
+}
+
+class _Conference extends ConferenceNotifier {
+  ConferenceState seed;
+  _Conference(this.seed);
+  int leaves = 0, ends = 0;
+
+  @override
+  ConferenceState build() => seed;
+
+  @override
+  Future<void> leaveMeeting() async => leaves++;
+
+  @override
+  Future<void> endMeeting() async => ends++;
+}
+
+class _Lock extends AppLockedNotifier {
+  @override
+  bool build() => false;
+  void set(bool v) => state = v;
+}
+
+class _Profiles extends ProfileNotifier {
+  @override
+  Map<String, storage_api.UserProfile> build() => {
+        'ada': _profile('ada', 'Ada'),
+      };
+  void rename(String id, String name) =>
+      state = {...state, id: _profile(id, name)};
+}
+
+class _Speaker extends StartCallsOnSpeakerNotifier {
+  @override
+  Future<bool> build() async => true;
+}
+
+storage_api.UserProfile _profile(String id, String name) =>
+    storage_api.UserProfile(
+      peerId: id,
+      displayName: name,
+      status: '',
+      aboutMe: '',
+      updatedAt: 0,
+      twitchUsername: '',
+      showcaseBoard: '',
+      avatarFrame: '',
+      avatarAnim: '',
+      bannerAnim: '',
+      supportCreds: '',
+      nameColor: '',
+    );
+
+const _noPassword = identity_api.ProtectionStatus(
+    isEncrypted: true,
+    hasPassword: false,
+    hasOsKeychain: true,
+    osKeychainAvailable: true);
+
+const _withPassword = identity_api.ProtectionStatus(
+    isEncrypted: true,
+    hasPassword: true,
+    hasOsKeychain: false,
+    osKeychainAvailable: true);
+
+const _confId = 'c0ffee';
+
+CallState _outgoing(String id, {bool video = false}) => CallState(
+    status: CallStatus.ringing,
+    direction: CallDirection.outgoing,
+    peerId: 'ada',
+    callId: id,
+    isVideoCall: video);
+
+CallState _incoming(String id) => CallState(
+    status: CallStatus.ringing,
+    direction: CallDirection.incoming,
+    peerId: 'ada',
+    callId: id);
+
+VoiceChannelState _room({bool muted = false}) => VoiceChannelState(
+    currentServerId: 's1',
+    currentChannelId: 'ch1',
+    currentChannelName: 'Lounge',
+    isMuted: muted);
+
+VoiceChannelState _meetingSeat() => VoiceChannelState(
+    currentServerId: conferenceServerId(_confId),
+    currentChannelId: kConferenceChannelId,
+    currentChannelName: 'Meeting');
+
+final _uuidShape = RegExp(
+    r'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$');
+
+// --- harness -----------------------------------------------------------------
+
+class _Rig {
+  final ProviderContainer c;
+  final _Native native;
+  final _Call call;
+  final _Voice voice;
+  final _Conference conference;
+  final _Lock lock;
+  final _Profiles profiles;
+  _Rig(this.c, this.native, this.call, this.voice, this.conference, this.lock,
+      this.profiles);
+
+  OsCallService get service => c.read(osCallServiceProvider)!;
+
+  /// Lets the provider listeners fire and the queue drain.
+  Future<void> settle() async {
+    for (var i = 0; i < 5; i++) {
+      await pumpEventQueue();
+      await service.settled;
+    }
+  }
+}
+
+Future<_Rig> _rig({
+  CallState call = const CallState(),
+  VoiceChannelState voice = const VoiceChannelState(),
+  ConferenceState conference = const ConferenceState(),
+  identity_api.ProtectionStatus protection = _noPassword,
+  Set<String> ageHidden = const {},
+}) async {
+  final native = _Native();
+  final callN = _Call(call);
+  final voiceN = _Voice(voice);
+  final confN = _Conference(conference);
+  final lock = _Lock();
+  final profiles = _Profiles();
+  final c = ProviderContainer(overrides: [
+    osCallChannelProvider.overrideWithValue(native),
+    callProvider.overrideWith(() => callN),
+    voiceChannelProvider.overrideWith(() => voiceN),
+    conferenceProvider.overrideWith(() => confN),
+    appLockedProvider.overrideWith(() => lock),
+    profileProvider.overrideWith(() => profiles),
+    identityProtectionProvider.overrideWith((ref) async => protection),
+    startCallsOnSpeakerProvider.overrideWith(_Speaker.new),
+    keptServersProvider.overrideWithValue(
+        {'s1': const ServerInfo(serverId: 's1', name: 'Den')}),
+    serverAgeHiddenProvider
+        .overrideWith((ref, serverId) => ageHidden.contains(serverId)),
+  ]);
+  addTearDown(c.dispose);
+  await c.read(identityProtectionProvider.future);
+  await c.read(startCallsOnSpeakerProvider.future);
+  final rig = _Rig(c, native, callN, voiceN, confN, lock, profiles);
+  rig.service; // mount
+  await rig.settle();
+  return rig;
+}
+
+void main() {
+  final logs = <String>[];
+  setUp(() {
+    debugOsCallPlatform = true;
+    logs.clear();
+    OsCallService.log = logs.add;
+  });
+  tearDown(() => debugOsCallPlatform = null);
+
+  group('derivation', () {
+    OsSession? derive(
+            {CallState call = const CallState(),
+            VoiceChannelState voice = const VoiceChannelState(),
+            ConferenceState conference = const ConferenceState()}) =>
+        deriveOsSession(call: call, voice: voice, conference: conference);
+
+    test('nothing live is no session, and an incoming ring is never one', () {
+      expect(derive(), isNull);
+      expect(derive(call: _incoming('c1')), isNull);
+    });
+
+    test('a placed call is a session from its first ring, live once active',
+        () {
+      final ringing = derive(call: _outgoing('c1'))!;
+      expect(ringing.key, 'dm:c1');
+      expect(ringing.live, isFalse);
+      expect(ringing.outgoing, isTrue);
+      final active = derive(
+          call: _outgoing('c1').copyWith(status: CallStatus.active))!;
+      expect(active.key, 'dm:c1');
+      expect(active.live, isTrue);
+    });
+
+    test('an accepted call is a session from connecting', () {
+      final s = derive(
+          call: _incoming('c1').copyWith(status: CallStatus.connecting))!;
+      expect(s.key, 'dm:c1');
+      expect(s.live, isFalse);
+      expect(s.outgoing, isFalse);
+    });
+
+    test('a DM call goes before the room it is leaving', () {
+      final s = derive(
+          call: _incoming('c1').copyWith(status: CallStatus.connecting),
+          voice: _room())!;
+      expect(s.key, 'dm:c1');
+    });
+
+    test('a room and a meeting have their own keys', () {
+      expect(derive(voice: _room())!.key, 'vc:s1/ch1');
+      expect(derive(voice: _room())!.kind, OsCallKind.room);
+      final meeting = derive(
+          voice: _meetingSeat(),
+          conference: const ConferenceState(
+              activeConfId: _confId,
+              lobbyStatus: ConferenceLobbyStatus.inCall))!;
+      expect(meeting.key, 'meet:$_confId');
+      expect(meeting.kind, OsCallKind.meeting);
+    });
+
+    test('video follows a camera or share on either side', () {
+      expect(derive(voice: _room())!.video, isFalse);
+      expect(
+          derive(voice: _room().copyWith(peerCameraOn: {'p': true}))!.video,
+          isTrue);
+      expect(derive(call: _outgoing('c1', video: true))!.video, isTrue);
+      expect(
+          derive(
+                  call: _outgoing('c1')
+                      .copyWith(status: CallStatus.active, remoteScreenSharing: true))!
+              .video,
+          isTrue);
+    });
+
+    test('a desktop builds nothing', () async {
+      debugOsCallPlatform = false;
+      final c = ProviderContainer(overrides: [
+        callProvider.overrideWith(() => _Call(_outgoing('c1'))),
+        voiceChannelProvider.overrideWith(() => _Voice(_room())),
+        conferenceProvider.overrideWith(() => _Conference(const ConferenceState())),
+      ]);
+      addTearDown(c.dispose);
+      expect(c.read(osSessionProvider), isNull);
+      expect(c.read(osCallServiceProvider), isNull);
+    });
+  });
+
+  group('begin, connected, end', () {
+    test('a joined room begins at once, named and connected', () async {
+      final r = await _rig();
+      r.voice.set(_room());
+      await r.settle();
+      expect(r.native.methods, ['begin', 'connected']);
+      final begin = r.native.lastOf('begin');
+      expect(begin['kind'], 'room');
+      expect(begin['title'], 'Lounge · Den');
+      expect(begin['loud'], isTrue);
+      expect(begin['outgoing'], isTrue);
+      expect(begin['uuid'], matches(_uuidShape));
+      expect(begin['live'], [begin['uuid']]);
+      expect(r.native.lastOf('connected')['uuid'], begin['uuid']);
+    });
+
+    test('the system\'s id for a call is a fresh random uuid, never an id',
+        () async {
+      final r = await _rig();
+      r.call.set(_outgoing('c1'));
+      await r.settle();
+      final first = r.native.lastOf('begin')['uuid'] as String;
+      r.call.set(const CallState());
+      await r.settle();
+      r.call.set(_outgoing('c1'));
+      await r.settle();
+      final second = r.native.lastOf('begin')['uuid'] as String;
+      expect(first, matches(_uuidShape));
+      expect(second, matches(_uuidShape));
+      expect(second, isNot(first), reason: 'the same call id, a new uuid');
+    });
+
+    test('a placed call begins ringing and connects when answered', () async {
+      final r = await _rig();
+      r.call.set(_outgoing('c1'));
+      await r.settle();
+      expect(r.native.methods, ['begin']);
+      expect(r.native.lastOf('begin')['title'], 'Ada');
+      expect(r.native.lastOf('begin')['kind'], 'dm');
+      r.call.set(_outgoing('c1').copyWith(status: CallStatus.active));
+      await r.settle();
+      expect(r.native.methods, ['begin', 'connected']);
+    });
+
+    test('accepting a call from a room ends the room before the call begins',
+        () async {
+      final r = await _rig(voice: _room(), call: _incoming('c1'));
+      final roomUuid = r.native.lastOf('begin')['uuid'];
+      r.native.clear();
+      // acceptCall: connecting first, the room's leave after.
+      r.call.set(_incoming('c1').copyWith(status: CallStatus.connecting));
+      r.voice.set(const VoiceChannelState());
+      await r.settle();
+      expect(r.native.methods, ['end', 'begin']);
+      expect(r.native.lastOf('end')['uuid'], roomUuid);
+      final begin = r.native.lastOf('begin');
+      expect(begin['kind'], 'dm');
+      expect(begin['uuid'], isNot(roomUuid));
+      expect(begin['live'], [begin['uuid']],
+          reason: 'the room ended first, so native holds only the call');
+    });
+
+    test('answered elsewhere right after our accept leaves no OS call',
+        () async {
+      final r = await _rig(call: _incoming('c1'));
+      expect(r.native.methods, isEmpty, reason: 'a ring is never mirrored');
+      r.call.set(_incoming('c1').copyWith(status: CallStatus.connecting));
+      await r.settle();
+      r.call.cause = CallEndCause.answeredElsewhere;
+      r.call.set(const CallState());
+      await r.settle();
+      expect(r.native.methods, ['begin', 'end']);
+      expect(r.native.lastOf('end')['uuid'], r.native.lastOf('begin')['uuid']);
+      expect(r.service.liveUuid, isNull);
+    });
+
+    test('the same race inside one beat begins nothing', () async {
+      final r = await _rig(call: _incoming('c1'));
+      r.call.set(_incoming('c1').copyWith(status: CallStatus.connecting));
+      r.call.set(const CallState());
+      await r.settle();
+      expect(r.native.of('begin').length, r.native.of('end').length);
+      expect(r.service.liveUuid, isNull);
+    });
+
+    test('a media rebuild keeps the one OS call', () async {
+      final r = await _rig(
+          call: _outgoing('c1').copyWith(status: CallStatus.active));
+      r.native.clear();
+      r.call.set(r.call.state.copyWith(status: CallStatus.connecting));
+      await r.settle();
+      r.call.set(r.call.state.copyWith(status: CallStatus.active));
+      await r.settle();
+      expect(r.native.methods, isEmpty);
+    });
+
+    test('a meeting ending in the app ends the OS call', () async {
+      final r = await _rig(
+          voice: _meetingSeat(),
+          conference: const ConferenceState(
+              activeConfId: _confId,
+              lobbyStatus: ConferenceLobbyStatus.inCall));
+      expect(r.native.lastOf('begin')['kind'], 'meeting');
+      r.voice.set(const VoiceChannelState());
+      await r.settle();
+      expect(r.native.lastOf('end')['uuid'], r.native.lastOf('begin')['uuid']);
+      expect(r.native.lastOf('end')['reason'], 'local');
+    });
+
+    test('a remote end and a lost link say so', () async {
+      final r = await _rig(
+          call: _outgoing('c1').copyWith(status: CallStatus.active));
+      r.call.cause = CallEndCause.remoteEnd;
+      r.call.set(const CallState());
+      await r.settle();
+      expect(r.native.lastOf('end')['reason'], 'remote');
+      r.call.set(_outgoing('c2').copyWith(status: CallStatus.active));
+      await r.settle();
+      r.call.cause = CallEndCause.linkLost;
+      r.call.set(const CallState());
+      await r.settle();
+      expect(r.native.lastOf('end')['reason'], 'failed');
+    });
+
+    test('a native side that throws never stops the call or the next one',
+        () async {
+      final r = await _rig();
+      r.native.onBegin = (_) => throw PlatformException(code: 'boom');
+      r.voice.set(_room());
+      await r.settle();
+      final uuid = r.native.lastOf('begin')['uuid'];
+      r.voice.set(const VoiceChannelState());
+      await r.settle();
+      expect(r.native.lastOf('end')['uuid'], uuid);
+      expect(logs.any((l) => l.contains('begin failed')), isTrue);
+    });
+  });
+
+  group('mute', () {
+    test('the app mute reaches the OS', () async {
+      final r = await _rig(voice: _room());
+      r.native.clear();
+      r.voice.set(_room(muted: true));
+      await r.settle();
+      expect(r.native.methods, ['setMuted']);
+      expect(r.native.lastOf('setMuted')['muted'], isTrue);
+    });
+
+    test('an OS mute goes through the app toggle, then the OS hears the truth',
+        () async {
+      final r = await _rig(voice: _room());
+      final uuid = r.service.liveUuid;
+      r.native.clear();
+      await r.native.send('osMute', {'uuid': uuid, 'muted': true});
+      await r.settle();
+      expect(r.voice.mutes, 1);
+      expect(r.voice.state.isMuted, isTrue);
+      expect(r.native.of('setMuted').last['muted'], isTrue);
+    });
+
+    test('our own echo toggles nothing and sends nothing', () async {
+      final r = await _rig(voice: _room(muted: true));
+      final uuid = r.service.liveUuid;
+      r.native.clear();
+      await r.native.send('osMute', {'uuid': uuid, 'muted': true});
+      await r.settle();
+      expect(r.voice.mutes, 0);
+      expect(r.native.methods, isEmpty);
+    });
+
+    test('a refused mute puts the OS back to the truth', () async {
+      final r = await _rig(call: _outgoing('c1'));
+      final uuid = r.service.liveUuid;
+      r.native.clear();
+      // Still ringing out: the app refuses a mute until connected.
+      await r.native.send('osMute', {'uuid': uuid, 'muted': true});
+      await r.settle();
+      expect(r.call.mutes, 1);
+      expect(r.native.methods, ['setMuted']);
+      expect(r.native.lastOf('setMuted')['muted'], isFalse);
+    });
+
+    test('an action for a uuid we do not hold does nothing', () async {
+      final r = await _rig(voice: _room());
+      await r.native.send('osMute', {'uuid': 'stranger', 'muted': true});
+      await r.native.send('osEnd', {'uuid': 'stranger'});
+      await r.settle();
+      expect(r.voice.mutes, 0);
+      expect(r.voice.leaves, 0);
+    });
+  });
+
+  group('OS hang-up', () {
+    test('a DM call hangs up through endCall, once', () async {
+      final r = await _rig(
+          call: _outgoing('c1').copyWith(status: CallStatus.active));
+      final uuid = r.service.liveUuid;
+      await r.native.send('osEnd', {'uuid': uuid});
+      await r.settle();
+      await r.native.send('osEnd', {'uuid': uuid});
+      await r.settle();
+      expect(r.call.ends, 1);
+      expect(r.native.of('end').length, 1, reason: 'end is sent once per uuid');
+    });
+
+    test('a room is left', () async {
+      final r = await _rig(voice: _room());
+      await r.native.send('osEnd', {'uuid': r.service.liveUuid});
+      await r.settle();
+      expect(r.voice.leaves, 1);
+      expect(r.service.liveUuid, isNull);
+    });
+
+    test('a meeting guest leaves the meeting, never a bare voice leave',
+        () async {
+      final r = await _rig(
+          voice: _meetingSeat(),
+          conference: const ConferenceState(
+              activeConfId: _confId,
+              lobbyStatus: ConferenceLobbyStatus.inCall));
+      await r.native.send('osEnd', {'uuid': r.service.liveUuid});
+      await r.settle();
+      expect(r.conference.leaves, 1);
+      expect(r.voice.leaves, 0);
+      expect(r.conference.ends, 0);
+    });
+
+    test('a meeting host steps out and the meeting runs on', () async {
+      final r = await _rig(
+          voice: _meetingSeat(),
+          conference: const ConferenceState(
+              activeConfId: _confId,
+              isHost: true,
+              lobbyStatus: ConferenceLobbyStatus.inCall));
+      await r.native.send('osEnd', {'uuid': r.service.liveUuid});
+      await r.settle();
+      expect(r.conference.ends, 0, reason: 'never "end for everyone"');
+      expect(r.conference.leaves, 0);
+      expect(r.voice.leaves, 1);
+      expect(r.c.read(conferenceProvider).activeConfId, _confId);
+      expect(r.c.read(conferenceProvider).lobbyStatus,
+          ConferenceLobbyStatus.steppedOut);
+    });
+  });
+
+  group('hold', () {
+    test('held deafens; the app cannot undo it; the OS resume restores it',
+        () async {
+      final r = await _rig(voice: _room());
+      final uuid = r.service.liveUuid;
+      await r.native.send('osHold', {'uuid': uuid, 'held': true});
+      await r.settle();
+      expect(r.voice.state.isDeafened, isTrue);
+      expect(r.voice.state.isMuted, isTrue);
+      expect(r.service.held, isTrue);
+
+      r.native.clear();
+      var acted = false;
+      unlessOsHeld(r.c.read, () => acted = true)!();
+      await r.settle();
+      expect(acted, isFalse, reason: 'the app must not resume a held call');
+      expect(r.native.methods.contains('requestUnhold'), isTrue);
+      expect(r.voice.deafens, 1);
+
+      await r.native.send('osHold', {'uuid': uuid, 'held': false});
+      await r.settle();
+      expect(r.voice.state.isDeafened, isFalse);
+      expect(r.voice.state.isMuted, isFalse);
+      expect(r.service.held, isFalse);
+      var after = false;
+      unlessOsHeld(r.c.read, () => after = true)!();
+      expect(after, isTrue);
+    });
+
+    test('a resume gives back exactly what was there: muted stays muted',
+        () async {
+      final r = await _rig(voice: _room(muted: true));
+      final uuid = r.service.liveUuid;
+      await r.native.send('osHold', {'uuid': uuid, 'held': true});
+      await r.native.send('osHold', {'uuid': uuid, 'held': false});
+      await r.settle();
+      expect(r.voice.state.isDeafened, isFalse);
+      expect(r.voice.state.isMuted, isTrue);
+    });
+
+    test('an unhold that was never a hold changes nothing', () async {
+      final r = await _rig(voice: _room());
+      await r.native
+          .send('osHold', {'uuid': r.service.liveUuid, 'held': false});
+      await r.settle();
+      expect(r.voice.deafens + r.voice.mutes, 0);
+    });
+
+    test('nothing to guard when no call is held', () async {
+      final r = await _rig();
+      expect(osCallHoldIntercept(r.c.read), isFalse);
+      expect(unlessOsHeld(r.c.read, null), isNull);
+    });
+  });
+
+  group('fallback and reset', () {
+    test('osFailed: still ended, never re-begun on a reset; the next session '
+        'tries the OS again', () async {
+      final r = await _rig(voice: _room());
+      final uuid = r.service.liveUuid;
+      await r.native.send('osFailed', {'uuid': uuid, 'why': 'timeout'});
+      await r.native.send('osReset');
+      await r.settle();
+      expect(r.native.of('begin').length, 1);
+      r.voice.set(_room(muted: true));
+      await r.settle();
+      expect(r.native.lastOf('setMuted')['uuid'], uuid,
+          reason: 'an unmirrored key still hears its state (Android fallback)');
+      r.voice.set(const VoiceChannelState());
+      await r.settle();
+      expect(r.native.lastOf('end')['uuid'], uuid);
+      r.call.set(_outgoing('c2'));
+      await r.settle();
+      expect(r.native.of('begin').length, 2);
+      expect(r.native.lastOf('begin')['live'], [r.service.liveUuid]);
+    });
+
+    test('a begin native answers ok:false is unmirrored like osFailed',
+        () async {
+      final r = await _rig();
+      r.native.onBegin = (_) => {'ok': false};
+      r.voice.set(_room());
+      await r.settle();
+      await r.native.send('osReset');
+      await r.settle();
+      expect(r.native.of('begin').length, 1);
+    });
+
+    test('a reset begins the live session again under a new uuid and ends '
+        'nothing', () async {
+      final r = await _rig(voice: _room(muted: true));
+      final old = r.service.liveUuid;
+      r.native.clear();
+      await r.native.send('osReset');
+      await r.settle();
+      expect(r.native.methods, ['begin', 'connected', 'setMuted']);
+      final begin = r.native.lastOf('begin');
+      expect(begin['uuid'], isNot(old));
+      expect(begin['title'], 'Lounge · Den');
+      expect(begin['live'], [begin['uuid']]);
+      expect(r.voice.leaves, 0);
+    });
+
+    test('a reset while held gives the audio back first', () async {
+      final r = await _rig(voice: _room());
+      await r.native
+          .send('osHold', {'uuid': r.service.liveUuid, 'held': true});
+      await r.native.send('osReset');
+      await r.settle();
+      expect(r.voice.state.isDeafened, isFalse);
+      expect(r.service.held, isFalse);
+    });
+
+    test('a lost end is corrected by the next begin\'s live set', () async {
+      final r = await _rig(voice: _room());
+      final first = r.service.liveUuid;
+      r.voice.set(const VoiceChannelState());
+      r.call.set(_outgoing('c9'));
+      await r.settle();
+      final live = r.native.lastOf('begin')['live'] as List;
+      expect(live, isNot(contains(first)));
+    });
+
+    test('the debug fallback switch reaches native before the first begin',
+        () async {
+      OsCallService.debugForceFallback = true;
+      addTearDown(() => OsCallService.debugForceFallback = null);
+      final r = await _rig(voice: _room());
+      expect(r.native.calls.first.$1, 'available');
+      expect(r.native.calls.first.$2, {'forceFallback': true});
+      expect(r.native.calls.where((c) => c.$1 == 'begin'), hasLength(1));
+    });
+
+    test('without the switch native is never asked to fall back', () async {
+      final r = await _rig(voice: _room());
+      expect(r.native.of('available').single, isNot(contains('forceFallback')));
+    });
+  });
+
+  group('title', () {
+    test('a launch password hides the name from the start', () async {
+      final r = await _rig(protection: _withPassword);
+      r.call.set(_outgoing('c1'));
+      await r.settle();
+      expect(r.native.lastOf('begin')['title'], kHiddenNotificationTitle);
+    });
+
+    test('a protection state not known yet hides the name', () async {
+      final native = _Native();
+      final c = ProviderContainer(overrides: [
+        osCallChannelProvider.overrideWithValue(native),
+        callProvider.overrideWith(() => _Call(_outgoing('c1'))),
+        voiceChannelProvider.overrideWith(() => _Voice(const VoiceChannelState())),
+        conferenceProvider.overrideWith(() => _Conference(const ConferenceState())),
+        profileProvider.overrideWith(_Profiles.new),
+        identityProtectionProvider
+            .overrideWith((ref) => Future<identity_api.ProtectionStatus>.delayed(
+                const Duration(days: 1), () => _noPassword)),
+        startCallsOnSpeakerProvider.overrideWith(_Speaker.new),
+      ]);
+      addTearDown(c.dispose);
+      c.read(osCallServiceProvider);
+      await pumpEventQueue();
+      await c.read(osCallServiceProvider)!.settled;
+      expect(native.lastOf('begin')['title'], kHiddenNotificationTitle);
+    });
+
+    test('App Lock blanks the name one way; nothing re-reveals it', () async {
+      final r = await _rig(voice: _room());
+      r.native.clear();
+      r.lock.set(true);
+      await r.settle();
+      expect(r.native.methods, ['update']);
+      expect(r.native.lastOf('update')['title'], kHiddenNotificationTitle);
+      r.lock.set(false);
+      r.voice.set(_room().copyWith(peerCameraOn: {'p': true}));
+      await r.settle();
+      expect(r.native.lastOf('update')['title'], kHiddenNotificationTitle);
+    });
+
+    test('a profile change mid-call renames nothing', () async {
+      final r = await _rig(call: _outgoing('c1'));
+      r.native.clear();
+      r.profiles.rename('ada', 'Someone else');
+      await r.settle();
+      expect(r.native.methods, isEmpty);
+    });
+
+    test('a name not known yet is never the id', () async {
+      final r = await _rig();
+      r.call.set(_outgoing('c1').copyWith(peerId: 'stranger-id'));
+      await r.settle();
+      expect(r.native.lastOf('begin')['title'], kHiddenNotificationTitle);
+    });
+
+    test('an 18+ server this phone hides is never named', () async {
+      final r = await _rig(ageHidden: {'s1'});
+      r.voice.set(_room());
+      await r.settle();
+      expect(r.native.lastOf('begin')['title'], kHiddenNotificationTitle);
+    });
+
+    test('a meeting guest sees whose meeting it is; the host its name',
+        () async {
+      final r = await _rig(
+          voice: _meetingSeat(),
+          conference: const ConferenceState(
+              activeConfId: _confId,
+              hostName: 'Ada',
+              lobbyStatus: ConferenceLobbyStatus.inCall));
+      expect(r.native.lastOf('begin')['title'], 'Meeting with Ada');
+    });
+
+    test('video changes update the OS with the title fixed at begin',
+        () async {
+      final r = await _rig(voice: _room());
+      r.native.clear();
+      r.voice.set(_room().copyWith(isCameraOn: true));
+      await r.settle();
+      expect(r.native.methods, ['update']);
+      expect(r.native.lastOf('update'),
+          containsPair('title', 'Lounge · Den'));
+      expect(r.native.lastOf('update'), containsPair('video', true));
+    });
+  });
+
+  group('the in-call mute button', () {
+    Future<int> tapMute(WidgetTester tester, {required bool held}) async {
+      var presses = 0;
+      final service = _HeldService(held);
+      await tester.pumpWidget(ProviderScope(
+        overrides: [osCallServiceProvider.overrideWithValue(service)],
+        child: MaterialApp(
+          theme: HollowThemeData.dark(),
+          home: Scaffold(
+            body: Center(
+              child: CallMuteButton(muted: true, onPressed: () => presses++),
+            ),
+          ),
+        ),
+      ));
+      await tester.tap(find.byType(CallMuteButton));
+      await tester.pump();
+      expect(service.unholdAsks, held ? 1 : 0);
+      return presses;
+    }
+
+    testWidgets('acts while the OS does not hold the call', (tester) async {
+      expect(await tapMute(tester, held: false), 1);
+    });
+
+    testWidgets('asks the OS to resume a held call instead of unmuting',
+        (tester) async {
+      expect(await tapMute(tester, held: true), 0);
+    });
+  });
+}
+
+T _noRead<T>(ProviderListenable<T> provider) =>
+    throw UnimplementedError('not read in this test');
+
+class _HeldService extends OsCallService {
+  final bool _held;
+  int unholdAsks = 0;
+  _HeldService(this._held) : super(_noRead, _Native());
+
+  @override
+  bool get held => _held;
+
+  @override
+  void requestUnhold() => unholdAsks++;
+}

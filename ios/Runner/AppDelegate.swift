@@ -5,6 +5,7 @@ import Security
 import UIKit
 import UniformTypeIdentifiers
 import UserNotifications
+import flutter_webrtc
 
 /// The bundled UI sound pack (issue #55) on iOS.
 ///
@@ -22,6 +23,13 @@ import UserNotifications
 /// The single `setActive(true)` is opt-in from Dart and only sent when no call
 /// owns the session (activating an already-active session would be a no-op
 /// anyway, but there is no reason to poke it).
+///
+/// Under CallKit (#154) the OS activates the call session, and an AVAudioPlayer
+/// started on an INACTIVE session would activate it ahead of CallKit (and cut
+/// another app's music): a call cue, and ANY sound while a CallKit call exists
+/// without an active session (starting or held), waits up to 1 s for the
+/// call's activation and is dropped after that; the ringback waits for it the
+/// same way and is dropped if the call ends first.
 final class HollowSfxPlayer {
   static let shared = HollowSfxPlayer()
 
@@ -42,12 +50,60 @@ final class HollowSfxPlayer {
     return URL(fileURLWithPath: path)
   }
 
+  /// How long a call cue waits for the call's audio session (N4).
+  private static let cueWait: TimeInterval = 1
+  /// The ringback outlasts a CallKit start that falls back after 3 s.
+  private static let ringbackWait: TimeInterval = 6
+  private var cancelPendingLoop: (() -> Void)?
+
   private func activateIfAsked(_ activate: Bool) {
-    guard activate else { return }
+    guard activate, HollowCallAudio.callKitCalls() == 0 else { return }
     try? AVAudioSession.sharedInstance().setActive(true)
   }
 
+  /// Runs [run] once the call audio owner holds the session, or drops it after
+  /// [seconds]. Returns a cancel.
+  @discardableResult
+  private func whenCallAudioActive(
+    within seconds: TimeInterval, _ run: @escaping () -> Void
+  ) -> () -> Void {
+    if HollowCallAudio.ownerActive() {
+      run()
+      return {}
+    }
+    var token: NSObjectProtocol?
+    var done = false
+    let finish: (Bool) -> Void = { fire in
+      guard !done else { return }
+      done = true
+      if let token { NotificationCenter.default.removeObserver(token) }
+      if fire { run() }
+    }
+    token = NotificationCenter.default.addObserver(
+      forName: .HollowCallAudioActivated,
+      object: nil, queue: .main
+    ) { _ in finish(true) }
+    DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { finish(false) }
+    return { finish(false) }
+  }
+
   func play(asset: String, volume: Float, activateSession: Bool) {
+    // A call cue, or any sound while a CallKit call is starting or held: never
+    // the thing that activates the session (AVAudioPlayer.play() would).
+    let waits =
+      HollowCallAudio.callKitMode()
+      && (!activateSession
+        || (HollowCallAudio.callKitCalls() > 0 && !HollowCallAudio.ownerActive()))
+    if waits {
+      whenCallAudioActive(within: Self.cueWait) { [weak self] in
+        self?.playNow(asset: asset, volume: volume, activateSession: false)
+      }
+      return
+    }
+    playNow(asset: asset, volume: volume, activateSession: activateSession)
+  }
+
+  private func playNow(asset: String, volume: Float, activateSession: Bool) {
     guard let url = assetURL(asset) else { return }
     activateIfAsked(activateSession)
     do {
@@ -70,6 +126,19 @@ final class HollowSfxPlayer {
 
   func startLoop(asset: String, volume: Float, activateSession: Bool) {
     stopLoop()
+    if HollowCallAudio.callKitMode() {
+      // The ringback belongs to a call being placed: it plays once the call's
+      // session is up (CallKit or the fallback), never activating it itself.
+      cancelPendingLoop = whenCallAudioActive(within: Self.ringbackWait) { [weak self] in
+        self?.cancelPendingLoop = nil
+        self?.startLoopNow(asset: asset, volume: volume, activateSession: false)
+      }
+      return
+    }
+    startLoopNow(asset: asset, volume: volume, activateSession: activateSession)
+  }
+
+  private func startLoopNow(asset: String, volume: Float, activateSession: Bool) {
     guard let url = assetURL(asset) else { return }
     activateIfAsked(activateSession)
     do {
@@ -84,6 +153,8 @@ final class HollowSfxPlayer {
 
   /// Stops the loop WITHOUT deactivating the session — see the class comment.
   func stopLoop() {
+    cancelPendingLoop?()
+    cancelPendingLoop = nil
     loopPlayer?.stop()
     loopPlayer = nil
   }
@@ -236,6 +307,7 @@ struct TaskHolds {
   private let foregroundBanners = ForegroundBannerPresenter()
 
   private var relayTriggers: RelayTriggers?
+  private var osCalls: OsCallController?
   private var relayBackgroundTask: RelayBackgroundTask?
   private var storageBackgroundTask: RelayBackgroundTask?
 
@@ -251,6 +323,9 @@ struct TaskHolds {
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
   ) -> Bool {
     UNUserNotificationCenter.current().delegate = foregroundBanners
+    // Calls run through CallKit (#154): WebRTC on manual audio for the whole
+    // process, set before the WebRTC plugin registers and Dart runs.
+    HollowCallAudio.enableCallKitMode()
     GeneratedPluginRegistrant.register(with: self)
     excludeDataFromBackup()
     observeSwitcher()
@@ -395,6 +470,9 @@ struct TaskHolds {
           }
         }
       }
+
+      // hollow/os_call -> the call the app is in, mirrored to CallKit (#154).
+      osCalls = OsCallController(messenger: controller.binaryMessenger)
 
       // hollow/relay_triggers -> network changes for relay_triggers.dart.
       let relayChannel = FlutterMethodChannel(

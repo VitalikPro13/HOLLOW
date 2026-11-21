@@ -14,6 +14,11 @@
 @class AudioManager;
 
 void postEvent(FlutterEventSink _Nullable sink, id _Nullable event);
+// Hollow fork (#154): a remote audio track came or went on a peer connection;
+// callable from any thread (iOS only, a no-op elsewhere).
+void hollowNoteRemoteAudio(NSString* _Nullable peerConnectionId,
+                           NSString* _Nullable trackId,
+                           BOOL added);
 
 typedef void (^CompletionHandler)(void);
 

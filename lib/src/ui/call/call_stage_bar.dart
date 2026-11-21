@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/recording_provider.dart';
 import 'package:hollow/src/core/providers/settings_place_provider.dart';
 import 'package:hollow/src/core/services/macos_version.dart';
+import 'package:hollow/src/core/services/os_call_service.dart';
 import 'package:hollow/src/theme/hollow_shadows.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -338,7 +339,7 @@ class CallMuteButton extends ConsumerWidget {
       color: muted ? null : mic.color,
       alarm: muted,
       size: size,
-      onPressed: onPressed,
+      onPressed: unlessOsHeld(ref.read, onPressed),
     );
   }
 }

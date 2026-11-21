@@ -405,6 +405,9 @@
            mediaStream:(RTCMediaStream*)stream
            didAddTrack:(RTCVideoTrack*)track {
   peerConnection.remoteTracks[track.trackId] = track;
+  if ([track.kind isEqualToString:kRTCMediaStreamTrackKindAudio]) {
+    hollowNoteRemoteAudio(peerConnection.flutterId, track.trackId, YES);
+  }
   NSString* streamId = stream.streamId;
   peerConnection.remoteStreams[streamId] = stream;
 
@@ -430,6 +433,9 @@
            mediaStream:(RTCMediaStream*)stream
         didRemoveTrack:(RTCVideoTrack*)track {
   [peerConnection.remoteTracks removeObjectForKey:track.trackId];
+  if ([track.kind isEqualToString:kRTCMediaStreamTrackKindAudio]) {
+    hollowNoteRemoteAudio(peerConnection.flutterId, track.trackId, NO);
+  }
   NSString* streamId = stream.streamId;
   FlutterEventSink eventSink = peerConnection.eventSink;
   if (eventSink) {
@@ -456,6 +462,7 @@
   BOOL hasAudio = NO;
   for (RTCAudioTrack* track in stream.audioTracks) {
     peerConnection.remoteTracks[track.trackId] = track;
+    hollowNoteRemoteAudio(peerConnection.flutterId, track.trackId, YES);
     [audioTracks addObject:@{
       @"id" : track.trackId,
       @"kind" : track.kind,
@@ -511,6 +518,7 @@
   }
   for (RTCAudioTrack* track in stream.audioTracks) {
     [peerConnection.remoteTracks removeObjectForKey:track.trackId];
+    hollowNoteRemoteAudio(peerConnection.flutterId, track.trackId, NO);
   }
 
   FlutterEventSink eventSink = peerConnection.eventSink;
@@ -651,6 +659,7 @@
     }
 
     if ([rtpReceiver.track.kind isEqualToString:@"audio"]) {
+      hollowNoteRemoteAudio(peerConnection.flutterId, rtpReceiver.track.trackId, YES);
       [self ensureAudioSession];
     }
     postEvent(eventSink, event);

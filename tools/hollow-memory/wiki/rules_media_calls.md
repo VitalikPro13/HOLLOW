@@ -61,6 +61,22 @@ the signal whitelist's four touches, the stream overlay consent detail, share ba
   (`vcLocalSpeakingProvider`, the set is DEVICE-keyed). LOCAL mic level =
   `Helper.getCaptureLevel()`, NEVER getStats. `feedback_getstats_no_local_audio_level`.
 
+## OS call state (#154, 0.14.3)
+
+- The OS mirrors the ONE session `osSessionProvider` derives (a placed or accepted DM call,
+  else the room or meeting we sit in; never a ring) through `OsCallService`'s single queue;
+  OS hang-up and mute run the app's own paths (`endCall`, `leaveVoiceForDmCall`: a meeting
+  host steps out), and the OS is told the mute truth after every OS mute. Wiki `os_calls`.
+- iOS audio belongs to CallKit or the fork's `HollowCallAudio` (manual audio for the whole
+  process from `AppDelegate`, set before the plugins register): the fork NEVER calls
+  `setActive`, every session calls `begin` (else only the 3 s native safety net gives it
+  audio), MixWithOthers only via `+[HollowCallAudio categoryOptions:]`, and no sound activates
+  the session ahead of CallKit (`HollowSfxPlayer` waits or drops).
+- A new in-call unmute or undeafen control asks the hold guard first (`unlessOsHeld`): a held
+  call resumes only through the OS. Opening a call screen while held only shows it.
+- The OS title follows the phone notification rule (HOL-SEC-155) and is fixed at begin;
+  the OS call uuid is random, never an id.
+
 ## WebRTC plumbing
 
 - flutter_webrtc native input selection (audio+video) uses `sourceId`:

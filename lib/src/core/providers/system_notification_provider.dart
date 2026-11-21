@@ -13,6 +13,7 @@ import 'package:hollow/src/core/providers/app_lifecycle_provider.dart';
 import 'package:hollow/src/core/providers/notification_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
+import 'package:hollow/src/core/providers/shell_tab.dart' show ProviderRead;
 import 'package:hollow/src/core/services/desktop_notification_service.dart';
 import 'package:hollow/src/core/services/sound_service.dart';
 import 'package:hollow/src/core/services/push_notification_service.dart'
@@ -493,16 +494,8 @@ class SystemNotificationNotifier
     ref.read(chatProvider.notifier).sendMessage(peerId, text);
   }
 
-  /// Whether an OS notification may name the sender or quote the message
-  /// (C-35). Never while the lock cover is up, and on a phone never with App
-  /// Lock on: a banner there sits on the lock screen and in the shade before
-  /// any unlock. A protection state not known yet counts as on.
-  bool _contentAllowed({required bool mobile}) {
-    if (ref.read(appLockedProvider)) return false;
-    if (!mobile) return true;
-    final status = ref.read(identityProtectionProvider).valueOrNull;
-    return status != null && !status.hasPassword;
-  }
+  bool _contentAllowed({required bool mobile}) =>
+      notificationContentAllowed(ref.read, mobile: mobile);
 
   String _channelName(String serverId, String channelId) {
     final channels = ref.read(channelListProvider);
@@ -581,3 +574,15 @@ class SystemNotificationNotifier
 final systemNotificationProvider = NotifierProvider<
     SystemNotificationNotifier,
     List<NotificationCard>>(SystemNotificationNotifier.new);
+
+/// Whether an OS surface (a notification, the OS call UI) may name a person or
+/// a room or quote a message (C-35, HOL-SEC-155). Never while the lock cover is
+/// up, and on a phone never with App Lock on: what it shows sits on the lock
+/// screen and in the shade before any unlock. A protection state not known yet
+/// counts as on.
+bool notificationContentAllowed(ProviderRead read, {required bool mobile}) {
+  if (read(appLockedProvider)) return false;
+  if (!mobile) return true;
+  final status = read(identityProtectionProvider).valueOrNull;
+  return status != null && !status.hasPassword;
+}

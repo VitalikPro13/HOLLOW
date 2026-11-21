@@ -17,6 +17,7 @@ import 'package:hollow/src/core/providers/conference_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/providers/status_provider.dart';
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
+import 'package:hollow/src/core/services/os_call_service.dart';
 import 'package:hollow/src/theme/hollow_theme_data.dart';
 import 'package:hollow/src/ui/chat/chat_pane_shared.dart';
 import 'package:hollow/src/ui/chat/message_row.dart';
@@ -527,6 +528,100 @@ void main() {
       );
     });
   });
+
+  // #154, Vitalik Nov 21: while the OS holds the call (a carrier call took
+  // it), opening the call screen only shows it; only the person's explicit
+  // Unmute or Undeafen asks the OS to resume.
+  group('a call the OS holds', () {
+    testWidgets('opening it only shows it; Unmute asks the OS to resume',
+        (tester) async {
+      final held = _HeldOsCall();
+      final call = _InCall(CallState(
+        status: CallStatus.active,
+        peerId: kFriendPeerId1,
+        callId: 'c1',
+        direction: CallDirection.outgoing,
+        startedAt: DateTime.now(),
+        isMuted: true,
+        isDeafened: true,
+      ));
+      await _pump(
+        tester,
+        const Stack(children: [MobileMinimisedCall()]),
+        extra: [
+          callProvider.overrideWith(() => call),
+          osCallServiceProvider.overrideWithValue(held),
+        ],
+      );
+      await tester.tap(find.bySemanticsLabel(RegExp(r'^Open the call with')));
+      await tester.pumpAndSettle();
+      expect(find.byType(MobileCallScreen), findsOneWidget);
+      expect(held.unholdAsks, 0, reason: 'opening the screen resumes nothing');
+
+      await tester.tap(_semantic('Unmute'));
+      await tester.pump();
+      expect(held.unholdAsks, 1);
+      await tester.tap(_semantic('Undeafen'));
+      await tester.pump();
+      expect(held.unholdAsks, 2);
+      expect(call.state.isMuted && call.state.isDeafened, isTrue,
+          reason: 'the OS decides; nothing changes here');
+      await tester.pumpWidget(const SizedBox());
+    });
+
+    testWidgets('opening a held room only shows it', (tester) async {
+      final held = _HeldOsCall();
+      final room = _Room(const VoiceChannelState(
+        currentServerId: 's1',
+        currentChannelId: 'v1',
+        currentChannelName: 'Jam room',
+        isMuted: true,
+        isDeafened: true,
+      ));
+      await _pump(
+        tester,
+        const Stack(children: [MobileMinimisedCall()]),
+        extra: [
+          voiceChannelProvider.overrideWith(() => room),
+          osCallServiceProvider.overrideWithValue(held),
+        ],
+      );
+      await tester.tap(_semantic('Open the room Jam room'));
+      await tester.pumpAndSettle();
+      expect(find.byType(MobileVoiceChannelRoute), findsOneWidget);
+      expect(held.unholdAsks, 0, reason: 'opening the room resumes nothing');
+      await tester.tap(_semantic('Undeafen'));
+      await tester.pump();
+      expect(held.unholdAsks, 1);
+      await tester.pumpWidget(const SizedBox());
+    });
+  });
+}
+
+/// An OS call service whose call the OS holds; counts the resume asks.
+class _HeldOsCall extends OsCallService {
+  int unholdAsks = 0;
+  _HeldOsCall() : super(_noRead, _NoNative());
+
+  @override
+  bool get held => true;
+
+  @override
+  void requestUnhold() => unholdAsks++;
+}
+
+T _noRead<T>(ProviderListenable<T> provider) =>
+    throw UnimplementedError('not read in this test');
+
+class _NoNative implements OsCallChannel {
+  @override
+  Future<Object?> invoke(String method, [Map<String, Object?>? args]) async =>
+      null;
+
+  @override
+  void setHandler(
+      Future<Object?> Function(String method, Map<Object?, Object?> args)?
+          handler) {}
 }
 
 class _InCall extends CallNotifier {

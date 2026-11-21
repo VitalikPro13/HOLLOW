@@ -7,6 +7,7 @@ import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
+import 'package:hollow/src/core/services/os_call_service.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -318,8 +319,11 @@ class _MobileVoiceChannelRouteState
   List<MobileCallControl> _controls(VoiceChannelState vc, bool conference) {
     final notifier = ref.read(voiceChannelProvider.notifier);
     return [
-      muteControl(muted: vc.isMuted, onTap: notifier.toggleMute),
-      deafenControl(deafened: vc.isDeafened, onTap: notifier.toggleDeafen),
+      muteControl(
+          muted: vc.isMuted, onTap: unlessOsHeld(ref.read, notifier.toggleMute)),
+      deafenControl(
+          deafened: vc.isDeafened,
+          onTap: unlessOsHeld(ref.read, notifier.toggleDeafen)),
       if (isPhoneCallPlatform)
         speakerControl(
           context,

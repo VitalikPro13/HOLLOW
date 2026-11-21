@@ -10,6 +10,7 @@ import 'package:hollow/src/core/providers/display_scale_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/theme_provider.dart';
 import 'package:hollow/src/core/providers/window_chrome_provider.dart';
+import 'package:hollow/src/core/services/os_call_service.dart';
 import 'package:hollow/src/core/services/window_fullscreen.dart';
 import 'package:hollow/src/theme/hollow_theme_data.dart';
 import 'package:hollow/src/ui/components/hollow_scroll_behavior.dart';
@@ -79,6 +80,9 @@ class HollowApp extends ConsumerWidget {
                 // Blanks the screen on ear-hold for any active call, not only
                 // while the call sheet is visible; renders nothing.
                 const CallProximityController(),
+                // Tells the OS we are in a call (CallKit, Telecom); renders
+                // nothing.
+                const _OsCallMount(),
               ],
             ),
           ),
@@ -238,5 +242,16 @@ class _PointerFocusDismisser extends StatelessWidget {
       },
       child: child,
     );
+  }
+}
+
+/// Keeps the OS call mirror alive for the app's life (#154).
+class _OsCallMount extends ConsumerWidget {
+  const _OsCallMount();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    ref.watch(osCallServiceProvider);
+    return const SizedBox.shrink();
   }
 }

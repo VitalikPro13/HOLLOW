@@ -221,6 +221,13 @@ class CallNotifier extends Notifier<CallState> {
   /// What is tearing the current call down, set by the path that ends it and
   /// read once by [_cleanup]. Unset means the link gave out.
   CallEndCause? _endCause;
+
+  /// Why the last call ended, kept past the reset for the OS call mirror
+  /// (`os_call_service.dart`), which reads it once the state is idle. Set by
+  /// the call's FIRST teardown (no cause = the link gave out, as the record
+  /// says); a new call starts with none.
+  CallEndCause? get lastEndCause => _lastEndCause;
+  CallEndCause? _lastEndCause;
   Timer? _statsTimer;
 
   /// SECURITY (Phase 6.25): Guard against concurrent renegotiations.
@@ -1082,6 +1089,7 @@ class CallNotifier extends Notifier<CallState> {
     );
     _ringStartedAt = DateTime.now();
     _endCause = null;
+    _lastEndCause = null;
 
     // Ringback (#55): every path out of "ringing" stops it, the accept below and
     // `_cleanup()` for reject / busy / timeout / hang-up.
@@ -2113,6 +2121,7 @@ class CallNotifier extends Notifier<CallState> {
     );
     _ringStartedAt = DateTime.now();
     _endCause = null;
+    _lastEndCause = null;
     // The ring starts the clock on this side.
     CallSetupTrace.begin(callId: callId, outgoing: false);
 
@@ -2660,6 +2669,7 @@ class CallNotifier extends Notifier<CallState> {
 
   Future<void> _cleanup() async {
     _recordEndedCall();
+    _lastEndCause ??= _endCause ?? CallEndCause.linkLost;
     _ringStartedAt = null;
     _endCause = null;
     // A call that never reached `connected` still has a story worth reading.
