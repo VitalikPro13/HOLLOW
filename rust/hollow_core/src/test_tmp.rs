@@ -58,6 +58,16 @@ impl Drop for RemoveAtShutdown {
     }
 }
 
+/// A folder under the test root that lives as long as this process: the same path for
+/// every caller in it, never shared with another process.
+pub(crate) fn process_dir(name: &str) -> PathBuf {
+    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    let dir = DIR.get_or_init(|| root().join(format!("{PREFIX}{}-proc", std::process::id())));
+    let path = dir.join(name);
+    std::fs::create_dir_all(&path).expect("test process dir");
+    path
+}
+
 /// `tempfile::tempdir()` under the test root.
 pub(crate) fn tempdir() -> std::io::Result<TestDir> {
     let dir = tempfile::Builder::new().prefix(PREFIX).tempdir_in(root())?;

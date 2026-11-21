@@ -41,11 +41,25 @@ pub fn data_dir() -> Result<PathBuf, String> {
     } else if let Ok(custom) = std::env::var("HOLLOW_DATA_DIR") {
         PathBuf::from(custom)
     } else {
-        let base = dirs::data_dir().ok_or("Could not find app data directory")?;
-        base.join("hollow")
+        os_data_root()?
     };
     fs::create_dir_all(&dir).map_err(|e| format!("Failed to create data dir: {e}"))?;
     Ok(dir)
+}
+
+/// The OS's own data folder for Hollow.
+#[cfg(not(test))]
+fn os_data_root() -> Result<PathBuf, String> {
+    let base = dirs::data_dir().ok_or("Could not find app data directory")?;
+    Ok(base.join("hollow"))
+}
+
+/// Test builds never reach the OS's own folder: a suite run on a person's machine
+/// wrote a database and vault files into their real profile. A test that names no
+/// root gets one of its own, per process, under the test temp root.
+#[cfg(test)]
+fn os_data_root() -> Result<PathBuf, String> {
+    Ok(crate::test_tmp::process_dir("os-root").join("hollow"))
 }
 
 /// Path to the stored identity keypair file (master key).
@@ -502,6 +516,20 @@ fn encode_key_file(existing: Option<&[u8]>, keypair: &NativeKeypair) -> Result<V
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #155 review: a suite run on a person's machine wrote into their real profile.
+    #[test]
+    fn tests_never_touch_the_real_data_root() {
+        let fallback = super::os_data_root().unwrap();
+        if let Some(real) = dirs::data_dir() {
+            assert!(!fallback.starts_with(real.join("hollow")), "a test build falls back to the OS folder: {fallback:?}");
+        }
+        assert!(fallback.starts_with(crate::test_tmp::process_dir("os-root")), "{fallback:?}");
+        assert_eq!(fallback, super::os_data_root().unwrap(), "one root per process");
+        if std::env::var_os("HOLLOW_DATA_DIR").is_none() && super::DATA_DIR_OVERRIDE.get().is_none() {
+            assert_eq!(super::data_dir().unwrap(), fallback);
+        }
+    }
 
     #[test]
     fn data_dir_respects_env_override() {

@@ -100,6 +100,7 @@ void main() {
   group('after a wipe on this computer', () {
     late Directory tmp;
     late String defaultRoot;
+    String? previousDefaultRoot;
     late String work;
     late String home;
     late int relaunched;
@@ -122,6 +123,7 @@ void main() {
       work = '${tmp.path}${sep}work';
       home = '${tmp.path}${sep}home';
       Directory(defaultRoot).createSync();
+      previousDefaultRoot = debugDefaultDesktopDataRoot;
       debugDefaultDesktopDataRoot = defaultRoot;
       relaunched = 0;
       restarting = Completer<void>();
@@ -135,7 +137,7 @@ void main() {
     });
 
     tearDown(() {
-      debugDefaultDesktopDataRoot = null;
+      debugDefaultDesktopDataRoot = previousDefaultRoot;
       wipeUnfinished = realUnfinished;
       relaunchForWipe = realRelaunch;
       tmp.deleteSync(recursive: true);

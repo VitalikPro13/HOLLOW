@@ -38,8 +38,9 @@ void main() {
     // A test process never boots through portable detection, even with an
     // identity in the default profile.
     touch('identity.key');
+    final previous = debugDefaultDesktopDataRoot;
     debugDefaultDesktopDataRoot = dir.path;
-    addTearDown(() => debugDefaultDesktopDataRoot = null);
+    addTearDown(() => debugDefaultDesktopDataRoot = previous);
     expect(defaultProfileLeftBehind(), isNull);
   });
 }

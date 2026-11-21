@@ -234,6 +234,15 @@ release pipeline is the `release` skill.
   `HOLLOW_TEST_TMP`, else `%TEMP%/hollow-tests`; leftovers named `hollow-test-*` are swept
   after 3 h); a source scan refuses any new `tempfile::`. A dropped harness `TestNode` aborts
   its loop (`AbortOnDrop`). On this box `HOLLOW_TEST_TMP=D:\dev\tmp\hollow-tests`.
+- Test builds never reach the OS's own data folder: `identity::data_dir()` with no override
+  and no `HOLLOW_DATA_DIR` gives a per-process root under the test temp root
+  (`os_data_root`, `test_tmp::process_dir`; test `tests_never_touch_the_real_data_root`).
+  Before #155's review about 120 tests (ws_client wire tests, recovery, vault, the destroy
+  harness journeys, file transfer) wrote `messages.db` and `vault/<id>` into the real
+  `%APPDATA%\hollow` and `~/Library/Application Support/hollow` of whoever ran the suite.
+  Flutter tests get the same through `test/flutter_test_config.dart` (data root and the
+  profile registry anchor in a temp folder; `test/real_profile_isolation_test.dart`); a test
+  that overrides `debugDefaultDesktopDataRoot` restores the PREVIOUS value, never null.
 - Release builds keep stderr quiet (`mirror_to_stderr`: debug builds and the forwarder only):
   the systemd journal would keep a copy no wipe reaches. The log file exists only while an
   identity does and is erased by the wipe. HOL-SEC-156.
