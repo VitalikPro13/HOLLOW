@@ -847,6 +847,7 @@ fn apply_update_impl(
         &zip_path_str,
         &app_dir,
         "hollow.exe",
+        std::process::id(),
         &relaunch,
     );
 
@@ -860,11 +861,18 @@ fn apply_update_impl(
     }
 }
 
-/// `update.bat`: waits until no `wait_image` runs, copies the staged files over
-/// `app_dir`, cleans up and runs `relaunch`. Every path argument is already
-/// [`bat_quoted_path`] output. The script is UTF-8, so the code page switches
+/// `update.bat`: waits until process `wait_pid` (named `wait_image`, so a reused pid
+/// is not waited on) is gone, copies the staged files over `app_dir`, cleans up and
+/// runs `relaunch`. A copy that fails relaunches nothing: a half-copied app could
+/// start on mismatched parts. Every path argument is already [`bat_quoted_path`] output. The script is UTF-8, so the code page switches
 /// before the first line that may hold a non-ASCII path, and delayed expansion
 /// is off whatever the registry says, so a `!` in a path or argument stays literal.
+/// What a failed copy leaves on screen (two `echo` lines: no characters cmd reads).
+#[cfg(any(target_os = "windows", test))]
+const COPY_FAILED_1: &str = "The update could not copy its files, so Hollow was not restarted.";
+#[cfg(any(target_os = "windows", test))]
+const COPY_FAILED_2: &str = "Close anything that uses the Hollow folder, then start Hollow and update again.";
+
 #[cfg(any(target_os = "windows", test))]
 fn update_bat_script(
     version: &str,
@@ -872,6 +880,7 @@ fn update_bat_script(
     zip_path_str: &str,
     app_dir: &str,
     wait_image: &str,
+    wait_pid: u32,
     relaunch: &str,
 ) -> String {
     format!(
@@ -886,13 +895,14 @@ fn update_bat_script(
          echo.\r\n\
          echo   Waiting for Hollow to close...\r\n\
          :wait\r\n\
-         tasklist /FI \"IMAGENAME eq {wait_image}\" 2>NUL | find /I \"{wait_image}\" >NUL\r\n\
+         tasklist /FI \"PID eq {wait_pid}\" /FI \"IMAGENAME eq {wait_image}\" 2>NUL | find /I \"{wait_image}\" >NUL\r\n\
          if %ERRORLEVEL% == 0 (\r\n\
              timeout /t 1 /nobreak >NUL\r\n\
              goto wait\r\n\
          )\r\n\
          echo   Copying files...\r\n\
          xcopy /E /Y /Q \"{staging_str}\\*\" \"{app_dir}\\\" >NUL\r\n\
+         if errorlevel 1 goto copyfailed\r\n\
          echo.\r\n\
          echo   Cleaning up...\r\n\
          rd /S /Q \"{staging_str}\" >NUL 2>&1\r\n\
@@ -914,7 +924,14 @@ fn update_bat_script(
          timeout /t 1 /nobreak >NUL\r\n\
          echo.\r\n\
          {relaunch}\r\n\
-         exit\r\n"
+         exit\r\n\
+         :copyfailed\r\n\
+         echo.\r\n\
+         echo   {COPY_FAILED_1}\r\n\
+         echo   {COPY_FAILED_2}\r\n\
+         echo.\r\n\
+         pause\r\n\
+         exit /b 1\r\n"
     )
 }
 
@@ -1109,12 +1126,8 @@ fn sh_quote(s: &str) -> String {
 /// that drops `--portable` or `--data-dir` comes back up on a DIFFERENT profile than
 /// the user was running, so every generated relaunch forwards the original arguments.
 #[cfg(target_os = "linux")]
-fn current_args_quoted() -> String {
-    std::env::args()
-        .skip(1)
-        .map(|a| sh_quote(&a))
-        .collect::<Vec<_>>()
-        .join(" ")
+fn current_args_quoted() -> Result<String, String> {
+    Ok(relaunch_args()?.iter().map(|a| sh_quote(a)).collect::<Vec<_>>().join(" "))
 }
 
 #[cfg(target_os = "linux")]
@@ -1239,7 +1252,7 @@ fn apply_update_tarball(
         archive_path,
         &rel.display,
         pid,
-        &current_args_quoted(),
+        &current_args_quoted()?,
     );
     write_shell_script(&script_path, &body)
 }
@@ -1462,7 +1475,7 @@ fn apply_update_flatpak(
          rm -f {bundle}\n\
          {recipe}",
         bundle = sh_quote(bundle_path),
-        recipe = flatpak_relaunch_recipe(&info.instance_id, &current_args_quoted()),
+        recipe = flatpak_relaunch_recipe(&info.instance_id, &current_args_quoted()?),
     );
     write_shell_script(&script_path, &body)
 }
@@ -1617,6 +1630,10 @@ pub(crate) fn extract_zip_to(zip_path: &str, staging_dir: &std::path::Path) -> R
         if entry.enclosed_name().is_none() || !inside {
             return Err(format!("Unsafe zip entry path: {name}"));
         }
+        if never_installed(&name) {
+            crate::hollow_log!("[updater] Skipped a data entry the update must not install: {}", crate::log::redact_path(&name));
+            continue;
+        }
 
         if name.ends_with('/') {
             let dir_path = staging_dir.join(&name);
@@ -1635,6 +1652,19 @@ pub(crate) fn extract_zip_to(zip_path: &str, staging_dir: &std::path::Path) -> R
         }
     }
     Ok(())
+}
+
+/// A portable data folder or a portable marker in an update archive: installing it
+/// would switch the app to another data root on its next start, over a database
+/// the archive brought (#155; 0.12.1 to 0.14.1 shipped one).
+fn never_installed(name: &str) -> bool {
+    let mut parts = name.split('/').filter(|p| !p.is_empty() && *p != ".");
+    let Some(first) = parts.next() else { return false };
+    let first = first.to_ascii_lowercase();
+    if first == "hollow_data" {
+        return true;
+    }
+    parts.next().is_none() && matches!(first.as_str(), "portable" | "portable.txt" | "portable.txt.txt")
 }
 
 fn detect_common_prefix(archive: &mut zip::ZipArchive<fs::File>) -> Option<String> {
@@ -1657,6 +1687,49 @@ fn detect_common_prefix(archive: &mut zip::ZipArchive<fs::File>) -> Option<Strin
 #[cfg(test)]
 mod extract_zip_tests {
     use std::io::Write;
+
+    fn zip_of(path: &std::path::Path, entries: &[(&str, &[u8])]) {
+        let mut w = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
+        for (name, data) in entries {
+            if name.ends_with('/') {
+                w.add_directory(name.trim_end_matches('/'), zip::write::SimpleFileOptions::default()).unwrap();
+            } else {
+                w.start_file(*name, zip::write::SimpleFileOptions::default()).unwrap();
+                w.write_all(data).unwrap();
+            }
+        }
+        w.finish().unwrap();
+    }
+
+    /// #155: 0.12.1 to 0.14.1 shipped `hollow_data/messages.db`, and installing it
+    /// switched every updated copy to portable mode over a stranger's database.
+    #[test]
+    fn an_update_never_carries_a_data_folder() {
+        for prefix in ["", "Release/"] {
+            let tmp = crate::test_tmp::tempdir().expect("tmp");
+            let zip = tmp.path().join("u.zip");
+            let names = [
+                "hollow.exe", "data/app.so", "hollow_data/", "hollow_data/messages.db", "hollow_data/hollow.lock",
+                "Hollow_Data/identity.key", "portable.txt", "portable", "portable.txt.txt", "PORTABLE.TXT",
+                "data/flutter_assets/portable.txt",
+            ];
+            let entries: Vec<(String, &[u8])> = names.iter().map(|n| (format!("{prefix}{n}"), b"x".as_slice())).collect();
+            let refs: Vec<(&str, &[u8])> = entries.iter().map(|(n, d)| (n.as_str(), *d)).collect();
+            zip_of(&zip, &refs);
+            let staging = tmp.path().join("staging");
+            std::fs::create_dir_all(&staging).unwrap();
+            super::extract_zip_to(zip.to_str().unwrap(), &staging).expect("a legitimate update still installs");
+            assert!(staging.join("hollow.exe").exists() && staging.join("data/app.so").exists(), "{prefix:?}");
+            assert!(staging.join("data/flutter_assets/portable.txt").exists(), "only a marker beside the exe counts");
+            let top: Vec<String> = std::fs::read_dir(&staging)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().to_lowercase())
+                .collect();
+            for gone in ["hollow_data", "portable.txt", "portable", "portable.txt.txt"] {
+                assert!(!top.contains(&gone.to_string()), "{prefix:?} installed {gone}: {top:?}");
+            }
+        }
+    }
 
     /// Builds a zip the way Compress-Archive does — backslash separators,
     /// zero-byte directory entries with a trailing backslash — and asserts
@@ -1896,68 +1969,110 @@ pub fn spawn_relaunch_waiter() -> Result<(), String> {
             return spawn_flatpak_relaunch_waiter();
         }
     }
+    spawn_waiter(std::process::id(), &self_restart_snippet()?)
+}
+
+/// What the waiter runs for THIS process: its exe, its own arguments, and the
+/// data-root override where the relaunch would not inherit it.
+fn self_restart_snippet() -> Result<String, String> {
     let exe = std::env::current_exe()
         .map_err(|e| format!("current_exe failed: {e}"))?;
     let exe = exe
         .to_str()
         .ok_or("Executable path is not valid UTF-8")?
         .to_string();
-    spawn_waiter(std::process::id(), &relaunch_snippet(&exe))
+    let data_dir_env = std::env::var("HOLLOW_DATA_DIR").ok().filter(|v| !v.is_empty());
+    Ok(relaunch_snippet(&exe, &relaunch_args()?, data_dir_env.as_deref()))
 }
 
 /// The platform snippet the waiter runs once the watched pid is gone.
 ///
 /// The original argv is forwarded: a relaunch that drops `--portable` or any other
 /// data-root flag comes back up on a DIFFERENT profile than the user was running.
-fn relaunch_snippet(exe: &str) -> String {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+/// Windows and Linux children inherit `HOLLOW_DATA_DIR`; `open` does not.
+fn relaunch_snippet(exe: &str, args: &[String], data_dir_env: Option<&str>) -> String {
     #[cfg(windows)]
     {
-        // PowerShell single-quoted literals; ' escapes by doubling.
-        let exe_q = exe.replace('\'', "''");
-        if args.is_empty() {
-            format!("Start-Process -FilePath '{exe_q}'")
-        } else {
-            let list = args
-                .iter()
-                .map(|a| format!("'{}'", a.replace('\'', "''")))
-                .collect::<Vec<_>>()
-                .join(",");
-            format!("Start-Process -FilePath '{exe_q}' -ArgumentList {list}")
-        }
+        let _ = data_dir_env;
+        powershell_relaunch(exe, args)
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
     {
-        let arg_str = args
-            .iter()
-            .map(|a| sh_quote(a))
-            .collect::<Vec<_>>()
-            .join(" ");
-        #[cfg(target_os = "macos")]
-        {
-            // Relaunch the bundle via LaunchServices when running from a .app.
-            match exe.find(".app/") {
-                Some(idx) => {
-                    let bundle = &exe[..idx + 4];
-                    if args.is_empty() {
-                        format!("/usr/bin/open \"{bundle}\"")
-                    } else {
-                        format!("/usr/bin/open \"{bundle}\" --args {arg_str}")
-                    }
-                }
-                None if args.is_empty() => format!("exec \"{exe}\""),
-                None => format!("exec \"{exe}\" {arg_str}"),
-            }
+        // Relaunch the bundle via LaunchServices when running from a .app.
+        match exe.find(".app/") {
+            Some(idx) => macos_relaunch_line(&exe[..idx + 4], args, data_dir_env),
+            None => exec_line(exe, args),
         }
-        #[cfg(not(target_os = "macos"))]
-        {
-            if args.is_empty() {
-                format!("exec \"{exe}\"")
-            } else {
-                format!("exec \"{exe}\" {arg_str}")
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        let _ = data_dir_env;
+        exec_line(exe, args)
+    }
+}
+
+#[cfg(not(windows))]
+fn exec_line(exe: &str, args: &[String]) -> String {
+    let mut line = format!("exec {}", sh_quote(exe));
+    for arg in args {
+        line.push(' ');
+        line.push_str(&sh_quote(arg));
+    }
+    line
+}
+
+/// `Start-Process` with ONE argument string: given a list, Windows PowerShell joins
+/// it with spaces and quotes nothing, so an argument holding a space came back as two.
+#[cfg(any(windows, test))]
+fn powershell_relaunch(exe: &str, args: &[String]) -> String {
+    let mut line = format!("Start-Process -FilePath {}", ps_quote(exe));
+    if !args.is_empty() {
+        let command_line = args.iter().map(|a| argv_quote(a)).collect::<Vec<_>>().join(" ");
+        line.push_str(" -ArgumentList ");
+        line.push_str(&ps_quote(&command_line));
+    }
+    line
+}
+
+/// A PowerShell single-quoted literal. PowerShell also ends such a literal at the
+/// typographic single quotes, so those are doubled as well.
+#[cfg(any(windows, test))]
+fn ps_quote(s: &str) -> String {
+    let mut out = String::from("'");
+    for c in s.chars() {
+        if matches!(c, '\'' | '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}') {
+            out.push(c);
+        }
+        out.push(c);
+    }
+    out.push('\'');
+    out
+}
+
+/// One argument quoted so CommandLineToArgvW returns it unchanged: backslashes are
+/// literal except before a quote, where they and the quote are escaped.
+#[cfg(any(windows, test))]
+fn argv_quote(arg: &str) -> String {
+    let mut out = String::from("\"");
+    let mut backslashes = 0usize;
+    for c in arg.chars() {
+        match c {
+            '\\' => backslashes += 1,
+            '"' => {
+                out.push_str(&"\\".repeat(backslashes * 2 + 1));
+                out.push('"');
+                backslashes = 0;
+            }
+            _ => {
+                out.push_str(&"\\".repeat(backslashes));
+                out.push(c);
+                backslashes = 0;
             }
         }
     }
+    out.push_str(&"\\".repeat(backslashes * 2));
+    out.push('"');
+    out
 }
 
 #[cfg(windows)]
@@ -1998,7 +2113,7 @@ fn spawn_flatpak_relaunch_waiter() -> Result<(), String> {
     let script_path = data.join("updates").join("relaunch.sh");
     let body = format!(
         "#!/bin/sh\n{}",
-        flatpak_relaunch_recipe(&info.instance_id, &current_args_quoted())
+        flatpak_relaunch_recipe(&info.instance_id, &current_args_quoted()?)
     );
     let path = write_shell_script(&script_path, &body)?;
     crate::hollow_log!("[updater] Flatpak self-restart through the host script {}", crate::log::redact_path(&path));
@@ -2416,7 +2531,7 @@ mod relaunch_args_tests {
     fn the_update_script_relaunches_with_the_original_arguments() {
         let line = bat_relaunch_line(r"C:\App\hollow.exe", &strings(&["--portable", "x y", "%TEMP%"])).unwrap();
         assert_eq!(line, r#"start "" "C:\App\hollow.exe" "--portable" "x y" "%%TEMP%%""#);
-        let bat = update_bat_script("0.14.2", r"C:\D\staging", r"C:\D\u.zip", r"C:\App", "hollow.exe", &line);
+        let bat = update_bat_script("0.14.2", r"C:\D\staging", r"C:\D\u.zip", r"C:\App", "hollow.exe", 4242, &line);
         let lines: Vec<&str> = bat.split("\r\n").collect();
         assert!(lines.contains(&line.as_str()), "relaunch line missing:\n{bat}");
         assert_eq!(lines.iter().filter(|l| l.starts_with("start ")).count(), 1, "{bat}");
@@ -2425,6 +2540,67 @@ mod relaunch_args_tests {
         assert!(pos("setlocal DisableDelayedExpansion") < pos("xcopy"));
         assert!(pos("chcp 65001") < pos("xcopy"));
         assert!(pos("xcopy") < pos("start "));
+        // It waits for the process that wrote it, by pid.
+        assert!(lines[pos("tasklist")].contains("/FI \"PID eq 4242\""), "{bat}");
+        // A failed copy jumps past the relaunch.
+        assert_eq!(lines[pos("xcopy") + 1], "if errorlevel 1 goto copyfailed", "{bat}");
+        assert!(pos("start ") < pos(":copyfailed") && pos("exit") < pos(":copyfailed"), "{bat}");
+        assert_eq!(lines[pos(":copyfailed")..].iter().filter(|l| l.starts_with("start ")).count(), 0);
+    }
+
+    /// The self-restart hands Start-Process ONE command line: as a list, Windows
+    /// PowerShell joins it unquoted and an argument holding a space splits.
+    #[test]
+    fn the_self_restart_keeps_an_argument_with_a_space() {
+        let args = strings(&["--portable", "C:\\My Data\\", "a\"b", "it's", ""]);
+        let line = super::powershell_relaunch(r"C:\Pro'gram\hollow.exe", &args);
+        assert_eq!(
+            line,
+            r#"Start-Process -FilePath 'C:\Pro''gram\hollow.exe' -ArgumentList '"--portable" "C:\My Data\\" "a\"b" "it''s" ""'"#
+        );
+        assert_eq!(super::powershell_relaunch(r"C:\h.exe", &[]), r"Start-Process -FilePath 'C:\h.exe'");
+        assert_eq!(super::ps_quote("a\u{2019}b"), "'a\u{2019}\u{2019}b'");
+    }
+
+    /// The self-restart carries this process's own arguments, each quoted for the
+    /// platform's launcher.
+    #[test]
+    fn the_self_restart_takes_this_processs_own_arguments() {
+        let own: Vec<String> = std::env::args().skip(1).collect();
+        assert!(!own.is_empty(), "the test runner passes arguments, so this proves something");
+        let snippet = super::self_restart_snippet().unwrap();
+        for arg in &own {
+            #[cfg(windows)]
+            let quoted = super::argv_quote(arg).replace('\'', "''");
+            #[cfg(not(windows))]
+            let quoted = super::sh_quote(arg);
+            assert!(snippet.contains(&quoted), "{arg:?} missing from {snippet}");
+        }
+    }
+
+    /// LaunchServices starts a bundle with its own environment, so the override
+    /// must ride `open --env`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_macos_self_restart_keeps_the_data_root_override() {
+        let snippet = super::relaunch_snippet("/Apps/Hollow.app/Contents/MacOS/Hollow", &strings(&["--portable"]), Some("/d/x y"));
+        assert_eq!(snippet, "/usr/bin/open -n --env 'HOLLOW_DATA_DIR=/d/x y' '/Apps/Hollow.app' --args '--portable'");
+    }
+
+    #[test]
+    fn argv_quoting_round_trips_through_the_windows_rules() {
+        let cases: &[(&str, &str)] = &[
+            ("plain", r#""plain""#),
+            ("a b", r#""a b""#),
+            (r"C:\x\", r#""C:\x\\""#),
+            (r#"a"b"#, r#""a\"b""#),
+            (r#"a\"b"#, r#""a\\\"b""#),
+            (r"a\b", r#""a\b""#),
+            ("", r#""""#),
+        ];
+        for (arg, want) in cases {
+            assert_eq!(super::argv_quote(arg), *want, "{arg:?}");
+        }
     }
 
     #[test]
@@ -2508,44 +2684,62 @@ mod update_bat_tests {
         .collect()
     }
 
-    #[test]
-    fn update_bat_relaunches_with_every_argument_intact() {
+    struct Run {
+        status: std::process::ExitStatus,
+        out: std::path::PathBuf,
+        console: std::path::PathBuf,
+        app: std::path::PathBuf,
+        staging: std::path::PathBuf,
+        zip: std::path::PathBuf,
+    }
+
+    const DUMPER: &str = "$t = $env:HOLLOW_ARGV_OUT + '.tmp'\r\n\
+         [IO.File]::WriteAllText($t, ([Environment]::GetCommandLineArgs() -join \"`n\"), (New-Object Text.UTF8Encoding $false))\r\n\
+         Move-Item -LiteralPath $t -Destination $env:HOLLOW_ARGV_OUT\r\n";
+
+    fn ps_args(dumper: &std::path::Path, extra: &[String]) -> Vec<String> {
+        let mut args: Vec<String> = ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", dumper.to_str().unwrap()]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        args.extend_from_slice(extra);
+        args
+    }
+
+    /// Writes the real update.bat under `root` (a path full of cmd metacharacters),
+    /// whose "app" is powershell reporting its argv, and starts it the way cmd would
+    /// with delayed expansion forced on. `before` runs once the folders exist and
+    /// returns what must stay alive until the script ends (a lock, a process).
+    fn start_bat<T>(
+        tmp: &std::path::Path,
+        wait: (&str, u32),
+        extra: &[String],
+        before: impl FnOnce(&std::path::Path) -> T,
+    ) -> (std::process::Child, Run, T) {
         use std::os::windows::process::CommandExt;
         const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
-        let tmp = crate::test_tmp::tempdir().expect("tmp");
-        let root = tmp.path().join("a&b %PATH% !x! ^c (d) Віталій");
+        let root = tmp.join("a&b %PATH% !x! ^c (d) Віталій");
         let staging = root.join("staging");
         let app = root.join("app");
         fs::create_dir_all(&staging).unwrap();
         fs::create_dir_all(&app).unwrap();
         fs::write(staging.join("marker.txt"), b"new build").unwrap();
+        fs::write(app.join("marker.txt"), b"old build").unwrap();
         let zip = root.join("u.zip");
         fs::write(&zip, b"zip").unwrap();
         let dumper = root.join("dump argv.ps1");
-        fs::write(
-            &dumper,
-            "$t = $env:HOLLOW_ARGV_OUT + '.tmp'\r\n\
-             [IO.File]::WriteAllText($t, ([Environment]::GetCommandLineArgs() -join \"`n\"), (New-Object Text.UTF8Encoding $false))\r\n\
-             Move-Item -LiteralPath $t -Destination $env:HOLLOW_ARGV_OUT\r\n",
-        )
-        .unwrap();
-        let out = tmp.path().join("argv.txt");
-
+        fs::write(&dumper, DUMPER).unwrap();
+        let held = before(&app);
+        let out = tmp.join("argv.txt");
         let ps = std::path::PathBuf::from(std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into()))
             .join(r"System32\WindowsPowerShell\v1.0\powershell.exe");
-        let prefix = ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", dumper.to_str().unwrap()];
-        let mut args: Vec<String> = prefix.iter().map(|s| s.to_string()).collect();
-        args.extend(weird_args());
-        let relaunch = bat_relaunch_line(&bat_quoted_path(ps.to_str().unwrap()).unwrap(), &args).unwrap();
+        let relaunch = bat_relaunch_line(&bat_quoted_path(ps.to_str().unwrap()).unwrap(), &ps_args(&dumper, extra)).unwrap();
         let q = |p: &std::path::Path| bat_quoted_path(p.to_str().unwrap()).unwrap();
-        let bat = update_bat_script("9.9.9", &q(&staging), &q(&zip), &q(&app), "hollow-test-absent.exe", &relaunch);
-        let bat_path = tmp.path().join("update.bat");
+        let bat = update_bat_script("9.9.9", &q(&staging), &q(&zip), &q(&app), wait.0, wait.1, &relaunch);
+        let bat_path = tmp.join("update.bat");
         fs::write(&bat_path, bat).unwrap();
-
-        // Its exit code is the last command's (a `timeout` with no console input
-        // fails), so only what the script did counts.
-        let console = tmp.path().join("console.txt");
-        let ran = std::process::Command::new("cmd")
+        let console = tmp.join("console.txt");
+        let child = std::process::Command::new("cmd")
             .args(["/V:ON", "/C"])
             .arg(&bat_path)
             .env("HOLLOW_ARGV_OUT", &out)
@@ -2553,25 +2747,106 @@ mod update_bat_tests {
             .stdin(std::process::Stdio::null())
             .stdout(fs::File::create(&console).unwrap())
             .stderr(std::process::Stdio::null())
-            .status()
+            .spawn()
             .expect("run update.bat");
+        let run = Run { status: std::process::ExitStatus::default(), out, console, app, staging, zip };
+        (child, run, held)
+    }
+
+    fn finish(mut child: std::process::Child, mut run: Run) -> Run {
+        run.status = child.wait().unwrap();
+        run
+    }
+
+    fn wait_for(path: &std::path::Path, secs: u64) -> bool {
         let start = Instant::now();
-        while !out.exists() && start.elapsed() < Duration::from_secs(60) {
+        while !path.exists() && start.elapsed() < Duration::from_secs(secs) {
             std::thread::sleep(Duration::from_millis(200));
         }
-        let dumped = fs::read_to_string(&out).unwrap_or_else(|_| {
-            panic!(
-                "the relaunched app never ran ({ran}); console:\n{}",
-                String::from_utf8_lossy(&fs::read(&console).unwrap_or_default())
-            )
-        });
+        path.exists()
+    }
+
+    fn console(run: &Run) -> String {
+        String::from_utf8_lossy(&fs::read(&run.console).unwrap_or_default()).into_owned()
+    }
+
+    #[test]
+    fn update_bat_relaunches_with_every_argument_intact() {
+        let tmp = crate::test_tmp::tempdir().expect("tmp");
+        let (child, run, ()) = start_bat(tmp.path(), ("hollow-test-absent.exe", 1), &weird_args(), |_| ());
+        // Its exit code is the last command's (a `timeout` with no console input
+        // fails), so only what the script did counts.
+        let run = finish(child, run);
+        assert!(wait_for(&run.out, 60), "the relaunched app never ran; console:\n{}", console(&run));
+        let dumped = fs::read_to_string(&run.out).unwrap();
         let got: Vec<&str> = dumped.split('\n').collect();
-        assert_eq!(&got[1..1 + prefix.len()], &prefix[..], "prefix: {got:?}");
         let want = weird_args();
-        assert_eq!(&got[1 + prefix.len()..], &want.iter().map(String::as_str).collect::<Vec<_>>()[..]);
-        assert!(app.join("marker.txt").exists(), "xcopy did not install into the metacharacter path");
-        assert!(!staging.exists(), "staging was not cleaned up");
-        assert!(!zip.exists(), "the zip was not deleted");
+        assert_eq!(&got[6..], &want.iter().map(String::as_str).collect::<Vec<_>>()[..], "{got:?}");
+        assert_eq!(fs::read(run.app.join("marker.txt")).unwrap(), b"new build", "xcopy did not install");
+        assert!(!run.staging.exists(), "staging was not cleaned up");
+        assert!(!run.zip.exists(), "the zip was not deleted");
+    }
+
+    fn ping(seconds: u32) -> std::process::Child {
+        std::process::Command::new("ping")
+            .args(["-n", &seconds.to_string(), "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap()
+    }
+
+    /// The script waits for the app that wrote it, and only for it: another copy of
+    /// the same program (a second install, a fleet peer) never holds the update.
+    /// Whether `tasklist` can see processes here: over ssh it answers "Access
+    /// denied", the script's wait then ends at once, and this test proves nothing.
+    /// It is run in a desktop session for that reason (b155 proof, round 2).
+    fn tasklist_sees_processes() -> bool {
+        let me = std::process::id().to_string();
+        std::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {me}")])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).contains(&me))
+            .unwrap_or(false)
+    }
+
+    #[test]
+    fn update_bat_waits_for_its_own_process_only() {
+        if !tasklist_sees_processes() {
+            return;
+        }
+        let tmp = crate::test_tmp::tempdir().expect("tmp");
+        let mut other = ping(90);
+        let mut own = ping(6);
+        let (child, run, ()) = start_bat(tmp.path(), ("PING.EXE", own.id()), &[], |_| ());
+        while own.try_wait().unwrap().is_none() {
+            assert!(!run.out.exists(), "relaunched while its own process still ran");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let ok = wait_for(&run.out, 45);
+        let other_alive = other.try_wait().unwrap().is_none();
+        let _ = other.kill();
+        let run = finish(child, run);
+        assert!(ok, "never relaunched after its own process ended; console:\n{}", console(&run));
+        assert!(other_alive, "the relaunch waited for another process of the same name");
+    }
+
+    /// A copy that fails (a file in use) leaves the window up and starts nothing:
+    /// a half-copied app could start on mismatched parts.
+    #[test]
+    fn a_failed_copy_relaunches_nothing() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let tmp = crate::test_tmp::tempdir().expect("tmp");
+        let (child, run, lock) = start_bat(tmp.path(), ("hollow-test-absent.exe", 1), &[], |app| {
+            fs::OpenOptions::new().read(true).share_mode(0).open(app.join("marker.txt")).unwrap()
+        });
+        let run = finish(child, run);
+        let relaunched = wait_for(&run.out, 10);
+        drop(lock);
+        let text = console(&run);
+        assert!(!relaunched, "a half-copied app was started; console:\n{text}");
+        assert_eq!(run.status.code(), Some(1), "console:\n{text}");
+        assert!(text.contains(super::COPY_FAILED_1), "console:\n{text}");
+        assert!(run.zip.exists() && run.staging.exists(), "a failed update threw its files away");
     }
 
     /// The real apply refuses before it writes a script that would drop the argument.
@@ -2597,6 +2872,7 @@ mod update_bat_tests {
         let ok = super::apply_update_at(tmp.path(), zip.to_str().unwrap(), app.to_str().unwrap(), "0.14.2", 0, &bad[..1]);
         let bat = fs::read_to_string(ok.expect("a carriable argument was refused")).unwrap();
         assert!(bat.contains(r#"\hollow.exe" "--portable""#), "{bat}");
+        assert!(bat.contains(&format!("/FI \"PID eq {}\"", std::process::id())), "it must wait for the app that wrote it:\n{bat}");
     }
 }
 

@@ -249,6 +249,22 @@ release pipeline is the `release` skill.
   `open --env` (LaunchServices gives the app its own environment), every path `sh_quote`d.
   Only the RUNNING build's script counts: an update FROM 0.14.1 or older still drops them.
   `update_bat_tests` runs the real script under `cmd /V:ON` on Windows.
+- `update.bat` waits for the pid that wrote it (`tasklist /FI "PID eq"` plus the image name),
+  never for every `hollow.exe` (another install or profile held updates forever), and a failed
+  `xcopy` relaunches NOTHING (a half-copied app starts on mismatched parts): it says so and
+  `pause`s, keeping the staged files. Over ssh `tasklist` answers "Access denied", so the
+  pid-wait test returns early there and is run in a desktop session.
+- The self-restart (`relaunchApp`, `self_restart_snippet`) hands `Start-Process` ONE command
+  line (`argv_quote` + `ps_quote`): as a list, Windows PowerShell joined it unquoted and an
+  argument with a space split. A non-Unicode argv refuses instead of panicking; macOS keeps
+  `HOLLOW_DATA_DIR` via `open --env`.
+- A release never carries profile data (#155): `build_release.ps1` refuses a Release folder
+  holding `hollow_data`, a portable marker, `*.db`/`-wal`/`-shm`, `hollow.lock` or `identity.*`
+  (`release_payload_guard.ps1`, self-test `release_payload_guard_selftest.ps1`, source guard
+  `test/release_payload_guard_test.dart`); `hollow.iss` excludes the same; `extract_zip_to`
+  skips `hollow_data/` and a marker beside the exe. `-SkipSign` builds an unsigned candidate.
+- The Inno installer and uninstaller `taskkill /IM hollow.exe` EVERY copy (a portable one, a
+  fleet peer): hold the `pc-fleet` lease when installing on the PC.
 - Quick patches (0.12.2): the build rides `"build": N` on the version entry and `APP_BUILD`
   beside `APP_VERSION` (never pubspec's `+N`); `version` / `latest` stay three-part forever
   (0.12.1 refuses the whole manifest otherwise). Paths use `release_tag` (`0.12.2-b1`), people

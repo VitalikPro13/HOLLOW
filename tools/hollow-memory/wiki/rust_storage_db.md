@@ -755,7 +755,7 @@ Source: `rust/hollow_core/src/identity/keys.rs`, `identity/encryption.rs`, `iden
 
 Keypair stored at `{data_dir}/identity.key`.
 
-**Desktop root selection lives in DART** (`lib/src/core/hollow_data_dir.dart::initHollowDataDir`, issue #47): `HOLLOW_DATA_DIR` env > `--portable` arg > profile pin (`profiles.json` `active` at the default OS root, written by the Settings > Profile switcher) > portable marker file > bare `hollow_data`-next-to-exe **only if it contains identity data** (`identity.key`/`identity.device`/`messages.db` — an empty folder no longer auto-activates portable) > OS default. Whichever wins (other than the OS default) is passed to Rust via `set_data_dir()`. `perform_pending_wipe` (api/storage.rs) preserves `profiles.json` plus `*.lock` and its own marker. See memory `project_profile_switcher_issue47`.
+**Desktop root selection lives in DART** (`lib/src/core/hollow_data_dir.dart::initHollowDataDir`, issue #47): `HOLLOW_DATA_DIR` env > `--portable` arg > profile pin (`profiles.json` `active` at the default OS root, written by the Settings > Profile switcher) > portable marker file > bare `hollow_data`-next-to-exe **only if it holds an identity** (`identity.key`/`identity.device`; `portableFolderHoldsIdentity`. A lone `messages.db` no longer counts since #155: releases 0.12.1 to 0.14.1 shipped one. When detection alone chose that folder and the OS default root holds an identity, the shell says once where the other identity is, `defaultProfileLeftBehind`) > OS default. Whichever wins (other than the OS default) is passed to Rust via `set_data_dir()`. `perform_pending_wipe` (api/storage.rs) preserves `profiles.json` plus `*.lock` and its own marker. See memory `project_profile_switcher_issue47`.
 
 ### IdentityData
 

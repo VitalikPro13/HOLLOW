@@ -81,9 +81,11 @@ Type: files; Name: "{app}\shoes.exe"
 
 [Files]
 ; Bundle the signed Release folder (exe, dlls, data/, etc.).
-; Exclude build/link artifacts and any local debug log that must NOT ship to users.
+; Exclude build/link artifacts and any local debug log that must NOT ship to users,
+; and any profile data or portable marker: one moves every install onto it (#155).
+; build_release.ps1 refuses a Release folder holding them before this runs.
 Source: "{#SourceDir}\*"; DestDir: "{app}"; \
-    Excludes: "*.lib,*.exp,*.pdb,hollow_debug.log,hollow_crash.log,*.log"; \
+    Excludes: "*.lib,*.exp,*.pdb,hollow_debug.log,hollow_crash.log,*.log,\hollow_data\,\hollow_data\*,*.db,*.db-wal,*.db-shm,hollow.lock,identity.*,portable,portable.txt,portable.txt.txt"; \
     Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Registry]
@@ -148,12 +150,13 @@ begin
     DataDir := ExpandConstant('{userappdata}\Hollow');
     if DirExists(DataDir) then
     begin
-      { Default is "No" — never delete identity/messages by accident. }
-      if MsgBox('Do you also want to permanently delete your Hollow data and identity?' #13#10 #13#10
+      { Default is "No" — never delete identity/messages by accident. A plain MsgBox
+        ignores /SUPPRESSMSGBOXES and hung every silent uninstall here. }
+      if SuppressibleMsgBox('Do you also want to permanently delete your Hollow data and identity?' #13#10 #13#10
                 + 'This removes your account key, messages, and all local data in:' #13#10
                 + DataDir + #13#10 #13#10
                 + 'This CANNOT be undone. Choose No to keep your data for a future reinstall.',
-                mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES then
+                mbConfirmation, MB_YESNO or MB_DEFBUTTON2, IDNO) = IDYES then
       begin
         DelTree(DataDir, True, True, True);
       end;

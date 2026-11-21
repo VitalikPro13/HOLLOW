@@ -170,6 +170,7 @@ import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:hollow/src/ui/components/wallpaper_backdrop.dart';
 
 const _kDesktopBreakpoint = 1024.0;
+const _kDefaultProfileNoteKey = 'default_profile_note_shown';
 const _kTabletBreakpoint = 600.0;
 
 /// Main application shell.
@@ -683,9 +684,33 @@ class _HollowShellState extends ConsumerState<HollowShell>
       if (!setUpThisLaunch) await _offerKeychainLock();
       await _finishKeychainRekey();
       await _restoreOffers.atStart(countedAtStart: counted);
+      await _noteDefaultProfileLeftBehind();
     } finally {
       done.complete();
     }
+  }
+
+  /// #155: this copy runs on the folder beside the app while the person's earlier
+  /// identity sits in the Default profile. Said once per profile, never above the
+  /// app lock's cover.
+  Future<void> _noteDefaultProfileLeftBehind() async {
+    await _untilUnlocked();
+    if (!mounted || defaultProfileLeftBehind() == null) return;
+    final shown = await storage_api
+        .loadSetting(key: _kDefaultProfileNoteKey)
+        .catchError((_) => null);
+    if (shown != null || !mounted) return;
+    await storage_api
+        .saveSetting(key: _kDefaultProfileNoteKey, value: '1')
+        .catchError((_) {});
+    if (!mounted) return;
+    network_api
+        .logFromDart(message: '[PORTABLE] the Default profile holds another identity; told the person once')
+        .catchError((_) {});
+    await showHollowDialog<void>(
+      context: context,
+      builder: (_) => const DefaultProfileNoteDialog(),
+    );
   }
 
   /// An identity made before Welcome asked for the Terms agrees once, never

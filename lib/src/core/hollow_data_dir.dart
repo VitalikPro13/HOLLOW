@@ -7,6 +7,7 @@ String? _cached;
 bool _portable = false;
 bool _pinned = false;
 bool _forcedPortable = false;
+bool _portableByDetection = false;
 
 /// True when the app is running in portable mode: a `portable.txt` marker (or
 /// an already-created `hollow_data` folder) next to the executable moved the
@@ -85,14 +86,12 @@ String? _portableDataRoot(bool forced) {
     }
     if (dataDir.existsSync()) {
       // A bare folder only auto-activates portable when it actually CONTAINS
-      // identity data. A fresh/empty hollow_data next to the exe must NOT hijack
+      // an identity. A fresh/empty hollow_data next to the exe must NOT hijack
       // the default profile (issue #47); it shows as a row in Settings > Profile.
-      const identityMarkers = ['identity.key', 'identity.device', 'messages.db'];
-      final hasData = identityMarkers
-          .any((m) => File('${dataDir.path}$sep$m').existsSync());
-      if (hasData) {
+      if (portableFolderHoldsIdentity(dataDir.path)) {
         portableDetectionNote =
             'existing hollow_data folder with identity data → ${dataDir.path}';
+        _portableByDetection = true;
         return dataDir.path;
       }
       portableDetectionNote =
@@ -106,6 +105,26 @@ String? _portableDataRoot(bool forced) {
     portableDetectionNote = 'detection failed: $e — normal install';
   }
   return null;
+}
+
+/// Whether a `hollow_data` folder beside the exe holds an identity of its own.
+/// A database alone is not one: releases 0.12.1 to 0.14.1 shipped a stray
+/// `hollow_data/messages.db`, and counting it moved every updated copy off the
+/// person's profile onto an empty one (#155).
+bool portableFolderHoldsIdentity(String dir) {
+  final sep = Platform.pathSeparator;
+  return const ['identity.key', 'identity.device']
+      .any((m) => File('$dir$sep$m').existsSync());
+}
+
+/// The OS default profile, when it holds an identity and this launch went to the
+/// folder beside the exe only because that folder holds one too (no flag, marker
+/// or pin chose it). An update of 0.14.1 or older could move a copy there (#155).
+String? defaultProfileLeftBehind() {
+  if (!_portableByDetection) return null;
+  final root = defaultDesktopDataRoot();
+  if (sameProfilePath(root, hollowDataDir)) return null;
+  return profileHasIdentity(root) ? root : null;
 }
 
 /// Must be called once at startup (after WidgetsFlutterBinding.ensureInitialized).
@@ -254,8 +273,10 @@ String nextLaunchRoot() {
   final pin = readProfileRegistrySync().activePath;
   if (pin != null) return pin;
   final bootNote = portableDetectionNote;
+  final bootDetected = _portableByDetection;
   final detected = _portableDataRoot(false);
   portableDetectionNote = bootNote;
+  _portableByDetection = bootDetected;
   return detected ?? defaultDesktopDataRoot();
 }
 

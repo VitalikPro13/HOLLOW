@@ -603,3 +603,28 @@ class DiagnosticsDialog extends StatelessWidget {
     );
   }
 }
+
+/// Said once when this copy runs on the folder beside the app while the person's
+/// earlier identity sits in the Default profile (#155: an update of 0.14.1 or
+/// older could move a copy there).
+class DefaultProfileNoteDialog extends StatelessWidget {
+  const DefaultProfileNoteDialog({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return HollowDialog(
+      title: 'Your other identity is still here',
+      content: const HollowDialogText(
+          'Hollow is using the profile in the folder next to the app. The '
+          'identity you had before is still on this computer, in the Default '
+          'profile. To go back to it, open Settings, then Files & storage, and '
+          'switch to Default.'),
+      actions: [
+        HollowButton.filled(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('OK'),
+        ),
+      ],
+    );
+  }
+}

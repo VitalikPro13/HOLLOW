@@ -35,6 +35,9 @@
 .PARAMETER SkipBuild
     Skip 'flutter build windows' (use the existing Release folder as-is).
 
+.PARAMETER SkipSign
+    Skip both signing steps (an unsigned candidate build for testing; never a release).
+
 .PARAMETER SkipInstaller
     Skip Inno Setup + installer signing (produce only the signed ZIP).
 
@@ -65,6 +68,7 @@
 param(
     [string]$Version,
     [switch]$SkipBuild,
+    [switch]$SkipSign,
     [switch]$SkipInstaller,
     [switch]$SkipZip,
     [switch]$SkipAndroid,
@@ -148,9 +152,16 @@ if (-not $SkipBuild) {
 
 if (-not (Test-Path $releaseDir)) { throw "Release folder not found: $releaseDir" }
 
+# Profile data or a portable marker in the Release folder ships to every user and
+# moves their copy onto it (#155). Checked before anything is signed or packed.
+. (Join-Path $PSScriptRoot 'release_payload_guard.ps1')
+Assert-ReleasePayloadClean $releaseDir
+
 # --- 2. Sign payload binaries ---
-Step 2 'Sign Release binaries'
-& (Join-Path $PSScriptRoot 'sign_release.ps1') -Path $releaseDir
+if (-not $SkipSign) {
+    Step 2 'Sign Release binaries'
+    & (Join-Path $PSScriptRoot 'sign_release.ps1') -Path $releaseDir
+} else { Step 2 'Sign Release binaries (SKIPPED: unsigned candidate, never a release)' }
 
 # --- 3 + 4. Installer ---
 $setupExe = $null
@@ -175,8 +186,10 @@ if (-not $SkipInstaller) {
     $setupExe = Join-Path $repo "installer\Output\hollow-$Version-win64-setup.exe"
     if (-not (Test-Path $setupExe)) { throw "Expected installer not produced: $setupExe" }
 
-    Step 4 'Sign installer'
-    & (Join-Path $PSScriptRoot 'sign_file.ps1') -File $setupExe
+    if (-not $SkipSign) {
+        Step 4 'Sign installer'
+        & (Join-Path $PSScriptRoot 'sign_file.ps1') -File $setupExe
+    } else { Step 4 'Sign installer (SKIPPED)' }
 } else { Step '3-4' 'Installer (SKIPPED)' }
 
 # --- 5. Portable ZIP ---
