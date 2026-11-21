@@ -870,7 +870,7 @@ mod phrase_restore_tests {
     #[test]
     fn a_restore_never_keeps_a_device_its_roster_does_not_count() {
         let r = root();
-        let (phrase, master, old) = ran_once(&r);
+        let (phrase, _, old) = ran_once(&r);
         let stranger = NativeKeypair::from_secret_bytes(&[0x71; 32]);
         fs::write(r.path().join("identity.device"), stranger.to_protobuf_encoding().unwrap()).unwrap();
         crate::api::wipe::zero_and_remove(&r.path().join("identity.key"));

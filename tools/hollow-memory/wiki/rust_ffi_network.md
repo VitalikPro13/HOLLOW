@@ -179,7 +179,7 @@ This is a synchronous blocking send from the FFI thread into the async event loo
 
 ## revoke_device(device_peer_id, lost_since_ms, with_dependents) (0.14)
 
-Removes one of OUR OWN devices: `lost_since_ms` None = retired (keeps what it did); Some = lost or stolen (keeps only what predates that moment). `with_dependents` also removes the devices only it placed; those linked after the moment go regardless. Refused for the running device or an id that is not ours. The removal moves the join lock of every server of the identity (`relay_uws_server` "Join lock chains").
+Removes one of OUR OWN devices: `lost_since_ms` None = retired (keeps what it did); Some = lost or stolen (keeps only what predates that moment). `with_dependents` also removes the devices only it placed; those linked after the moment go regardless. Refused for the running device or an id that is not ours. The removal moves the join lock of every server of the identity (`relay_uws_server` "Join lock chains"). Trap (HOL-SEC-216, 0.14.3): a lost removal settles a server only from records this device holds from before that moment (`restore_flow::held_before`); a server it first held later gets no settling or retire from it, and one we own goes to the members' witnesses through a `lost_restore:{sid}` row that survives a restart (`security_write_gates` §80).
 
 ## set_license_key()
 

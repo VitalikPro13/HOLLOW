@@ -337,7 +337,7 @@ a phone closes):
 FRB codegen: yes (R1, R2, R4, R5, S218, D3b). No new crate. No relay, no KAT, no wire variant.
 Persisted: `app_settings` keys `welcome_restore`, `lost_restore:{server}`; root files
 `set_aside.pending`, `set_aside_welcome`; `Origin.set_aside` with `#[serde(default)]`.
-Gate row: wiki `security_write_gates` new section 78 (the restore's store writes, the
+Gate row: wiki `security_write_gates` new section 80 (the restore's store writes, the
 `welcome_restore` mark and its `recovering()` reach, `lost_restore` rows, the set-aside move,
 the 215 alert).
 

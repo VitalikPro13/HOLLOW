@@ -759,12 +759,12 @@ Keypair stored at `{data_dir}/identity.key`.
 
 ### IdentityData
 
-Struct returned by all identity functions: `{ keypair: NativeKeypair, peer_id: String, mnemonic: Option<String> }`. Mnemonic is only `Some` on generation/restore, `None` on load (one-time backup).
+Struct returned by all identity functions: `{ keypair: NativeKeypair, peer_id: String, mnemonic: Option<String> }`. Mnemonic is only `Some` on generation (one-time backup), `None` on load and on every phrase restore (0.14.3).
 
 ### Identity Lifecycle
 
 - `keys.rs:generate_new_identity()` -- Generates 32 bytes of entropy via `getrandom`, creates 24-word BIP-39 mnemonic (256 bits), derives keypair, saves to disk (encrypted if session key active). Returns IdentityData with mnemonic.
-- `keys.rs:restore_identity_from_mnemonic(phrase)` -- Parses mnemonic phrase, derives keypair, saves to disk. Returns IdentityData with mnemonic.
+- `keys.rs:restore_with_phrase(mnemonic, how, welcome)` -- The ONE phrase restore (Welcome and in-app; `restore_identity_from_mnemonic` wraps it). Lands the master key, keeps the device already here when it may (HOL-SEC-217) or mints one after `forget_device_secrets`, signs the admission or recovery into the database (not a bootstrap file), writes `identity.device` last. Returns no mnemonic. See `rust_ffi_share_identity` and `security_write_gates` §80.
 - `keys.rs:load_or_create_identity()` -- Checks if `identity.key` exists. If yes: detects format (plaintext protobuf or HKEYV1 encrypted), decrypts via session key if encrypted, returns without mnemonic. If no: calls `generate_new_identity()`.
 - `keys.rs:save_keypair(keypair)` -- Internal helper. Encodes keypair to protobuf. If session wrapping key is active, re-encrypts as HKEYV1 envelope preserving current flags. Otherwise writes plaintext.
 

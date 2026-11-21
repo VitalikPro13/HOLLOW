@@ -100,7 +100,15 @@ Force-generates a fresh identity, replacing any existing one. Same flow as the c
 
 ### `restore_identity_from_mnemonic(phrase: String) -> Result<IdentityInfo, String>`
 
-Restores a keypair from a 24-word mnemonic. Parses the phrase via `Mnemonic::parse()`, derives the keypair, overwrites `identity.key` on disk. Returns peer_id and the mnemonic back. Used for account recovery, multi-device sync, and password recovery.
+The in-app phrase restores (key missing, identity locked, hardware key gone). Same path as `welcome_restore`'s No branch without the kept-data check, the mark or the keychain default: `identity::keys::restore_with_phrase(.., Admit, false)`. Returns NO mnemonic (0.14.3). Errors are the approved copy ("A recovery phrase is 24 words. This one has {n}." and the word and checksum lines).
+
+### `welcome_restore(phrase, mode: WelcomeRestoreMode, check_kept) -> Result<RestoreOutcome, String>` (0.14.3, #155)
+
+Welcome's "Use your recovery phrase". `Admit` (No: nobody else has the old device) or `Recover { lost_since_ms }` (Yes, or not sure). Order: `parse_phrase` (exactly 24 English words, lowercased, single-spaced; errors `phrase_words:{n}`, `phrase_word:{i}` from 1, `phrase_checksum`, which Dart maps to its copy) -> `finish_wipe_before_a_new_identity` -> `refuse_while_not_ready` -> with `check_kept`, the read-only kept-folder probe (`KeptMatch { path, profile_name: None }` / `KeptNoneOpens`, nothing lands) -> a gone identity's `identity.duress` zeroed -> `land_identity_key` -> open the store, held roster = stored merged with an unimported bootstrap -> KEEP the device already there (Admit only: decodes, not the master, counted, MLS credential names it) or MINT (after `forget_device_secrets`) -> sign through `api::roster::sign_restore` (`admit_by_phrase` / `recover`, dated by `phrase_time`; Yes on an empty install signs `no_wait`) -> `welcome_restore` mark when minted -> `identity.device` last -> the keychain default inside (`Restored { locked_to_keychain }`; skipped while a `.locked` pair exists). Trap: Dart never calls `protect_new_identity_by_default` on this path. Rules: wiki `security_write_gates` §80.
+
+### Phrase-restore companions (0.14.3)
+
+`api::roster::welcome_restore_state()` (the Home card: `{at_ms, branch, empty, no_wait}`, `None` unless THIS device was minted by a Welcome restore within 30 days); `may_set_aside_this_identity()` / `set_aside_this_identity()` (the typo retry: only while no friend accepted and no server holds us; writes `set_aside.pending` = `{digest, relay}`, the move runs in `settle_relink` at the next launch); `api::recovery::set_aside_welcome()` (`Option<SetAsideWelcome { relay }>`, the relay the set-aside identity used) and `clear_set_aside_welcome()`; `RosterStatus.too_early` (`"admit"`/`"recover"`, from this device's own last phrase statement a later base outdated), `too_early_lost_since_ms`, `dropped_by_recovery_at_ms` (a device that counted once, left out by a recovery typed elsewhere).
 
 ### `unlock_identity(password: Option<String>) -> Result<IdentityInfo, String>`
 

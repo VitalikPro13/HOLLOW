@@ -72376,7 +72376,7 @@ async fn pr218_a_restore_on_a_clock_behind_asks_for_the_phrase_again_and_then_co
     let (a_master, b_master) = (tag_kp(a).peer_id(), tag_kp(b_tag).peer_id());
     let ahead = super::roster_book::now_ms() + 5 * 60 * 1000;
     let mut r = super::roster_book::load(&b.store(), &a_master).expect("B holds A's roster");
-    r.add_phrase_statement(&roster::r_pub_of(&recovery_kp(a)), Some(roster::sign_recovery(&tag_kp(a), &recovery_kp(a), ahead, &[a1.device_id.clone()], false)), None)
+    r.add_phrase_statement(&roster::r_pub_of(&recovery_kp(a)), Some(roster::sign_recovery(&tag_kp(a), &recovery_kp(a), ahead, std::slice::from_ref(&a1.device_id), false)), None)
         .expect("a recovery dated ahead");
     for n in [&a1, &b] {
         super::roster_book::merge_for_test(&n.store(), &r, &n.master_id, &n.device_id);

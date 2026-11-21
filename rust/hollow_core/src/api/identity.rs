@@ -149,7 +149,12 @@ pub fn welcome_restore(phrase: String, mode: WelcomeRestoreMode, check_kept: boo
         WelcomeRestoreMode::Admit => identity::keys::PhraseRestore::Admit,
         WelcomeRestoreMode::Recover { lost_since_ms } => identity::keys::PhraseRestore::Recover { lost_since_ms: lost_since_ms.max(0) },
     };
-    identity::keys::restore_with_phrase(&mnemonic, how, true)?;
+    let restored = identity::keys::restore_with_phrase(&mnemonic, how, true)?;
+    hollow_log!(
+        "[HOLLOW-ID] Restored from the recovery phrase on Welcome: {}, {}",
+        if restored.kept_device { "kept the device here" } else { "a new device" },
+        if restored.empty { "no roster held" } else { "beside a held roster" },
+    );
     forget_missed_tries();
     Ok(RestoreOutcome::Restored { locked_to_keychain: keychain_default_after_restore(&root, &phrase) })
 }
@@ -199,8 +204,6 @@ pub fn set_aside_this_identity() -> Result<(), String> {
     crate::api::storage::refuse_while_not_ready()?;
     crate::api::recovery::mark_set_aside_at(&root, relay)
 }
-
-pub(crate) const NOT_BUILT: &str = "Not built yet";
 
 /// A new identity or a new lock starts its own count of missed tries.
 fn forget_missed_tries() {
