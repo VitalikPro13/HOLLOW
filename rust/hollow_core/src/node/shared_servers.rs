@@ -154,15 +154,26 @@ pub(crate) fn answer<'a>(
     Some(frames(entries(states, &master, &relay)))
 }
 
-/// Whether this device typed our identity's newest phrase recovery within the window: its
-/// T is recorded here. A device that held servers before the recovery qualifies too.
-pub(crate) fn recovering(local_master: &str, db_path: &str, db_passphrase: &str) -> bool {
-    let Some(roster) = super::roster_book::own_roster(local_master, db_path, db_passphrase) else { return false };
-    let Some(at) = roster.recoveries.iter().map(|r| r.at_ms).max() else { return false };
-    let recent = super::types::now_ms().saturating_sub(at) < RECOVERY_WINDOW_MS;
-    recent
-        && MessageStore::lease(db_path, db_passphrase)
-            .is_ok_and(|s| super::roster_book::recovery_lost_since(&s, &roster.base()).is_some())
+/// Whether this device asks friends for the servers we share: it typed our identity's
+/// newest phrase recovery within the window (its T is recorded here; a device that held
+/// servers before the recovery qualifies too), or a Welcome phrase admission put it into
+/// an empty database within the window and our roster still counts it (PHRASE_RESTORE
+/// 3, R2). A removal never drops the admission statement, so membership decides.
+pub(crate) fn recovering(local_master: &str, local_device: &str, db_path: &str, db_passphrase: &str) -> bool {
+    MessageStore::lease(db_path, db_passphrase).is_ok_and(|s| recovering_in(&s, local_master, local_device, super::types::now_ms()))
+}
+
+pub(crate) fn recovering_in(store: &MessageStore, local_master: &str, local_device: &str, now_ms: i64) -> bool {
+    let Some(roster) = super::roster_book::load(store, local_master) else { return false };
+    let recovered = roster.recoveries.iter().map(|r| r.at_ms).max().is_some_and(|at| {
+        now_ms.saturating_sub(at) < RECOVERY_WINDOW_MS && super::roster_book::recovery_lost_since(store, &roster.base()).is_some()
+    });
+    recovered
+        || super::phrase_restore::current(store, local_device, now_ms).is_some_and(|m| {
+            m.branch == super::phrase_restore::Branch::Admit
+                && m.empty
+                && super::roster_book::fold(store, &roster).is_member(local_device)
+        })
 }
 
 /// The longest relay domain an entry may name.
@@ -414,6 +425,7 @@ pub(crate) fn ask_if_recovering(
     room: Option<&str>,
     peer: &str,
     local_master: &str,
+    local_device: &str,
     db_path: &str,
     db_passphrase: &str,
 ) {
@@ -423,7 +435,7 @@ pub(crate) fn ask_if_recovering(
     }
     let Ok(store) = MessageStore::lease(db_path, db_passphrase) else { return };
     let accepted = store.get_friend_row(&master).ok().flatten().is_some_and(|(status, ..)| status == "accepted");
-    if !accepted || !recovering(local_master, db_path, db_passphrase) || !asks.may_ask(peer, Instant::now()) {
+    if !accepted || !recovering(local_master, local_device, db_path, db_passphrase) || !asks.may_ask(peer, Instant::now()) {
         return;
     }
     hollow_log!("[HOLLOW-SERVER] Asking {peer} which servers we share");

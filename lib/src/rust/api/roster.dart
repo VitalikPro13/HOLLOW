@@ -6,10 +6,12 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `changed`, `ctx`, `delegation_from`, `destroy_order`, `destroy_permission`, `erase_stored_phrase`, `stored_phrase`
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Ctx`
+// These functions are ignored because they are not marked as `pub`: `changed`, `ctx`, `delegation_from`, `destroy_order`, `destroy_permission`, `erase_stored_phrase`, `sign_restore`, `stored_phrase`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Ctx`, `RestoreSign`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `clone`, `eq`, `fmt`
 
-/// The Home card's state, `None` when no Welcome restore minted THIS device.
+/// The Home card's state, `None` when no Welcome restore minted THIS device or its 30
+/// days are over.
 Future<WelcomeRestoreState?> welcomeRestoreState() =>
     RustLib.instance.api.crateApiRosterWelcomeRestoreState();
 

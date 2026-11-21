@@ -1833,7 +1833,7 @@ async fn run_event_loop(
                             &db_path, &db_passphrase,
                         ).await;
                         if pending_server_joins.contains_key(&sid)
-                            && super::shared_servers::recovering(&local_peer_str, &db_path, &db_passphrase)
+                            && super::shared_servers::recovering(&local_peer_str, &device_peer_id, &db_path, &db_passphrase)
                         {
                             crdt_resync.room_notices.start(&sid, std::time::Instant::now());
                         }
@@ -4305,7 +4305,7 @@ async fn run_event_loop(
                         );
                         if arrived_here && peer_id != device_peer_id {
                             super::shared_servers::ask_if_recovering(
-                                &ws_cmd_tx, &mut crdt_resync.shared_asks, Some(&room), &peer_id, &local_peer_str, &db_path, &db_passphrase,
+                                &ws_cmd_tx, &mut crdt_resync.shared_asks, Some(&room), &peer_id, &local_peer_str, &device_peer_id, &db_path, &db_passphrase,
                             );
                         }
 
@@ -4934,7 +4934,7 @@ async fn run_event_loop(
                         };
                         for peer in &arrived {
                             super::shared_servers::ask_if_recovering(
-                                &ws_cmd_tx, &mut crdt_resync.shared_asks, Some(&room), peer, &local_peer_str, &db_path, &db_passphrase,
+                                &ws_cmd_tx, &mut crdt_resync.shared_asks, Some(&room), peer, &local_peer_str, &device_peer_id, &db_path, &db_passphrase,
                             );
                         }
                         // Our own first listing of our inbox on this session, not a resume's.
@@ -14977,7 +14977,7 @@ async fn handle_incoming_request_inner(
 
             hollow_log!("[HOLLOW-FRIENDS] Friend accepted by {peer_str}");
             super::shared_servers::ask_if_recovering(
-                ws_cmd_tx, &mut crdt_resync.shared_asks, None, peer_str, master_peer_str, db_path, db_passphrase,
+                ws_cmd_tx, &mut crdt_resync.shared_asks, None, peer_str, master_peer_str, device_peer_id, db_path, db_passphrase,
             );
 
             // Register DM room code with signaling. Use the MASTER so both sides compute
@@ -16861,7 +16861,7 @@ async fn handle_incoming_request_inner(
                 hollow_log!("[HOLLOW-SECURITY] Dropped a shared-servers answer from {peer_str} that answers no ask of ours");
                 return;
             }
-            if !super::shared_servers::recovering(master_peer_str, db_path, db_passphrase) {
+            if !super::shared_servers::recovering(master_peer_str, device_peer_id, db_path, db_passphrase) {
                 return;
             }
             let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) else { return };

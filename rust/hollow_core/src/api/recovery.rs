@@ -43,6 +43,12 @@ const SET_ASIDE_FILE: &str = "messages.db.unreadable-";
 const RELINK_JOURNAL: &str = "relink.json";
 const RELINK_ORIGIN: &str = "relink_origin.json";
 const RELINK_WELCOME: &str = "relink_welcome";
+/// "Type my phrase again": the SHA-256 of the identity key to set aside at the next launch.
+const SET_ASIDE_MARK: &str = "set_aside.pending";
+/// Welcome's note that an identity was set aside, as `RELINK_WELCOME` is a relink's.
+const SET_ASIDE_WELCOME: &str = "set_aside_welcome";
+/// Kept folders a phrase is probed against, newest names last.
+const KEPT_PROBE_MAX: usize = 16;
 const WIPE_MARKER: &str = "pending_wipe.marker";
 /// Device-level files: the logs say what happened to this device, whatever it holds.
 const LOGS: [&str; 4] = ["hollow_debug.log", "hollow_crash.log", "hollow_crash.log.old", "push_debug.log"];
@@ -72,6 +78,8 @@ fn stays_on_relink(name: &str) -> bool {
         || name == "push_lines.json"
         || name == RELINK_JOURNAL
         || name == RELINK_WELCOME
+        || name == SET_ASIDE_MARK
+        || name == SET_ASIDE_WELCOME
         || name == RELINK_ORIGIN
         || name == WIPE_MARKER
 }
@@ -472,6 +480,10 @@ struct Journal {
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Origin {
     root: String,
+    /// Moved by "Type my phrase again" (a mistyped phrase's identity), not a relink: it
+    /// never raises the typo warning, and Welcome says so instead.
+    #[serde(default)]
+    set_aside: bool,
 }
 
 /// Paths compared the way the profile registry compares them.
@@ -546,6 +558,10 @@ fn kept_key_in_place(root: &Path, target: &Path) -> bool {
 /// `<root>-old-<day>`, marked with where it came from, the database first and the
 /// identity last. Returns that folder. A failure moves everything back.
 pub(crate) fn relink_at(root: &Path, now: i64) -> Result<PathBuf, String> {
+    move_identity_aside(root, now, false)
+}
+
+fn move_identity_aside(root: &Path, now: i64, set_aside: bool) -> Result<PathBuf, String> {
     if not_ready(root) {
         return Err(IDENTITY_NOT_READY.to_string());
     }
@@ -556,7 +572,7 @@ pub(crate) fn relink_at(root: &Path, now: i64) -> Result<PathBuf, String> {
     let names = ordered(root, |n| !stays_on_relink(n), is_key_file)?;
 
     std::fs::create_dir(&target).map_err(|e| format!("Failed to make the folder for the old data: {e}"))?;
-    let origin = serde_json::to_vec(&Origin { root: root.to_string_lossy().into_owned() }).map_err(|e| e.to_string())?;
+    let origin = serde_json::to_vec(&Origin { root: root.to_string_lossy().into_owned(), set_aside }).map_err(|e| e.to_string())?;
     let journal = serde_json::to_vec(&Journal { target: target.to_string_lossy().into_owned() }).map_err(|e| e.to_string())?;
     let undo = |target: &Path| {
         crate::identity::platform_keystore::forget_key_proven(target, false);
@@ -591,7 +607,8 @@ pub(crate) fn relink_at(root: &Path, now: i64) -> Result<PathBuf, String> {
         }
         return Err(HELD.to_string());
     }
-    let _ = std::fs::write(root.join(RELINK_WELCOME), target.to_string_lossy().as_bytes());
+    let welcome = if set_aside { SET_ASIDE_WELCOME } else { RELINK_WELCOME };
+    let _ = std::fs::write(root.join(welcome), target.to_string_lossy().as_bytes());
     // The commit point: from here a start-up sees a finished relink.
     let _ = std::fs::remove_file(root.join(RELINK_JOURNAL));
     hollow_log!("[HOLLOW-REPAIR] Moved {} entr(ies) aside to link this device again", names.len());
@@ -625,8 +642,9 @@ pub(crate) fn settle_relink_at(root: &Path) {
             hollow_log!("[HOLLOW-REPAIR] The old data's keychain key did not keep; the relink finishes at a later start");
             return;
         }
-        if !present(&root.join(RELINK_WELCOME)) {
-            let _ = std::fs::write(root.join(RELINK_WELCOME), journal.target.as_bytes());
+        let welcome = if origin_of(&target).is_some_and(|o| o.set_aside) { SET_ASIDE_WELCOME } else { RELINK_WELCOME };
+        if !present(&root.join(welcome)) {
+            let _ = std::fs::write(root.join(welcome), journal.target.as_bytes());
         }
         hollow_log!("[HOLLOW-REPAIR] Finished a relink a restart cut short");
     } else {
@@ -666,11 +684,85 @@ pub(crate) fn settle_relink_at(root: &Path) {
     let _ = std::fs::remove_file(root.join(RELINK_JOURNAL));
 }
 
-/// At launch, before anything reads the identity.
+/// At launch, before anything reads the identity: a relink cut short, then a set-aside
+/// the last run asked for.
 #[frb]
 pub fn settle_relink() -> Result<(), String> {
-    settle_relink_at(&crate::identity::data_dir()?);
+    let root = crate::identity::data_dir()?;
+    settle_relink_at(&root);
+    settle_set_aside_at(&root, now_ms());
     Ok(())
+}
+
+fn origin_of(dir: &Path) -> Option<Origin> {
+    serde_json::from_slice(&std::fs::read(dir.join(RELINK_ORIGIN)).ok()?).ok()
+}
+
+fn set_aside_digest(root: &Path) -> Option<[u8; 32]> {
+    use sha2::{Digest, Sha256};
+    let key = zeroize::Zeroizing::new(std::fs::read(root.join("identity.key")).ok()?);
+    let mut h = Sha256::new();
+    h.update(b"hollow-set-aside1");
+    h.update(key.as_slice());
+    Some(h.finalize().into())
+}
+
+/// "Type my phrase again" (PHRASE_RESTORE_DESIGN 6.2): marks the identity in `root` to be
+/// set aside at the next launch, bound to its key so a mark left behind moves nothing.
+/// Nothing moves while this process holds the identity open.
+pub(crate) fn mark_set_aside_at(root: &Path) -> Result<(), String> {
+    let digest = set_aside_digest(root).ok_or(IDENTITY_NOT_READY)?;
+    write_synced(&root.join(SET_ASIDE_MARK), &digest).map_err(|e| format!("Failed to mark the identity to set aside: {e}"))
+}
+
+/// At launch: moves a marked identity whole into a `<root>-old-<day>` folder marked as
+/// set aside, as a relink does, so nothing of it is erased. A mark for another key is
+/// dropped; one met while a wipe or another step is unfinished waits for a later start.
+pub(crate) fn settle_set_aside_at(root: &Path, now: i64) {
+    use subtle::ConstantTimeEq;
+    let mark = root.join(SET_ASIDE_MARK);
+    let Ok(marked) = std::fs::read(&mark) else { return };
+    let ours = set_aside_digest(root).is_some_and(|d| marked.len() == d.len() && bool::from(d.ct_eq(marked.as_slice())));
+    if !ours {
+        hollow_log!("[HOLLOW-REPAIR] A set-aside mark names another identity key; nothing moved");
+        let _ = std::fs::remove_file(&mark);
+        return;
+    }
+    if not_ready(root) {
+        return;
+    }
+    match move_identity_aside(root, now, true) {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&mark);
+            hollow_log!("[HOLLOW-REPAIR] Set the identity aside; this profile starts at Welcome");
+        }
+        Err(e) => hollow_log!("[HOLLOW-REPAIR] The identity could not be set aside yet: {e}"),
+    }
+}
+
+/// What old data kept beside a profile says about a typed phrase (6.1).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum KeptCheck {
+    /// This kept folder's database opens with the phrase's key.
+    Match(PathBuf),
+    /// Kept identities are here and none opens: likely a typo.
+    NoneOpens,
+    /// Nothing kept speaks either way.
+    Clear,
+}
+
+/// Probes the databases kept aside from `root` with `db_key`, read-only, never creating
+/// or changing anything. A folder set aside by "Type my phrase again" never warns.
+pub(crate) fn check_kept_at(root: &Path, db_key: &str) -> KeptCheck {
+    let mut kept = kept_aside(root);
+    kept.sort();
+    for dir in kept.iter().filter(|d| present(&d.join("messages.db"))).take(KEPT_PROBE_MAX) {
+        if probe(&dir.join("messages.db"), db_key, true) == Probe::Opens {
+            return KeptCheck::Match(dir.clone());
+        }
+    }
+    let typo = kept.iter().any(|d| present(&d.join("identity.key")) && !origin_of(d).is_some_and(|o| o.set_aside));
+    if typo { KeptCheck::NoneOpens } else { KeptCheck::Clear }
 }
 
 /// The kept folder of a relink this profile has not shown Welcome for yet.
@@ -692,13 +784,18 @@ pub fn clear_relink_welcome() -> Result<(), String> {
 /// Welcome opens on the phrase step with its line. `settle_relink` makes the move.
 #[frb]
 pub fn set_aside_welcome() -> Result<bool, String> {
-    Err(crate::api::identity::NOT_BUILT.into())
+    Ok(set_aside_welcome_at(&crate::identity::data_dir()?))
+}
+
+fn set_aside_welcome_at(root: &Path) -> bool {
+    present(&root.join(SET_ASIDE_WELCOME))
 }
 
 /// Welcome has said the identity was set aside.
 #[frb]
 pub fn clear_set_aside_welcome() -> Result<(), String> {
-    Err(crate::api::identity::NOT_BUILT.into())
+    let _ = std::fs::remove_file(crate::identity::data_dir()?.join(SET_ASIDE_WELCOME));
+    Ok(())
 }
 
 /// Whether `name` is `{base}-old-YYYY-MM-DD` or that with `-<n>`.
@@ -1512,6 +1609,146 @@ mod tests {
         v
     }
 
+    /// A folder kept aside from `root` holding identity `seed` and a database saying `who`.
+    fn kept_from_root(root: &Path, day: &str, seed: u8, who: &str, set_aside: bool) -> PathBuf {
+        let dir = root.with_file_name(format!("{}-old-{day}", root.file_name().unwrap().to_string_lossy()));
+        root_with(&dir, seed, seed, who);
+        let origin = serde_json::to_vec(&Origin { root: root.to_string_lossy().into(), set_aside }).unwrap();
+        put(&dir.join(RELINK_ORIGIN), &origin);
+        dir
+    }
+
+    /// Every file under `dir`, names and bytes, as one digest.
+    fn tree_digest(dir: &Path) -> Vec<u8> {
+        use sha2::{Digest, Sha256};
+        let mut files = Vec::new();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d).unwrap().flatten() {
+                if e.file_type().unwrap().is_dir() {
+                    stack.push(e.path());
+                } else {
+                    files.push(e.path());
+                }
+            }
+        }
+        files.sort();
+        let mut h = Sha256::new();
+        for f in files {
+            h.update(f.to_string_lossy().as_bytes());
+            h.update(std::fs::read(&f).unwrap());
+        }
+        h.finalize().to_vec()
+    }
+
+    /// 6.1: the phrase's database key opens only this root's own kept folder; a folder
+    /// of the same name pattern kept from another root never answers.
+    #[test]
+    fn kept_data_check_finds_only_this_identitys_folder() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let root = tmp.path().join("data");
+        std::fs::create_dir_all(&root).unwrap();
+        kept_from_root(&root, "2025-10-01", 0x50, "older", false);
+        let ours = kept_from_root(&root, "2025-10-02", 0x51, "ours", false);
+        let foreign = root.with_file_name("data-old-2025-10-03");
+        root_with(&foreign, 0x53, 0x53, "foreign");
+        put(&foreign.join(RELINK_ORIGIN), &serde_json::to_vec(&Origin { root: "/elsewhere/other".into(), set_aside: false }).unwrap());
+
+        assert_eq!(check_kept_at(&root, &pass_of(0x51)), KeptCheck::Match(ours));
+        assert_eq!(check_kept_at(&root, &pass_of(0x53)), KeptCheck::NoneOpens, "another root's folder answered");
+    }
+
+    #[test]
+    fn kept_data_check_never_changes_a_kept_folder() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let root = tmp.path().join("data");
+        std::fs::create_dir_all(&root).unwrap();
+        let dir = kept_from_root(&root, "2025-10-01", 0x54, "kept", false);
+        let before = tree_digest(&dir);
+        assert!(matches!(check_kept_at(&root, &pass_of(0x54)), KeptCheck::Match(_)));
+        assert_eq!(check_kept_at(&root, &pass_of(0x55)), KeptCheck::NoneOpens);
+        assert_eq!(tree_digest(&dir), before, "the check changed a kept folder");
+    }
+
+    /// A kept identity no typed phrase opens warns of a typo; a folder "Type my phrase
+    /// again" set aside is a known typo and never warns.
+    #[test]
+    fn kept_data_that_does_not_open_warns_and_a_set_aside_folder_never_does() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let root = tmp.path().join("data");
+        std::fs::create_dir_all(&root).unwrap();
+        assert_eq!(check_kept_at(&root, &pass_of(0x56)), KeptCheck::Clear, "nothing kept");
+        let typo = kept_from_root(&root, "2025-10-01", 0x57, "typo", true);
+        assert_eq!(check_kept_at(&root, &pass_of(0x56)), KeptCheck::Clear, "a set-aside folder warned");
+        std::fs::remove_dir_all(&typo).unwrap();
+        kept_from_root(&root, "2025-10-01", 0x57, "real", false);
+        assert_eq!(check_kept_at(&root, &pass_of(0x56)), KeptCheck::NoneOpens);
+    }
+
+    /// 6.2: the typo identity moves whole into its own kept folder, duress slot
+    /// included; the real identity's relinked data is untouched; the root is at Welcome.
+    #[test]
+    fn set_aside_moves_the_typo_identity_and_erases_nothing() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let root = tmp.path().join("data");
+        let real = kept_from_root(&root, "2025-10-01", 0x58, "real", false);
+        let real_before = tree_digest(&real);
+        root_with(&root, 0x59, 0x59, "typo");
+        put(&root.join("identity.duress"), b"slot");
+        put(&root.join("profiles.json"), b"{}");
+        mark_set_aside_at(&root).unwrap();
+
+        settle_set_aside_at(&root, DAY);
+
+        let target = tmp.path().join("data-old-2025-10-10");
+        assert_eq!(who(&target, 0x59).unwrap(), "typo");
+        for name in ["identity.key", "identity.device", "identity.duress"] {
+            assert!(target.join(name).exists(), "{name} did not move with the identity");
+        }
+        assert!(origin_of(&target).is_some_and(|o| o.set_aside), "the folder is not marked as set aside");
+        assert_eq!(names(&root), ["profiles.json", SET_ASIDE_WELCOME], "the root is not at Welcome");
+        assert_eq!(tree_digest(&real), real_before, "the real identity's kept data changed");
+        assert!(set_aside_welcome_at(&root));
+    }
+
+    #[test]
+    fn a_set_aside_mark_for_another_key_moves_nothing() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let root = tmp.path().join("data");
+        root_with(&root, 0x5a, 0x5a, "typo");
+        mark_set_aside_at(&root).unwrap();
+        put(&root.join(WIPE_MARKER), b"");
+        settle_set_aside_at(&root, DAY);
+        assert!(root.join(SET_ASIDE_MARK).exists() && root.join("identity.key").exists(), "moved while a wipe was unfinished");
+        std::fs::remove_file(root.join(WIPE_MARKER)).unwrap();
+
+        for name in DB_SET {
+            let _ = std::fs::remove_file(root.join(name));
+        }
+        root_with(&root, 0x5b, 0x5b, "the right one");
+        settle_set_aside_at(&root, DAY);
+
+        assert_eq!(who(&root, 0x5b).unwrap(), "the right one");
+        assert!(!root.join(SET_ASIDE_MARK).exists(), "a stale mark stayed");
+        assert!(!tmp.path().join("data-old-2025-10-10").exists());
+    }
+
+    /// The documented rule: a set-aside folder is this root's kept data, so a destroy of
+    /// whatever identity runs here later erases it with the rest.
+    #[test]
+    fn a_destroy_after_a_set_aside_erases_the_set_aside_folder_too() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let root = tmp.path().join("data");
+        root_with(&root, 0x5c, 0x5c, "typo");
+        mark_set_aside_at(&root).unwrap();
+        settle_set_aside_at(&root, DAY);
+        let target = tmp.path().join("data-old-2025-10-10");
+        assert!(target.exists());
+        let erased = erase_kept_aside(&root);
+        assert_eq!(erased, vec![target.clone()]);
+        assert!(!target.exists());
+    }
+
     #[test]
     fn day_of_names_the_utc_day() {
         assert_eq!(day_of(0), "1970-01-01");
@@ -1806,7 +2043,7 @@ mod tests {
         let dir = parent.join(name);
         put(&dir.join("identity.key"), b"a key");
         put(&dir.join("messages.db"), b"db");
-        let origin = serde_json::to_vec(&Origin { root: origin.to_string_lossy().into() }).unwrap();
+        let origin = serde_json::to_vec(&Origin { root: origin.to_string_lossy().into(), set_aside: false }).unwrap();
         put(&dir.join(RELINK_ORIGIN), &origin);
         dir
     }
@@ -2313,7 +2550,7 @@ mod tests {
         put(&root.join("identity.dpapi"), b"the root's blob");
         let target = tmp.path().join("data-old-2025-10-10");
         std::fs::create_dir(&target).unwrap();
-        put(&target.join(RELINK_ORIGIN), &serde_json::to_vec(&Origin { root: root.to_string_lossy().into() }).unwrap());
+        put(&target.join(RELINK_ORIGIN), &serde_json::to_vec(&Origin { root: root.to_string_lossy().into(), set_aside: false }).unwrap());
         put(&target.join("identity.dpapi"), b"the kept slot's blob");
         put(&root.join(RELINK_JOURNAL), serde_json::to_string(&Journal { target: target.to_string_lossy().into() }).unwrap().as_bytes());
 
@@ -2460,7 +2697,7 @@ mod tests {
         root_with(&root, 0x6e, 0x6e, "ours");
         let target = tmp.path().join("data-old-2025-10-10");
         std::fs::create_dir(&target).unwrap();
-        put(&target.join(RELINK_ORIGIN), &serde_json::to_vec(&Origin { root: root.to_string_lossy().into() }).unwrap());
+        put(&target.join(RELINK_ORIGIN), &serde_json::to_vec(&Origin { root: root.to_string_lossy().into(), set_aside: false }).unwrap());
         put(&root.join(RELINK_JOURNAL), serde_json::to_string(&Journal { target: target.to_string_lossy().into() }).unwrap().as_bytes());
         put(&target.join("custom_background.img"), b"the old one");
         put(&root.join("custom_background.img"), b"a new one");

@@ -72,7 +72,7 @@ fn derive_db_key() -> Result<String, String> {
 
 /// The database key of the identity `master`: the first 32 bytes of its protobuf
 /// encoding, deterministic per identity.
-fn db_key_of(master: &crate::identity::native_identity::NativeKeypair) -> Result<String, String> {
+pub(crate) fn db_key_of(master: &crate::identity::native_identity::NativeKeypair) -> Result<String, String> {
     let proto = master
         .to_protobuf_encoding()
         .map_err(|e| format!("Failed to encode keypair: {e}"))?;
@@ -5288,7 +5288,12 @@ mod landing_tests {
         crate::api::identity::unlock_identity(None).unwrap();
         crate::identity::encryption::clear_session_key();
         assert_eq!(kept_aside(&root).len(), 1, "another identity's database came back");
-        assert!(!root.join("messages.db").exists(), "another identity's database came back");
+        let (restored, _) = crate::identity::recovery::keys_from_phrase(PHRASE_B).unwrap();
+        let db = root.join("messages.db");
+        assert!(
+            !db.exists() || database_opens_with(&db, &db_key_of(&restored).unwrap()).unwrap(),
+            "another identity's database came back",
+        );
     }
 
     /// A key write through `write_key_file` (a password change) and a key landing at

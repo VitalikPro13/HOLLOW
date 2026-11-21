@@ -35,6 +35,11 @@ pub(crate) const KIND_KEY_CHANGED: &str = "identity_key_changed";
 /// under our own master; the detail is `{device}:{voucher}` (peer ids hold no `:`).
 pub(crate) const KIND_OWN_DEVICE_ADDED: &str = "own_device_added";
 
+/// The voucher of a device the recovery phrase added (HOL-SEC-215): an admission typed
+/// on another install, or a recovery keeping it. Never a peer id, which holds no
+/// lowercase-only word like this.
+pub(crate) const BY_PHRASE: &str = "phrase";
+
 pub(crate) fn own_device_detail(device: &str, voucher: &str) -> String {
     format!("{device}:{voucher}")
 }

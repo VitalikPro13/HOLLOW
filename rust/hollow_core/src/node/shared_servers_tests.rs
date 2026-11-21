@@ -277,3 +277,59 @@ fn a_recovering_join_sends_its_room_notice_three_times_apart() {
     }
     assert!(n.0.len() <= MAX_SERVERS);
 }
+
+/// R2: a roster where the phrase admitted F (and D, which stands to remove it) and a
+/// Welcome mark naming F, saved in `n`.
+fn fresh_admission(n: &Node, empty: bool, branch: super::super::phrase_restore::Branch) -> (String, String, i64) {
+    use crate::identity::roster::{r_pub_of, sign_phrase_admit};
+    let (master, recovery, f, d) = (kp(0x61), kp(0x62), kp(0x63), kp(0x64));
+    let own = master.peer_id();
+    let at = super::super::types::now_ms() - 60_000;
+    let mut r = Roster::new(&own);
+    for dev in [&d, &f] {
+        r.add_consent(sign_consent(dev, &own));
+        r.add_phrase_statement(&r_pub_of(&recovery), None, Some(sign_phrase_admit(&master, &recovery, at, &dev.peer_id()))).unwrap();
+    }
+    let store = n.store();
+    super::super::roster_book::merge_for_test(&store, &r, &own, &f.peer_id());
+    let mark = super::super::phrase_restore::Mark { at_ms: at, branch, empty, device: f.peer_id() };
+    super::super::phrase_restore::write(&store, &mark).unwrap();
+    (own, f.peer_id(), at)
+}
+
+#[test]
+fn recovering_counts_a_fresh_phrase_restore_for_thirty_days() {
+    use super::super::phrase_restore::Branch;
+    let _g = super::super::resolver::test_lock();
+    let n = Node::new();
+    let (own, f, at) = fresh_admission(&n, true, Branch::Admit);
+    let store = n.store();
+    assert!(recovering_in(&store, &own, &f, at + 1), "a fresh admission asks");
+    assert!(recovering_in(&store, &own, &f, at + RECOVERY_WINDOW_MS - 1));
+    assert!(!recovering_in(&store, &own, &f, at + RECOVERY_WINDOW_MS), "day 31");
+    assert!(!recovering_in(&store, &own, &kp(0x64).peer_id(), at + 1), "another device of ours");
+
+    let n = Node::new();
+    let (own, f, at) = fresh_admission(&n, false, Branch::Admit);
+    assert!(!recovering_in(&n.store(), &own, &f, at + 1), "a restore beside a held roster");
+    let n = Node::new();
+    let (own, f, at) = fresh_admission(&n, true, Branch::Recover);
+    assert!(!recovering_in(&n.store(), &own, &f, at + 1), "a recovery asks by its own branch, with its T");
+}
+
+/// D3: a removal never drops the admission statement, so the gate reads membership.
+#[test]
+fn recovering_stops_once_the_restored_device_is_removed() {
+    use crate::identity::roster::sign_removal;
+    let _g = super::super::resolver::test_lock();
+    let n = Node::new();
+    let (own, f, at) = fresh_admission(&n, true, super::super::phrase_restore::Branch::Admit);
+    let store = n.store();
+    let mut r = super::super::roster_book::load(&store, &own).unwrap();
+    r.add_removal(sign_removal(&kp(0x64), &own, &r.base(), &f, &[]));
+    super::super::roster_book::merge_for_test(&store, &r, &own, &f);
+    let r = super::super::roster_book::load(&store, &own).unwrap();
+    assert!(!super::super::roster_book::fold(&store, &r).is_member(&f), "precondition: F is removed");
+    assert!(r.phrase_admits.iter().any(|p| p.device == f), "precondition: the admission stays");
+    assert!(!recovering_in(&store, &own, &f, at + 1));
+}

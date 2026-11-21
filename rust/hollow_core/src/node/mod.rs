@@ -81,6 +81,7 @@ pub(crate) mod roster_reach;
 pub(crate) mod roster_round;
 pub(crate) mod sealed_box;
 pub(crate) mod server_rosters;
+pub(crate) mod phrase_restore;
 pub(crate) mod settle_owed;
 pub(crate) mod standing;
 pub(crate) mod security_alerts;

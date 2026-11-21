@@ -374,6 +374,33 @@ pub(crate) fn ensure_own(
     (roster, state)
 }
 
+/// Our roster as a phrase restore finds it (PHRASE_RESTORE_DESIGN 1.2 step 7): the
+/// stored one merged with a bootstrap of `master` no start has imported yet. `None`
+/// when neither is here: a fresh install.
+pub(crate) fn held_for_restore(store: &MessageStore, master: &str, db_path: &str) -> Option<Roster> {
+    let stored = load(store, master);
+    let boot = bootstrap_path(db_path)
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|j| serde_json::from_str::<Roster>(&j).ok())
+        .map(|r| r.verified(now_ms()))
+        .filter(|r| r.master == master);
+    match (stored, boot) {
+        (Some(s), Some(b)) => Some(s.merged(&b).reverified()),
+        (s, b) => s.or(b.map(|b| b.reverified())),
+    }
+}
+
+/// Store `held` before a phrase restore signs into it, so what it signs is dated past
+/// the bootstrap's statements too; the bootstrap is consumed.
+pub(crate) fn keep_held_for_restore(store: &MessageStore, held: &Roster, device: &str, db_path: &str) -> Result<(), String> {
+    let state = fold(store, held);
+    save(store, held, &state, &held.master, device)?;
+    if let Some(path) = bootstrap_path(db_path) {
+        let _ = std::fs::remove_file(path);
+    }
+    Ok(())
+}
+
 /// The upgrade, signed by the phrase 0.11 stored: the same recovery on every device of
 /// the identity, an admission for each device the 0.11 list kept and this one, and this
 /// device's consent first so that what it signs next has standing. Never the master id:
@@ -819,7 +846,8 @@ pub(crate) fn recover(
     db_path: &str,
     db_passphrase: &str,
 ) -> Result<(Roster, RosterState), String> {
-    change_own(master, device, db_path, db_passphrase, |r, _| {
+    let mut at = 0;
+    let (roster, state) = change_own(master, device, db_path, db_passphrase, |r, _| {
         let mut keep: Vec<String> = keep.to_vec();
         keep.push(device.peer_id());
         keep.sort();
@@ -830,9 +858,12 @@ pub(crate) fn recover(
         if !r.has_consent(&device.peer_id()) {
             r.add_consent(roster::sign_consent(device, &r.master.clone()));
         }
-        let rec = roster::sign_recovery(master, recovery, phrase_time(r), &keep, no_wait);
+        at = phrase_time(r);
+        let rec = roster::sign_recovery(master, recovery, at, &keep, no_wait);
         r.add_phrase_statement(&roster::r_pub_of(recovery), Some(rec), None)
-    })
+    })?;
+    note_own_phrase(db_path, db_passphrase, OwnPhrase { kind: PhraseKind::Recover, at_ms: at, base: state.base.clone() });
+    Ok((roster, state))
 }
 
 /// The phrase admits this device into whatever base is current.
@@ -843,13 +874,64 @@ pub(crate) fn admit_by_phrase(
     db_path: &str,
     db_passphrase: &str,
 ) -> Result<(Roster, RosterState), String> {
-    change_own(master, device, db_path, db_passphrase, |r, _| {
+    let mut at = 0;
+    let (roster, state) = change_own(master, device, db_path, db_passphrase, |r, _| {
         if !r.has_consent(&device.peer_id()) {
             r.add_consent(roster::sign_consent(device, &r.master.clone()));
         }
-        let pa = roster::sign_phrase_admit(master, recovery, phrase_time(r), &device.peer_id());
+        at = phrase_time(r);
+        let pa = roster::sign_phrase_admit(master, recovery, at, &device.peer_id());
         r.add_phrase_statement(&roster::r_pub_of(recovery), None, Some(pa))
-    })
+    })?;
+    note_own_phrase(db_path, db_passphrase, OwnPhrase { kind: PhraseKind::Admit, at_ms: at, base: state.base.clone() });
+    Ok((roster, state))
+}
+
+/// This device's newest phrase statement about itself, kept here: a base compacts
+/// older statements away, so only this device can tell that a later base outdated
+/// its admission or recovery (HOL-SEC-218). This device's own row, never in a copy.
+pub(crate) const OWN_PHRASE: &str = "own_phrase_statement";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum PhraseKind {
+    Admit,
+    Recover,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct OwnPhrase {
+    pub(crate) kind: PhraseKind,
+    pub(crate) at_ms: i64,
+    /// The base current once it was signed (a recovery's own).
+    pub(crate) base: String,
+}
+
+fn note_own_phrase(db_path: &str, db_passphrase: &str, own: OwnPhrase) {
+    let Ok(store) = MessageStore::lease(db_path, db_passphrase) else { return };
+    if let Ok(json) = serde_json::to_string(&own) {
+        let _ = store.save_setting(OWN_PHRASE, &json);
+    }
+}
+
+/// This device's own phrase statement that the current base outdated: this device is
+/// neither a member nor removed, and the base's recovery is dated at or after it.
+pub(crate) fn own_phrase_outdated(store: &MessageStore, roster: &Roster, state: &RosterState, me: &str) -> Option<OwnPhrase> {
+    if state.is_member(me) || state.removed.contains_key(me) {
+        return None;
+    }
+    let own: OwnPhrase = serde_json::from_str(&store.load_setting(OWN_PHRASE).ok()??).ok()?;
+    (roster.base_at()? >= own.at_ms).then_some(own)
+}
+
+/// When the recovery that left this device out was signed: this device counted for the
+/// identity once (its own first sight of itself), and now is neither a member, nor
+/// removed, nor outdated by its own phrase statement.
+pub(crate) fn dropped_by_recovery_at(store: &MessageStore, roster: &Roster, state: &RosterState, me: &str) -> Option<i64> {
+    if state.is_member(me) || state.removed.contains_key(me) || own_phrase_outdated(store, roster, state, me).is_some() {
+        return None;
+    }
+    seen_before(store, &roster.master, &roster::device_seen_key(me), i64::MAX).then(|| roster.base_at()).flatten()
 }
 
 /// When this device learned it was removed and who removed it, if it was.
@@ -1583,11 +1665,12 @@ pub(crate) fn lost_by_own_change(
     lost.into_iter().collect()
 }
 
-/// Members another of our devices vouched into our identity since `prev`, each with
-/// its voucher: what the rest of our devices are told (C-IDENTITY-09). Never a device
-/// this one vouched (the person was here), one the 0.11 upgrade admitted, or anything
-/// before this device was a member itself, its own admission included.
-fn vouched_by_a_sibling(
+/// Members another of our devices or the phrase added to our identity since `prev`,
+/// each with its voucher (`phrase` for an admission or a recovery's keep, HOL-SEC-215):
+/// what the rest of our devices are told (C-IDENTITY-09). Never a device this one
+/// vouched (the person was here), this device itself, one the 0.11 upgrade admitted, or
+/// anything before this device was a member itself, its own admission included.
+fn added_by_another(
     roster: &Roster,
     prev: &RosterState,
     now: &RosterState,
@@ -1610,8 +1693,10 @@ fn vouched_by_a_sibling(
             if vouchers.contains(&local_device) {
                 return None;
             }
-            let by = vouchers.iter().find(|b| now.is_member(b)).or(vouchers.first())?;
-            Some((d.clone(), by.to_string()))
+            if let Some(by) = vouchers.iter().find(|b| now.is_member(b)).or(vouchers.first()) {
+                return Some((d.clone(), by.to_string()));
+            }
+            roster.phrase_rooted(d).then(|| (d.clone(), super::security_alerts::BY_PHRASE.to_string()))
         })
         .collect()
 }
@@ -1748,7 +1833,7 @@ fn fold_in_store(
     let upgrade_admitted = stored.as_ref().map(Roster::upgrade_admitted).unwrap_or_default();
     let own_news = if master == local_master && changed {
         let upgrade: BTreeSet<String> = upgrade_admitted.union(&merged.upgrade_admitted()).cloned().collect();
-        vouched_by_a_sibling(&merged, &prev, &now, local_device, &upgrade)
+        added_by_another(&merged, &prev, &now, local_device, &upgrade)
             .into_iter()
             .filter_map(|(device, voucher)| {
                 let at = super::security_alerts::record_own_device_added(store, master, &device, &voucher)?;
@@ -2785,19 +2870,81 @@ mod tests {
         let prev = state(&[&me_id, &p_id]);
         let now = state(&[&me_id, &p_id, &n, &q, &u, &x]);
         let upgrade = BTreeSet::from([u.clone()]);
-        assert_eq!(vouched_by_a_sibling(&r, &prev, &now, &me_id, &upgrade), vec![(n.clone(), p_id.clone())]);
+        assert_eq!(added_by_another(&r, &prev, &now, &me_id, &upgrade), vec![(n.clone(), p_id.clone())]);
         assert_eq!(
-            vouched_by_a_sibling(&r, &prev, &now, &me_id, &BTreeSet::new()).into_iter().collect::<BTreeSet<_>>(),
+            added_by_another(&r, &prev, &now, &me_id, &BTreeSet::new()).into_iter().collect::<BTreeSet<_>>(),
             BTreeSet::from([(n.clone(), p_id.clone()), (u.clone(), p_id.clone())]),
             "control: without the upgrade the vouched device is news",
         );
         let joining = state(&[&p_id]);
         assert!(
-            vouched_by_a_sibling(&r, &joining, &now, &me_id, &upgrade).is_empty(),
+            added_by_another(&r, &joining, &now, &me_id, &upgrade).is_empty(),
             "a device that just joined was told about itself or what came before it",
         );
         let other_base = RosterState { base: "f".repeat(32), ..now.clone() };
-        assert!(vouched_by_a_sibling(&r, &prev, &other_base, &me_id, &upgrade).is_empty(), "a vouch from another base");
+        assert!(added_by_another(&r, &prev, &other_base, &me_id, &upgrade).is_empty(), "a vouch from another base");
+    }
+
+    /// HOL-SEC-215 (R-ID-14): a roster `me` holds rooted by the phrase, and the same
+    /// with `then` added, as this device folds them.
+    fn phrase_case(then: impl FnOnce(&mut Roster, &NativeKeypair, &NativeKeypair)) -> (Roster, RosterState, RosterState, String) {
+        let (master, recovery, me) = (kp(0x11), kp(0x12), kp(0x13));
+        let at = now_ms() - 60_000;
+        let mut r = Roster::genesis(&master, &recovery, &me, at);
+        let prev = r.verified(now_ms()).fold(|_| None, now_ms());
+        then(&mut r, &master, &recovery);
+        let now = r.verified(now_ms()).fold(|_| None, now_ms());
+        (r, prev, now, me.peer_id())
+    }
+
+    #[test]
+    fn a_device_the_phrase_admits_alerts_our_other_devices() {
+        let f = kp(0x14);
+        let (r, prev, now, me) = phrase_case(|r, master, recovery| {
+            r.add_consent(sign_consent(&f, &master.peer_id()));
+            let pa = roster::sign_phrase_admit(master, recovery, now_ms() - 1_000, &f.peer_id());
+            r.add_phrase_statement(&roster::r_pub_of(recovery), None, Some(pa)).unwrap();
+        });
+        assert!(now.is_member(&f.peer_id()), "precondition: the phrase admits F");
+        assert_eq!(added_by_another(&r, &prev, &now, &me, &BTreeSet::new()), vec![(f.peer_id(), "phrase".to_string())]);
+    }
+
+    #[test]
+    fn a_device_a_recovery_keeps_alerts_our_other_devices() {
+        let f = kp(0x14);
+        let me_id = kp(0x13).peer_id();
+        let (r, prev, now, me) = phrase_case(|r, master, recovery| {
+            r.add_consent(sign_consent(&f, &master.peer_id()));
+            let rec = roster::sign_recovery(master, recovery, now_ms() - 1_000, &[me_id.clone(), f.peer_id()], false);
+            r.add_phrase_statement(&roster::r_pub_of(recovery), Some(rec), None).unwrap();
+        });
+        assert!(now.is_member(&f.peer_id()) && now.is_member(&me), "precondition: the recovery keeps both");
+        assert_eq!(added_by_another(&r, &prev, &now, &me, &BTreeSet::new()), vec![(f.peer_id(), "phrase".to_string())]);
+    }
+
+    /// The admitted device learns of its own admission as a new member: it was not one
+    /// before, so it alerts nothing (the prev rule covers "not this device").
+    #[test]
+    fn the_device_the_phrase_admitted_alerts_nothing_about_itself() {
+        let f = kp(0x14);
+        let (r, _, now, _) = phrase_case(|r, master, recovery| {
+            r.add_consent(sign_consent(&f, &master.peer_id()));
+            let pa = roster::sign_phrase_admit(master, recovery, now_ms() - 1_000, &f.peer_id());
+            r.add_phrase_statement(&roster::r_pub_of(recovery), None, Some(pa)).unwrap();
+        });
+        let before_f = RosterState { members: now.members.iter().filter(|d| **d != f.peer_id()).cloned().collect(), ..now.clone() };
+        assert!(added_by_another(&r, &before_f, &now, &f.peer_id(), &BTreeSet::new()).is_empty());
+    }
+
+    #[test]
+    fn an_upgrade_admission_still_alerts_nothing() {
+        let f = kp(0x14);
+        let (r, prev, now, me) = phrase_case(|r, master, recovery| {
+            r.add_consent(sign_consent(&f, &master.peer_id()));
+            let pa = roster::sign_phrase_admit(master, recovery, now_ms() - 1_000, &f.peer_id());
+            r.add_phrase_statement(&roster::r_pub_of(recovery), None, Some(pa)).unwrap();
+        });
+        assert!(added_by_another(&r, &prev, &now, &me, &BTreeSet::from([f.peer_id()])).is_empty());
     }
 
     /// C-IDENTITY-09. The ingest records the alert once with who added the device, tells

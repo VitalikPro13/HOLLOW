@@ -839,6 +839,20 @@ impl Roster {
         }
     }
 
+    /// When the current base's recovery was signed, `None` in a legacy base.
+    pub(crate) fn base_at(&self) -> Option<i64> {
+        self.current_recovery().map(|c| c.at)
+    }
+
+    /// Whether the phrase roots `device` in the current base: a recovery keeping it or an
+    /// admission dated after the base (any admission in a legacy base).
+    pub(crate) fn phrase_rooted(&self, device: &str) -> bool {
+        match self.current_recovery() {
+            Some(c) => c.keep.contains(device) || self.phrase_admits.iter().any(|p| p.device == device && p.at_ms > c.at),
+            None => self.phrase_admits.iter().any(|p| p.device == device),
+        }
+    }
+
     /// The base every new device statement must name.
     pub(crate) fn base(&self) -> String {
         self.current_recovery()
@@ -1426,6 +1440,24 @@ impl Roster {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    /// HOL-SEC-218 (reviewer probe, its rule pinned): an admission dated before the
+    /// current base roots nothing; that is what lets a recovery cut off older
+    /// admissions. The restore dates its own past every held statement instead.
+    #[test]
+    fn an_admission_dated_before_the_current_base_never_roots() {
+        let master = NativeKeypair::from_secret_bytes(&[0x41; 32]);
+        let recovery = NativeKeypair::from_secret_bytes(&[0x42; 32]);
+        let old = NativeKeypair::from_secret_bytes(&[0x43; 32]);
+        let fresh = NativeKeypair::from_secret_bytes(&[0x44; 32]);
+        let now = 1_700_000_000_000;
+        let mut r = Roster::genesis(&master, &recovery, &old, now + 5 * 60 * 1000);
+        r.add_consent(sign_consent(&fresh, &master.peer_id()));
+        r.add_phrase_statement(&r_pub_of(&recovery), None, Some(sign_phrase_admit(&master, &recovery, now, &fresh.peer_id())))
+            .expect("the phrase admits the fresh install");
+        let state = r.verified(now).fold(|_| None, now);
+        assert!(!state.is_member(&fresh.peer_id()));
+    }
 
     fn kp(tag: u8) -> NativeKeypair {
         NativeKeypair::from_secret_bytes(&[tag; 32])
