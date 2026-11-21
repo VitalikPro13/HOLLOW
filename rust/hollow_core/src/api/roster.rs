@@ -37,6 +37,35 @@ pub struct RosterStatus {
     pub removed_by: Option<String>,
     pub wipe_at_ms: Option<i64>,
     pub devices: Vec<RosterDevice>,
+    /// This device is not a member although the phrase admitted it (`"admit"`) or a
+    /// recovery kept it (`"recover"`): that statement is dated at or before the current
+    /// base (a clock behind, or a later change). The lock's button runs
+    /// `join_with_phrase`, or `recover_with_phrase(keep: [], too_early_lost_since_ms)`.
+    pub too_early: Option<String>,
+    /// For `too_early == "recover"`: when that recovery said the person last had the
+    /// devices it dropped.
+    pub too_early_lost_since_ms: Option<i64>,
+    /// This device is not a member because a recovery typed elsewhere left it out:
+    /// that recovery's time.
+    pub dropped_by_recovery_at_ms: Option<i64>,
+}
+
+/// What a Welcome phrase restore that minted this device left for the Home card.
+pub struct WelcomeRestoreState {
+    pub at_ms: i64,
+    /// `"admit"` (No) or `"recover"` (Yes).
+    pub branch: String,
+    /// The restore found no roster here (a fresh install).
+    pub empty: bool,
+    /// The identity's roster says a device restored from a backup joins only when
+    /// approved.
+    pub no_wait: bool,
+}
+
+/// The Home card's state, `None` when no Welcome restore minted THIS device.
+#[frb]
+pub fn welcome_restore_state() -> Result<Option<WelcomeRestoreState>, String> {
+    Err(crate::api::identity::NOT_BUILT.into())
 }
 
 struct Ctx {
@@ -78,6 +107,9 @@ pub fn roster_status() -> Result<RosterStatus, String> {
             removed_by: None,
             wipe_at_ms: None,
             devices: Vec::new(),
+            too_early: None,
+            too_early_lost_since_ms: None,
+            dropped_by_recovery_at_ms: None,
         });
     };
     let state = crate::node::roster_book::fold(&store, &roster);
@@ -117,6 +149,9 @@ pub fn roster_status() -> Result<RosterStatus, String> {
             .then(|| removal.map(|(_, at)| at.saturating_add(REMOVAL_GRACE_MS)))
             .flatten(),
         devices,
+        too_early: None,
+        too_early_lost_since_ms: None,
+        dropped_by_recovery_at_ms: None,
     })
 }
 

@@ -93,6 +93,62 @@ pub fn restore_identity_from_mnemonic(phrase: String) -> Result<IdentityInfo, St
     })
 }
 
+/// Welcome's answer to "Could someone else have your old device?".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WelcomeRestoreMode {
+    /// No: the old device broke or was wiped. The phrase admits this install and every
+    /// other device keeps counting.
+    Admit,
+    /// Yes, or not sure: a recovery keeping only this install; every other device is
+    /// dropped as lost or stolen since `lost_since_ms` (0 = longer ago, or not sure).
+    Recover { lost_since_ms: i64 },
+}
+
+/// What `welcome_restore` did. Words that are not a recovery phrase come back as an
+/// error string instead: `phrase_words:{n}` (not 24 words), `phrase_word:{i}` (word i,
+/// from 1, is not on the list), `phrase_checksum`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RestoreOutcome {
+    /// The identity is on this device. The phrase never comes back out of Rust.
+    Restored {
+        /// The keychain default ran (Windows and macOS OS data root, no `.locked` pair):
+        /// show its toast. False: set the protection offer due.
+        locked_to_keychain: bool,
+    },
+    /// A folder of old data kept beside this profile opens with these words; nothing
+    /// changed. Desktop offers to switch to it. `profile_name` when the registry lists it.
+    KeptMatch { path: String, profile_name: Option<String> },
+    /// Old data with an identity is kept beside this profile and none of it opens with
+    /// these words; nothing changed. A typo is likely.
+    KeptNoneOpens,
+}
+
+/// Welcome's phrase restore (PHRASE_RESTORE_DESIGN 1.2). With `check_kept`, old data
+/// kept beside this profile is probed first and a match or a miss returns before
+/// anything lands; the person's choice calls again without it.
+#[frb]
+pub fn welcome_restore(phrase: String, mode: WelcomeRestoreMode, check_kept: bool) -> Result<RestoreOutcome, String> {
+    let _ = (phrase, mode, check_kept);
+    Err(NOT_BUILT.into())
+}
+
+/// Whether "Type my phrase again" may set this identity aside: a Welcome restore
+/// within 30 days that no friend accepted and no server holds.
+#[frb]
+pub fn may_set_aside_this_identity() -> bool {
+    false
+}
+
+/// Sets this identity aside (moved, never erased) at the next launch, after which the
+/// profile opens at Welcome. Checks `may_set_aside_this_identity` again. The caller
+/// relaunches the app.
+#[frb]
+pub fn set_aside_this_identity() -> Result<(), String> {
+    Err(NOT_BUILT.into())
+}
+
+pub(crate) const NOT_BUILT: &str = "Not built yet";
+
 /// A new identity or a new lock starts its own count of missed tries.
 fn forget_missed_tries() {
     if let Ok(root) = crate::identity::data_dir() {

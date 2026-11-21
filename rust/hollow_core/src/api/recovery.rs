@@ -688,6 +688,19 @@ pub fn clear_relink_welcome() -> Result<(), String> {
     Ok(())
 }
 
+/// Whether "Type my phrase again" set an identity aside since Welcome last said so:
+/// Welcome opens on the phrase step with its line. `settle_relink` makes the move.
+#[frb]
+pub fn set_aside_welcome() -> Result<bool, String> {
+    Err(crate::api::identity::NOT_BUILT.into())
+}
+
+/// Welcome has said the identity was set aside.
+#[frb]
+pub fn clear_set_aside_welcome() -> Result<(), String> {
+    Err(crate::api::identity::NOT_BUILT.into())
+}
+
 /// Whether `name` is `{base}-old-YYYY-MM-DD` or that with `-<n>`.
 fn is_kept_name(name: &str, base: &str) -> bool {
     let Some(rest) = name.strip_prefix(base).and_then(|r| r.strip_prefix("-old-")) else { return false };

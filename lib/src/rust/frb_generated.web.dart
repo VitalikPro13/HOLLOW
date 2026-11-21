@@ -176,6 +176,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   VideoThumbRef dco_decode_box_autoadd_video_thumb_ref(dynamic raw);
 
   @protected
+  WelcomeRestoreMode dco_decode_box_autoadd_welcome_restore_mode(dynamic raw);
+
+  @protected
+  WelcomeRestoreState dco_decode_box_autoadd_welcome_restore_state(dynamic raw);
+
+  @protected
   CallRecord dco_decode_call_record(dynamic raw);
 
   @protected
@@ -577,6 +583,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   VideoThumbRef? dco_decode_opt_box_autoadd_video_thumb_ref(dynamic raw);
 
   @protected
+  WelcomeRestoreState? dco_decode_opt_box_autoadd_welcome_restore_state(
+    dynamic raw,
+  );
+
+  @protected
   Uint8List? dco_decode_opt_list_prim_u_8_strict(dynamic raw);
 
   @protected
@@ -686,6 +697,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   RestoreChoices dco_decode_restore_choices(dynamic raw);
+
+  @protected
+  RestoreOutcome dco_decode_restore_outcome(dynamic raw);
 
   @protected
   RestorePoint dco_decode_restore_point(dynamic raw);
@@ -833,6 +847,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   VideoThumbRef dco_decode_video_thumb_ref(dynamic raw);
+
+  @protected
+  WelcomeRestoreMode dco_decode_welcome_restore_mode(dynamic raw);
+
+  @protected
+  WelcomeRestoreState dco_decode_welcome_restore_state(dynamic raw);
 
   @protected
   AnyhowException sse_decode_AnyhowException(SseDeserializer deserializer);
@@ -999,6 +1019,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   VideoThumbRef sse_decode_box_autoadd_video_thumb_ref(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  WelcomeRestoreMode sse_decode_box_autoadd_welcome_restore_mode(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  WelcomeRestoreState sse_decode_box_autoadd_welcome_restore_state(
     SseDeserializer deserializer,
   );
 
@@ -1520,6 +1550,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  WelcomeRestoreState? sse_decode_opt_box_autoadd_welcome_restore_state(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   Uint8List? sse_decode_opt_list_prim_u_8_strict(SseDeserializer deserializer);
 
   @protected
@@ -1645,6 +1680,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   RestoreChoices sse_decode_restore_choices(SseDeserializer deserializer);
+
+  @protected
+  RestoreOutcome sse_decode_restore_outcome(SseDeserializer deserializer);
 
   @protected
   RestorePoint sse_decode_restore_point(SseDeserializer deserializer);
@@ -1820,6 +1858,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   VideoThumbRef sse_decode_video_thumb_ref(SseDeserializer deserializer);
+
+  @protected
+  WelcomeRestoreMode sse_decode_welcome_restore_mode(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  WelcomeRestoreState sse_decode_welcome_restore_state(
+    SseDeserializer deserializer,
+  );
 
   @protected
   void sse_encode_AnyhowException(
@@ -2034,6 +2082,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_box_autoadd_video_thumb_ref(
     VideoThumbRef self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_welcome_restore_mode(
+    WelcomeRestoreMode self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_welcome_restore_state(
+    WelcomeRestoreState self,
     SseSerializer serializer,
   );
 
@@ -2719,6 +2779,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_opt_box_autoadd_welcome_restore_state(
+    WelcomeRestoreState? self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_opt_list_prim_u_8_strict(
     Uint8List? self,
     SseSerializer serializer,
@@ -2901,6 +2967,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_restore_choices(
     RestoreChoices self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_restore_outcome(
+    RestoreOutcome self,
     SseSerializer serializer,
   );
 
@@ -3113,6 +3185,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_video_thumb_ref(VideoThumbRef self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_welcome_restore_mode(
+    WelcomeRestoreMode self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_welcome_restore_state(
+    WelcomeRestoreState self,
+    SseSerializer serializer,
+  );
 }
 
 // Section: wire_class

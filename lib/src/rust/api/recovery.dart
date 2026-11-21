@@ -36,6 +36,15 @@ Future<String?> relinkWelcome() =>
 Future<void> clearRelinkWelcome() =>
     RustLib.instance.api.crateApiRecoveryClearRelinkWelcome();
 
+/// Whether "Type my phrase again" set an identity aside since Welcome last said so:
+/// Welcome opens on the phrase step with its line. `settle_relink` makes the move.
+Future<bool> setAsideWelcome() =>
+    RustLib.instance.api.crateApiRecoverySetAsideWelcome();
+
+/// Welcome has said the identity was set aside.
+Future<void> clearSetAsideWelcome() =>
+    RustLib.instance.api.crateApiRecoveryClearSetAsideWelcome();
+
 /// The file list and the ends of both logs, ids replaced. Never key material: file
 /// contents are never read, the logs never hold a key, a phrase or a password.
 /// `starting` (a start-up step unfinished) gives nothing at all, so a held wipe and a

@@ -5,10 +5,12 @@
 
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
+import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
+part 'identity.freezed.dart';
 
 // These functions are ignored because they are not marked as `pub`: `bound_key`, `code_is_the_password`, `database_opens_with`, `db_key_of`, `debug_defaults_hook`, `default_eligible_for`, `default_eligible`, `drop_cached_key_off_os_root`, `duress_available`, `duress_slot_left_on_first_key`, `duress_slot_left_unbound`, `forget_duress_code`, `forget_missed_tries`, `is_os_default_root`, `is_running_root`, `keychain_key_found_at`, `keychain_key_that_decrypts_at`, `keychain_key_that_decrypts`, `keychain_move_allowed_at`, `keychain_move_allowed`, `keychain_rekey_wants_password_at`, `keychain_takes_new_keys`, `lands_as`, `launch_secret_allowed_for`, `lock_to_keychain`, `move_to_group_key`, `open_secret`, `open_typed_secret`, `owner_gate`, `password_keychain_allowed`, `phrase_is_this_identitys`, `protection_status_of`, `read_plain_key_file`, `refuse_short_pin`, `refused`, `repair_device_file`, `resalt_off_the_login_keychain`, `save_duress_settings`, `seal_for_keychain`, `settle_keychain_move_at`, `switch_to_keychain`, `switch_to_plaintext`, `this_os`, `tie_to_hardware`, `unlock_identity_with`, `unlock_logged`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `DesktopOs`, `Duress`, `Secret`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `eq`, `eq`, `fmt`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `eq`, `eq`, `fmt`, `fmt`, `fmt`
 
 /// Set the data directory path (Android/iOS: pass app documents dir).
 /// Must be called before load_or_create_identity() or start_node().
@@ -32,6 +34,30 @@ Future<IdentityInfo> restoreIdentityFromMnemonic({required String phrase}) =>
     RustLib.instance.api.crateApiIdentityRestoreIdentityFromMnemonic(
       phrase: phrase,
     );
+
+/// Welcome's phrase restore (PHRASE_RESTORE_DESIGN 1.2). With `check_kept`, old data
+/// kept beside this profile is probed first and a match or a miss returns before
+/// anything lands; the person's choice calls again without it.
+Future<RestoreOutcome> welcomeRestore({
+  required String phrase,
+  required WelcomeRestoreMode mode,
+  required bool checkKept,
+}) => RustLib.instance.api.crateApiIdentityWelcomeRestore(
+  phrase: phrase,
+  mode: mode,
+  checkKept: checkKept,
+);
+
+/// Whether "Type my phrase again" may set this identity aside: a Welcome restore
+/// within 30 days that no friend accepted and no server holds.
+Future<bool> maySetAsideThisIdentity() =>
+    RustLib.instance.api.crateApiIdentityMaySetAsideThisIdentity();
+
+/// Sets this identity aside (moved, never erased) at the next launch, after which the
+/// profile opens at Welcome. Checks `may_set_aside_this_identity` again. The caller
+/// relaunches the app.
+Future<void> setAsideThisIdentity() =>
+    RustLib.instance.api.crateApiIdentitySetAsideThisIdentity();
 
 /// Unlock the identity file for this session, before `open_message_store()` or
 /// `start_node()`. A plaintext identity loads directly and ignores `password`; an
@@ -367,4 +393,42 @@ class ProtectionStatus {
           hasPassword == other.hasPassword &&
           hasOsKeychain == other.hasOsKeychain &&
           osKeychainAvailable == other.osKeychainAvailable;
+}
+
+@freezed
+sealed class RestoreOutcome with _$RestoreOutcome {
+  const RestoreOutcome._();
+
+  /// The identity is on this device. The phrase never comes back out of Rust.
+  const factory RestoreOutcome.restored({
+    /// The keychain default ran (Windows and macOS OS data root, no `.locked` pair):
+    /// show its toast. False: set the protection offer due.
+    required bool lockedToKeychain,
+  }) = RestoreOutcome_Restored;
+
+  /// A folder of old data kept beside this profile opens with these words; nothing
+  /// changed. Desktop offers to switch to it. `profile_name` when the registry lists it.
+  const factory RestoreOutcome.keptMatch({
+    required String path,
+    String? profileName,
+  }) = RestoreOutcome_KeptMatch;
+
+  /// Old data with an identity is kept beside this profile and none of it opens with
+  /// these words; nothing changed. A typo is likely.
+  const factory RestoreOutcome.keptNoneOpens() = RestoreOutcome_KeptNoneOpens;
+}
+
+@freezed
+sealed class WelcomeRestoreMode with _$WelcomeRestoreMode {
+  const WelcomeRestoreMode._();
+
+  /// No: the old device broke or was wiped. The phrase admits this install and every
+  /// other device keeps counting.
+  const factory WelcomeRestoreMode.admit() = WelcomeRestoreMode_Admit;
+
+  /// Yes, or not sure: a recovery keeping only this install; every other device is
+  /// dropped as lost or stolen since `lost_since_ms` (0 = longer ago, or not sure).
+  const factory WelcomeRestoreMode.recover({
+    required PlatformInt64 lostSinceMs,
+  }) = WelcomeRestoreMode_Recover;
 }
