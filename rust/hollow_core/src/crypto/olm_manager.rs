@@ -755,9 +755,10 @@ impl OlmManager {
     }
 
     /// Never inlined: a session restored from its pickle is large, and the change entry
-    /// points sit inside the swarm's deepest stack frames.
+    /// points sit inside the swarm's deepest stack frames, so the event loop also calls
+    /// it where its stack is shallow.
     #[inline(never)]
-    fn take_newer_if_answered(&mut self) {
+    pub(crate) fn take_newer_if_answered(&mut self) {
         let Some(answer) = self.awaiting_newer.as_mut() else { return };
         let newer = match answer.try_recv() {
             Ok(newer) => newer,

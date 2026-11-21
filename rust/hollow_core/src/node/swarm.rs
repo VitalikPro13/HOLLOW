@@ -5840,6 +5840,9 @@ async fn run_event_loop(
                         let (WsEvent::Message { room, from, data } | WsEvent::DirectMessage { room, from, data }) = ws_frame else {
                             continue;
                         };
+                        // A copy our push fetch saved is taken here, not under the Olm arm,
+                        // where restoring its pickle overran a debug worker's stack.
+                        olm.take_newer_if_answered();
                         // The relay never hands a device its own frames; one that does is
                         // echoing a genuine seal back to us.
                         if from == device_peer_id {

@@ -71316,3 +71316,31 @@ async fn sec244_a_replay_past_the_frame_budget_lands_whole() {
     assert!(all, "a replayed frame fell to the frame budget: {} of {N} landed", landed(&b));
 }
 
+// sec244-stack
+// Found with HOL-SEC-244: a resumed app whose push fetch read a DM takes the fetch's
+// session copy at its first change. When that change was a ring frame's decrypt, the
+// restore ran under the event loop and the Olm arm and overran a debug worker's stack.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn sec244_a_resumed_app_takes_its_fetchs_copy_before_it_reads_the_ring() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (a_tag, b_tag) = (237, 239);
+    let (a, mut b) = sec244_pair(&relay, a_tag, b_tag).await;
+    relay.hold_direct(&a.device_id, &b.device_id);
+    relay.suspend(&b.device_id);
+    let since = olm_frames_for(&relay, &a.device_id, &b).len();
+    send_dm_burst(&a, &b, "ring", 2).await;
+    assert!(wait_until(10, async || olm_frames_for(&relay, &a.device_id, &b).len() >= since + 2).await);
+    let mut fetch = push_fetch_of(&b);
+    assert_eq!(push_fetch_reads(&relay, &a, &b, &mut fetch, since).await, 2);
+    drop(fetch);
+    relay.resume(&b.device_id);
+    flush_frames(&relay, &mut b).await;
+    relay.release_held(&a.device_id, &b.device_id);
+    drain_events(&mut b);
+    // B reads the ring's copies (spent, so quietly dropped) and goes on reading A.
+    dm_read(&a, &mut b, "ring-after").await;
+}
