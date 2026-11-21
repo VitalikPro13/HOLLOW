@@ -5,6 +5,9 @@ import android.content.ClipDescription
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.media.AudioDeviceInfo
+import android.media.AudioManager
 import android.net.Uri
 import android.os.Build
 import android.os.PersistableBundle
@@ -34,6 +37,16 @@ class MainActivity : FlutterFragmentActivity() {
         relayNetworkWatch = RelayNetworkWatch(this) {
             relayTriggers.invokeMethod("network", null)
         }.also { it.start() }
+
+        // Whether calls can start on an earpiece (#154): a tablet has none, so
+        // Settings hides the speaker switch there.
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "hollow/audio_hardware")
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "hasEarpiece" -> result.success(hasEarpiece())
+                    else -> result.notImplemented()
+                }
+            }
 
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "hollow/link_keep_alive")
             .setMethodCallHandler { call, result ->
@@ -107,6 +120,15 @@ class MainActivity : FlutterFragmentActivity() {
                     else -> result.notImplemented()
                 }
             }
+    }
+
+    private fun hasEarpiece(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            return packageManager.hasSystemFeature(PackageManager.FEATURE_TELEPHONY)
+        }
+        val audio = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        return audio.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+            .any { it.type == AudioDeviceInfo.TYPE_BUILTIN_EARPIECE }
     }
 
     // Phrase screens, the App Lock and secrets on the clipboard

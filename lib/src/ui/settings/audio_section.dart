@@ -10,6 +10,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart' as webrtc;
 import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/hollow_data_dir.dart';
+import 'package:hollow/src/core/providers/audio_route_provider.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/settings_place_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
@@ -51,6 +52,53 @@ class VoiceSwitchPromptRow extends ConsumerWidget {
           kAskBeforeVoiceSwitchDefault,
       onChanged: (v) => ref
           .read(askBeforeVoiceSwitchProvider.notifier)
+          .setEnabled(v)
+          .catchError((Object e) {
+        if (!context.mounted) return;
+        HollowToast.show(
+            context,
+            friendlyError(e,
+                fallback: "Couldn't save that setting. Try again."),
+            type: HollowToastType.error);
+      }),
+    );
+  }
+}
+
+/// Only where calls can start on an earpiece (#154): not a desktop or tablet.
+class StartCallsOnSpeakerRow extends ConsumerStatefulWidget {
+  const StartCallsOnSpeakerRow({super.key});
+
+  @override
+  ConsumerState<StartCallsOnSpeakerRow> createState() =>
+      _StartCallsOnSpeakerRowState();
+}
+
+class _StartCallsOnSpeakerRowState
+    extends ConsumerState<StartCallsOnSpeakerRow> {
+  @override
+  void initState() {
+    super.initState();
+    // A read made before the message store opened failed and would stick for
+    // the process, showing the default instead of the stored choice.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted && ref.read(startCallsOnSpeakerProvider).hasError) {
+        ref.invalidate(startCallsOnSpeakerProvider);
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final stored = ref.watch(startCallsOnSpeakerProvider);
+    return SettingsSwitchRow(
+      title: 'Start calls on the speaker',
+      subtitle: 'When this is off, voice calls start on the earpiece. Video '
+          'calls and voice rooms use the speaker either way, and a connected '
+          'headset comes first.',
+      value: stored.valueOrNull ?? kStartCallsOnSpeakerDefault,
+      onChanged: !stored.hasValue ? null : (v) => ref
+          .read(startCallsOnSpeakerProvider.notifier)
           .setEnabled(v)
           .catchError((Object e) {
         if (!context.mounted) return;
@@ -699,6 +747,8 @@ class _AudioVideoSettingsViewState
           children: [
             if (_isDesktop) _buildSpeakerRow(touch),
             if (_isDesktop) _buildCameraRow(touch),
+            if (ref.watch(hasEarpieceProvider).valueOrNull ?? false)
+              const StartCallsOnSpeakerRow(),
             SettingsChoiceRow<AudioQualityPreset>(
               title: 'Call quality',
               subtitle: _qualityLine(ref.watch(audioQualityProvider).valueOrNull ??

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/age_gate.dart';
 import 'package:hollow/src/core/friendly_error.dart';
+import 'package:hollow/src/core/providers/audio_route_provider.dart';
 import 'package:hollow/src/core/providers/profile_draft_provider.dart';
 import 'package:hollow/src/core/providers/settings_place_provider.dart';
 import 'package:hollow/src/core/providers/shell_tab.dart';
@@ -156,14 +157,18 @@ class _Rail extends StatelessWidget {
 }
 
 /// What a settings search for `query` finds on a build in `mode`.
-List<SettingsSearchEntry> settingsSearchHits(String query, AgeGateMode mode) => [
+/// [earpiece] = this device has one, so phone-only rows exist (#154).
+List<SettingsSearchEntry> settingsSearchHits(String query, AgeGateMode mode,
+        {bool earpiece = false}) =>
+    [
       for (final c in SettingsCategory.values)
         if (c.label.toLowerCase().contains(query.toLowerCase()))
           SettingsSearchEntry(c.label, c),
       for (final e in kSettingsSearchIndex)
         if (e.matches(query) &&
             e.label != e.category.label &&
-            (!e.ageGateSetting || mode != AgeGateMode.phoneRemote))
+            (!e.ageGateSetting || mode != AgeGateMode.phoneRemote) &&
+            (!e.phoneOnly || earpiece))
           e,
     ];
 
@@ -176,7 +181,8 @@ class _SearchResults extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final hollow = HollowTheme.of(context);
-    final hits = settingsSearchHits(query, ref.watch(ageGateModeProvider));
+    final hits = settingsSearchHits(query, ref.watch(ageGateModeProvider),
+        earpiece: ref.watch(hasEarpieceProvider).valueOrNull ?? false);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [

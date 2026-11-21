@@ -439,6 +439,33 @@ class VoiceEnhanceDynamicNotifier extends AsyncNotifier<bool> {
   }
 }
 
+/// Whether a phone's 1:1 voice call starts on the loudspeaker (#154); off = the
+/// earpiece. Video calls and voice rooms start loud either way, and a headset
+/// beats both (`AudioRoutes.preferLoudRoute`). Local to this device.
+final startCallsOnSpeakerProvider =
+    AsyncNotifierProvider<StartCallsOnSpeakerNotifier, bool>(
+        StartCallsOnSpeakerNotifier.new);
+
+const bool kStartCallsOnSpeakerDefault = true;
+
+class StartCallsOnSpeakerNotifier extends AsyncNotifier<bool> {
+  @override
+  Future<bool> build() async {
+    final val = await storage_api.loadSetting(key: 'start_calls_on_speaker');
+    if (val == null || val.isEmpty) return kStartCallsOnSpeakerDefault;
+    return val == 'true';
+  }
+
+  /// Rethrows on a persistence failure; call sites show it.
+  Future<void> setEnabled(bool enabled) async {
+    await storage_api.saveSetting(
+      key: 'start_calls_on_speaker',
+      value: enabled ? 'true' : 'false',
+    );
+    state = AsyncData(enabled);
+  }
+}
+
 /// Whether joining a voice room asks first when it would leave people behind
 /// in ours (#106). Local to this device.
 final askBeforeVoiceSwitchProvider =

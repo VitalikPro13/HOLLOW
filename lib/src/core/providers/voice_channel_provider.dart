@@ -1450,8 +1450,10 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       }
       unawaited(_teardownCall());
     }
-    // So the next call doesn't inherit a stale speakerphone state.
-    if (_isMobile) {
+    // So the next call doesn't inherit a stale speakerphone state. A DM call
+    // taking over (accepted from inside the room) owns the route by now; a
+    // bare ring owns nothing, so the reset still runs under it.
+    if (_isMobile && !ref.read(callProvider.notifier).ownsRoute) {
       unawaited(Helper.setSpeakerphoneOn(false).catchError((_) {}));
       ref.read(audioRouteProvider.notifier).reset();
     }
@@ -1528,7 +1530,12 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     _broadcastAudioState();
   }
 
-  static bool get _isMobile => Platform.isAndroid || Platform.isIOS;
+  /// Lets host tests run the phone-only audio route paths.
+  @visibleForTesting
+  static bool? debugMobileOverride;
+
+  static bool get _isMobile =>
+      debugMobileOverride ?? (Platform.isAndroid || Platform.isIOS);
 
   /// Route audio to the loudspeaker (true) or earpiece (false). Mobile only.
   void _setSpeakerRoute(bool speaker) {

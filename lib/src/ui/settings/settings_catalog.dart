@@ -76,11 +76,20 @@ class SettingsSearchEntry {
   /// The age-restricted setting, which an iPhone and a store Android do not have.
   final bool ageGateSetting;
 
+  /// A row only a device with an earpiece shows (`hasEarpieceProvider`).
+  final bool phoneOnly;
+
   const SettingsSearchEntry(this.label, this.category, [this.keywords = ''])
-      : ageGateSetting = false;
+      : ageGateSetting = false,
+        phoneOnly = false;
 
   const SettingsSearchEntry.ageGate(this.label, this.category, [this.keywords = ''])
-      : ageGateSetting = true;
+      : ageGateSetting = true,
+        phoneOnly = false;
+
+  const SettingsSearchEntry.phone(this.label, this.category, [this.keywords = ''])
+      : ageGateSetting = false,
+        phoneOnly = true;
 
   bool matches(String query) {
     final q = query.toLowerCase();
@@ -145,6 +154,7 @@ const List<SettingsSearchEntry> kSettingsSearchIndex = [
   SettingsSearchEntry('Gain', SettingsCategory.audio, 'mic volume loud'),
   SettingsSearchEntry('Speaker', SettingsCategory.audio, 'output headphones'),
   SettingsSearchEntry('Camera', SettingsCategory.audio, 'webcam video'),
+  SettingsSearchEntry.phone('Start calls on the speaker', SettingsCategory.audio, 'speakerphone loudspeaker earpiece hands-free call'),
   SettingsSearchEntry('Call quality', SettingsCategory.audio, 'bitrate music hi-fi stereo'),
   SettingsSearchEntry('Send my voice', SettingsCategory.audio, 'push to talk ptt voice activity'),
   SettingsSearchEntry('Push-to-talk key', SettingsCategory.audio, 'ptt hotkey keybind'),

@@ -451,7 +451,11 @@ class ProbeDump {
     // The call by state, not by widgets: a dismissed incoming card stays built
     // for its exit, so "Accept gone" cannot say a ring stopped.
     final call = read(callProvider);
-    if (call != null) out['callStatus'] = call.status.name;
+    if (call != null) {
+      out['callStatus'] = call.status.name;
+      // Hands-free (#154): the speaker, or a headset that beat it.
+      out['callSpeakerOn'] = call.isSpeakerOn;
+    }
     // A meeting by state: a voice room alone cannot show a stranded meeting.
     final meeting = read(conferenceProvider);
     if (meeting != null) {

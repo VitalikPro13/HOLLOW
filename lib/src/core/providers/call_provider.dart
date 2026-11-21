@@ -206,6 +206,11 @@ class CallState {
   static const idle = CallState();
 }
 
+/// Whether a phone's 1:1 call starts on the loud route. A video call is
+/// hands-free by nature, so [startOnSpeaker] only decides voice calls.
+bool dmCallStartsLoud({required bool video, required bool startOnSpeaker}) =>
+    video || startOnSpeaker;
+
 class CallNotifier extends Notifier<CallState> {
   VoiceService? _voiceService;
   Timer? _ringTimer;
@@ -385,6 +390,14 @@ class CallNotifier extends Notifier<CallState> {
     ref.listen<Set<String>>(blockedUsersProvider, (_, _) => _endIfPeerBlocked());
     ref.listen<Duration>(voicePollIntervalProvider,
         (_, next) => _voiceService?.setPollInterval(next));
+    // A call that never reached media never touched the route, so its
+    // teardown must not reset it (a ring declined inside a voice room).
+    listenSelf((_, next) {
+      if (next.status == CallStatus.connecting ||
+          next.status == CallStatus.active) {
+        _ownsRoute = true;
+      }
+    });
     return const CallState();
   }
 
@@ -477,8 +490,13 @@ class CallNotifier extends Notifier<CallState> {
           }));
         }
 
-        // Voice calls start on the earpiece, video calls on the loudspeaker.
-        _setSpeakerRoute(state.isVideoCall);
+        // A phone call starts loud (#154; a headset still wins); "Start calls
+        // on the speaker" off sends a voice call to the earpiece.
+        _setSpeakerRoute(dmCallStartsLoud(
+          video: state.isVideoCall,
+          startOnSpeaker: _startOnSpeaker ?? kStartCallsOnSpeakerDefault,
+        ));
+        _applyLateStartRoute();
 
         // VAD writes go to callSpeakingProvider, not CallState, so a flip rebuilds
         // only the avatar glow. stopVad() emits (false,false), resetting it on hangup.
@@ -1039,6 +1057,7 @@ class CallNotifier extends Notifier<CallState> {
     // in about a second. Taken at the START: the invite and accept ride it too.
     RealtimeSessionFlag.acquire('dm-call');
     if (state.status != CallStatus.idle) return;
+    unawaited(_readStartRoute());
 
     await _leaveVoiceChannelIfActive(hostMeeting);
     // The leave awaited real teardown; an incoming invite may have started ringing.
@@ -1114,6 +1133,7 @@ class CallNotifier extends Notifier<CallState> {
 
     final peerId = state.peerId!;
     final callId = state.callId!;
+    unawaited(_readStartRoute());
 
     _ringTimer?.cancel();
     // Everything before this was the user deciding; machine time starts here.
@@ -1243,7 +1263,74 @@ class CallNotifier extends Notifier<CallState> {
         }));
   }
 
-  static bool get _isMobile => Platform.isAndroid || Platform.isIOS;
+  /// "Start calls on the speaker" as read when this call started; null = the
+  /// store could not answer, so the default applies.
+  bool? _startOnSpeaker;
+
+  /// This call reached media, so its teardown may reset the route it set.
+  bool _ownsRoute = false;
+
+  /// Whether this call has set the route; a voice room's leave must not reset
+  /// it under the call (a bare ring owns nothing).
+  bool get ownsRoute => _ownsRoute;
+
+  /// The start-route read in flight, its generation, and whether it landed.
+  Future<void>? _startRouteRead;
+  int _startRouteGen = 0;
+  bool _startRouteLanded = false;
+
+  /// The person (or the camera) chose a route after the start route applied.
+  bool _routeChosen = false;
+
+  /// Read at call start, never at build: the first frame builds this notifier
+  /// before the message store opens, and a failed read would otherwise stick
+  /// for the whole process.
+  Future<void> _readStartRoute() {
+    final gen = ++_startRouteGen;
+    _startOnSpeaker = null;
+    _startRouteLanded = false;
+    return _startRouteRead = () async {
+      bool? read;
+      try {
+        if (ref.read(startCallsOnSpeakerProvider).hasError) {
+          ref.invalidate(startCallsOnSpeakerProvider);
+        }
+        read = await ref
+            .read(startCallsOnSpeakerProvider.future)
+            .timeout(const Duration(seconds: 2));
+      } catch (_) {}
+      if (gen != _startRouteGen) return;
+      _startOnSpeaker = read;
+      _startRouteLanded = true;
+    }();
+  }
+
+  /// Media connected before the setting answered (a busy store): apply the
+  /// stored choice when it lands, unless the call changed or a route was chosen.
+  void _applyLateStartRoute() {
+    _routeChosen = false;
+    final pending = _startRouteRead;
+    if (_startRouteLanded || pending == null) return;
+    final callId = state.callId;
+    unawaited(pending.then((_) {
+      final stored = _startOnSpeaker;
+      if (state.callId != callId ||
+          state.status != CallStatus.active ||
+          _routeChosen ||
+          stored == null) {
+        return;
+      }
+      _setSpeakerRoute(
+          dmCallStartsLoud(video: state.isVideoCall, startOnSpeaker: stored));
+    }));
+  }
+
+  /// Lets host tests run the phone-only audio route paths.
+  @visibleForTesting
+  static bool? debugMobileOverride;
+
+  static bool get _isMobile =>
+      debugMobileOverride ?? (Platform.isAndroid || Platform.isIOS);
 
   /// Route audio to the loudspeaker (true) or earpiece (false). Mobile only.
   void _setSpeakerRoute(bool speaker) {
@@ -1267,12 +1354,14 @@ class CallNotifier extends Notifier<CallState> {
   /// Toggle loudspeaker/earpiece during a call. Mobile only.
   void toggleSpeaker() {
     if (state.status == CallStatus.idle) return;
+    _routeChosen = true;
     _setSpeakerRoute(!state.isSpeakerOn);
   }
 
   /// Switch this call to an explicit output route (mobile route sheet).
   Future<void> selectAudioRoute(AudioRoute route) async {
     if (!_isMobile || state.status == CallStatus.idle) return;
+    _routeChosen = true;
     // Keep isSpeakerOn meaning "hands-free" for proximity blanking and the row.
     state = state.copyWith(isSpeakerOn: route.kind != AudioRouteKind.earpiece);
     await ref.read(audioRouteProvider.notifier).select(route);
@@ -1300,6 +1389,7 @@ class CallNotifier extends Notifier<CallState> {
 
     // Camera on mid-call implies hands-off use; off keeps the active route.
     if (enabled && !wasEnabled && _isMobile && !state.isSpeakerOn) {
+      _routeChosen = true;
       _setSpeakerRoute(true);
     }
 
@@ -2634,11 +2724,15 @@ class CallNotifier extends Notifier<CallState> {
     await _disarmVoiceRedirect();
     ref.read(focusedDmSourceProvider.notifier).state =
         const DmFocusedSource.none();
-    // So the next call doesn't inherit a stale speakerphone state.
-    if (_isMobile) {
+    // So the next call doesn't inherit a stale speakerphone state; a voice room
+    // still live owns the route, and a call that never reached media never set it.
+    if (_isMobile &&
+        _ownsRoute &&
+        !ref.read(voiceChannelProvider).isInVoiceChannel) {
       unawaited(Helper.setSpeakerphoneOn(false).catchError((_) {}));
       ref.read(audioRouteProvider.notifier).reset();
     }
+    _ownsRoute = false;
     ref.read(callLevelProvider.notifier).reset();
     state = const CallState();
     // The call's media is gone: listening for the overlay may resume.

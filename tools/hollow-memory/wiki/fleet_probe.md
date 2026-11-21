@@ -1128,6 +1128,8 @@ answers with the reason toast, b hangs up and a's strip goes. 29 steps, 54 s, gr
   animation, so `wait_for gone text:Accept` fails on a device that really stopped ringing. The
   provider snapshot carries `callStatus` (idle / ringing / connecting / active) and
   `callElsewhere` (what a sibling is in: call / voice / meeting, or empty): wait on those.
+  `callSpeakerOn` (bool, #154) says whether the DM call is hands-free (speaker, or a headset
+  that beat it); `fleet/c154_speaker_default_mobile.json` (iOS peers j,k) waits on it.
 - **A Data sent dialog left open covers the incoming card**: tap `text:Done` after a link before
   anything rings, or the Accept tap reports "clipped, covered, or not hit-testable".
 - **Mixed desktop + phone identity** (driven by hand the same day, green): Windows a shows a code

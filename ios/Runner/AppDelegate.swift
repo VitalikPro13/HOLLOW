@@ -336,6 +336,19 @@ struct TaskHolds {
         result(["keys": keys, "appId": appId])
       }
 
+      // hollow/audio_hardware → whether calls can start on an earpiece (#154):
+      // an iPad has none, so Settings hides the speaker switch there.
+      FlutterMethodChannel(
+        name: "hollow/audio_hardware",
+        binaryMessenger: controller.binaryMessenger
+      ).setMethodCallHandler { call, result in
+        if call.method == "hasEarpiece" {
+          result(UIDevice.current.userInterfaceIdiom == .phone)
+        } else {
+          result(FlutterMethodNotImplemented)
+        }
+      }
+
       // hollow/privacy → phrase screens, App Lock and secrets on the clipboard
       // (privacy_screen.dart, secret_clipboard.dart).
       let privacy = FlutterMethodChannel(

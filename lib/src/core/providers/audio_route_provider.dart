@@ -1,9 +1,27 @@
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart' as webrtc;
 import 'package:hollow/src/core/services/audio_route.dart';
+
+/// Whether this device can play a call on an earpiece (#154): a phone can, a
+/// tablet or desktop cannot. A runner that cannot answer counts as a phone, so
+/// the switch shows rather than vanishing on a real phone.
+final hasEarpieceProvider = FutureProvider<bool>((ref) async {
+  if (defaultTargetPlatform != TargetPlatform.android &&
+      defaultTargetPlatform != TargetPlatform.iOS) {
+    return false;
+  }
+  try {
+    return await const MethodChannel('hollow/audio_hardware')
+            .invokeMethod<bool>('hasEarpiece') ??
+        true;
+  } catch (_) {
+    return true;
+  }
+});
 
 /// Live view of the phone's call-audio routing: which routes exist and which
 /// one audio is actually on. Mobile only; on desktop it stays empty and every
