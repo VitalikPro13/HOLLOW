@@ -50,8 +50,16 @@ final licenseErrorProvider = StateProvider<String?>((ref) => null);
 
 /// The relay turns our login away because every device seat of our access key
 /// is taken (`license_key_in_use`); the node keeps retrying. Cleared once the
-/// relay lets us in, or when the person enters another key.
+/// relay lets us in, a login fails for another reason, or the person enters
+/// another key.
 final relayKeyFullProvider = StateProvider<bool>((ref) => false);
+
+/// The relay's answer when every seat of our access key is taken.
+const String kLicenseKeyInUse = 'license_key_in_use';
+
+/// Not a refusal: the node's word that a login failed for a reason other than a
+/// full key, so the key-full state ends (ws_client `LICENSE_KEY_NOT_FULL`).
+const String kLicenseKeyNotFull = 'license_key_not_full';
 
 /// The connection status while our access key is full.
 const String kAccessKeyFullStatus = 'Access key full';

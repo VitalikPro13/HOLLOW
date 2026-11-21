@@ -19,18 +19,23 @@ import 'package:hollow/src/rust/api/network.dart' as network_api;
 /// out is back to the default relay, which restarts Hollow. [linking]: this
 /// device is joining an identity whose other device already holds a key, and
 /// no system back leaves the prompt. [cancellable]: the person asked to replace a
-/// key that still works, so Cancel keeps it.
+/// key that still works, so Cancel keeps it. [onKey] runs INSIDE the dialog:
+/// Connect loads while it runs, and a throw keeps the dialog open with the error.
 Future<String?> showLicenseKeyDialog(
   BuildContext context, {
   String? error,
   bool linking = false,
   bool cancellable = false,
+  Future<void> Function(String key)? onKey,
 }) {
   return showHollowDialog<String>(
     context: context,
     barrierDismissible: cancellable,
     builder: (dialogContext) => _LicenseKeyContent(
-        initialError: error, linking: linking, cancellable: cancellable),
+        initialError: error,
+        linking: linking,
+        cancellable: cancellable,
+        onKey: onKey),
   );
 }
 
@@ -39,21 +44,25 @@ Future<String?> showLicenseKeyDialog(
 /// after the caller's dialog is gone.
 Future<void> enterAnotherAccessKey(
     BuildContext context, ProviderContainer container) async {
-  final key = await showLicenseKeyDialog(context, cancellable: true);
-  if (key == null) return;
-  await container.read(licenseKeyProvider.notifier).setKey(key);
-  await network_api.setLicenseKey(key: key);
-  final node = container.read(nodeProvider.notifier);
-  await node.stop();
-  await node.start();
+  await showLicenseKeyDialog(context, cancellable: true, onKey: (key) async {
+    await container.read(licenseKeyProvider.notifier).setKey(key);
+    await network_api.setLicenseKey(key: key);
+    final node = container.read(nodeProvider.notifier);
+    await node.stop();
+    await node.start();
+  });
 }
 
 class _LicenseKeyContent extends ConsumerStatefulWidget {
   final String? initialError;
   final bool linking;
   final bool cancellable;
+  final Future<void> Function(String key)? onKey;
   const _LicenseKeyContent(
-      {this.initialError, this.linking = false, this.cancellable = false});
+      {this.initialError,
+      this.linking = false,
+      this.cancellable = false,
+      this.onKey});
 
   @override
   ConsumerState<_LicenseKeyContent> createState() => _LicenseKeyContentState();
@@ -63,6 +72,8 @@ class _LicenseKeyContentState extends ConsumerState<_LicenseKeyContent>
     with HollowDialogAction {
   final _controller = TextEditingController();
   String? _error;
+  // Connect's own run, so the default-relay button's run never spins it.
+  bool _connecting = false;
 
   static final _isMobile = Platform.isAndroid || Platform.isIOS;
 
@@ -102,7 +113,7 @@ class _LicenseKeyContentState extends ConsumerState<_LicenseKeyContent>
     }
   }
 
-  void _onSubmit() {
+  Future<void> _onSubmit() async {
     if (actionRunning) return;
     final key = _controller.text.trim();
     if (key.isEmpty) {
@@ -118,7 +129,17 @@ class _LicenseKeyContentState extends ConsumerState<_LicenseKeyContent>
       return;
     }
 
-    Navigator.of(context).pop(key);
+    final onKey = widget.onKey;
+    if (onKey != null) {
+      setState(() => _connecting = true);
+      final done = await runDialogAction(() => onKey(key),
+          fallback: "Couldn't reconnect with this key. Try again.");
+      if (!done) {
+        if (mounted) setState(() => _connecting = false);
+        return;
+      }
+    }
+    if (mounted) Navigator.of(context).pop(key);
   }
 
   Future<void> _useDefaultRelay() => runDialogAction(() async {
@@ -191,6 +212,7 @@ class _LicenseKeyContentState extends ConsumerState<_LicenseKeyContent>
           ),
         HollowButton.filled(
           onPressed: actionRunning ? null : _onSubmit,
+          loading: _connecting,
           child: const Text('Connect'),
         ),
       ],

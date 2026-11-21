@@ -1937,10 +1937,11 @@ class EventStreamNotifier extends Notifier<bool> {
             );
 
       case NetworkEvent_LicenseError(:final reason):
-        if (reason == 'license_key_in_use') {
-          ref.read(relayKeyFullProvider.notifier).state = true;
+        ref.read(relayKeyFullProvider.notifier).state =
+            reason == kLicenseKeyInUse;
+        if (reason != kLicenseKeyNotFull) {
+          ref.read(licenseErrorProvider.notifier).state = reason;
         }
-        ref.read(licenseErrorProvider.notifier).state = reason;
 
       // The relay's operator refuses a server or meeting: it opens read-only.
       case NetworkEvent_ServerUnavailable(:final serverId):

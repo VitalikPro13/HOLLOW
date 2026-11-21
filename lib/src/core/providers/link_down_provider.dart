@@ -4,14 +4,16 @@ import 'package:hollow/src/core/providers/relay_denial_provider.dart';
 
 /// Why OUR relay link is down, as the "you're offline" family of copy names it:
 /// a relay that refuses us is no reconnect away, so it never reads as offline.
-enum LinkDown { offline, refusedAccount, refusedNetwork }
+enum LinkDown { offline, refusedAccount, refusedNetwork, keyFull }
 
 /// What a down link means right now; surfaces still decide for themselves
 /// whether it is down.
 final linkDownProvider = Provider<LinkDown>((ref) {
-  if (ref.watch(overallConnectionProvider) != OverallConnection.refused) {
-    return LinkDown.offline;
-  }
+  final link = ref.watch(overallConnectionProvider);
+  // Every seat of our access key is taken (#153): the status says so, and so does
+  // every line about the link.
+  if (link == OverallConnection.keyFull) return LinkDown.keyFull;
+  if (link != OverallConnection.refused) return LinkDown.offline;
   return ref.watch(relayLoginDenialProvider) == 'network_denied'
       ? LinkDown.refusedNetwork
       : LinkDown.refusedAccount;
@@ -68,6 +70,25 @@ String linkDownNote(LinkDown down, LinkNote note) {
       LinkNote.destroyEverywhere || LinkNote.destroyUnlink =>
         "You're offline, so the order can't reach your other devices from "
             'here.',
+    };
+  }
+  if (down == LinkDown.keyFull) {
+    const full = 'Your access key is full';
+    return switch (note) {
+      LinkNote.title => full,
+      LinkNote.presence => "$full, so who's online may be out of date.",
+      LinkNote.around => "$full, so who's around may be out of date.",
+      LinkNote.friendsAround =>
+        'Friends who are online show up here once the relay lets you in.',
+      LinkNote.friendsOnline =>
+        "Who's online shows up once the relay lets you in.",
+      LinkNote.nickname => 'Claim a nickname once the relay lets you in.',
+      LinkNote.lobby =>
+        "$full. You'll knock again once the relay lets you in.",
+      LinkNote.pasteLink =>
+        '$full. Fetch this file once the relay lets you in.',
+      LinkNote.destroyEverywhere || LinkNote.destroyUnlink =>
+        "$full, so the order can't reach your other devices from here.",
     };
   }
   final refused = down == LinkDown.refusedNetwork

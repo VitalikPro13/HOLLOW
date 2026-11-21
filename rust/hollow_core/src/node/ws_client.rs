@@ -300,7 +300,9 @@ pub enum WsEvent {
     DirectMessage { room: String, from: String, data: Vec<u8> },
     /// Binary data from a specific peer (file/shard streaming chunks).
     BinaryDirect { room: String, from: String, data: Vec<u8> },
-    /// License key validation failed — do not auto-reconnect.
+    /// The relay judged our access key: one of [`LicenseRefusal`]'s codes (a busy key keeps
+    /// retrying, the others stop the client), or [`LICENSE_KEY_NOT_FULL`] once a busy key
+    /// no longer is what turns us away.
     LicenseError { reason: String },
     /// The relay will not carry this server or meeting room (its operator's denylist),
     /// spelled as we joined it. Nothing changes until the node, which alone knows its
@@ -2232,6 +2234,8 @@ impl Client {
                 // per outage; only a refused key stops the client. Only the relay's
                 // exact refusal codes count, never text that merely mentions a license.
                 match e {
+                    // Said once per spell: the UI keeps showing it until a login fails for
+                    // another reason or gets in.
                     ConnectError::License(LicenseRefusal::InUse) => {
                         if !self.license_busy_notified {
                             self.license_busy_notified = true;
@@ -2245,10 +2249,13 @@ impl Client {
                         return;
                     }
                     ConnectError::Denied(kind) => {
+                        self.key_no_longer_full();
                         self.on_login_denied(kind, held);
                         return;
                     }
-                    ConnectError::Refused(_) | ConnectError::Other(_) | ConnectError::Cooldown(_) => {}
+                    ConnectError::Refused(_) | ConnectError::Other(_) | ConnectError::Cooldown(_) => {
+                        self.key_no_longer_full();
+                    }
                 }
                 if !held {
                     let _ = self.event_tx.send(WsEvent::SessionLost);
@@ -2381,6 +2388,14 @@ impl Client {
                 // A failed write already took the socket down; nothing follows here.
                 let _ = self.sync_flag().await;
             }
+        }
+    }
+
+    /// A login failed for a reason other than the key, so the status stops saying the key
+    /// is full (#153 review item 4).
+    fn key_no_longer_full(&mut self) {
+        if std::mem::take(&mut self.license_busy_notified) {
+            let _ = self.event_tx.send(WsEvent::LicenseError { reason: LICENSE_KEY_NOT_FULL.into() });
         }
     }
 
@@ -2824,6 +2839,10 @@ impl RelayDenial {
         }
     }
 }
+
+/// The [`WsEvent::LicenseError`] reason that ends a busy-key spell without a login: no relay
+/// sends it, so it never reads as a refusal (`LicenseRefusal::from_code`).
+pub(crate) const LICENSE_KEY_NOT_FULL: &str = "license_key_not_full";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LicenseRefusal {
@@ -4387,6 +4406,52 @@ mod tests {
         assert!(is_auth_nonce(&"a0".repeat(32)));
         assert!(!is_auth_nonce(&"A0".repeat(32)));
         assert!(!is_auth_nonce("abcd"));
+    }
+
+    /// #153 review item 4: "Access key full" lasts only while the key is what turns us away.
+    /// A login failing for any other reason ends the spell once; the next busy answer starts
+    /// a new one.
+    #[tokio::test]
+    async fn a_busy_key_spell_ends_when_a_login_fails_for_another_reason() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut client = Client::new(
+            Dial { url: "wss://relay.example/ws".into(), peer_id: "me".into(), keypair_proto: vec![], pub_key_b64: String::new(), license_key: Some("K".into()), fetch: false },
+            Timing::default(),
+            tx,
+            false,
+        );
+        fn said(rx: &mut mpsc::UnboundedReceiver<WsEvent>) -> Vec<String> {
+            let mut out = Vec::new();
+            while let Ok(ev) = rx.try_recv() {
+                if let WsEvent::LicenseError { reason } = ev {
+                    out.push(reason);
+                }
+            }
+            out
+        }
+        async fn fail(client: &mut Client, e: ConnectError) {
+            client.attempt = Some(Attempt { fut: Box::pin(std::future::pending()), purpose: Purpose::Connect, signing: false, started: Instant::now() });
+            client.on_attempt(Err(e)).await;
+        }
+        let busy = || ConnectError::License(LicenseRefusal::InUse);
+        fail(&mut client, busy()).await;
+        fail(&mut client, busy()).await;
+        assert_eq!(said(&mut rx), ["license_key_in_use"], "said once per spell");
+        fail(&mut client, ConnectError::Other("unreachable".into())).await;
+        assert_eq!(said(&mut rx), [LICENSE_KEY_NOT_FULL], "a failure for another reason ends it");
+        fail(&mut client, ConnectError::Refused("keys_unreadable".into())).await;
+        assert!(said(&mut rx).is_empty(), "and only once");
+        for other in [
+            ConnectError::Refused("ip_limit".into()),
+            ConnectError::Cooldown(Duration::from_secs(1)),
+            ConnectError::Denied(RelayDenial::Account),
+        ] {
+            fail(&mut client, busy()).await;
+            fail(&mut client, other).await;
+            assert_eq!(said(&mut rx), ["license_key_in_use", LICENSE_KEY_NOT_FULL]);
+        }
+        assert!(!client.stopped, "none of these stops the client");
+        assert_eq!(LicenseRefusal::from_code(LICENSE_KEY_NOT_FULL), None, "no relay answer reads as it");
     }
 
     #[test]

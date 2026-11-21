@@ -10,8 +10,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/core/providers/license_key_provider.dart';
+import 'package:hollow/src/core/providers/link_down_provider.dart';
 import 'package:hollow/src/rust/frb_generated.dart';
 import 'package:hollow/src/theme/hollow_theme_data.dart';
+import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/dialogs/access_key_full_dialog.dart';
 import 'package:hollow/src/ui/dialogs/license_key_dialog.dart';
 import 'package:hollow/src/ui/mobile/mobile_connection_indicator.dart';
@@ -147,5 +149,58 @@ void main() {
       await settle(tester);
       await capture(tester, 'prompt_$label');
     });
+    // Review item 5: the new key applies inside the prompt.
+    for (final fails in [false, true]) {
+      testWidgets('key prompt ${fails ? 'failed' : 'applying'} $label',
+          (tester) async {
+        await pump(tester, size, true);
+        final applying = Completer<void>();
+        unawaited(showLicenseKeyDialog(host, cancellable: true, onKey: (_) {
+          if (fails) throw StateError('restart failed');
+          return applying.future;
+        }));
+        await settle(tester);
+        await tester.enterText(find.byType(TextField), 'WXYZ1234ABCD5678');
+        await tester.tap(find.text('Connect'));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 300));
+        await capture(tester, 'prompt_${fails ? 'failed' : 'applying'}_$label');
+        if (!applying.isCompleted) applying.complete();
+      });
+    }
+    // Review item 3: a line about the down link, as the phone's Friends list says it.
+    for (final full in [false, true]) {
+      testWidgets('empty state ${full ? 'after' : 'before'} $label',
+          (tester) async {
+        await pump(tester, size, full);
+        await tester.pumpWidget(ProviderScope(
+          key: UniqueKey(),
+          overrides: hollowTestOverrides(extra: [
+            connectionStatusProvider.overrideWith(
+                () => TestRelayStatus(RelayConnectionStatus.disconnected)),
+            relayKeyFullProvider.overrideWith((ref) => full),
+          ]),
+          child: RepaintBoundary(
+            key: shotKey,
+            child: MaterialApp(
+              debugShowCheckedModeBanner: false,
+              theme: HollowThemeData.dark(),
+              home: Scaffold(
+                body: Consumer(builder: (context, ref, _) {
+                  final down = ref.watch(linkDownProvider);
+                  return HollowEmptyState(
+                    dense: true,
+                    title: linkDownNote(down, LinkNote.title),
+                    description: linkDownNote(down, LinkNote.friendsOnline),
+                  );
+                }),
+              ),
+            ),
+          ),
+        ));
+        await settle(tester);
+        await capture(tester, 'empty_${full ? 'after' : 'before'}_$label');
+      });
+    }
   }
 }
