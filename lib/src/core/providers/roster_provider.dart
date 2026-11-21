@@ -1,11 +1,14 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hollow/src/core/services/phrase_restore.dart';
 import 'package:hollow/src/rust/api/roster.dart' as roster_api;
 
 /// What our own roster says about THIS device, for the full-screen lock (design
 /// ID-1): a member uses the app; a removed device waits for its erase or the
-/// recovery phrase; a device restored from a backup waits to be let in.
-enum RosterGateKind { none, removed, pending }
+/// recovery phrase; a device restored from a backup, or one a recovery left
+/// out, waits to be let in; a phrase restore the roster outdated before it
+/// counted (HOL-SEC-218) types the phrase again.
+enum RosterGateKind { none, removed, pending, tooEarly }
 
 @immutable
 class RosterGate {
@@ -20,11 +23,25 @@ class RosterGate {
   /// When a waiting device joins on its own if nobody refuses it.
   final DateTime? joinsAt;
 
+  /// A waiting device a phrase recovery on another device left out, since then.
+  final DateTime? droppedAt;
+
+  /// [RosterGateKind.tooEarly]: which statement came too early, so typing the
+  /// phrase again makes the same one.
+  final PhraseRestoreBranch? tooEarly;
+
+  /// The moment a too-early recovery judged lost devices from, kept so the
+  /// next one judges from it too.
+  final int? lostSinceMs;
+
   const RosterGate({
     this.kind = RosterGateKind.none,
     this.removedBy,
     this.wipeAt,
     this.joinsAt,
+    this.droppedAt,
+    this.tooEarly,
+    this.lostSinceMs,
   });
 
   static DateTime? _at(int? ms) =>
@@ -33,16 +50,50 @@ class RosterGate {
   /// The gate a stored roster implies. An identity with no roster yet is none;
   /// any other device the roster does not count waits, with a date only while the
   /// phrase lets backups join by waiting.
-  factory RosterGate.fromStatus(roster_api.RosterStatus s) {
-    if (s.member || s.devices.isEmpty) return const RosterGate();
-    if (s.removedBy != null) {
+  factory RosterGate.fromStatus(roster_api.RosterStatus s) =>
+      RosterGate.from(
+        member: s.member,
+        anyDevice: s.devices.isNotEmpty,
+        removedBy: s.removedBy,
+        wipeAtMs: s.wipeAtMs,
+        joinsAtMs: s.joinsAtMs,
+        tooEarly: s.tooEarly,
+        tooEarlyLostSinceMs: s.tooEarlyLostSinceMs,
+        droppedByRecoveryAtMs: s.droppedByRecoveryAtMs,
+      );
+
+  /// [RosterGate.fromStatus] from its parts.
+  factory RosterGate.from({
+    required bool member,
+    required bool anyDevice,
+    String? removedBy,
+    int? wipeAtMs,
+    int? joinsAtMs,
+    String? tooEarly,
+    int? tooEarlyLostSinceMs,
+    int? droppedByRecoveryAtMs,
+  }) {
+    if (member || !anyDevice) return const RosterGate();
+    if (removedBy != null) {
       return RosterGate(
         kind: RosterGateKind.removed,
-        removedBy: s.removedBy,
-        wipeAt: _at(s.wipeAtMs),
+        removedBy: removedBy,
+        wipeAt: _at(wipeAtMs),
       );
     }
-    return RosterGate(kind: RosterGateKind.pending, joinsAt: _at(s.joinsAtMs));
+    final early = tooEarly == null ? null : phraseRestoreBranchFrom(tooEarly);
+    if (early != null) {
+      return RosterGate(
+        kind: RosterGateKind.tooEarly,
+        tooEarly: early,
+        lostSinceMs: tooEarlyLostSinceMs,
+      );
+    }
+    return RosterGate(
+      kind: RosterGateKind.pending,
+      joinsAt: _at(joinsAtMs),
+      droppedAt: _at(droppedByRecoveryAtMs),
+    );
   }
 
   @override
@@ -51,10 +102,14 @@ class RosterGate {
       other.kind == kind &&
       other.removedBy == removedBy &&
       other.wipeAt == wipeAt &&
-      other.joinsAt == joinsAt;
+      other.joinsAt == joinsAt &&
+      other.droppedAt == droppedAt &&
+      other.tooEarly == tooEarly &&
+      other.lostSinceMs == lostSinceMs;
 
   @override
-  int get hashCode => Object.hash(kind, removedBy, wipeAt, joinsAt);
+  int get hashCode => Object.hash(
+      kind, removedBy, wipeAt, joinsAt, droppedAt, tooEarly, lostSinceMs);
 }
 
 class RosterGateNotifier extends Notifier<RosterGate> {

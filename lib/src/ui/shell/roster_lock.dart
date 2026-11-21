@@ -6,6 +6,7 @@ import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/roster_provider.dart';
 import 'package:hollow/src/core/services/destroy_flow.dart';
+import 'package:hollow/src/core/services/phrase_restore.dart';
 import 'package:hollow/src/core/providers/device_proof_provider.dart';
 import 'package:hollow/src/rust/api/roster.dart' as roster_api;
 import 'package:hollow/src/rust/api/wipe.dart' as wipe_api;
@@ -20,7 +21,8 @@ import 'package:hollow/src/core/peer_id_label.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// The full-screen lock for a device our own roster does not admit (design ID-1):
-/// one that was removed, or one restored from a backup that waits to be let in.
+/// one that was removed, one restored from a backup or left out by a recovery
+/// that waits to be let in, or one whose phrase restore came too early.
 /// Opaque like the app lock; it lifts when the roster says this device belongs.
 Route<void> rosterLockRoute() => PageRouteBuilder<void>(
       opaque: true,
@@ -121,16 +123,34 @@ class _RosterLockScreenState extends ConsumerState<RosterLockScreen> {
     if (done) await ref.read(rosterGateProvider.notifier).refresh();
   }
 
+  /// The statement that came too early, made again: an admission joins, a
+  /// recovery recovers from the same moment as before.
+  Future<void> _typeAgain(RosterGate gate) async {
+    if (gate.tooEarly != PhraseRestoreBranch.recover) return _join();
+    final container = ProviderScope.containerOf(context, listen: false);
+    final done = await showRecoverAgainDialog(context,
+        lostSinceMs: gate.lostSinceMs ?? 0);
+    if (!done) return;
+    await container.read(rosterGateProvider.notifier).refresh();
+    askForRestoreChooser(container, fresh: true);
+  }
+
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
     final gate = ref.watch(rosterGateProvider);
     final labels = ref.watch(deviceLabelProvider);
     final removed = gate.kind == RosterGateKind.removed;
+    final tooEarly = gate.kind == RosterGateKind.tooEarly;
 
     final String title;
     final String body;
-    if (removed) {
+    if (tooEarly) {
+      title = 'Type your recovery phrase again';
+      body = "Your identity doesn't count this device yet. It changed after "
+          "you typed your phrase here, or this device's clock was behind. "
+          'Check the date and time, then type the phrase again.';
+    } else if (removed) {
       // A bare id names nothing a removed device can look up, so only a label is said.
       final label = labels[gate.removedBy];
       final kind = deviceKindName(ref.watch(deviceKindProvider)[gate.removedBy] ?? '');
@@ -148,9 +168,18 @@ class _RosterLockScreenState extends ConsumerState<RosterLockScreen> {
       final when = gate.joinsAt == null
           ? ''
           : ' If nobody refuses it, it joins on ${rosterDateLabel(context, gate.joinsAt!)}.';
-      title = 'Waiting to join your identity';
-      body = 'This device was restored from a backup. Approve it on one of your '
-          'other devices, or type your recovery phrase.$when';
+      final dropped = gate.droppedAt;
+      if (dropped != null) {
+        title = 'Your recovery phrase was used on another device';
+        body = "Since ${rosterDateLabel(context, dropped)}, this device isn't "
+            'part of your identity. If that was you and you want to use this '
+            'device too, type your recovery phrase or approve it on your other '
+            'device.$when';
+      } else {
+        title = 'Waiting to join your identity';
+        body = 'This device was restored from a backup. Approve it on one of '
+            'your other devices, or type your recovery phrase.$when';
+      }
     }
 
     return PopScope(
@@ -167,7 +196,12 @@ class _RosterLockScreenState extends ConsumerState<RosterLockScreen> {
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Icon(removed ? LucideIcons.shieldOff : LucideIcons.hourglass,
+                    Icon(
+                        removed
+                            ? LucideIcons.shieldOff
+                            : tooEarly
+                                ? LucideIcons.keyRound
+                                : LucideIcons.hourglass,
                         size: 32, color: hollow.textSecondary),
                     const SizedBox(height: HollowSpacing.lg),
                     Text(
@@ -197,7 +231,13 @@ class _RosterLockScreenState extends ConsumerState<RosterLockScreen> {
                               child: const Text('Erase now'),
                             ),
                           HollowButton.filled(
-                            onPressed: _erasing ? null : (removed ? _usePhrase : _join),
+                            onPressed: _erasing
+                                ? null
+                                : removed
+                                    ? _usePhrase
+                                    : tooEarly
+                                        ? () => _typeAgain(gate)
+                                        : _join,
                             child: const Text('Use recovery phrase'),
                           ),
                         ],
