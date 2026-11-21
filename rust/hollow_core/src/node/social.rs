@@ -716,7 +716,8 @@ impl AnswerResent {
         if self.0.len() >= ANSWER_RESENT_MAX {
             self.0.clear();
         }
-        self.0.insert(key)
+        self.0.insert(key);
+        true
     }
 
     pub(crate) fn clear(&mut self) {
