@@ -3,6 +3,8 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/app_relaunch.dart';
+import 'package:hollow/src/core/providers/license_key_provider.dart';
+import 'package:hollow/src/core/providers/node_provider.dart';
 import 'package:hollow/src/core/providers/relay_domain_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -10,29 +12,48 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
+import 'package:hollow/src/rust/api/network.dart' as network_api;
 
 /// Asks for the access key a SELF-HOSTED relay's owner switched on; the
 /// default relay never asks. Resolves to the typed key. The only other way
 /// out is back to the default relay, which restarts Hollow. [linking]: this
 /// device is joining an identity whose other device already holds a key, and
-/// no system back leaves the prompt.
+/// no system back leaves the prompt. [cancellable]: the person asked to replace a
+/// key that still works, so Cancel keeps it.
 Future<String?> showLicenseKeyDialog(
   BuildContext context, {
   String? error,
   bool linking = false,
+  bool cancellable = false,
 }) {
   return showHollowDialog<String>(
     context: context,
-    barrierDismissible: false,
-    builder: (dialogContext) =>
-        _LicenseKeyContent(initialError: error, linking: linking),
+    barrierDismissible: cancellable,
+    builder: (dialogContext) => _LicenseKeyContent(
+        initialError: error, linking: linking, cancellable: cancellable),
   );
+}
+
+/// Replaces the relay's access key with one the person types, then restarts the
+/// node so the next login carries it. Cancel changes nothing. [container] is read
+/// after the caller's dialog is gone.
+Future<void> enterAnotherAccessKey(
+    BuildContext context, ProviderContainer container) async {
+  final key = await showLicenseKeyDialog(context, cancellable: true);
+  if (key == null) return;
+  await container.read(licenseKeyProvider.notifier).setKey(key);
+  await network_api.setLicenseKey(key: key);
+  final node = container.read(nodeProvider.notifier);
+  await node.stop();
+  await node.start();
 }
 
 class _LicenseKeyContent extends ConsumerStatefulWidget {
   final String? initialError;
   final bool linking;
-  const _LicenseKeyContent({this.initialError, this.linking = false});
+  final bool cancellable;
+  const _LicenseKeyContent(
+      {this.initialError, this.linking = false, this.cancellable = false});
 
   @override
   ConsumerState<_LicenseKeyContent> createState() => _LicenseKeyContentState();
@@ -155,7 +176,12 @@ class _LicenseKeyContentState extends ConsumerState<_LicenseKeyContent>
       // Ghost first, primary last; in the trailing row, which wraps on a
       // phone where the longer label would not fit beside Connect.
       actions: [
-        if (!onDefault)
+        if (widget.cancellable)
+          HollowButton.ghost(
+            onPressed: actionRunning ? null : () => Navigator.of(context).pop(),
+            child: const Text('Cancel'),
+          ),
+        if (!onDefault && !widget.cancellable)
           HollowButton.ghost(
             onPressed: _useDefaultRelay,
             loading: actionRunning,

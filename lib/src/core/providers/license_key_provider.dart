@@ -38,6 +38,7 @@ class LicenseKeyNotifier extends Notifier<String?> {
 
   Future<void> setKey(String key) async {
     state = key;
+    ref.read(relayKeyFullProvider.notifier).state = false;
     await storage_api.saveSetting(key: _settingKey, value: key);
   }
 }
@@ -46,3 +47,25 @@ final licenseKeyProvider =
     NotifierProvider<LicenseKeyNotifier, String?>(LicenseKeyNotifier.new);
 
 final licenseErrorProvider = StateProvider<String?>((ref) => null);
+
+/// The relay turns our login away because every device seat of our access key
+/// is taken (`license_key_in_use`); the node keeps retrying. Cleared once the
+/// relay lets us in, or when the person enters another key.
+final relayKeyFullProvider = StateProvider<bool>((ref) => false);
+
+/// The connection status while our access key is full.
+const String kAccessKeyFullStatus = 'Access key full';
+
+/// The key-full notice's title.
+const String kAccessKeyFullTitle = 'Your access key is full';
+
+/// What a full key means and what to do about it.
+const String kAccessKeyFullText =
+    'This relay lets one access key connect up to five devices at once, and '
+    'yours already has five. Ask whoever runs the relay for a key of your own, '
+    'or close Hollow on another device that uses it. Hollow keeps trying to '
+    'connect.';
+
+/// The toast when the key first turns out full.
+const String kAccessKeyFullToast =
+    'Your access key is already on five devices. Hollow keeps trying.';

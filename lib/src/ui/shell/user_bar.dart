@@ -25,19 +25,23 @@ import 'package:hollow/src/ui/components/download_icon_button.dart';
 import 'package:hollow/src/ui/components/overlay_mic_indicator.dart';
 import 'package:hollow/src/ui/components/profile_card_popup.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
+import 'package:hollow/src/ui/dialogs/access_key_full_dialog.dart';
 import 'package:hollow/src/ui/dialogs/mnemonic_dialog.dart';
 import 'package:hollow/src/ui/dialogs/relay_denied_dialog.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// The status line, tappable while the relay refuses our login: it opens the
-/// dialog that says why and asks again, the only retry once that is closed.
-Widget _refusalTap(
-    BuildContext context, String? refusal, String label, Widget line) {
-  if (refusal == null) return line;
+/// The status line, tappable while the relay refuses our login (the dialog that
+/// says why and asks again, the only retry once that is closed) or our access
+/// key is full (what to do about it).
+Widget _refusalTap(BuildContext context, String? refusal, bool keyFull,
+    String label, Widget line) {
+  if (refusal == null && !keyFull) return line;
   return HollowPressable(
     subtle: true,
     semanticLabel: '$label, show why',
-    onTap: () => showRelayLoginDenial(context, refusal),
+    onTap: () => refusal != null
+        ? showRelayLoginDenial(context, refusal)
+        : showAccessKeyFull(context),
     borderRadius: BorderRadius.circular(HollowTheme.of(context).radiusXs),
     child: line,
   );
@@ -190,6 +194,7 @@ class UserBar extends ConsumerWidget {
                     _refusalTap(
                       context,
                       refusal,
+                      overall == OverallConnection.keyFull,
                       statusText,
                       Row(
                       children: [

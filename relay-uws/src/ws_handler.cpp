@@ -521,6 +521,35 @@ static void resume_session(RelayState& state, SSLWebSocket* ws, PerSocketData* d
                            uint64_t in_h, const std::string& challenge);
 static void send_kill_signals(RelayState& state, SSLWebSocket* ws, const std::string& peer);
 
+// The key a socket's license seat is held under (license_pool.h).
+static SeatToken seat_token(SSLWebSocket* ws) { return reinterpret_cast<SeatToken>(ws); }
+
+// The operator's lines about refused logins (operator_note.h): counts only, at most once
+// a minute per kind, never a peer id, key or address.
+enum class Refusal { SeatsFull, Cooldown, IpLimit };
+
+static void note_refusal(RelayState& state, Refusal kind) {
+    MinuteNote& note = kind == Refusal::SeatsFull  ? state.notes.seats_full
+                       : kind == Refusal::Cooldown ? state.notes.cooldown
+                                                   : state.notes.ip_limit;
+    const unsigned long long n = note.count(steady_ms());
+    if (n == 0) return;
+    switch (kind) {
+        case Refusal::SeatsFull:
+            fprintf(stderr, "[license] %llu login(s) refused since the last line like this: "
+                            "every device seat of an access key was taken\n", n);
+            break;
+        case Refusal::Cooldown:
+            fprintf(stderr, "[breaker] %llu login(s) refused since the last line like this: "
+                            "the device was paused (cooldown)\n", n);
+            break;
+        case Refusal::IpLimit:
+            fprintf(stderr, "[limits] %llu connection(s) refused since the last line like this: "
+                            "an address had no connection slot left (ip_limit)\n", n);
+            break;
+    }
+}
+
 // The one frame an unauthenticated socket may send besides `auth`. The nonce is
 // minted once per socket; asking again gets the same one. `door_key` is what this
 // socket's door proofs are made for; `session` says a v3 login may ask for one;
@@ -631,7 +660,9 @@ static bool handle_auth(SSLWebSocket* ws, PerSocketData* data,
     // trade a user who can fix their own problem for an attacker who learns one
     // bit slower. Keys are high-entropy and every guess costs a full TLS
     // handshake plus a signed auth frame. Do not "fix" this by merging them.
-    LicenseResult lr = state.license.validate_key(license_key_ptr, peer_id);
+    // A seat taken here is this socket's until its close, whichever refusal below or
+    // later close ends it (.close gives it back).
+    LicenseResult lr = state.license.validate_key(license_key_ptr, peer_id, seat_token(ws));
     switch (lr) {
         case LicenseResult::Ok:
         case LicenseResult::NotRequired:
@@ -641,6 +672,7 @@ static bool handle_auth(SSLWebSocket* ws, PerSocketData* data,
             ws->end(1008, "bad_license");
             return false;
         case LicenseResult::KeyInUse:
+            note_refusal(state, Refusal::SeatsFull);
             send_json(ws, {{"type", "auth_failed"}, {"error", "license_key_in_use"}});
             ws->end(1008, "bad_license");
             return false;
@@ -657,6 +689,7 @@ static bool handle_auth(SSLWebSocket* ws, PerSocketData* data,
     if (!guest && !fetch) {
         const int64_t wait = breaker_login_wait(state, peer_id, frame->version == 3 ? frame->session : std::string());
         if (wait > 0 && breaker::enforced()) {
+            note_refusal(state, Refusal::Cooldown);
             close_once(ws, 1013, "cooldown",
                        json{{"type", "auth_failed"}, {"error", "cooldown"}, {"after_ms", wait}}.dump());
             return false;
@@ -681,6 +714,7 @@ static bool handle_auth(SSLWebSocket* ws, PerSocketData* data,
                                                        std::chrono::steady_clock::now(),
                                                        state.limits.family(data->ip_key).cap);
         if (!slot.admit) {
+            note_refusal(state, Refusal::IpLimit);
             ws->end(1008, "ip_limit");
             return false;
         }
@@ -3615,7 +3649,7 @@ static void go_offline(RelayState& state, const std::string& peer_id) {
     state.last_push_sent.erase(peer_id);
     state.push_budget.erase(peer_id);
 
-    state.license.release_key(peer_id);
+    // Its license seat is not touched here: a seat is a socket's, given back by .close.
     state.peer_sockets.erase(peer_id);
 }
 
@@ -3630,7 +3664,7 @@ static void cleanup_peer(RelayState& state, const std::string& peer_id,
                          bool suppress_peer_left) {
     // If a DIFFERENT socket now owns this peer_id, the closing socket is a stale
     // duplicate that was already replaced — skip the shared cleanup (nickname,
-    // push, license, peer_sockets) so we don't tear down the live successor's
+    // push, peer_sockets) so we don't tear down the live successor's
     // state. The per-room leave below is always safe to run because leave_room
     // is itself gated on expected_ws.
     // (In the supersede path cleanup_peer is called while peer_sockets still
@@ -5220,6 +5254,7 @@ void setup_ws_handler(uWS::SSLApp& app, RelayState& state, const Config& config)
                     ws->end(1008, "rate_limit");
                     return;
                 case session_bounds::Admission::IpLimit:
+                    note_refusal(state, Refusal::IpLimit);
                     ws->end(1008, "ip_limit");
                     return;
                 case session_bounds::Admission::In:
@@ -5457,6 +5492,9 @@ void setup_ws_handler(uWS::SSLApp& app, RelayState& state, const Config& config)
             // The socket's send buffer is freed with it: drop its charge (never negative).
             state.send_ledger.forget(ws);
             state.open_sockets.erase(ws);
+            // Whatever ended the socket, authenticated or refused after its key was judged,
+            // the license seat it took goes back with it (#153).
+            state.license.release_seat(seat_token(ws));
             state.login_window.leave(reinterpret_cast<login_window::Key>(ws));
             state.conns.close(reinterpret_cast<conn_book::Key>(ws));
 
@@ -5482,13 +5520,9 @@ void setup_ws_handler(uWS::SSLApp& app, RelayState& state, const Config& config)
                 data->auth_timer = nullptr;
             }
             if (data->authenticated && data->is_fetch) {
-                // A fetch socket leaves only the slots it still holds, and frees the
-                // peer's license seat only when no full socket of it is connected.
+                // A fetch socket leaves only the slots it still holds.
                 for (const auto& room : data->fetch_rooms) {
                     leave_room(state, data->peer_id, room, ws);
-                }
-                if (!state.peer_sockets.count(data->peer_id)) {
-                    state.license.release_key(data->peer_id);
                 }
             } else if (s) {
                 enter_grace(state, ws, data, *s);

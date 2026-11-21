@@ -926,8 +926,9 @@ access key**.
 
 The setup makes the keys for you and shows them at the end. Run it again to see
 them, add one or remove one. One key admits up to 5 devices at a time, so a
-person's phone and desktop share one key. Removing a key disconnects whoever uses
-it within 30 seconds.
+person's phone and desktop share one key. Give each person a key of their own: a
+key the whole group shares runs out of seats, and the sixth device can't connect.
+Removing a key disconnects every device that uses it within 30 seconds.
 
 By hand, the keys live in `keys.json` (`relay-uws/keys/keys.json` under Docker,
 `/etc/hollow-relay/keys.json` under systemd):
@@ -1267,6 +1268,17 @@ connected to, and the relay accepts only its own address (`RELAY_HOST`, or
 `--domain` under systemd). Everyone has to type that address. A second name that
 points at the same server won't sign in.
 
+**Members see Access key full.** One access key lets in 5 devices at once. A
+sixth is turned away, and its app says **Access key full** until a seat frees up,
+which happens as soon as one of those devices closes Hollow. Give each person a
+key of their own rather than one key for the group. The relay notes these
+refusals in its log at most once a minute, without saying who, as a line that
+says every device seat of an access key was taken. Run
+`sudo journalctl -u hollow-relay` (under Docker,
+`sudo docker compose -p hollow-relay logs relay`) within the hour, since the
+journal keeps only the last hour. `/server-stats` counts these refusals as
+`seats_full` under `license`.
+
 **The app says the relay has no TURN server.** TURN is off, or coturn isn't
 running. Check `systemctl status hollow-coturn`, or `docker compose ps` and
 `COMPOSE_PROFILES=turn` in `.env`. coturn keeps no log at all, because a TURN log
@@ -1443,6 +1455,17 @@ overwrites that file with zeros and deletes it.
 ## Operator changelog
 
 Notes for people who already run a relay, newest first.
+
+### 0.14.3
+
+- A device the relay turned away right after checking its access key, because it
+  was paused or its address had no connection left, kept a seat of that key until
+  it connected again, so a shared key could fill up with nobody on it. Every seat
+  now goes back the moment its connection closes, and removing a key also
+  disconnects the phones that were only fetching notifications (#153).
+- The log says, at most once a minute, when logins are refused because a key is
+  full, a device is paused or an address has no connection left, with counts and
+  nothing about who. `/server-stats` counts full-key refusals.
 
 ### 0.14
 

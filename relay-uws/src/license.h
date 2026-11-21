@@ -11,7 +11,7 @@ struct LicenseState : LicensePool {
     FileStamp last_stamp;
 
     bool load_from_file(const std::string& path);
-    LicenseResult validate_key(const std::string* key, const std::string& peer_id);
-    void release_key(const std::string& peer_id);
+    LicenseResult validate_key(const std::string* key, const std::string& peer_id, SeatToken socket);
+    void release_seat(SeatToken socket);
     void try_reload(RelayState& state);
 };

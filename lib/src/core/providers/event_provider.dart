@@ -1323,6 +1323,7 @@ class EventStreamNotifier extends Notifier<bool> {
 
       case NetworkEvent_RelayConnected():
         ref.read(relayLoginDenialProvider.notifier).state = null;
+        ref.read(relayKeyFullProvider.notifier).state = false;
         ref.read(connectionStatusProvider.notifier).onRelayEvent(event);
         // After the status, so the link flow reads the relay as up.
         ref.read(deviceLinkSyncProvider.notifier).onRelayConnected();
@@ -1936,6 +1937,9 @@ class EventStreamNotifier extends Notifier<bool> {
             );
 
       case NetworkEvent_LicenseError(:final reason):
+        if (reason == 'license_key_in_use') {
+          ref.read(relayKeyFullProvider.notifier).state = true;
+        }
         ref.read(licenseErrorProvider.notifier).state = reason;
 
       // The relay's operator refuses a server or meeting: it opens read-only.

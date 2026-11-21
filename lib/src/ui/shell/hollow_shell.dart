@@ -400,7 +400,7 @@ class _HollowShellState extends ConsumerState<HollowShell>
       if (!mounted) return;
       HollowToast.show(
         context,
-        'Your access key is in use on another device. Hollow keeps retrying.',
+        kAccessKeyFullToast,
         type: HollowToastType.info,
         duration: const Duration(seconds: 6),
       );

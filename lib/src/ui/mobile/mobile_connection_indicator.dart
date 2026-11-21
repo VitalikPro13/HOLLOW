@@ -17,6 +17,7 @@ import 'package:hollow/src/ui/components/connection_visual.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
 import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:hollow/src/ui/components/overlay_hosts.dart';
+import 'package:hollow/src/ui/dialogs/access_key_full_dialog.dart';
 import 'package:hollow/src/ui/dialogs/relay_denied_dialog.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -43,7 +44,9 @@ ConnectionIndicatorContent? connectionIndicatorContent(
           label: OverallConnection.offline.label,
           busy: false,
         ),
-      OverallConnection.refused => (label: connection.label, busy: false),
+      OverallConnection.refused ||
+      OverallConnection.keyFull =>
+        (label: connection.label, busy: false),
     };
 
 /// Keeps [MobileConnectionIndicator] in the root overlay while the mobile
@@ -265,9 +268,11 @@ class _MobileConnectionIndicatorState
         busy: content.busy,
         ink: connectionVisual(hollow, connection).color,
         // A refusal is no network fault: the notice's own mark.
-        icon: connection == OverallConnection.refused
-            ? LucideIcons.ban
-            : LucideIcons.wifiOff,
+        icon: switch (connection) {
+          OverallConnection.refused => LucideIcons.ban,
+          OverallConnection.keyFull => LucideIcons.keyRound,
+          _ => LucideIcons.wifiOff,
+        },
       );
     }
     _animate(visible);
@@ -275,9 +280,13 @@ class _MobileConnectionIndicatorState
     if (said == null || (!visible && _motion.isDismissed)) {
       return const SizedBox.shrink();
     }
-    final tap = visible && refusal != null
-        ? () => showRelayLoginDenial(context, refusal, touch: true)
-        : null;
+    final tap = !visible
+        ? null
+        : refusal != null
+            ? () => showRelayLoginDenial(context, refusal, touch: true)
+            : connection == OverallConnection.keyFull
+                ? () => showAccessKeyFull(context)
+                : null;
     Widget card = _Card(said: said);
     if (tap != null) {
       // The card keeps its size; a finger gets 44 px.

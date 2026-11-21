@@ -52,6 +52,7 @@ run test_join_lock ../src/crypto.cpp $LIBS
 run test_kill_list
 run test_kill_order ../src/crypto.cpp $LIBS
 run test_license_pool
+run test_operator_note
 run test_link_guess
 run test_login_window
 run test_online_people

@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/models/node_status.dart';
+import 'package:hollow/src/core/providers/license_key_provider.dart';
 import 'package:hollow/src/core/providers/node_provider.dart';
 import 'package:hollow/src/core/providers/relay_denial_provider.dart';
 import 'package:hollow/src/rust/api/network.dart';
@@ -349,6 +350,9 @@ enum OverallConnection {
 
   /// The relay refuses our account or network.
   refused,
+
+  /// Every device seat of our access key is taken; the node keeps retrying.
+  keyFull,
 }
 
 extension OverallConnectionLabel on OverallConnection {
@@ -360,6 +364,7 @@ extension OverallConnectionLabel on OverallConnection {
         OverallConnection.connected => 'Connected',
         OverallConnection.offline => 'No connection',
         OverallConnection.refused => kRelayRefusedStatus,
+        OverallConnection.keyFull => kAccessKeyFullStatus,
       };
 
   /// The relay link is down, whatever the reason.
@@ -367,7 +372,8 @@ extension OverallConnectionLabel on OverallConnection {
       this == OverallConnection.offline ||
       this == OverallConnection.reconnecting ||
       this == OverallConnection.error ||
-      this == OverallConnection.refused;
+      this == OverallConnection.refused ||
+      this == OverallConnection.keyFull;
 
   /// True only when fully connected to the relay — the only state that should
   /// render a green/"online" indicator.
@@ -388,6 +394,11 @@ final overallConnectionProvider = Provider<OverallConnection>((ref) {
   if (relay != RelayConnectionStatus.connected &&
       ref.watch(relayLoginDenialProvider) != null) {
     return OverallConnection.refused;
+  }
+  // Said as long as the relay turns the key away, never "No connection" (#153).
+  if (relay != RelayConnectionStatus.connected &&
+      ref.watch(relayKeyFullProvider)) {
+    return OverallConnection.keyFull;
   }
   return switch (relay) {
     RelayConnectionStatus.connected => OverallConnection.connected,

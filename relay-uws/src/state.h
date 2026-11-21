@@ -18,6 +18,7 @@
 #include "kill_list.h"
 #include "link_guess.h"
 #include "license.h"
+#include "operator_note.h"
 #include "conn_book.h"
 #include "conn_limits.h"
 #include "conn_rate.h"
@@ -372,6 +373,10 @@ struct RelayState {
     std::unordered_set<SSLWebSocket*> guest_sockets;
 
     LicenseState license;
+    // The operator's once-a-minute lines about refused logins (operator_note.h).
+    struct {
+        MinuteNote seats_full, cooldown, ip_limit;
+    } notes;
     ReportsState reports;
     ServerStatsCache stats_cache;
     DeliveryDiag diag;

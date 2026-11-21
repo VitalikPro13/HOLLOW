@@ -89,6 +89,14 @@ int main() {
 
     // The denylist's counts are an opt-in of their own, off unless named, and go with the
     // rest of the activity when PUBLIC_STATS is off.
+    // #153: a members-only relay names how many logins a full access key turned away.
+    nlohmann::json with_license = {{"mem_total_kb", 1000}, {"license", server_stats::license_block(7)}};
+    check("the license block is a count only",
+          keys(with_license["license"]) == std::set<std::string>{"seats_full"} &&
+              with_license["license"]["seats_full"] == 7);
+    server_stats::keep_public(with_license, false);
+    check("public stats off drops the license block", !with_license.contains("license"));
+
     check("deny counts: unset means off", !server_stats::parse_opt_in(nullptr));
     check("deny counts: empty means off", !server_stats::parse_opt_in("  "));
     for (const char* t : {"on", "ON", " true", "1", "yes\n"}) {

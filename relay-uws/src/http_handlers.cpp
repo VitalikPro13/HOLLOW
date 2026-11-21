@@ -147,6 +147,9 @@ static void handle_server_stats(HttpResponse* res, RelayState& state, const Conf
         {"budget_closed", state.diag.budget_closed}
     };
 
+    // Beside the breaker: logins a full access key turned away, on a members-only relay.
+    if (state.license.enabled) resp["license"] = server_stats::license_block(state.license.seats_full_refused);
+
     // Kept out when the operator hides the public activity, so it is never even counted.
     if (config.public_stats) resp["online_users"] = state.people_online(config.forwarder_peer_id);
 

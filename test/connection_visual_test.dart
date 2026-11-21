@@ -1,5 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hollow/src/core/providers/connection_status_provider.dart';
+import 'package:hollow/src/core/providers/license_key_provider.dart';
 import 'package:hollow/src/core/providers/relay_denial_provider.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/ui/components/connection_visual.dart';
@@ -41,12 +42,17 @@ void main() {
     }
   });
 
-  test('invisible wins over every connection state but a refusal', () {
+  test('invisible wins over every connection state but a refusal or a full key', () {
     for (final c in OverallConnection.values) {
       final v = connectionVisual(hollow, c, invisible: true);
       // Invisible hides us from others, never our own refused login from us.
-      expect(v.label,
-          c == OverallConnection.refused ? kRelayRefusedStatus : 'Invisible');
+      expect(
+          v.label,
+          switch (c) {
+            OverallConnection.refused => kRelayRefusedStatus,
+            OverallConnection.keyFull => kAccessKeyFullStatus,
+            _ => 'Invisible',
+          });
       expect(v.filled, isFalse);
     }
   });

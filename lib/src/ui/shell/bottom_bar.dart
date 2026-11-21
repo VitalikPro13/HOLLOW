@@ -58,6 +58,7 @@ import 'package:hollow/src/ui/components/server_avatar.dart';
 import 'package:hollow/src/ui/components/server_folder_popup.dart';
 import 'package:hollow/src/ui/components/status_dot.dart';
 import 'package:hollow/src/ui/components/voice_here_badge.dart';
+import 'package:hollow/src/ui/dialogs/access_key_full_dialog.dart';
 import 'package:hollow/src/ui/dialogs/create_server_dialog.dart';
 import 'package:hollow/src/ui/dialogs/relay_denied_dialog.dart';
 import 'package:hollow/src/ui/shell/new_server_entry.dart';
@@ -396,6 +397,14 @@ class DockIdentity extends ConsumerWidget {
         subtle: true,
         semanticLabel: '${visual.label}, show why',
         onTap: () => showRelayLoginDenial(context, refusal),
+        borderRadius: BorderRadius.circular(hollow.radiusXs),
+        child: _statusLine(visual.label, hollow.warning),
+      );
+    } else if (overall == OverallConnection.keyFull) {
+      line = HollowPressable(
+        subtle: true,
+        semanticLabel: '${visual.label}, show why',
+        onTap: () => showAccessKeyFull(context),
         borderRadius: BorderRadius.circular(hollow.radiusXs),
         child: _statusLine(visual.label, hollow.warning),
       );

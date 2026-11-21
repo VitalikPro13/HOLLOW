@@ -6998,6 +6998,7 @@ static void test_denylist() {
 #include "live_sib_mute.inc"
 #include "live_push_default.inc"
 #include "live_people.inc"
+#include "live_license.inc"
 
 int main(int argc, char** argv) {
     if (argc != 3) {
@@ -7125,6 +7126,15 @@ int main(int argc, char** argv) {
     if (only && std::string(only) == "people") {
         test_people_online();
         test_people_pending();
+        SSL_CTX_free(g_ctx);
+        if (failures) printf("%d FAILED\n", failures);
+        return failures ? 1 : 0;
+    }
+    // =license: access-key seats against a members-only relay of its own (#153).
+    if (only && std::string(only) == "license") {
+        const char* keys = getenv("RELAY_LIVE_KEYS");
+        g_keys_file = keys ? keys : "";
+        test_license_seats();
         SSL_CTX_free(g_ctx);
         if (failures) printf("%d FAILED\n", failures);
         return failures ? 1 : 0;

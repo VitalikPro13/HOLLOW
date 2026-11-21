@@ -218,7 +218,7 @@ and `test_auth_frame.cpp` to the Rust client's `relay_session.rs` tests.
 - **Presence follows the socket, delivery follows the session.** `enter_grace` (the close handler,
   for a socket whose session is live): the device leaves each room's `peers` now (`peer_left` to
   whoever saw it, unless it was hidden already) and goes into `WsRoom::held`; it leaves `peer_sockets` and `peer_rooms`
-  (`go_offline`: offline for push, push debounce reset, license seat released); the session keeps
+  (`go_offline`: offline for push, push debounce reset; the closing socket's license seat goes back in the close handler itself, see the License section); the session keeps
   its rooms with owner flags and door standing, its subscriptions, nickname, link code and inactive
   flag, and the closing socket's per-IP slot (`hold_ip_slot`; the close handler skips its own
   decrement). A room holding only `held` devices is not erased (`leave_room`). Every fan-out walks
@@ -851,13 +851,17 @@ The ONE thing the relay persists about peers. Small, but since file v3 (0.14) no
 
 ### LicensePool / LicenseState structs
 
-`LicensePool` (`license_pool.h`, header-only, pure, unit-tested by `test/test_license_pool.cpp`) holds the registry; `LicenseState` derives from it and adds the file. Since 2026-09-17 one key admits up to `MAX_DEVICES_PER_KEY = 5` sockets at once: a person's linked devices share one key (the linked device inherits it with the imported database) and the relay keeps a dead socket for up to its 120 s idle timeout, so a cap of one refused every second device and every reconnect that raced its own ghost (issue #86's surprise license prompt).
+`LicensePool` (`license_pool.h`, header-only, pure, unit-tested by `test/test_license_pool.cpp`) holds the registry; `LicenseState` derives from it and adds the file. Since 2026-09-17 one key admits up to `MAX_DEVICES_PER_KEY = 5` DEVICES (peer ids) at once: a person's linked devices share one key (the linked device inherits it with the imported database) and the relay keeps a dead socket for up to its 45 s idle timeout, so a cap of one refused every second device and every reconnect that raced its own ghost (issue #86's surprise license prompt).
+
+**A seat belongs to the SOCKET that took it (#153).** `validate(key, peer, token)` takes it (token = the socket pointer, `seat_token`), and the ONLY release is `release_seat(token)` at the top of the `.close` handler, run for every socket whatever ended it. A device counts once while ANY of its sockets holds a seat (full, fetch, guest, a superseded ghost, a session moving sockets), and gives the seat back with its last one. Two bugs this shape closed: (1) `handle_auth` judges the key BEFORE the cooldown (1013) and `settle_login` ip_limit (1008) refusals, which close with `authenticated == false`, so the old release in `cleanup_peer` never ran and the refused device kept a seat with no socket (a breaker-paused device for its whole pause); (2) a fresh relogin while the old socket lingered ran `cleanup_peer(ghost) -> go_offline -> release_key(P)` AFTER the successor's validate, so the live successor held no seat (a sixth device got in). Trap: never release a seat by peer id again, and never from `go_offline`/`cleanup_peer`: any refusal added to `handle_auth` later is covered only because the release is per socket in `.close`. Grace holds no seat (the session has no socket); a resume or a fresh login validates again; a restart starts with no seats (sockets do not survive it, holders are not in the snapshot). A full-key refusal counts `seats_full_refused` (`/server-stats` `license.seats_full`, only on a members-only relay, dropped with `PUBLIC_STATS=off`) and writes the operator's `[license]` line (`operator_note.h`, at most once a minute per kind, counts only; the cooldown and ip_limit refusals have `[breaker]` and `[limits]` lines of their own). Live proof: `run_live.sh` variant `license` (`live_license.inc`).
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `enabled` | `bool` | Whether license enforcement is active |
 | `keys` | `unordered_set<string>` | Set of valid license key strings |
-| `holders` | `unordered_map<string, unordered_set<string>>` | license_key -> peer_ids currently holding it |
+| `holders` | `unordered_map<string, unordered_map<string, unordered_set<SeatToken>>>` | license_key -> peer_id -> the sockets holding its seat; a key's seats = its peer ids |
+| `seats` | `unordered_map<SeatToken, pair<string, string>>` | socket -> (key, peer_id) it holds a seat for |
+| `seats_full_refused` | `uint64_t` | logins refused `KeyInUse`, for `/server-stats` |
 | `file_path` | `string` | Path to keys.json (saved for reload) |
 | `last_mtime` | `time_t` | Last modification time of keys.json (for change detection) |
 
@@ -884,20 +888,19 @@ Called during WebSocket auth (`handle_auth()`):
 1. If `!enabled`, return `NotRequired` (all peers connect freely).
 2. If no key provided (`key == nullptr || key->empty()`), return `KeyRequired`.
 3. If key not in `keys` set, return `InvalidKey`.
-4. If this peer_id already holds the key, return `Ok` (reconnection).
-5. If the key already has `MAX_DEVICES_PER_KEY` holders, return `KeyInUse`.
-6. Otherwise, add this peer_id to the key's holders and return `Ok`.
+4. If the key already has `MAX_DEVICES_PER_KEY` devices and this peer_id is not one of them, count `seats_full_refused` and return `KeyInUse`.
+5. Otherwise this socket takes a seat for the peer_id (one seat per device, however many of its sockets hold it) and `Ok` is returned.
 
-### license.cpp:release_key()
+### license.cpp:release_seat()
 
-Called when a peer disconnects (`cleanup_peer()`). Removes the peer_id from every key's holder set and drops keys left with no holders.
+Called at the top of the `.close` handler for EVERY socket, authenticated or refused after its key was judged. Drops that socket's seat; the device's seat goes with its last socket, and a key with no devices leaves no entry. A socket that holds nothing (or was kicked) changes nothing.
 
 ### license.cpp:try_reload()
 
 Called every 30 seconds by the license reload timer:
 1. Take the stamp; an unchanged one (or a missing file) returns. The stamp is kept whatever the outcome, so a broken file is judged once per change.
 2. `reload_text`: a file that does not read changes nothing ("keeping the previous keys"); else `replace_keys()` returns every holder of a key NOT in the new set as `peers_to_kick`, forgotten, and `enabled` and `keys` are swapped in. The timer callback in `main.cpp` sits in try/catch too.
-3. **Active connection revocation:** For each peer to kick, look up their `SSLWebSocket*` in `state.peer_sockets`, send `{"type":"auth_failed","error":"invalid_license_key"}`, and call `ws->end(1008, "license_revoked")`. This triggers the close handler which calls `cleanup_peer()`.
+3. **Active connection revocation:** `replace_keys` returns every SOCKET holding a dropped key (full, fetch and guest alike; before #153 only `peer_sockets`, so a fetch socket of a revoked key stayed), forgets their seats, and each still-open one (`open_sockets`, not `closing`) gets `{"type":"auth_failed","error":"invalid_license_key"}` and `ws->end(1008, "license_revoked")`. Live `license_revoked_key_closes_every_socket`.
 
 The 30-second reload cycle means key revocation takes at most 30 seconds to take effect on active connections.
 
@@ -987,8 +990,9 @@ Authentication protocol (first message after WebSocket open):
 7. Validate license key via `state.license.validate_key()`. Handle all `LicenseResult` cases:
    - `Ok` / `NotRequired`: continue.
    - `InvalidKey`: send `{"type":"auth_failed","error":"invalid_license_key"}`, close with "bad_license".
-   - `KeyInUse`: send `{"type":"auth_failed","error":"license_key_in_use"}`, close with "bad_license".
+   - `KeyInUse`: send `{"type":"auth_failed","error":"license_key_in_use"}`, close with "bad_license" (the operator's once-a-minute `[license]` line).
    - `KeyRequired`: send `{"type":"auth_failed","error":"license_key_required"}`, close with "bad_license".
+   The seat an `Ok` took is the socket's from here on: the cooldown and ip_limit refusals below give it back through `.close` (#153).
 
 **On success:**
 1. Set `data->peer_id`, `data->authenticated = true`, `data->license_key`.
@@ -1225,11 +1229,10 @@ This limits binary messages to a burst of 100 + sustained 20/second. Text messag
 ### ws_handler.cpp:cleanup_peer() — Disconnect cleanup
 
 Called from the close handler when an authenticated peer disconnects:
-1. `state.license.release_key(peer_id)` — Free the license key.
-2. `state.peer_sockets.erase(peer_id)` — Remove from global socket map.
-3. Copy the peer's room set (since `leave_room` modifies it during iteration).
-4. Call `leave_room()` for each room — removes peer from room, notifies remaining peers with `peer_left`, deletes empty rooms.
-5. `state.peer_rooms.erase(peer_id)` — Remove reverse index.
+1. `state.peer_sockets.erase(peer_id)` — Remove from global socket map (the license seat is NOT released here: `.close` releases it per socket, #153).
+2. Copy the peer's room set (since `leave_room` modifies it during iteration).
+3. Call `leave_room()` for each room — removes peer from room, notifies remaining peers with `peer_left`, deletes empty rooms.
+4. `state.peer_rooms.erase(peer_id)` — Remove reverse index.
 
 ---
 
@@ -1396,6 +1399,8 @@ Returns real-time server resource utilization. Cached for 5 seconds.
   "online_users": 42
 }
 ```
+
+A members-only relay (keys.json `enabled`) adds `"license": {"seats_full": N}`, the logins refused because every device seat of their key was taken (a count, never which key; #153).
 
 `bandwidth_cap_mbps` comes from the fair-share shaper's settings (`HOLLOW_CAKE_MBIT` in `/etc/hollow-relay/cake.env`, `deploy/hollow-cake.service`, 950 on the official box) and is omitted when the shaper is off or unset; the app then falls back to 1000. `online_users` is the number of PEOPLE online (`RelayState::people_online`, see RelayState above): distinct identities with a device on screen, never guests, hidden sessions or the media forwarder.
 

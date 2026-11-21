@@ -10,6 +10,7 @@ import 'package:hollow/src/core/message_tokens.dart'
 import 'package:hollow/src/core/models/call_record.dart';
 import 'package:hollow/src/core/models/channel_chat_message.dart';
 import 'package:hollow/src/core/providers/connection_status_provider.dart';
+import 'package:hollow/src/core/providers/license_key_provider.dart';
 import 'package:hollow/src/core/providers/relay_denial_provider.dart';
 import 'package:hollow/src/core/providers/blocked_users_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
@@ -360,6 +361,10 @@ List<storage_api.StoredChannelMessage> searchLoadedChannelMessages(
 Widget? ownLinkOfflineStatus(WidgetRef ref, {Key? key}) {
   final link = ref.watch(overallConnectionProvider);
   if (link.isOnline) return null;
+  if (link == OverallConnection.keyFull) {
+    return ConnectionProgress(
+        key: key, stage: ConnectionStage.offline, tooltip: kAccessKeyFullText);
+  }
   if (link != OverallConnection.refused) {
     return ConnectionProgress(key: key, stage: ConnectionStage.offline);
   }

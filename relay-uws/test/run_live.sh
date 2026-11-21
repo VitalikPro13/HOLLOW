@@ -10,7 +10,7 @@
 #   RELAY_LIVE_JOBS=n         compile at most n objects at once
 #   RELAY_LIVE_VARIANTS="a b" run only these variants (main, deny, exempt, backpressure,
 #                             breaker_shadow, breaker_enforce, oom, batch, shadow_env, window,
-#                             window_total, connected, cgnat, people); "none" builds only
+#                             window_total, connected, cgnat, people, license); "none" builds only
 cd "$(dirname "$0")" || exit 1
 # The carrier-NAT cases hold about 600 sockets on each side.
 ulimit -n 8192 2> /dev/null || ulimit -n 4096 2> /dev/null || true
@@ -205,6 +205,7 @@ free_port() {
 run_variant() {
     local v=$1 name=${2:-$1} exempt=${3-} backpressure=${4-} breaker=${5-} budget=${6-} port tries=0 log=$dir/relay_${2:-$1}.log
     local extra=() args=() only=${RELAY_LIVE_ONLY-} stall= denylist=$dir/denylist_${2:-$1}.json mode=enforce
+    local keys=$dir/no-keys.json
     local push_port
     push_port=$(free_port)
     # Three sockets an address, ten new ones a minute after a burst of thirty; a carrier-NAT
@@ -233,6 +234,13 @@ run_variant() {
     elif [ "$name" = cgnat ]; then
         only=cgnat
         limits=(CONN_RATE_IPV4=6000)
+    elif [ "$name" = license ]; then
+        # A members-only relay (#153): the keys test_relay_live.cpp's LICENSE_KEYS names, the
+        # breaker scaled down as for breaker_enforce so a device can be paused.
+        only=license
+        keys=$dir/keys_license.json
+        printf '{"enabled":true,"keys":["LIVE-SEAT-IPLIMIT","LIVE-SEAT-COOLDOWN","LIVE-SEAT-SUPERSEDE","LIVE-SEAT-PATHS","LIVE-SEAT-REVOKE"]}\n' > "$keys"
+        extra=(HOLLOW_RELAY_TEST_BREAKER_W=100 HOLLOW_RELAY_TEST_BREAKER_T=60)
     elif [ "$name" = shadow_env ]; then
         # An operator's BREAKER_MODE=shadow on a relay built to enforce.
         only=batch
@@ -269,7 +277,7 @@ run_variant() {
             -u LOGIN_WINDOW_TOTAL -u CONNECTED_LIMIT -u BREAKER_MODE -u HOLLOW_RELAY_TEST_CONN_BURST \
             "${limits[@]}" "${extra[@]}" TURN_SECRET=live-test HOLLOW_PUSH_PORT="$push_port" "$dir/relay_$v" "${args[@]}" --port "$port" --domain "$domain" \
             --cert-file "$dir/cert.pem" --key-file "$dir/key.pem" \
-            --keys-file "$dir/no-keys.json" --reports-file "$dir/reports_$name.json" \
+            --keys-file "$keys" --reports-file "$dir/reports_$name.json" \
             --denylist-file "$denylist" > "$log" 2>&1 &
         relay_pid=$!
         for _ in $(seq 100); do
@@ -292,7 +300,7 @@ run_variant() {
 
     # The client's last case sends the relay SIGTERM itself (the drain hint); its pid
     # also lets a probe read the relay's memory. Under ASan the run takes about 96 s.
-    RELAY_LIVE_DENYLIST=$denylist RELAY_LIVE_KEYS=$dir/no-keys.json RELAY_LIVE_BREAKER_MODE=$mode \
+    RELAY_LIVE_DENYLIST=$denylist RELAY_LIVE_KEYS=$keys RELAY_LIVE_BREAKER_MODE=$mode \
     RELAY_LIVE_PUSH_PORT=$push_port RELAY_LIVE_ONLY=$only RELAY_LIVE_BACKPRESSURE=$backpressure RELAY_LIVE_SEND_BUDGET=$budget RELAY_LIVE_STALL_MS=$stall RELAY_LIVE_SANITIZED=${SANITIZE:-0} RELAY_LIVE_PID=$relay_pid timeout 240 "$dir/client" "$port" "$domain" \
         > "$dir/client_$name.log" 2>&1
     local rc=$?
@@ -325,6 +333,19 @@ run_variant() {
     grep -qxF "[config] Push sidecar port: $push_port" "$log" || said="the relay did not take HOLLOW_PUSH_PORT"
     if grep -E '^\[deny\]' "$log" | grep -qE '[0-9a-f]{32}|12D3KooW|127\.0\.[0-9]+\.[0-9]+'; then
         said="a denylist line names an entry"
+    fi
+    # The operator's refusal lines (#153): each kind said, at most once a minute, and by
+    # counts alone: no peer id, address or key.
+    if [ "$name" = license ]; then
+        grep -q '^\[license\] [0-9]* login(s) refused since the last line like this: every device seat' "$log" ||
+            said="no full-key line"
+        grep -q '^\[breaker\] [0-9]* login(s) refused since the last line like this: the device was paused' "$log" ||
+            said="no cooldown line"
+        grep -q '^\[limits\] [0-9]* connection(s) refused since the last line like this' "$log" || said="no ip_limit line"
+        [ "$(grep -c '^\[license\] [0-9]* login(s) refused' "$log")" -le 3 ] || said="full-key lines past once a minute"
+        if grep -E '^\[(license|breaker|limits)\]' "$log" | grep -qE '12D3KooW|127\.0\.[0-9]+\.[0-9]+|LIVE-SEAT'; then
+            said="a refusal line names a device, an address or a key"
+        fi
     fi
     local checks
     checks=$(grep -c '  ok' "$dir/client_$name.log")
@@ -368,6 +389,8 @@ wanted connected && run_variant main connected
 wanted cgnat && run_variant main cgnat
 # Who /server-stats counts online: identities on screen, never the forwarder (#150).
 wanted people && run_variant main people
+# Access-key seats on a members-only relay: every refusal and close gives its seat back (#153).
+wanted license && run_variant main license
 # A 32 MiB send-buffer memory budget and a 5 s stall window: honest traffic passes, effects stay bounded.
 wanted oom && run_variant main oom "" "" "" 33554432
 exit $fail

@@ -41,13 +41,12 @@ bool LicenseState::load_from_file(const std::string& path) {
     return true;
 }
 
-LicenseResult LicenseState::validate_key(const std::string* key,
-                                          const std::string& peer_id) {
-    return validate(key, peer_id);
+LicenseResult LicenseState::validate_key(const std::string* key, const std::string& peer_id, SeatToken socket) {
+    return validate(key, peer_id, socket);
 }
 
-void LicenseState::release_key(const std::string& peer_id) {
-    release(peer_id);
+void LicenseState::release_seat(SeatToken socket) {
+    release(socket);
 }
 
 void LicenseState::try_reload(RelayState& state) {
@@ -58,11 +57,11 @@ void LicenseState::try_reload(RelayState& state) {
 
     // Judged once per change: the previous keys stay until the file reads.
     last_stamp = stamp;
-    std::vector<std::string> peers_to_kick;
+    std::vector<SeatToken> sockets_to_kick;
     bool read = false;
     try {
         std::optional<std::string> text = read_text(file_path);
-        read = text && reload_text(*text, peers_to_kick);
+        read = text && reload_text(*text, sockets_to_kick);
     } catch (...) {
         read = false;
     }
@@ -75,13 +74,14 @@ void LicenseState::try_reload(RelayState& state) {
     fprintf(stderr, "[license] Reloaded: %zu key(s), enabled=%s\n",
             keys.size(), enabled ? "true" : "false");
 
-    // Kick peers with revoked keys
-    for (auto& pid : peers_to_kick) {
-        auto it = state.peer_sockets.find(pid);
-        if (it != state.peer_sockets.end()) {
-            std::string err = R"({"type":"auth_failed","error":"invalid_license_key"})";
-            it->second->send(err, uWS::OpCode::TEXT);
-            it->second->end(1008, "license_revoked");
-        }
+    // Every socket a revoked key let in goes, fetch and guest sockets too. Each was
+    // still open (its close gives its seat back), so the lookup only guards a close
+    // that one of these ends brought about.
+    for (SeatToken token : sockets_to_kick) {
+        auto* ws = reinterpret_cast<SSLWebSocket*>(token);
+        if (!state.open_sockets.count(ws) || ws->getUserData()->closing) continue;
+        std::string err = R"({"type":"auth_failed","error":"invalid_license_key"})";
+        ws->send(err, uWS::OpCode::TEXT);
+        ws->end(1008, "license_revoked");
     }
 }

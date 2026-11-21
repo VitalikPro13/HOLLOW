@@ -29,7 +29,9 @@ ConnectionVisual connectionVisual(
   bool invisible = false,
 }) {
   // Invisible hides us from others, never our own state from us.
-  if (invisible && connection != OverallConnection.refused) {
+  if (invisible &&
+      connection != OverallConnection.refused &&
+      connection != OverallConnection.keyFull) {
     return ConnectionVisual(
       label: 'Invisible',
       color: hollow.textSecondary,
@@ -53,7 +55,8 @@ ConnectionVisual connectionVisual(
       ),
     OverallConnection.offline ||
     OverallConnection.error ||
-    OverallConnection.refused =>
+    OverallConnection.refused ||
+    OverallConnection.keyFull =>
       ConnectionVisual(
         label: connection.label,
         color: hollow.warning,

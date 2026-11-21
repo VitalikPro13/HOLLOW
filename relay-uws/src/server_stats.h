@@ -46,6 +46,13 @@ inline nlohmann::json breaker_block(const breaker::Stats& st, bool enforced, siz
             {"cooling_devices", cooling_devices}};
 }
 
+// A members-only relay's access keys (keys.json) while the public stats are on: how many
+// logins were refused because every device seat of their key was taken. A count only,
+// never which key; keep_public drops it when off.
+inline nlohmann::json license_block(uint64_t seats_full_refused) {
+    return {{"seats_full", seats_full_refused}};
+}
+
 // /server-stats' bandwidth_cap_mbps from the fair-share shaper's settings, HOLLOW_CAKE and
 // HOLLOW_CAKE_MBIT (deploy/hollow-cake.service): 0, so no field, when the shaper is off or
 // its bandwidth is not a whole number of Mbit/s from 1 to 100000.
