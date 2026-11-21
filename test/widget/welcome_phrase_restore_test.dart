@@ -369,6 +369,23 @@ void main() {
     expect(popped?.action, 'restored_phrase');
   });
 
+  testWidgets('a kept-data answer to the unchecked call never loops',
+      (tester) async {
+    keptMatchOffersSwitch = () => false;
+    _api.answers = [
+      () => const RestoreOutcome.keptMatch(path: '/data/hollow-old-2026-11-02'),
+    ];
+    WelcomeResult? popped;
+    await openStep(tester, result: (r) => popped = r);
+    await pick(tester, PhraseRestoreBranch.admit);
+    await type(tester, _phrase);
+    await restore(tester);
+    expect(_api.calls.map((c) => c.checkKept), [true, false]);
+    expect(find.text('Something went wrong. Try again.'), findsOneWidget);
+    expect(fieldText(tester), _phrase);
+    expect(popped, isNull);
+  });
+
   testWidgets('kept data the words do not open warns: Check the words goes '
       'back to the field, Restore anyway restores', (tester) async {
     _api.answers = [

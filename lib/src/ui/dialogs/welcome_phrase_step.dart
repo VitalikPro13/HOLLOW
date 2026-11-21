@@ -95,6 +95,15 @@ class _WelcomePhraseStepState extends State<WelcomePhraseStep> {
       return;
     }
     if (!mounted) return;
+    // Without the check Rust lands or refuses; a kept-data answer then would
+    // only ask the same question again.
+    if (!checkKept && outcome is! identity_api.RestoreOutcome_Restored) {
+      setState(() {
+        _busy = false;
+        _error = kGenericErrorSentence;
+      });
+      return;
+    }
     switch (outcome) {
       case identity_api.RestoreOutcome_Restored(:final lockedToKeychain):
         _phrase.clear();
