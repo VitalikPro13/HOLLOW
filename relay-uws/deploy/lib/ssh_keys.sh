@@ -22,7 +22,7 @@ ssh_has_key() {
 # on, off or unknown: whether sshd takes a password outside any Match block.
 ssh_password_state() {
     local t
-    t=$(sshd -T 2>/dev/null) || { echo unknown; return 0; }
+    t=$(hollow_sshd_t) || { echo unknown; return 0; }
     if printf '%s\n' "$t" | grep -xE 'passwordauthentication yes|kbdinteractiveauthentication yes' >/dev/null; then
         echo on
     else

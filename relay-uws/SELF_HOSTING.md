@@ -127,14 +127,26 @@ followed. Give that machine a fixed address in your router instead.
 ### Which system
 
 The setup supports **Ubuntu 22.04 or newer** and **Debian 12 or newer**, on
-x86_64 or ARM64 (aarch64), and systems built on them: Linux Mint 21 or newer,
-LMDE 6, Pop!_OS 22.04, Zorin OS 17, elementary OS 7 and others that name their
+x86_64 or ARM64 (aarch64). We test it on Ubuntu 22.04, 24.04, 25.10, 26.04 and
+26.10 and on Debian 12 and 13. It also supports systems built on them: Linux
+Mint 21 or newer, LMDE 6, Pop!_OS 22.04, Zorin OS 17, elementary OS 7 and others that name their
 Ubuntu or Debian release in `/etc/os-release`. It checks this first, says which
 base it found ("Linux Mint 22, based on Ubuntu 24.04"), and stops on anything
 else. On such a system Docker comes from the base's repository and the daily
 security updates from the base's security archive, which one of the system's
 software sources has to serve (the check says when none does). Removing the
 relay takes that update setting back out.
+
+On Ubuntu 26.10 the ready-made relay can't run. It is built for libsodium
+1.0.18 (`libsodium.so.23`), and 26.10 only offers a newer one. The setup checks
+the download before it installs anything. It installs the ready-made media
+forwarder, which runs there, and builds only the relay from your copy of the
+repository, which takes a few minutes. It does that only when the relay's
+sources in your copy are exactly the release's, with no changes of your own.
+Otherwise it builds both programs here, and the forwarder takes up to an hour
+or two. Updates on 26.10 come from your copy too, as in [Updates](#updates).
+Until a release newer than 0.14.2 is out, use the main branch on 26.10, as in
+[On Ubuntu 26.10](#on-ubuntu-2610).
 
 We recommend Debian 12 or 13, because it is lighter. On the same small test
 machine (1 CPU, 2 GB), a fresh Debian 13 used about 80 MB less memory than a
@@ -193,17 +205,19 @@ work. Then:
 sudo apt install git
 git clone --recurse-submodules https://github.com/VitalikPro13/HOLLOW.git
 cd HOLLOW
-git checkout v0.14.0-beta
-git -c gpg.ssh.allowedSignersFile=.github/allowed_signers verify-tag v0.14.0-beta
+git -c gpg.ssh.allowedSignersFile=.github/allowed_signers verify-tag v0.14.2-beta
+git checkout v0.14.2-beta
 git submodule update --init --recursive
 sudo bash relay-uws/install.sh
 ```
 
-Use the newest release tag in place of `v0.14.0-beta`. The newest is at the top
+Use the newest release tag in place of `v0.14.2-beta`. The newest is at the top
 of the project's Releases page, and tags before 0.14.0 are not signed.
 `verify-tag` should print a line that starts with `Good "git" signature` and
 names the release key, `SHA256:S474PF7v/QSTHwpXexCX4EzKFsNfDajUtcfP71jO+R4`. If
-it prints anything else, stop and tell us (see `SECURITY.md`).
+it prints anything else, stop and tell us (see `SECURITY.md`). It runs before
+the checkout, so the list of release keys it trusts comes from the copy you
+already have, never from the tag it checks.
 
 There is no `curl ... | bash` one-liner, on purpose. The clone gives you a copy
 you can read before you run it. The setup is `relay-uws/install.sh` plus the
@@ -219,6 +233,35 @@ If you started on the server's own console instead (a VirtualBox window or your
 provider's web console), the setup says so and suggests stopping to connect over
 SSH. Pasting rarely works on those consoles, and the DuckDNS token is long. If
 you stay, it can read the token from a file instead.
+
+#### On Ubuntu 26.10
+
+The setup in `v0.14.2-beta` and older stops on Ubuntu 26.10 before it installs
+anything. Until a newer release tag is out, run it from the main branch instead
+of a tag. A fresh clone is on main already, so leave out the `verify-tag` and
+`checkout` lines:
+
+```bash
+sudo apt install git
+git clone --recurse-submodules https://github.com/VitalikPro13/HOLLOW.git
+cd HOLLOW
+sudo bash relay-uws/install.sh
+```
+
+If your copy is on a release tag already, move it to main:
+
+```bash
+cd HOLLOW
+git fetch origin
+git checkout origin/main
+git submodule update --init --recursive
+sudo bash relay-uws/install.sh
+```
+
+Git then says your copy is in "detached HEAD" state, which is expected. The main
+branch is not a signed release, so `verify-tag` has nothing to check there.
+Clone only from the address above. Once a release newer than 0.14.2 is out,
+update to its tag as in [Updates](#updates).
 
 ### What it asks
 
@@ -240,9 +283,9 @@ the programs yourself.
    which takes about a minute. A build from source compiles both programs from
    your copy of the repository. The relay takes a few minutes, but the media
    forwarder is the whole Hollow core library and takes up to an hour or two on a
-   small machine. If there are no ready-made programs for your machine, the
-   setup says so and builds them instead. The Docker setup always builds from
-   source.
+   small machine. If there are no ready-made programs for your machine, or they
+   need a library your system doesn't offer, the setup says so and builds them
+   instead. The Docker setup always builds from source.
 4. **The address people reach.** Only behind a router. Press Enter to keep the
    public address the setup found, or type another, for example a LAN address
    for a relay only your home network uses.
@@ -410,13 +453,19 @@ of whiptail screens.
 ## Already running a relay?
 
 If you set up a relay by hand from an older version of this guide, or with a
-plain `docker compose up` in `relay-uws`, run the setup the same way:
+plain `docker compose up` in `relay-uws`, run the setup the same way, from the
+newest release:
 
 ```bash
 cd HOLLOW
-git pull --recurse-submodules
+git fetch --tags
+git -c gpg.ssh.allowedSignersFile=.github/allowed_signers verify-tag v0.14.2-beta
+git checkout v0.14.2-beta
+git submodule update --init --recursive
 sudo bash relay-uws/install.sh
 ```
+
+Use the newest release tag in place of `v0.14.2-beta`, as in [Updates](#updates).
 
 It finds the relay, changes nothing, and shows **A relay is already here** with
 what it found: how it runs, the address, the certificate and how it renews,
@@ -574,11 +623,16 @@ again. Put the id in `.env` as `FORWARDER_PEER_ID`, then run
 
 ```bash
 cd HOLLOW
-git pull --recurse-submodules
+git fetch --tags
+git -c gpg.ssh.allowedSignersFile=.github/allowed_signers verify-tag v0.14.2-beta
+git checkout v0.14.2-beta
+git submodule update --init --recursive
 cd relay-uws
 docker compose build
 docker compose up -d
 ```
+
+Use the newest release tag in place of `v0.14.2-beta`, as in [Updates](#updates).
 
 This restarts the relay, which drops what it holds in memory, so pick a quiet
 moment.
@@ -778,17 +832,22 @@ relay, the forwarder needs a key of its own. Add one to `keys.json` and put it i
 **10. Check it** with `sudo bash relay-uws/deploy/check-host.sh`, as in
 [Check it](#check-it).
 
-**Updating by hand.** Pull the repository, build again, install the new program
-and the scripts, and restart:
+**Updating by hand.** Check out the new release, build again, install the new
+program and the scripts, and restart:
 
 ```bash
 cd HOLLOW
-git pull --recurse-submodules
+git fetch --tags
+git -c gpg.ssh.allowedSignersFile=.github/allowed_signers verify-tag v0.14.2-beta
+git checkout v0.14.2-beta
+git submodule update --init --recursive
 cmake --build relay-uws/build -j"$(nproc)"
 sudo install -m 0755 relay-uws/build/hollow-relay /usr/local/bin/hollow-relay
 sudo cp -R relay-uws/deploy /usr/local/lib/hollow-relay/installer/
 sudo systemctl restart hollow-relay
 ```
+
+Use the newest release tag in place of `v0.14.2-beta`, as in [Updates](#updates).
 
 Messages waiting for offline people survive this restart, and connected apps
 pick up where they were within about 10 seconds. If `push-sidecar` changed, copy
@@ -1157,14 +1216,30 @@ it. The relay restarts once, and messages waiting for offline people carry acros
 the restart. If the new version doesn't start, the previous one goes back on by
 itself.
 
-With a build from source or Docker, pull your copy of the repository and run the
-setup from it:
+With a build from source or Docker, bring the new release into your copy of the
+repository and run the setup from it:
 
 ```bash
 cd HOLLOW
-git pull --recurse-submodules
+git fetch --tags
+git -c gpg.ssh.allowedSignersFile=.github/allowed_signers verify-tag v0.14.2-beta
+git checkout v0.14.2-beta
+git submodule update --init --recursive
 sudo bash relay-uws/install.sh
 ```
+
+Use the newest release tag in place of `v0.14.2-beta` and check what `verify-tag`
+prints, as in [Get the repository](#get-the-repository). Your copy sits on a
+release tag, not on a branch, so `git pull` stops there with an error.
+`git fetch --tags` brings in the tags made since you cloned. Without it,
+`verify-tag` and `git checkout` don't find the new tag. On Ubuntu 26.10, until a
+release newer than 0.14.2 is out, update from main as in
+[On Ubuntu 26.10](#on-ubuntu-2610).
+
+Where the setup builds only the relay, as on Ubuntu 26.10, run updates from your
+copy with the commands above. **Update to version …** in
+`sudo hollow-relay-setup` has no relay sources to build from, so it stops
+without installing anything and says so.
 
 The status screen then offers the rebuild. A Docker rebuild restarts the relay
 container, which drops what it holds in memory.
@@ -1210,6 +1285,24 @@ Docker setup keeps its volumes instead, the certificate's included.
 Every step checks what is already done, so after fixing the cause, run it again.
 If the system's automatic updates hold the package lock on a new server, the
 setup waits for them for up to 15 minutes and says so.
+
+**The forwarder's build stopped at the very end** with `the build left
+/var/cache/hollow-build/target/release/hollow-forwarder as something other than
+a plain file of its own`. The setup in 0.14.2 and older stops there after the
+whole build. Until a newer release is out, move your copy to the main branch as
+in [On Ubuntu 26.10](#on-ubuntu-2610) and run the setup again. On Ubuntu 26.10 it
+then installs the ready-made forwarder and builds only the relay. Elsewhere it
+builds the forwarder again and reuses what the first build compiled, so that
+build is shorter.
+
+**check-host says a program cannot start.** The line names the library the
+program can't find, such as `libsodium.so.23`. A release upgrade of the system
+can remove a library the ready-made programs were built for. When the system
+still offers that exact library, the next run of the setup installs it again
+and changes nothing else. When it doesn't, the setup stops and says so. Then run
+the setup from your copy of the repository (`sudo bash relay-uws/install.sh`)
+and choose **Rebuild from this copy**, which builds the programs for the system
+you have now.
 
 **The certificate failed.** The setup shows certbot's own lines. The usual
 causes are DNS that doesn't point at this server yet, port 80 blocked by a
@@ -1485,6 +1578,15 @@ Notes for people who already run a relay, newest first.
 
 ### 0.14
 
+- The setup runs on Ubuntu 25.10, 26.04 and 26.10. On 26.10 it installs the
+  ready-made forwarder and builds only the relay, because the ready-made relay
+  can't load its libsodium.
+- A forwarder built from source installs again. The setup in 0.14.2 stopped at
+  the end of that build.
+- check-host says when the relay or the forwarder is missing a library, and the
+  next run of the setup installs it again when the system still offers it.
+- check-host fails when `sshd -T` gives it no settings, instead of passing the
+  root login check.
 - The connection limits are settings now, with new defaults. Each IPv4 address
   may hold 512 connections and open 120 new ones a minute, up from 34 and 10, so
   everyone behind one mobile network or school address can reconnect at once.

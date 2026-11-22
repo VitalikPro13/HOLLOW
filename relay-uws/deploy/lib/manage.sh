@@ -103,7 +103,10 @@ Media forwarder: $( [ "$CFG_FORWARDER" = yes ] && docker_state forwarder || echo
 DuckDNS updates: $(docker_state duckdns)"
     else
         local how="ready-made"
-        [ "$(installed_source)" = source ] && how="built from source"
+        case "$(installed_source)" in
+        source) how="built from source" ;;
+        mixed) how="built here from source, beside the ready-made forwarder" ;;
+        esac
         t="$t
 Setup: full setup under systemd
 Relay: $(svc_state hollow-relay)${relay_v:+, version $relay_v} ($how, build $(installed_build)$(c=$(kv_get "$VERSION_FILE" commit); [ -n "$c" ] && printf ', commit %s' "${c:0:8}"))
@@ -248,6 +251,10 @@ update_check() {
        hollow_feed_newer "$INSTALLED_VERSION" "$INSTALLED_BUILD"; then
         UPDATE_AVAILABLE=1
         UPDATE_TEXT="${UPDATE_TEXT:-}version $FEED_VERSION (build $FEED_BUILD) is available, signed and ready to install."
+        # An if, not &&: under set -e a false test at the end fails the caller.
+        if [ "${PREBUILT_LIBS_DOUBT:-0}" = 1 ]; then
+            UPDATE_TEXT="$UPDATE_TEXT It may not run here, because $PREBUILT_LIBS_WHY. The update checks the download first and installs nothing that cannot start."
+        fi
     else
         UPDATE_TEXT="${UPDATE_TEXT:-}up to date, the signed release list has nothing newer."
     fi
@@ -397,9 +404,15 @@ We recommend no unless you know why you want the older one. $SNAPSHOT_LOSS" no |
         return 0
     fi
     local from_release="" was=$CFG_BINARIES
-    [ "$(installed_source)" = source ] || from_release="
+    case "$(installed_source)" in
+    source) ;;
+    mixed) from_release="
 
-The relay here now runs the programs of a signed release. After the rebuild it runs the ones built here, and the menu no longer offers signed updates. To update it later, pull this copy and rebuild."
+The forwarder here now comes from a signed release. After the rebuild both programs are built here, and the menu no longer offers signed updates. To update it later, pull this copy and rebuild." ;;
+    *) from_release="
+
+The relay here now runs the programs of a signed release. After the rebuild it runs the ones built here, and the menu no longer offers signed updates. To update it later, pull this copy and rebuild." ;;
+    esac
     ui_yesno confirm "Rebuild the relay" \
 "I will build $SOURCE_LABEL from this copy of the repository, install it and restart the relay$( [ "$CFG_FORWARDER" = yes ] && echo " and the forwarder. Building the forwarder takes up to an hour or two on a small machine"). The relay keeps running during the build.
 
@@ -500,10 +513,16 @@ manage_signed_again() {
 Version $FEED_VERSION is older than the version $iv built here, so we recommend no unless you know why you want it. $SNAPSHOT_LOSS"
         def=no
     fi
+    if [ "${PREBUILT_LIBS_DOUBT:-0}" = 1 ]; then
+        older="$older
+
+They may not run here, because $PREBUILT_LIBS_WHY. I check the download before I install anything, and if they cannot start, the relay keeps the programs built here."
+    fi
     ui_yesno confirm "Go back to signed releases" \
 "I will download version ${FEED_VERSION:-the newest} from the signed release list, check it and install it in place of the programs built here, then restart the relay$( [ "$CFG_FORWARDER" = yes ] && echo " and the forwarder"). Updates then come from the status screen again.$older" "$def" || return 1
     CFG_BINARIES=prebuilt
     FORCE_PROGRAMS=1
+    SIGNED_ONLY=1
 }
 
 manage_keys() {

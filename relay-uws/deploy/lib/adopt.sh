@@ -973,7 +973,7 @@ audit_collect() {
     local h
     h=$(ssh_home "$user")
     [ -n "$h" ] && [ -f "$h/.ssh/authorized_keys" ] && keys=$(grep -cE '^[^#]*(ssh-|ecdsa-|sk-)' "$h/.ssh/authorized_keys" 2>/dev/null || true)
-    root=$(sshd -T 2>/dev/null | sed -n 's/^permitrootlogin //p' || true)
+    root=$(hollow_sshd_t | sed -n 's/^permitrootlogin //p' || true)
     ports=$(hollow_ssh_ports)
     case "$root" in
     yes) root="root may log in with a password" ;;

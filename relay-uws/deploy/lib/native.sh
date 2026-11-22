@@ -36,9 +36,25 @@ CAKE_MODLOAD=/etc/modules-load.d/hollow-cake.conf
 SYS_NET=/sys/class/net
 SYS_MODULE=/sys/module
 
-# What the prebuilt programs and the feed check need at run time, proven on
-# bare Ubuntu 22.04 and 24.04 and Debian 12 and 13 images.
-RUNTIME_PACKAGES="openssl libsodium23 zlib1g ca-certificates curl jq"
+# What the feed check and the setup's own checks need at run time. The
+# libraries the ready-made programs link to come below, by the names they ask for.
+RUNTIME_PACKAGES="openssl ca-certificates curl jq"
+
+# The libraries the ready-made programs link to (scripts/build_relay_binaries.sh
+# refuses a build whose programs link to any other set).
+PREBUILT_NEEDS="libssl.so.3 libcrypto.so.3 libsodium.so.23 libz.so.1 libstdc++.so.6 libm.so.6
+libgcc_s.so.1 libc.so.6"
+# The ready-made forwarder's own share of them. Where only the relay's are
+# missing, the signed forwarder is installed and the relay is built here.
+FORWARDER_NEEDS="libcrypto.so.3 libgcc_s.so.1 libm.so.6 libc.so.6"
+
+# Each library by its exact soname, with the packages that hold that version on
+# Ubuntu and Debian. Never a newer soname's package: a program built for
+# libsodium.so.23 cannot load libsodium.so.26 (#153).
+LIB_PACKAGES="libsodium.so.23=libsodium23 libsodium.so.26=libsodium26
+libssl.so.3=libssl3t64,libssl3 libcrypto.so.3=libssl3t64,libssl3 libssl.so.4=libssl4
+libcrypto.so.4=libssl4 libz.so.1=zlib1g libzstd.so.1=libzstd1 libstdc++.so.6=libstdc++6
+libgcc_s.so.1=libgcc-s1 libm.so.6=libc6 libc.so.6=libc6"
 
 # What a build never reads: the submodules' fuzzing corpora and the TLS and
 # QUIC libraries uSockets can bundle, over a gigabyte together.
@@ -58,10 +74,12 @@ mark_restart() {
 
 installed_version() { kv_get "$VERSION_FILE" version; }
 installed_build() { kv_get "$VERSION_FILE" build; }
+# prebuilt, source, or mixed: the signed release's forwarder with a relay
+# built here at the release's version (BUILT_FROM's second line says from what).
 installed_source() { [ -r "$BUILT_FROM_FILE" ] && head -n 1 "$BUILT_FROM_FILE"; return 0; }
 
-# install_programs <dir> <prebuilt|source>: the dir holds the programs and
-# their VERSION marker. The pair it replaces is kept in previous/, so a failed
+# install_programs <dir> <prebuilt|source|mixed> [<how the relay was built>]:
+# the dir holds the programs and their VERSION marker. The pair it replaces is kept in previous/, so a failed
 # update can go back to it.
 install_programs() {
     local dir=$1 f
@@ -84,7 +102,8 @@ install_programs() {
         mv -f "/usr/local/bin/$f.new" "/usr/local/bin/$f"
     done
     put_file "$VERSION_FILE" 0644 root root <"$dir/VERSION"
-    printf '%s\n' "$2" | put_file "$BUILT_FROM_FILE" 0644 root root
+    # An if, not &&: under set -e a false test at the end fails the pipe.
+    { printf '%s\n' "$2"; if [ -n "${3:-}" ]; then printf '%s\n' "$3"; fi; } | put_file "$BUILT_FROM_FILE" 0644 root root
     mark_restart hollow-relay
     [ "$CFG_FORWARDER" = yes ] && mark_restart hollow-forwarder
     return 0
@@ -104,10 +123,253 @@ restore_previous_programs() {
     return 0
 }
 
+PROGRAMS_DIR=/usr/local/bin
 programs_present() {
-    [ -x /usr/local/bin/hollow-relay ] || return 1
-    [ "$CFG_FORWARDER" != yes ] || [ -x /usr/local/bin/hollow-forwarder ] || return 1
+    [ -x "$PROGRAMS_DIR/hollow-relay" ] || return 1
+    [ "$CFG_FORWARDER" != yes ] || [ -x "$PROGRAMS_DIR/hollow-forwarder" ] || return 1
     [ -r "$VERSION_FILE" ]
+}
+
+# programs_libs_heal: the installed programs find every library they link to.
+# A release upgrade of the system can take one away; it goes back only as the
+# package holding that exact soname. Programs that still cannot start stop the
+# run: replacing them is an update's or a rebuild's job, which keep the pair
+# for a rollback.
+programs_libs_heal() {
+    local bins=("$PROGRAMS_DIR/hollow-relay") missing lib p pkgs=() none=0
+    [ "$CFG_FORWARDER" = yes ] && bins+=("$PROGRAMS_DIR/hollow-forwarder")
+    missing=$(libs_missing "${bins[@]}")
+    [ -n "$missing" ] || return 0
+    if [ "$DRY_RUN" = 1 ]; then
+        say "  would install the libraries the installed programs lack: $(printf '%s' "$missing" | paste -sd' ' -)"
+        return 0
+    fi
+    hollow_apt_wait 2>"$WORK_DIR/apt.wait" || die "$(cat "$WORK_DIR/apt.wait")"
+    apt_refresh || die "the package lists could not be fetched, so the libraries the installed programs lack were not installed."
+    while read -r lib; do
+        if p=$(lib_package "$lib"); then pkgs+=("$p"); else none=1; fi
+    done <<<"$missing"
+    if [ "$none" = 0 ]; then
+        say "  the installed programs lack $(printf '%s' "$missing" | paste -sd' ' -), so I install ${pkgs[*]}"
+        apt_install "${pkgs[@]}" || die "apt could not install ${pkgs[*]}, which the installed programs need."
+        missing=$(libs_missing "${bins[@]}")
+        [ -n "$missing" ] || return 0
+    fi
+    die "the installed programs cannot start, because they need $(printf '%s' "$missing" | paste -sd' ' -), which this system does not have. The programs were not changed. To build the programs here, run the setup from your copy of the repository (sudo bash relay-uws/install.sh) and choose Rebuild from this copy."
+}
+
+# ---------------------------------------------------------------- libraries
+
+# libs_missing <program...>: the libraries the programs ask for that this
+# machine lacks, one per line. ldd only lists them; nothing of the program runs.
+libs_missing() {
+    local b
+    for b in "$@"; do
+        [ -f "$b" ] || continue
+        LC_ALL=C ldd "$b" 2>/dev/null | sed -n 's/^[[:space:]]*\([^[:space:]]*\) => not found.*/\1/p'
+    done | LC_ALL=C sort -u
+}
+
+# apt_offers <package>: installed, or a version this system's software sources serve.
+apt_offers() {
+    local c
+    [ "$(dpkg-query -W -f='${Status}' "$1" 2>/dev/null)" = "install ok installed" ] && return 0
+    c=$(apt-cache policy "$1" 2>/dev/null | sed -n 's/^ *Candidate: //p' | head -n 1)
+    [ -n "$c" ] && [ "$c" != "(none)" ]
+}
+
+# lib_package <soname>: the first package of LIB_PACKAGES holding it that this
+# system offers. Returns 1 when none is, or the soname is not listed.
+lib_package() {
+    local e p list
+    for e in $LIB_PACKAGES; do
+        [ "${e%%=*}" = "$1" ] || continue
+        list=${e#*=}
+        for p in ${list//,/ }; do apt_offers "$p" && { printf '%s' "$p"; return 0; }; done
+    done
+    return 1
+}
+
+# libs_why <soname...>: why the ready-made programs cannot run here.
+libs_why() {
+    local list sys
+    sys=$(hollow_os_field "${HOLLOW_OS_RELEASE:-/etc/os-release}" PRETTY_NAME)
+    if [ $# -eq 1 ]; then list=$1
+    else list="$(printf '%s, ' "${@:1:$#-1}")"; list="${list%, } and ${!#}"; fi
+    printf 'they need %s, which %s does not offer' "$list" "${sys:-this system}"
+}
+
+# libs_not_offered <soname...>: those this system neither has nor offers.
+libs_not_offered() {
+    local lib
+    for lib in "$@"; do
+        ldconfig -p 2>/dev/null | awk -v l="$lib" '$1 == l { f = 1 } END { exit !f }' && continue
+        lib_package "$lib" >/dev/null || printf '%s\n' "$lib"
+    done
+}
+
+# Whether this system has or offers every library the ready-made programs link
+# to. Sets PREBUILT_LIBS_WHY when it does not, and PREBUILT_RELAY_ONLY (still
+# true) when only the relay's are missing and a forwarder is wanted: the
+# signed forwarder can run here then. Judged only from software lists that are
+# there; the check of the download itself is the one that counts.
+prebuilt_libs_offered() {
+    local none=()
+    PREBUILT_LIBS_WHY="" PREBUILT_RELAY_ONLY=0
+    compgen -G "${APT_LISTS:-/var/lib/apt/lists}/*Packages*" >/dev/null || return 0
+    # shellcheck disable=SC2086 # one word per library
+    mapfile -t none < <(libs_not_offered $PREBUILT_NEEDS)
+    [ ${#none[@]} -eq 0 ] && return 0
+    PREBUILT_LIBS_WHY=$(libs_why "${none[@]}")
+    # shellcheck disable=SC2086 # one word per library
+    if [ "${CFG_FORWARDER:-yes}" != no ] && [ -z "$(libs_not_offered $FORWARDER_NEEDS)" ]; then
+        PREBUILT_RELAY_ONLY=1
+        return 0
+    fi
+    return 1
+}
+
+# prebuilt_libs_ready <dir>: installs the libraries the downloaded programs
+# ask for and lack, by the names they ask for. Sets PREBUILT_LIBS_WHY and
+# returns 1 when one is still missing, so the programs could not start here.
+# When only the relay's are missing, PREBUILT_RELAY_CANNOT is 1 and
+# PREBUILT_FWD_PKGS names what the forwarder still needs installed.
+prebuilt_libs_ready() {
+    local relay=$1/hollow-relay fwd=() lib p pkgs=() none=() fpkgs=() fnone=() all=()
+    PREBUILT_LIBS_WHY="" PREBUILT_RELAY_CANNOT=0 PREBUILT_FWD_PKGS=""
+    [ "$CFG_FORWARDER" = yes ] && fwd=("$1/hollow-forwarder")
+    [ -n "$(libs_missing "$relay" "${fwd[@]}")" ] || return 0
+    hollow_apt_wait 2>"$WORK_DIR/apt.wait" || die "$(cat "$WORK_DIR/apt.wait")"
+    apt_refresh || die "the package lists could not be fetched, so nothing was installed."
+    while read -r lib; do
+        if p=$(lib_package "$lib"); then pkgs+=("$p"); else none+=("$lib"); fi
+    done < <(libs_missing "$relay")
+    if [ ${#fwd[@]} -gt 0 ]; then
+        while read -r lib; do
+            if p=$(lib_package "$lib"); then fpkgs+=("$p"); else fnone+=("$lib"); fi
+        done < <(libs_missing "${fwd[@]}")
+    fi
+    # Nothing is installed for a set that could not start anyway.
+    if [ ${#none[@]} -eq 0 ] && [ ${#fnone[@]} -eq 0 ]; then
+        apt_install "${pkgs[@]}" "${fpkgs[@]}" ||
+            die "apt could not install the libraries the ready-made programs need (${pkgs[*]} ${fpkgs[*]}), so the programs were not installed."
+        [ -n "$(libs_missing "$relay" "${fwd[@]}")" ] || return 0
+        mapfile -t none < <(libs_missing "$relay")
+        [ ${#fwd[@]} -gt 0 ] && mapfile -t fnone < <(libs_missing "${fwd[@]}")
+        fpkgs=()
+    fi
+    if [ ${#fwd[@]} -gt 0 ] && [ ${#fnone[@]} -eq 0 ]; then
+        PREBUILT_RELAY_CANNOT=1 PREBUILT_FWD_PKGS="${fpkgs[*]}"
+    fi
+    mapfile -t all < <(printf '%s\n' "${none[@]}" "${fnone[@]}" | sed '/^$/d' | LC_ALL=C sort -u)
+    PREBUILT_LIBS_WHY=$(libs_why "${all[@]}")
+    return 1
+}
+
+# What a relay build reads from the copy of the repository.
+RELAY_SOURCE_PARTS="relay-uws/CMakeLists.txt relay-uws/src relay-uws/uWebSockets relay-uws/uSockets"
+
+# repo_git <args>: git on the copy of the repository, reading only: nothing is
+# written to it as root and no hook of it runs. Its owner chose to run the
+# setup from it, so who owns it and its relay submodules does not matter here.
+repo_git() {
+    git -c safe.directory="$REPO" -c safe.directory="$REPO/relay-uws/uWebSockets" \
+        -c safe.directory="$REPO/relay-uws/uSockets" -c safe.directory="$REPO/relay-uws/uWebSockets/uSockets" \
+        -c core.fsmonitor=false --no-optional-locks -C "$REPO" "$@"
+}
+
+# mixed_possible: this copy of the repository holds exactly the relay sources
+# of the release the feed names, so a relay built here beside the signed
+# forwarder is that release's and its VERSION marker stays true. The feed names
+# the release commit, which the tag only follows, so the trees are compared,
+# never the commits. Sets MIXED_WHY when it cannot, and MIXED_NO_SOURCES when
+# there is nothing here to build from at all.
+mixed_possible() {
+    local sv p here rel changed
+    MIXED_WHY="" MIXED_NO_SOURCES=0
+    if [ ! -f "$REPO/relay-uws/src/main.cpp" ] || [ ! -f "$REPO/relay-uws/uWebSockets/src/App.h" ] ||
+       [ ! -f "$REPO/relay-uws/uSockets/Makefile" ]; then
+        MIXED_WHY="this copy of the setup has no relay sources next to it"
+        MIXED_NO_SOURCES=1
+        return 1
+    fi
+    sv=$(relay_source_version "$REPO")
+    if [ -z "$sv" ] || [ "$sv" != "$FEED_VERSION" ]; then
+        MIXED_WHY="this copy of the repository holds version ${sv:-unknown}, and the release is $FEED_VERSION"
+        return 1
+    fi
+    if ! have git; then
+        MIXED_WHY="git is not installed, so I cannot tell whether this copy holds the release's relay sources"
+        return 1
+    fi
+    if ! [[ "${FEED_COMMIT:-}" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]]; then
+        MIXED_WHY="the release list names no commit to compare this copy with"
+        return 1
+    fi
+    if [ -z "$(source_commit "$REPO")" ]; then
+        MIXED_WHY="this copy of the repository is not a git clone I can read, so I cannot tell whether it holds the release's relay sources"
+        return 1
+    fi
+    if ! repo_git cat-file -e "$FEED_COMMIT^{commit}" 2>/dev/null; then
+        MIXED_WHY="this copy of the repository does not have the release's commit ${FEED_COMMIT:0:12}, which git fetch --tags brings in"
+        return 1
+    fi
+    for p in $RELAY_SOURCE_PARTS; do
+        here=$(repo_git rev-parse -q --verify "HEAD:$p" 2>/dev/null) || here=""
+        rel=$(repo_git rev-parse -q --verify "$FEED_COMMIT:$p" 2>/dev/null) || rel=""
+        # A submodule is a commit id here: the one checked out must be it,
+        # and a folder that is not a checkout is never the release's.
+        if [ -n "$here" ] && [ "$(repo_git ls-tree HEAD -- "$p" 2>/dev/null | awk '{print $1}')" = 160000 ] &&
+           [ "$(repo_git -C "$p" rev-parse -q --verify HEAD 2>/dev/null)" != "$here" ]; then
+            here=""
+        fi
+        if [ -z "$here" ] || [ "$here" != "$rel" ]; then
+            MIXED_WHY="the relay sources in this copy differ from those of the release's commit ${FEED_COMMIT:0:12}"
+            return 1
+        fi
+    done
+    # Untracked and ignored files too: the build copies the folders whole.
+    # shellcheck disable=SC2086 # one word per path
+    if ! changed=$(repo_git status --porcelain --untracked-files=all --ignored=matching --ignore-submodules=none -- $RELAY_SOURCE_PARTS 2>/dev/null); then
+        MIXED_WHY="git could not read the state of this copy's relay sources, so I cannot tell whether they are the release's"
+        return 1
+    fi
+    if [ -n "$changed" ]; then
+        MIXED_WHY="this copy has changes of its own in the relay sources, which git status shows"
+        return 1
+    fi
+    return 0
+}
+
+# programs_mixed <download dir>: the signed forwarder stays, and the relay
+# built from this copy takes the place of the release's.
+programs_mixed() {
+    local dl=$1
+    say "  the release's relay cannot run here ($PREBUILT_LIBS_WHY), so I build the relay from this copy of the repository and install the release's signed forwarder"
+    if [ -n "$PREBUILT_FWD_PKGS" ]; then
+        # shellcheck disable=SC2086 # one word per package
+        apt_install $PREBUILT_FWD_PKGS || { rm -rf "$dl"; die "apt could not install the libraries the ready-made forwarder needs ($PREBUILT_FWD_PKGS), so nothing was installed."; }
+    fi
+    local still
+    still=$(libs_missing "$dl/hollow-forwarder" | tr '\n' ' ')
+    [ -z "$still" ] || { rm -rf "$dl"; die "the ready-made forwarder still lacks ${still}after its libraries were installed, so nothing was installed."; }
+    rm -f -- "$dl/hollow-relay"
+    source_build_into "$dl" no
+    [ -f "$dl/hollow-relay" ] || { rm -rf "$dl"; die "the relay did not build, so nothing was installed."; }
+    MIXED_FROM="relay built from $(c=$(source_commit "$REPO"); printf '%s' "${c:+commit $c of }")the copy of the repository at $REPO"
+}
+
+# prebuilt_to_source <why>: builds from source where no ready-made programs can
+# run. An update installs the release it named or nothing, and a build here
+# would run without the snapshot its rollback needs.
+prebuilt_to_source() {
+    [ "${UPDATE_RUNNING:-0}" = 1 ] && die "the release list has no programs for this machine now ($1). Nothing was installed. To build the relay here, run the setup from your copy of the repository and choose Rebuild from this copy."
+    # Going back to signed releases never turns into a rebuild nobody asked for.
+    [ "${SIGNED_ONLY:-0}" = 1 ] && die "the signed release's programs cannot run on this machine ($1). Nothing was installed, and the relay keeps the programs built here."
+    [ -f "$REPO/relay-uws/src/main.cpp" ] || die "there are no ready-made programs for this machine ($1), and this copy of the setup has no relay sources to build them from. Nothing was installed. Run sudo bash relay-uws/install.sh from your clone of the repository."
+    say "  there are no ready-made programs for this machine ($1), so I build them from source instead"
+    CFG_BINARIES=source
+    programs_source
 }
 
 feed_lib_present() { [ -r "$DEPLOY/lib/release_feed.sh" ]; }
@@ -134,16 +396,11 @@ programs_prebuilt() {
     [ -n "${EXPECT_VERSION:-}" ] && check=("$VERSION_FILE")
     if [ "${DOWNGRADE:-0}" = 1 ] || [ "${FINISH_PENDING:-0}" = 1 ]; then check=("$VERSION_FILE" allow-downgrade); fi
     if ! prebuilt_available "${check[@]}"; then
-        # No build for this machine (a 32-bit system, or no aarch64 build yet):
+        # No build for this machine (a 32-bit system or no aarch64 build yet):
         # the sources can still make one.
         case "$PREBUILT_WHY" in
         *"no prebuilt relay"*|*"no relay build for"*|*"build it from source"*)
-            # An update installs the release it named or nothing, and a build
-            # here would run without the snapshot its rollback needs.
-            [ "${UPDATE_RUNNING:-0}" = 1 ] && die "the release list has no programs for this machine now ($PREBUILT_WHY). Nothing was installed."
-            say "  there are no ready-made programs for this machine ($PREBUILT_WHY), so I build them from source instead"
-            CFG_BINARIES=source
-            programs_source
+            prebuilt_to_source "$PREBUILT_WHY"
             return 0 ;;
         esac
         die "the release list could not be checked, so nothing was installed ($PREBUILT_WHY)."
@@ -165,6 +422,23 @@ programs_prebuilt() {
     dl=$(mktemp -d "$STATE_DIR/download.XXXXXX")
     say "  downloading version $FEED_VERSION ($(( ${FEED_SIZE:-0} / 1048576 )) MB)"
     run_logged hollow_feed_fetch "$dl" || { rm -rf "$dl"; die "the download did not pass its checks. Nothing was installed."; }
+    local kind=prebuilt
+    MIXED_FROM=""
+    if ! prebuilt_libs_ready "$dl"; then
+        if [ "$PREBUILT_RELAY_CANNOT" = 1 ] && mixed_possible; then
+            programs_mixed "$dl"
+            kind=mixed
+        else
+            rm -rf "$dl"
+            if [ "$PREBUILT_RELAY_CANNOT" = 1 ]; then
+                [ "${UPDATE_RUNNING:-0}" = 1 ] && die "the relay of version $FEED_VERSION cannot run here ($PREBUILT_LIBS_WHY), and it cannot be built here either, because $MIXED_WHY. Nothing was installed. To update, check out the release's tag in your copy of the repository and run sudo bash relay-uws/install.sh from it. It installs the signed forwarder and builds only the relay."
+                [ "$MIXED_NO_SOURCES" = 1 ] || [ "${SIGNED_ONLY:-0}" = 1 ] ||
+                    say "  the release's forwarder could run here, but the relay cannot be built beside it, because $MIXED_WHY. So I build both from this copy."
+            fi
+            prebuilt_to_source "$PREBUILT_LIBS_WHY"
+            return 0
+        fi
+    fi
     # An update also brings the setup's copy the release carries, checked by
     # the same signature; a first install keeps the copy it runs from, and a
     # downgrade keeps the newer setup.
@@ -183,7 +457,7 @@ programs_prebuilt() {
         rm -rf "$dl" "$SETUP_NEW"
         die "the settings as they are could not be kept for a rollback. Nothing was installed."
     fi
-    install_programs "$dl" prebuilt
+    install_programs "$dl" "$kind" "$MIXED_FROM"
     rm -rf "$dl"
     if [ "$staged" = 1 ]; then
         if [ "${FINISH_PENDING:-0}" = 1 ] && setup_copy_is "$FEED_VERSION" "$FEED_BUILD"; then
@@ -201,7 +475,11 @@ programs_prebuilt() {
         SETUP_CHANGE=replaced
     fi
     hollow_feed_accept "$STATE_DIR"
-    say "  installed version $FEED_VERSION (build $FEED_BUILD), signature and checksum verified"
+    if [ "$kind" = mixed ]; then
+        say "  installed version $FEED_VERSION (build $FEED_BUILD): the forwarder from the signed release, signature and checksum verified, and the relay built here"
+    else
+        say "  installed version $FEED_VERSION (build $FEED_BUILD), signature and checksum verified"
+    fi
 }
 
 # update_begin: the release's parts are about to change. The mark names it,
@@ -306,6 +584,18 @@ account_idle() {
 
 builder_idle() { account_idle "$BUILD_USER"; }
 
+# builder_ready: a package apt just upgraded (libc6, systemd) can have systemd
+# re-execute itself, and a transient unit asked for meanwhile never starts
+# ("Message recipient disconnected", Ubuntu 26.04). Waits until one runs.
+builder_ready() {
+    local _
+    for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30; do
+        systemd-run --quiet --wait --collect -p User="$BUILD_USER" /bin/true </dev/null >/dev/null 2>&1 && return 0
+        sleep 1
+    done
+    die "systemd does not start the build's units, so nothing was built. See: journalctl -b -e"
+}
+
 # plain_file <path> <owner>: a regular file of <owner>'s with one name and no
 # link anywhere on its path, so root reading it reads that file and no other.
 plain_file() {
@@ -321,6 +611,20 @@ stage_build_output() {
     plain_file "$1" "$BUILD_USER" ||
         die "the build left $1 as something other than a plain file of its own, so I installed nothing."
     install -m 0755 -o root -g root -- "$1" "$2/$(basename -- "$1")"
+}
+
+# take_build_output <file under $BUILD_DIR> <root's staging dir>: cargo's
+# output is a second name of its copy under deps/, so the build account copies
+# it to a name of its own in $BUILD_DIR/out and root stages only that copy.
+# Root never copies it itself: it would read whatever the build pointed it at.
+take_build_output() {
+    local name
+    name=$(basename -- "$1")
+    # shellcheck disable=SC2016 # the build account's shell expands them
+    run_logged as_builder /bin/sh -c 'mkdir -p -- "$1" && rm -f -- "$1/$2" && cp -- "$3" "$1/$2"' sh \
+        "$BUILD_DIR/out" "$name" "$1" || die "the build's $name could not be copied out of the build folder."
+    builder_idle
+    stage_build_output "$BUILD_DIR/out/$name" "$2"
 }
 
 # restore_state <state dir> <account> <file...>: puts back what an uninstall
@@ -385,33 +689,56 @@ source_version_marker() {
 }
 
 programs_source() {
-    local src=$REPO
-    [ -f "$src/relay-uws/src/main.cpp" ] || die "this copy of the installer has no relay sources next to it. Run install.sh from your clone of the repository to build from source."
-    if [ ! -f "$src/relay-uws/uWebSockets/src/App.h" ] || [ ! -f "$src/relay-uws/uSockets/Makefile" ]; then
-        die "the relay's submodules are missing. Run: git submodule update --init --recursive, in your copy of the repository."
-    fi
-    if [ "$CFG_FORWARDER" = yes ]; then
-        [ -f "$src/rust/hollow_core/Cargo.toml" ] || die "the forwarder's sources (rust/hollow_core) are missing from this copy."
-    fi
+    source_sources_check "$CFG_FORWARDER"
     step "Building the relay from source"
-    apt_install build-essential cmake pkg-config libssl-dev libsodium-dev zlib1g-dev perl curl ca-certificates
-    ensure_account "$BUILD_USER"
     if [ "$DRY_RUN" = 1 ]; then
+        apt_install build-essential cmake pkg-config libssl-dev libsodium-dev zlib1g-dev perl curl ca-certificates
+        ensure_account "$BUILD_USER"
         say "  would copy the sources to $BUILD_DIR and build them there as the account $BUILD_USER"
         [ "$CFG_FORWARDER" = yes ] && say "  would install Rust for $BUILD_USER and build the forwarder, with a temporary swap file if memory is short"
         return 0
     fi
     ensure_dir "$STATE_DIR" 0700 root root
+    local stage
+    stage=$(mktemp -d "$STATE_DIR/stage.XXXXXX")
+    source_build_into "$stage" "$CFG_FORWARDER"
+    source_version_marker "$REPO" >"$stage/VERSION"
+    install_programs "$stage" source
+    rm -rf "$stage"
+}
+
+# source_sources_check <forwarder yes|no>: this copy holds what a build needs.
+source_sources_check() {
+    local src=$REPO
+    [ -f "$src/relay-uws/src/main.cpp" ] || die "this copy of the installer has no relay sources next to it. Run install.sh from your clone of the repository to build from source."
+    if [ ! -f "$src/relay-uws/uWebSockets/src/App.h" ] || [ ! -f "$src/relay-uws/uSockets/Makefile" ]; then
+        die "the relay's submodules are missing. Run: git submodule update --init --recursive, in your copy of the repository."
+    fi
+    if [ "$1" = yes ]; then
+        [ -f "$src/rust/hollow_core/Cargo.toml" ] || die "the forwarder's sources (rust/hollow_core) are missing from this copy."
+    fi
+    return 0
+}
+
+# source_build_into <root's staging dir> <forwarder yes|no>: builds the relay,
+# and the forwarder when asked, from this copy as the build account, and stages
+# them there. $BUILD_DIR/target stays, so the next forwarder build reuses it.
+source_build_into() {
+    local src=$REPO stage=$1 with_fwd=$2
+    source_sources_check "$with_fwd"
+    apt_install build-essential cmake pkg-config libssl-dev libsodium-dev zlib1g-dev perl curl ca-certificates
+    ensure_account "$BUILD_USER"
+    builder_ready
+    ensure_dir "$STATE_DIR" 0700 root root
     install -d -m 0750 -o "$BUILD_USER" -g "$BUILD_USER" "$BUILD_DIR"
     builder_idle
     rm -rf "$BUILD_DIR/src" "$BUILD_DIR/out" "$BUILD_DIR/relay-build"
     install -d -m 0750 -o root -g root "$BUILD_DIR/src"
-    local parts=(relay-uws/CMakeLists.txt relay-uws/src relay-uws/uWebSockets relay-uws/uSockets)
-    [ "$CFG_FORWARDER" = yes ] && parts+=(rust/hollow_core rust/hollow_dfn)
+    local parts
+    read -r -a parts <<<"$RELAY_SOURCE_PARTS"
+    [ "$with_fwd" = yes ] && parts+=(rust/hollow_core rust/hollow_dfn)
     tar -C "$src" "${SOURCE_EXCLUDES[@]}" -cf - "${parts[@]}" | tar -C "$BUILD_DIR/src" -xf -
     chown -R "$BUILD_USER:$BUILD_USER" "$BUILD_DIR/src"
-    local stage
-    stage=$(mktemp -d "$STATE_DIR/stage.XXXXXX")
 
     local t0 t1
     t0=$(date +%s)
@@ -421,11 +748,11 @@ programs_source() {
         die "the relay's build could not be set up."
     run_logged as_builder cmake --build "$BUILD_DIR/relay-build" -j"$(nproc)" || die "the relay did not build."
     builder_idle
-    stage_build_output "$BUILD_DIR/relay-build/hollow-relay" "$stage"
+    take_build_output "$BUILD_DIR/relay-build/hollow-relay" "$stage"
     t1=$(date +%s)
     say "  the relay built in $(( (t1 - t0) / 60 )) min $(( (t1 - t0) % 60 )) s"
 
-    if [ "$CFG_FORWARDER" = yes ]; then
+    if [ "$with_fwd" = yes ]; then
         t0=$(date +%s)
         build_swap_on 4096
         say "  installing Rust for the build account"
@@ -438,19 +765,22 @@ programs_source() {
             --manifest-path "$BUILD_DIR/src/rust/hollow_core/Cargo.toml" || die "the forwarder did not build."
         [ ${#timer[@]} -gt 0 ] && say "  $(grep 'peak memory' "$WORK_DIR/cmd.log" | tail -n 1)"
         builder_idle
-        stage_build_output "$BUILD_DIR/target/release/hollow-forwarder" "$stage"
+        take_build_output "$BUILD_DIR/target/release/hollow-forwarder" "$stage"
         t1=$(date +%s)
         say "  the forwarder built in $(( (t1 - t0) / 60 )) min $(( (t1 - t0) % 60 )) s"
     fi
     build_swap_off
-    source_version_marker "$src" >"$stage/VERSION"
-    install_programs "$stage" source
-    rm -rf "$stage" "$BUILD_DIR/src" "$BUILD_DIR/relay-build"
+    rm -rf "$BUILD_DIR/src" "$BUILD_DIR/out" "$BUILD_DIR/relay-build"
 }
 
 ensure_programs() {
-    if [ "${FORCE_PROGRAMS:-0}" = 0 ] && programs_present &&
-       [ "$(installed_source)" = "$CFG_BINARIES" ]; then
+    local have
+    have=$(installed_source)
+    # A relay built here beside the signed forwarder is what the ready-made
+    # choice gives on this system.
+    [ "$have" = mixed ] && have=prebuilt
+    if [ "${FORCE_PROGRAMS:-0}" = 0 ] && programs_present && [ "$have" = "$CFG_BINARIES" ]; then
+        programs_libs_heal
         say "  the relay programs are already installed, version $(installed_version)"
         return 0
     fi
@@ -472,12 +802,15 @@ feed_show_warnings() {
 }
 
 # Whether the signed feed has programs for this machine. Sets PREBUILT_WHY to
-# the reason when it has none.
-PREBUILT_WHY=""
+# the reason when it has none. PREBUILT_LIBS_DOUBT says this setup's list of the
+# official programs' libraries names one this system does not offer: only a
+# warning, since a later release may link to others, and only the check of the
+# download (prebuilt_libs_ready) decides.
+PREBUILT_WHY="" PREBUILT_LIBS_DOUBT=0
 # prebuilt_available [<installed VERSION file> [allow-downgrade]]
 prebuilt_available() {
     local vfile=${1:-} force=${2:-} err
-    PREBUILT_WHY="" PREBUILT_RC=0 FEED_CHECKED=0
+    PREBUILT_WHY="" PREBUILT_RC=0 FEED_CHECKED=0 PREBUILT_LIBS_DOUBT=0 PREBUILT_RELAY_ONLY=0
     if ! feed_lib_present; then
         PREBUILT_WHY="this copy of the installer has no release feed helper"
         return 1
@@ -487,6 +820,7 @@ prebuilt_available() {
         PREBUILT_WHY=${err#Hollow relay update: }
         return 1
     fi
+    prebuilt_libs_offered || PREBUILT_LIBS_DOUBT=1
     # A fresh machine may not have the check's tools yet; the install step
     # checks again once it has them.
     if ! have jq || ! have curl || ! have openssl; then return 0; fi
@@ -787,9 +1121,10 @@ update_settings_keep() {
     (umask 077 && mkdir -p -- "$UPDATE_SNAP/tree") || return 1
     : >"$UPDATE_SNAP/absent"
     : >"$UPDATE_SNAP/units"
+    # Never cp --parents: uutils' (Ubuntu 26.10) refuses a folder with it.
     for p in $UPDATE_SNAP_PATHS; do
         if [ -e "$p" ]; then
-            cp -a --parents -- "$p" "$UPDATE_SNAP/tree" || return 1
+            mkdir -p -- "$UPDATE_SNAP/tree${p%/*}" && cp -a -- "$p" "$UPDATE_SNAP/tree$p" || return 1
         else
             printf '%s\n' "$p" >>"$UPDATE_SNAP/absent"
         fi
@@ -797,7 +1132,7 @@ update_settings_keep() {
     for p in "$UNIT_DIR"/hollow-*.service "$UNIT_DIR"/hollow-*.timer; do
         [ -f "$p" ] || continue
         u=${p##*/}
-        cp -a --parents -- "$p" "$UPDATE_SNAP/tree" || return 1
+        mkdir -p -- "$UPDATE_SNAP/tree${p%/*}" && cp -a -- "$p" "$UPDATE_SNAP/tree$p" || return 1
         printf '%s %s %s\n' "$u" "$(unit_active "$u" && echo active || echo inactive)" \
             "$(systemctl is-enabled --quiet "$u" 2>/dev/null && echo enabled || echo disabled)" >>"$UPDATE_SNAP/units"
     done
@@ -896,6 +1231,9 @@ follow_apply() {
 follow_remove() {
     local u gone=0
     if unit_exists "$FOLLOW_TIMER"; then run_ok systemctl disable --now "$FOLLOW_TIMER"; fi
+    # A look the timer started may still run, its probes as hollow-addr, and
+    # userdel refuses an account with a process.
+    if unit_exists hollow-address-follow.service; then run_ok systemctl stop hollow-address-follow.service; fi
     for u in $FOLLOW_UNITS; do
         [ -e "$UNIT_DIR/$u" ] || continue
         run rm -f "$UNIT_DIR/$u"
@@ -904,7 +1242,10 @@ follow_remove() {
     [ "$gone" = 1 ] && run systemctl daemon-reload
     # Its RAM stamps and the restarts it still owed: the setup's own run restarts what changed.
     [ ! -d /run/hollow-address ] || run rm -rf /run/hollow-address
-    if getent passwd "$FOLLOW_USER" >/dev/null; then run_ok userdel "$FOLLOW_USER"; fi
+    if getent passwd "$FOLLOW_USER" >/dev/null; then
+        [ "$DRY_RUN" = 1 ] || account_idle "$FOLLOW_USER"
+        run_ok userdel "$FOLLOW_USER"
+    fi
     if getent group "$FOLLOW_USER" >/dev/null; then run_ok groupdel "$FOLLOW_USER"; fi
     return 0
 }

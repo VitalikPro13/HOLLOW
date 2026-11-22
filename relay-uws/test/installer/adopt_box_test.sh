@@ -133,6 +133,24 @@ chmod 0755 /snap/bin/certbot
 
 # ---------------------------------------------------------------- old setups
 
+# box_leaf <key out> <cert out> <days>: a certificate for $HOST from the box's
+# own CA, which this box trusts. OpenSSL 4 (Ubuntu 26.10) no longer takes a
+# self-signed certificate as its own anchor.
+box_leaf() {
+    if [ ! -f /srv/box-ca/ca.pem ]; then
+        mkdir -p /srv/box-ca
+        openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 60 -subj "/CN=hollow-box-ca" \
+            -addext "basicConstraints=critical,CA:TRUE" -addext "keyUsage=critical,keyCertSign,cRLSign" \
+            -keyout /srv/box-ca/ca.key -out /srv/box-ca/ca.pem >/dev/null 2>&1
+        cp /srv/box-ca/ca.pem /usr/local/share/ca-certificates/hollow-box-ca.crt && update-ca-certificates >/dev/null 2>&1
+    fi
+    openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -subj "/CN=$HOST" -keyout "$1" -out "$1.csr" >/dev/null 2>&1
+    printf 'subjectAltName=DNS:%s\nauthorityKeyIdentifier=keyid,issuer\nsubjectKeyIdentifier=hash\nbasicConstraints=CA:FALSE\nkeyUsage=critical,digitalSignature\nextendedKeyUsage=serverAuth\n' "$HOST" >"$1.ext"
+    openssl x509 -req -in "$1.csr" -CA /srv/box-ca/ca.pem -CAkey /srv/box-ca/ca.key -CAcreateserial -days "$3" \
+        -extfile "$1.ext" -out "$2" >/dev/null 2>&1
+    rm -f "$1.csr" "$1.ext"
+}
+
 # A self-signed stand-in for the Let's Encrypt lineage the old guide made with
 # certbot certonly --standalone --cert-name relay.
 seed_lineage() {
@@ -804,10 +822,7 @@ docker|docker-rollback)
     cp "$T/fixtures/docker-compose.0.12.2.yml" "$clone/relay-uws/docker-compose.yml"
     # Its own certificate, which the app would trust: this box trusts it.
     mkdir -p /srv/relay-certs
-    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 60 -subj "/CN=$HOST" \
-        -addext "subjectAltName=DNS:$HOST" -keyout /srv/relay-certs/privkey.pem -out /srv/relay-certs/fullchain.pem >/dev/null 2>&1
-    cp /srv/relay-certs/fullchain.pem /usr/local/share/ca-certificates/relay-box.crt
-    update-ca-certificates >/dev/null 2>&1
+    box_leaf /srv/relay-certs/privkey.pem /srv/relay-certs/fullchain.pem 60
     TURN_OLD=$(openssl rand -hex 32)
     cat >"$clone/relay-uws/.env" <<EOF
 RELAY_HOST=$HOST
@@ -909,9 +924,7 @@ EOF
         # (CERT_WATCH_SECS=30) with no restart.
         echo "-- a renewed certificate"
         turn_pid=$(docker inspect -f '{{.State.Pid}}' hollow-relay-coturn-1 2>/dev/null)
-        openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 6 -subj "/CN=$HOST" \
-            -addext "subjectAltName=DNS:$HOST" -keyout /srv/relay-certs/privkey.pem.new \
-            -out /srv/relay-certs/fullchain.pem.new >/dev/null 2>&1
+        box_leaf /srv/relay-certs/privkey.pem.new /srv/relay-certs/fullchain.pem.new 6
         mv /srv/relay-certs/privkey.pem.new /srv/relay-certs/privkey.pem
         mv /srv/relay-certs/fullchain.pem.new /srv/relay-certs/fullchain.pem
         new_fp=$(openssl x509 -noout -fingerprint -sha256 -in /srv/relay-certs/fullchain.pem | sed 's/.*=//')

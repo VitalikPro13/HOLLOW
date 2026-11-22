@@ -19,6 +19,9 @@ REPO=$(cd "$RELAY/.." && pwd)
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 WORK_DIR=$TMP
+# The setup judges library packages by this machine's package lists only where a
+# test hands it lists of its own.
+APT_LISTS=$TMP/no-apt-lists
 
 pass=0 fail=0
 ok()  { pass=$((pass + 1)); }
@@ -561,6 +564,11 @@ if [ -r "$DEPLOY/lib/release_feed.sh" ] && command -v jq >/dev/null && command -
     update_check 2>/dev/null
     eq "a newer signed feed offers the update" "$UPDATE_AVAILABLE" 1
     has "the status screen names it" "$UPDATE_TEXT" "version 0.12.3 (build 0) is available"
+    # the_status_screen_only_warns_of_a_library (#153): the download decides.
+    out=$(prebuilt_libs_offered() { PREBUILT_LIBS_WHY="they need libsodium.so.23, which Ubuntu 26.10 does not offer"; return 1; }
+        update_check 2>/dev/null; echo "$UPDATE_AVAILABLE $UPDATE_TEXT")
+    has "a library the list lacks still offers the update, with a warning" "$out" "1 version 0.12.3 (build 0) is available, signed and ready to install. It may not run here, because they need libsodium.so.23, which Ubuntu 26.10 does not offer. The update checks the download first and installs nothing that cannot start."
+    has "without a warning the check ends well under set -e" "$( (set -e; update_check 2>/dev/null; echo survived) )" survived
     mkfeed "$TMP/feed" "$TMP/feed.pem" 0.12.2 0 $((now + 1))
     update_check 2>/dev/null
     eq "the same release offers nothing" "$UPDATE_AVAILABLE" 0
@@ -1070,6 +1078,567 @@ t_update_no_source_fallback() {
     has "a first install still builds them" "$(UPDATE_RUNNING=0 programs_prebuilt 2>&1)" SOURCE-BUILD
 }
 in_sub t_update_no_source_fallback
+
+# prebuilt_libs_by_soname (#153): the ready-made programs' libraries are
+# installed by the names they ask for, never a newer soname's package, and a
+# system that offers none of a library builds from source instead.
+t_prebuilt_libs() {
+    local F=$TMP/fake_libs dl=$TMP/libs_dl out
+    export LIBS_CALLS=$TMP/libs.calls MISSING_FILE=$TMP/libs.missing OFFER PRESENT
+    : >"$LIBS_CALLS"
+    # apt-cache serves OFFER; ldconfig knows PRESENT; ldd lists MISSING_FILE as not found.
+    mkfake "$F" apt-cache 'echo "policy $2" >>"$LIBS_CALLS"; case " $OFFER " in *" $2 "*) c=1.0 ;; *) c="(none)" ;; esac; printf "%s:
+  Installed: (none)
+  Candidate: %s
+" "$2" "$c"'
+    mkfake "$F" dpkg-query 'exit 1'
+    mkfake "$F" ldconfig 'for l in $PRESENT; do printf "	%s (libc6,x86-64) => /lib/%s
+" "$l" "$l"; done'
+    mkfake "$F" ldd 'echo "ldd $1" >>"$LIBS_CALLS"; for l in $(cat "$MISSING_FILE" 2>/dev/null); do printf "	%s => not found
+" "$l"; done; printf "	libc.so.6 => /lib/libc.so.6 (0x00007f)
+"'
+    PATH=$F:$PATH
+    hollow_apt_wait() { :; }
+    apt_refresh() { echo refresh >>"$LIBS_CALLS"; }
+    # Installing a package gives its library: libsodium23 -> libsodium.so.23 and so on.
+    apt_install() {
+        echo "install $*" >>"$LIBS_CALLS"
+        local p
+        for p in "$@"; do
+            case "$p" in libsodium23) sed -i '/^libsodium.so.23$/d' "$MISSING_FILE" ;; zlib1g) sed -i '/^libz.so.1$/d' "$MISSING_FILE" ;; esac
+        done
+    }
+    APT_LISTS=$TMP/libs_lists
+    mkdir -p "$APT_LISTS" "$dl"
+    : >"$APT_LISTS/archive.ubuntu.com_ubuntu_dists_stonking_main_binary-amd64_Packages"
+    : >"$dl/hollow-relay"; : >"$dl/hollow-forwarder"
+    HOLLOW_OS_RELEASE=$T/fixtures/os-release/ubuntu-26.10
+    CFG_FORWARDER=no DRY_RUN=0
+
+    # Ubuntu 26.10 serves libsodium26 only: never taken for libsodium.so.23.
+    OFFER="libsodium26 libssl3t64 libssl4 zlib1g libzstd1 libstdc++6 libgcc-s1 libc6" PRESENT="libc.so.6 libm.so.6"
+    no_ lib_package libsodium.so.23
+    eq "libssl.so.3 comes from the t64 package" "$(lib_package libssl.so.3)" libssl3t64
+    eq "a program built for libsodium.so.26 gets that one" "$(lib_package libsodium.so.26)" libsodium26
+    no_ lib_package libhollow.so.1
+    no_ prebuilt_libs_offered
+    eq "and says why" "$PREBUILT_LIBS_WHY" "they need libsodium.so.23, which Ubuntu 26.10 does not offer"
+    PRESENT="libc.so.6 libm.so.6 libsodium.so.23"
+    yes_ prebuilt_libs_offered
+    OFFER="libssl3t64 zlib1g" PRESENT="libc.so.6"
+    prebuilt_libs_offered
+    eq "several are named together" "$PREBUILT_LIBS_WHY" "they need libsodium.so.23, libstdc++.so.6, libm.so.6 and libgcc_s.so.1, which Ubuntu 26.10 does not offer"
+    # Ubuntu 22.04 still names it libssl3; Debian 13 and Ubuntu 24.04 libssl3t64.
+    OFFER="libsodium23 libssl3 zlib1g libzstd1 libstdc++6 libgcc-s1 libc6" PRESENT="libc.so.6"
+    eq "libssl.so.3 from libssl3 where there is no t64" "$(lib_package libssl.so.3)" libssl3
+    yes_ prebuilt_libs_offered
+    # Without package lists nothing is judged before the download.
+    APT_LISTS=$TMP/libs_nolists OFFER="" PRESENT=""
+    yes_ prebuilt_libs_offered
+    APT_LISTS=$TMP/libs_lists
+
+    # After the download: what ldd misses is installed by its own name.
+    OFFER="libsodium23 libssl3t64 zlib1g" PRESENT=""
+    printf 'libsodium.so.23\nlibz.so.1\n' >"$MISSING_FILE"
+    : >"$LIBS_CALLS"
+    yes_ prebuilt_libs_ready "$dl"
+    has "the missing ones are installed" "$(cat "$LIBS_CALLS")" "install libsodium23 zlib1g"
+    eq "judged once the package lists are fetched" "$(grep -E '^(refresh|policy|install)' "$LIBS_CALLS" | head -n 1)" refresh
+    lacks "only the relay is read without the forwarder" "$(cat "$LIBS_CALLS")" "ldd $dl/hollow-forwarder"
+    : >"$LIBS_CALLS"
+    CFG_FORWARDER=yes
+    yes_ prebuilt_libs_ready "$dl"
+    lacks "nothing missing, nothing installed" "$(cat "$LIBS_CALLS")" "install"
+    has "and the forwarder is read when it runs" "$(cat "$LIBS_CALLS")" "ldd $dl/hollow-forwarder"
+    CFG_FORWARDER=no
+    # Ubuntu 26.10: libsodium.so.23 is not offered, so nothing is installed.
+    OFFER="libsodium26 libssl3t64 zlib1g"
+    printf 'libsodium.so.23\nlibz.so.1\n' >"$MISSING_FILE"
+    : >"$LIBS_CALLS"
+    no_ prebuilt_libs_ready "$dl"
+    lacks "not even what it does offer" "$(cat "$LIBS_CALLS")" "install"
+    eq "the reason names the library" "$PREBUILT_LIBS_WHY" "they need libsodium.so.23, which Ubuntu 26.10 does not offer"
+    # A package that does not bring the library counts as missing too.
+    OFFER="libssl3t64"
+    printf 'libssl.so.3\n' >"$MISSING_FILE"
+    no_ prebuilt_libs_ready "$dl"
+    eq "still missing after the install" "$PREBUILT_LIBS_WHY" "they need libssl.so.3, which Ubuntu 26.10 does not offer"
+    : >"$MISSING_FILE"
+}
+in_sub t_prebuilt_libs
+
+# the_release_build_links_to_exactly_what_the_setup_judges (#153)
+t_prebuilt_needs_build_check() {
+    local b=$REPO/scripts/build_relay_binaries.sh n=$DEPLOY/lib/native.sh out
+    # shellcheck disable=SC2086 # one word per library
+    yes_ bash "$b" --check-needed "$n" $PREBUILT_NEEDS ld-linux-x86-64.so.2
+    out=$(bash "$b" --check-needed "$n" ${PREBUILT_NEEDS/libsodium.so.23/libsodium.so.26} 2>&1)
+    has "a build linking to another libsodium stops" "$out" "Make them the same"
+    out=$(bash "$b" --check-needed "$n" ${PREBUILT_NEEDS/libsodium.so.23/} 2>&1)
+    has "so does one that no longer links to a library the setup still asks for" "$out" "Make them the same"
+    printf 'PREBUILT_NEEDS="libc.so.6 libhollow.so.1"\nLIB_PACKAGES="libc.so.6=libc6"\n' >"$TMP/needs_native.sh"
+    out=$(bash "$b" --check-needed "$TMP/needs_native.sh" libc.so.6 libhollow.so.1 2>&1)
+    has "a library without packages stops it" "$out" "libhollow.so.1 has no packages in LIB_PACKAGES"
+    local lib
+    for lib in $PREBUILT_NEEDS; do
+        [[ " $LIB_PACKAGES " == *[[:space:]]"$lib="* ]] && ok || bad "$lib in PREBUILT_NEEDS has no packages in LIB_PACKAGES"
+    done
+    # The forwarder's own list, judged alone (an aarch64 build also names the loader).
+    yes_ bash "$b" --check-needed "$n" --list FORWARDER_NEEDS libcrypto.so.3 libgcc_s.so.1 libm.so.6 libc.so.6 ld-linux-aarch64.so.1
+    out=$(bash "$b" --check-needed "$n" --list FORWARDER_NEEDS libcrypto.so.3 libsodium.so.23 libgcc_s.so.1 libm.so.6 libc.so.6 2>&1)
+    has "a forwarder that links to more stops the build" "$out" "FORWARDER_NEEDS (relay-uws/deploy/lib/native.sh) names"
+    for lib in $FORWARDER_NEEDS; do
+        [[ " $PREBUILT_NEEDS " == *[[:space:]]"$lib"[[:space:]]* ]] && ok || bad "$lib in FORWARDER_NEEDS is not in PREBUILT_NEEDS"
+    done
+}
+in_sub t_prebuilt_needs_build_check
+
+# prebuilt_without_its_libraries_builds_from_source (#153): before the download
+# and after it, never installing programs that cannot start.
+t_prebuilt_libs_fallback() {
+    local F=$TMP/fake_libs2 out dl
+    export MISSING_FILE=$TMP/libs2.missing LIBS_CALLS=$TMP/libs2.calls OFFER="libsodium26" PRESENT=""
+    mkfake "$F" apt-cache 'case " $OFFER " in *" $2 "*) c=1.0 ;; *) c="(none)" ;; esac; printf "%s:
+  Candidate: %s
+" "$2" "$c"'
+    mkfake "$F" dpkg-query 'exit 1'
+    mkfake "$F" ldconfig 'exit 0'
+    mkfake "$F" ldd 'for l in $(cat "$MISSING_FILE" 2>/dev/null); do printf "	%s => not found
+" "$l"; done'
+    PATH=$F:$PATH
+    HOLLOW_OS_RELEASE=$T/fixtures/os-release/ubuntu-26.10
+    hollow_apt_wait() { :; }
+    apt_refresh() { :; }
+    apt_install() { :; }
+    programs_source() { echo SOURCE-BUILD; }
+    install_programs() { echo INSTALLED; }
+    ensure_dir() { mkdir -p "$1"; }
+    STATE_DIR=$TMP/libs2_state CFG_FORWARDER=no DRY_RUN=0 SETUP_FROM_RELEASE=0
+    hollow_feed_accept() { :; }
+    update_begin() { echo UPDATE-BEGIN; }
+    REPO=$TMP/libs2_repo
+    mkdir -p "$REPO/relay-uws/src" && touch "$REPO/relay-uws/src/main.cpp"
+    # the_library_list_only_warns (#153): this setup's list of the official
+    # programs' libraries names one Ubuntu 26.10 does not offer, but a later
+    # release may link to others, so the download decides.
+    APT_LISTS=$TMP/libs2_lists
+    mkdir -p "$APT_LISTS" && : >"$APT_LISTS/archive.ubuntu.com_ubuntu_dists_stonking_main_binary-amd64_Packages"
+    feed_lib_present() { return 0; }
+    feed_lib_load() { :; }
+    feed_show_warnings() { :; }
+    have() { return 0; }
+    hollow_feed_arch() { echo linux-x86_64; }
+    hollow_feed_check() { FEED_VERSION=0.14.3 FEED_BUILD=0 FEED_COMMIT=$(printf '%040d' 3) FEED_SIZE=1; }
+    OFFER="libsodium26 libssl3t64 zlib1g libstdc++6 libgcc-s1 libc6"
+    yes_ prebuilt_available
+    eq "the list only warns" "$PREBUILT_LIBS_DOUBT" 1
+    eq "and the feed is still checked" "$FEED_CHECKED" 1
+    eq "naming the library" "$PREBUILT_LIBS_WHY" "they need libsodium.so.23, which Ubuntu 26.10 does not offer"
+    hollow_feed_fetch() { : >"$1/hollow-relay"; printf 'version=0.14.3\nbuild=0\n' >"$1/VERSION"; }
+    : >"$MISSING_FILE"
+    out=$(UPDATE_RUNNING=0 programs_prebuilt 2>&1)
+    has "a later release whose programs start here is installed" "$out" INSTALLED
+    lacks "never built from source on the list's word" "$out" SOURCE-BUILD
+    out=$( (UPDATE_RUNNING=1 programs_prebuilt) 2>&1)
+    has "and so is an update to it" "$out" INSTALLED
+    OFFER="libsodium26"
+    # Found in the download.
+    prebuilt_available() { FEED_CHECKED=1 FEED_VERSION=0.14.2 FEED_BUILD=0 FEED_SIZE=1; return 0; }
+    hollow_feed_fetch() { : >"$1/hollow-relay"; printf 'version=0.14.2\nbuild=0\n' >"$1/VERSION"; }
+    printf 'libsodium.so.23\n' >"$MISSING_FILE"
+    out=$(UPDATE_RUNNING=0 programs_prebuilt 2>&1)
+    has "a download that cannot start here is built from source" "$out" SOURCE-BUILD
+    has "and says why" "$out" "there are no ready-made programs for this machine (they need libsodium.so.23, which Ubuntu 26.10 does not offer), so I build them from source instead"
+    lacks "and never installed" "$out" INSTALLED
+    eq "the download is gone" "$(find "$STATE_DIR" -maxdepth 1 -name 'download.*' | wc -l | tr -d ' ')" 0
+    out=$( (UPDATE_RUNNING=1 programs_prebuilt) 2>&1)
+    has "an update of it stops" "$out" "DIE the release list has no programs for this machine now (they need libsodium.so.23"
+    lacks "installing nothing" "$out" INSTALLED
+    : >"$MISSING_FILE"
+    out=$(UPDATE_RUNNING=0 programs_prebuilt 2>&1)
+    has "a download that can start is installed" "$out" INSTALLED
+    lacks "and not built" "$out" SOURCE-BUILD
+    # a_copy_without_sources_says_so_once: the setup's own copy cannot build.
+    printf 'libsodium.so.23\n' >"$MISSING_FILE"
+    rm -rf "$REPO/relay-uws/src"
+    out=$( (UPDATE_RUNNING=0 programs_prebuilt) 2>&1)
+    has "a copy without sources stops" "$out" "DIE there are no ready-made programs for this machine (they need libsodium.so.23, which Ubuntu 26.10 does not offer), and this copy of the setup has no relay sources to build them from. Nothing was installed."
+    lacks "without first saying it builds" "$out" "so I build them from source instead"
+    # going_back_to_signed_releases_never_rebuilds: the menu's choice installs
+    # the release or nothing.
+    mkdir -p "$REPO/relay-uws/src" && touch "$REPO/relay-uws/src/main.cpp"
+    out=$( (UPDATE_RUNNING=0 SIGNED_ONLY=1 programs_prebuilt) 2>&1)
+    has "programs that cannot start are refused" "$out" "DIE the signed release's programs cannot run on this machine (they need libsodium.so.23, which Ubuntu 26.10 does not offer). Nothing was installed, and the relay keeps the programs built here."
+    lacks "and nothing is built in their place" "$out" SOURCE-BUILD
+    : >"$MISSING_FILE"
+}
+in_sub t_prebuilt_libs_fallback
+
+# mix_clone <dir>: a git clone holding stand-in relay sources at 0.14.2.
+mix_clone() {
+    mkdir -p "$1/relay-uws/src" "$1/relay-uws/uWebSockets/src" "$1/relay-uws/uSockets"
+    touch "$1/relay-uws/uWebSockets/src/App.h" "$1/relay-uws/uSockets/Makefile" "$1/relay-uws/CMakeLists.txt"
+    echo 'int main() {}' >"$1/relay-uws/src/main.cpp"
+    printf '#define HOLLOW_RELAY_VERSION "0.14.2"\n' >"$1/relay-uws/src/version.h"
+    mix_git "$1" init -q && mix_git "$1" add -A && mix_git "$1" commit -qm release
+}
+mix_git() { local d=$1; shift; git -C "$d" -c user.email=t@x -c user.name=t -c commit.gpgsign=false "$@"; }
+
+# prebuilt_forwarder_beside_a_relay_built_here (#153): where only the relay's
+# libraries are missing (Ubuntu 26.10 has no libsodium.so.23), the signed
+# forwarder is installed and the relay is built from this copy, at the
+# release's version only.
+t_prebuilt_mixed() {
+    local F=$TMP/fake_mixed out dl
+    export MIX_CALLS=$TMP/mix.calls MIX_DIR=$TMP/mix_missing OFFER PRESENT=""
+    mkdir -p "$MIX_DIR"
+    mkfake "$F" apt-cache 'case " $OFFER " in *" $2 "*) c=1.0 ;; *) c="(none)" ;; esac; printf "%s:
+  Candidate: %s
+" "$2" "$c"'
+    mkfake "$F" dpkg-query 'exit 1'
+    mkfake "$F" ldconfig 'for l in $PRESENT; do printf "	%s (libc6,x86-64) => /lib/%s
+" "$l" "$l"; done'
+    # Each program misses what $MIX_DIR/<its name> lists.
+    mkfake "$F" ldd 'n=$(basename "$1"); for l in $(cat "$MIX_DIR/$n" 2>/dev/null); do printf "	%s => not found
+" "$l"; done'
+    PATH=$F:$PATH
+    HOLLOW_OS_RELEASE=$T/fixtures/os-release/ubuntu-26.10
+    APT_LISTS=$TMP/mix_lists
+    mkdir -p "$APT_LISTS"
+    : >"$APT_LISTS/archive.ubuntu.com_ubuntu_dists_stonking_main_binary-amd64_Packages"
+    hollow_apt_wait() { :; }
+    apt_refresh() { :; }
+    # Installing libssl3t64 gives libcrypto.so.3.
+    apt_install() { echo "install $*" >>"$MIX_CALLS"; case " $* " in *" libssl3t64 "*) : >"$MIX_DIR/hollow-forwarder" ;; esac; }
+    STATE_DIR=$TMP/mix_state DRY_RUN=0 SETUP_FROM_RELEASE=0 CFG_FORWARDER=yes
+    ensure_dir() { mkdir -p "$1"; }
+
+    # Before the download, from the package lists.
+    OFFER="libsodium26 libssl3t64 zlib1g libstdc++6 libgcc-s1 libc6"
+    yes_ prebuilt_libs_offered
+    eq "only the relay's are missing" "$PREBUILT_RELAY_ONLY" 1
+    eq "named" "$PREBUILT_LIBS_WHY" "they need libsodium.so.23, which Ubuntu 26.10 does not offer"
+    CFG_FORWARDER=no
+    no_ prebuilt_libs_offered
+    CFG_FORWARDER=yes OFFER="libsodium26 zlib1g libstdc++6 libgcc-s1 libc6"
+    no_ prebuilt_libs_offered
+    eq "a forwarder that cannot run either is no help" "$PREBUILT_RELAY_ONLY" 0
+    OFFER="libsodium26 libssl3t64 zlib1g libstdc++6 libgcc-s1 libc6"
+
+    # After the download.
+    dl=$TMP/mix_dl
+    mkdir -p "$dl" && : >"$dl/hollow-relay" && : >"$dl/hollow-forwarder"
+    echo libsodium.so.23 >"$MIX_DIR/hollow-relay"
+    echo libcrypto.so.3 >"$MIX_DIR/hollow-forwarder"
+    : >"$MIX_CALLS"
+    no_ prebuilt_libs_ready "$dl"
+    eq "the relay cannot run, the forwarder can" "$PREBUILT_RELAY_CANNOT" 1
+    eq "once it has its library" "$PREBUILT_FWD_PKGS" libssl3t64
+    lacks "nothing is installed yet" "$(cat "$MIX_CALLS")" install
+    echo libhollow.so.1 >"$MIX_DIR/hollow-forwarder"
+    no_ prebuilt_libs_ready "$dl"
+    eq "a forwarder missing a library nobody offers cannot" "$PREBUILT_RELAY_CANNOT" 0
+    eq "and both are named" "$PREBUILT_LIBS_WHY" "they need libhollow.so.1 and libsodium.so.23, which Ubuntu 26.10 does not offer"
+    CFG_FORWARDER=no
+    echo libcrypto.so.3 >"$MIX_DIR/hollow-forwarder"
+    no_ prebuilt_libs_ready "$dl"
+    eq "without a forwarder there is nothing to keep" "$PREBUILT_RELAY_CANNOT" 0
+    CFG_FORWARDER=yes
+
+    # The whole flow, with the release's download and a stand-in build.
+    REPO=$TMP/mix_repo
+    mix_clone "$REPO"
+    MIX_COMMIT=$(git -C "$REPO" rev-parse HEAD)
+    prebuilt_available() { FEED_CHECKED=1 FEED_VERSION=0.14.2 FEED_BUILD=0 FEED_COMMIT=$MIX_COMMIT FEED_SIZE=1; return 0; }
+    hollow_feed_fetch() {
+        echo download-relay >"$1/hollow-relay"; echo download-forwarder >"$1/hollow-forwarder"
+        printf 'version=0.14.2\nbuild=0\n' >"$1/VERSION"
+        echo libsodium.so.23 >"$MIX_DIR/hollow-relay"; echo libcrypto.so.3 >"$MIX_DIR/hollow-forwarder"
+    }
+    source_build_into() { echo "build $2" >>"$MIX_CALLS"; : >"$MIX_DIR/hollow-relay"; echo built-relay >"$1/hollow-relay"; }
+    programs_source() { echo SOURCE-BUILD; }
+    hollow_feed_accept() { :; }
+    install_programs() { echo "INSTALLED $2 | $3 | $(cat "$1/hollow-relay") $(cat "$1/hollow-forwarder") | $(head -n 1 "$1/VERSION")"; }
+    update_begin() { echo UPDATE-BEGIN; }
+    : >"$MIX_CALLS"
+    out=$(UPDATE_RUNNING=0 programs_prebuilt 2>&1)
+    has "a first install keeps the signed forwarder and builds the relay" "$out" "INSTALLED mixed | relay built from commit $MIX_COMMIT of the copy of the repository at $REPO | built-relay download-forwarder | version=0.14.2"
+    has "it says so" "$out" "the release's relay cannot run here (they need libsodium.so.23, which Ubuntu 26.10 does not offer), so I build the relay from this copy of the repository and install the release's signed forwarder"
+    has "and how it ended" "$out" "the forwarder from the signed release, signature and checksum verified, and the relay built here"
+    has "the forwarder's library is installed" "$(cat "$MIX_CALLS")" "install libssl3t64"
+    has "only the relay is built" "$(cat "$MIX_CALLS")" "build no"
+    lacks "nothing else is built" "$out" SOURCE-BUILD
+    # A package that does not bring the forwarder's library stops it.
+    apt_install() { echo "install $*" >>"$MIX_CALLS"; }
+    out=$( (UPDATE_RUNNING=0 programs_prebuilt) 2>&1)
+    has "a forwarder its package did not fix stops" "$out" "DIE the ready-made forwarder still lacks libcrypto.so.3 after its libraries were installed"
+    lacks "installing nothing" "$out" INSTALLED
+    apt_install() { echo "install $*" >>"$MIX_CALLS"; case " $* " in *" libssl3t64 "*) : >"$MIX_DIR/hollow-forwarder" ;; esac; }
+    out=$( (UPDATE_RUNNING=1 programs_prebuilt) 2>&1)
+    has "an update from this copy does the same" "$out" "INSTALLED mixed"
+    has "after keeping the settings for its rollback" "$out" UPDATE-BEGIN
+    # Another version in this copy: its relay is not the release's.
+    printf '#define HOLLOW_RELAY_VERSION "0.14.1"\n' >"$REPO/relay-uws/src/version.h"
+    out=$(UPDATE_RUNNING=0 programs_prebuilt 2>&1)
+    has "a first install builds everything from this copy" "$out" SOURCE-BUILD
+    has "saying why" "$out" "the release's forwarder could run here, but the relay cannot be built beside it, because this copy of the repository holds version 0.14.1, and the release is 0.14.2. So I build both from this copy."
+    lacks "never mixing versions" "$out" "INSTALLED"
+    out=$( (UPDATE_RUNNING=1 programs_prebuilt) 2>&1)
+    has "an update stops" "$out" "DIE the relay of version 0.14.2 cannot run here (they need libsodium.so.23, which Ubuntu 26.10 does not offer), and it cannot be built here either, because this copy of the repository holds version 0.14.1, and the release is 0.14.2. Nothing was installed."
+    has "and says what to do" "$out" "check out the release's tag in your copy of the repository and run sudo bash relay-uws/install.sh from it"
+    lacks "installing nothing" "$out" INSTALLED
+    lacks "and building nothing" "$out" SOURCE-BUILD
+    # The setup's own copy has no relay sources.
+    rm -rf "$REPO/relay-uws/src"
+    out=$( (UPDATE_RUNNING=0 programs_prebuilt) 2>&1)
+    has "a first install from it stops" "$out" "DIE there are no ready-made programs for this machine (they need libsodium.so.23, which Ubuntu 26.10 does not offer), and this copy of the setup has no relay sources to build them from."
+    lacks "never claiming it builds from this copy" "$out" "So I build both from this copy"
+    out=$( (UPDATE_RUNNING=1 programs_prebuilt) 2>&1)
+    has "an update from the menu's copy stops" "$out" "because this copy of the setup has no relay sources next to it. Nothing was installed."
+    lacks "and installs nothing" "$out" INSTALLED
+    # A release whose relay runs here is installed whole.
+    hollow_feed_fetch() { echo download-relay >"$1/hollow-relay"; echo download-forwarder >"$1/hollow-forwarder"; printf 'version=0.14.3\nbuild=0\n' >"$1/VERSION"; : >"$MIX_DIR/hollow-relay"; : >"$MIX_DIR/hollow-forwarder"; }
+    out=$( (UPDATE_RUNNING=1 programs_prebuilt) 2>&1)
+    has "a later release whose relay runs is the signed pair" "$out" "INSTALLED prebuilt |  | download-relay download-forwarder"
+
+    # mixed_counts_as_the_ready_made_choice: a run with nothing to change
+    # neither downloads nor builds.
+    installed_source() { echo mixed; }
+    programs_present() { return 0; }
+    installed_version() { echo 0.14.2; }
+    programs_prebuilt() { echo PREBUILT; }
+    CFG_BINARIES=prebuilt FORCE_PROGRAMS=0
+    out=$(ensure_programs)
+    has "the mixed pair is kept" "$out" "the relay programs are already installed, version 0.14.2"
+    lacks "untouched" "$out" PREBUILT
+    CFG_BINARIES=source
+    eq "a build of both is still asked for" "$(ensure_programs)" SOURCE-BUILD
+}
+in_sub t_prebuilt_mixed
+
+# a_mixed_relay_is_built_only_from_the_releases_own_sources (#153): the VERSION
+# marker of a mixed pair names the release's build and commit, so the relay
+# built beside the signed forwarder must come from exactly the release's relay
+# trees, with nothing changed in them. Reviewer's case first: a branch past the
+# release with the same version.h.
+t_mixed_needs_the_release_trees() {
+    local F=$TMP/fake_rev out rel tag
+    export MIX_DIR=$TMP/rev_missing
+    mkdir -p "$MIX_DIR"
+    mkfake "$F" ldd 'n=$(basename "$1"); for l in $(cat "$MIX_DIR/$n" 2>/dev/null); do printf "	%s => not found\n" "$l"; done'
+    mkfake "$F" apt-cache 'case "$2" in libsodium23) c="(none)" ;; *) c=1.0 ;; esac; printf "%s:\n  Candidate: %s\n" "$2" "$c"'
+    mkfake "$F" dpkg-query 'exit 1'
+    mkfake "$F" ldconfig ':'
+    PATH=$F:$PATH
+    HOLLOW_OS_RELEASE=$T/fixtures/os-release/ubuntu-26.10
+    hollow_apt_wait() { :; }; apt_refresh() { :; }; apt_install() { :; }
+    STATE_DIR=$TMP/rev_state DRY_RUN=0 SETUP_FROM_RELEASE=0 CFG_FORWARDER=yes
+    ensure_dir() { mkdir -p "$1"; }
+    REPO=$TMP/rev_repo
+    mix_clone "$REPO"
+    rel=$(git -C "$REPO" rev-parse HEAD)
+    prebuilt_available() { FEED_CHECKED=1 FEED_VERSION=0.14.2 FEED_BUILD=1 FEED_COMMIT=$rel FEED_SIZE=1; return 0; }
+    hollow_feed_fetch() {
+        echo download-relay >"$1/hollow-relay"; echo download-forwarder >"$1/hollow-forwarder"
+        printf 'version=0.14.2\nbuild=1\ncommit=%s\n' "$rel" >"$1/VERSION"
+        echo libsodium.so.23 >"$MIX_DIR/hollow-relay"; : >"$MIX_DIR/hollow-forwarder"
+    }
+    source_build_into() { : >"$MIX_DIR/hollow-relay"; echo clone-relay >"$1/hollow-relay"; }
+    programs_source() { echo SOURCE-BUILD; }
+    hollow_feed_accept() { :; }
+    install_programs() { echo "INSTALLED $2 | $(cat "$1/hollow-relay") | $(tr '\n' ' ' <"$1/VERSION")"; }
+    FEED_VERSION=0.14.2 FEED_COMMIT=$rel
+
+    yes_ mixed_possible
+    # The tag is a later commit than the one the feed names; only the trees count.
+    echo notes >"$REPO/CHANGELOG" && mix_git "$REPO" add -A && mix_git "$REPO" commit -qm publish
+    tag=$(git -C "$REPO" rev-parse HEAD)
+    yes_ mixed_possible
+    out=$(UPDATE_RUNNING=0 programs_prebuilt 2>&1)
+    has "the release's trees at another commit give the mixed pair" "$out" "INSTALLED mixed | clone-relay | version=0.14.2 build=1 commit=$rel"
+    # A branch past the release: same version.h, other relay code.
+    echo 'int main() { /* the clone, not the release */ }' >"$REPO/relay-uws/src/main.cpp"
+    mix_git "$REPO" commit -qam branch
+    no_ mixed_possible
+    eq "and says why" "$MIXED_WHY" "the relay sources in this copy differ from those of the release's commit ${rel:0:12}"
+    out=$(UPDATE_RUNNING=0 programs_prebuilt 2>&1)
+    lacks "a relay built from other sources is never labelled as the release" "$out" "INSTALLED mixed"
+    has "a first install builds both from this copy" "$out" SOURCE-BUILD
+    has "saying why" "$out" "because the relay sources in this copy differ from those of the release's commit ${rel:0:12}. So I build both from this copy."
+    out=$( (UPDATE_RUNNING=1 programs_prebuilt) 2>&1)
+    has "an update stops" "$out" "DIE the relay of version 0.14.2 cannot run here"
+    lacks "installing nothing" "$out" INSTALLED
+    for p in relay-uws/CMakeLists.txt relay-uws/uWebSockets relay-uws/uSockets; do
+        mix_git "$REPO" reset -q --hard "$tag"
+        if [ -d "$REPO/$p" ]; then echo changed >"$REPO/$p/extra.h"; else echo changed >>"$REPO/$p"; fi
+        mix_git "$REPO" add -A && mix_git "$REPO" commit -qm "change $p"
+        no_ mixed_possible
+        has "$p counts as relay source" "$MIXED_WHY" "differ from those of the release's commit"
+    done
+    mix_git "$REPO" reset -q --hard "$tag"
+    yes_ mixed_possible
+    # Changes of its own, committed or not: the build copies the folders whole.
+    echo '// local' >>"$REPO/relay-uws/src/main.cpp"
+    no_ mixed_possible
+    eq "an edit is a change" "$MIXED_WHY" "this copy has changes of its own in the relay sources, which git status shows"
+    mix_git "$REPO" checkout -q -- relay-uws/src/main.cpp
+    echo '// new' >"$REPO/relay-uws/src/extra.cpp"
+    no_ mixed_possible
+    rm -f "$REPO/relay-uws/src/extra.cpp"
+    printf 'relay-uws/src/*.local\n' >"$REPO/.gitignore" && mix_git "$REPO" add .gitignore && mix_git "$REPO" commit -qm ignore
+    echo x >"$REPO/relay-uws/src/a.local"
+    no_ mixed_possible
+    eq "so is an ignored file" "$MIXED_WHY" "this copy has changes of its own in the relay sources, which git status shows"
+    rm -f "$REPO/relay-uws/src/a.local"
+    yes_ mixed_possible
+    cp "$REPO/.git/index" "$TMP/rev_index"
+    echo broken >"$REPO/.git/index"
+    no_ mixed_possible
+    eq "a state git cannot read" "$MIXED_WHY" "git could not read the state of this copy's relay sources, so I cannot tell whether they are the release's"
+    cp "$TMP/rev_index" "$REPO/.git/index"
+    yes_ mixed_possible
+    # What git cannot vouch for.
+    FEED_COMMIT=$(printf '%040d' 7)
+    no_ mixed_possible
+    eq "a release commit this copy lacks" "$MIXED_WHY" "this copy of the repository does not have the release's commit 000000000000, which git fetch --tags brings in"
+    FEED_COMMIT=""
+    no_ mixed_possible
+    eq "a release list without a commit" "$MIXED_WHY" "the release list names no commit to compare this copy with"
+    FEED_COMMIT=$rel
+    have() { [ "$1" != git ] && command -v "$1" >/dev/null 2>&1; }
+    no_ mixed_possible
+    eq "without git" "$MIXED_WHY" "git is not installed, so I cannot tell whether this copy holds the release's relay sources"
+    have() { command -v "$1" >/dev/null 2>&1; }
+    mv "$REPO/.git" "$REPO/.git-away"
+    no_ mixed_possible
+    eq "a copy that is no clone" "$MIXED_WHY" "this copy of the repository is not a git clone I can read, so I cannot tell whether it holds the release's relay sources"
+    mv "$REPO/.git-away" "$REPO/.git"
+    yes_ mixed_possible
+}
+in_sub t_mixed_needs_the_release_trees
+
+# a_submodule_counts_at_the_commit_checked_out (#153): the relay's submodules
+# are commit ids in the tree, so the checkout in each must be that commit.
+t_mixed_submodule_checkout() {
+    local R=$TMP/sub_repo sub rel
+    REPO=$R
+    mix_clone "$R"
+    sub=$R/relay-uws/uWebSockets
+    rm -rf "$sub" && mkdir -p "$sub/src" && touch "$sub/src/App.h"
+    mix_git "$sub" init -q && mix_git "$sub" add -A && mix_git "$sub" commit -qm one
+    mix_git "$R" rm -rq --cached relay-uws/uWebSockets
+    mix_git "$R" update-index --add --cacheinfo "160000,$(git -C "$sub" rev-parse HEAD),relay-uws/uWebSockets"
+    mix_git "$R" commit -qm submodule
+    rel=$(git -C "$R" rev-parse HEAD)
+    FEED_VERSION=0.14.2 FEED_COMMIT=$rel
+    yes_ mixed_possible
+    echo 'int x;' >"$sub/src/new.h" && mix_git "$sub" add -A && mix_git "$sub" commit -qm two
+    no_ mixed_possible
+    mix_git "$sub" reset -q --hard HEAD~1
+    yes_ mixed_possible
+    mv "$sub/.git" "$TMP/sub-git-away"
+    no_ mixed_possible
+    eq "a folder that is no checkout is not the release's" "$MIXED_WHY" "the relay sources in this copy differ from those of the release's commit ${rel:0:12}"
+    mv "$TMP/sub-git-away" "$sub/.git"
+}
+in_sub t_mixed_submodule_checkout
+
+# installed_programs_get_back_only_their_library (#153): a settings run with
+# installed programs that lost a library installs that library, or stops; it
+# never fetches other programs outside an update.
+t_programs_libs_heal() {
+    local F=$TMP/fake_heal out
+    export HEAL_MISSING=$TMP/heal.missing HEAL_CALLS=$TMP/heal.calls OFFER="libsodium23"
+    PROGRAMS_DIR=$TMP/heal_bin VERSION_FILE=$TMP/heal_bin/VERSION
+    mkdir -p "$PROGRAMS_DIR"
+    for f in hollow-relay hollow-forwarder; do printf '#!/bin/sh\n' >"$PROGRAMS_DIR/$f"; chmod +x "$PROGRAMS_DIR/$f"; done
+    printf 'version=0.14.2\nbuild=0\n' >"$VERSION_FILE"
+    mkfake "$F" ldd 'case "$1" in *hollow-relay) for l in $(cat "$HEAL_MISSING" 2>/dev/null); do printf "	%s => not found\n" "$l"; done ;; esac'
+    mkfake "$F" apt-cache 'case " $OFFER " in *" $2 "*) c=1.0 ;; *) c="(none)" ;; esac; printf "%s:\n  Candidate: %s\n" "$2" "$c"'
+    mkfake "$F" dpkg-query 'exit 1'
+    PATH=$F:$PATH
+    hollow_apt_wait() { :; }
+    apt_refresh() { echo refresh >>"$HEAL_CALLS"; }
+    apt_install() { echo "install $*" >>"$HEAL_CALLS"; case " $* " in *" libsodium23 "*) : >"$HEAL_MISSING" ;; esac; }
+    programs_prebuilt() { echo PREBUILT; }
+    programs_source() { echo SOURCE-BUILD; }
+    installed_source() { echo prebuilt; }
+    CFG_BINARIES=prebuilt CFG_FORWARDER=yes FORCE_PROGRAMS=0 DRY_RUN=0
+    yes_ programs_present
+    echo libsodium.so.23 >"$HEAL_MISSING"
+    yes_ programs_present
+    : >"$HEAL_CALLS"
+    out=$(ensure_programs 2>&1)
+    has "the library goes back by its exact package" "$(cat "$HEAL_CALLS")" "install libsodium23"
+    has "and says so" "$out" "the installed programs lack libsodium.so.23, so I install libsodium23"
+    has "keeping the programs" "$out" "the relay programs are already installed, version 0.14.2"
+    lacks "fetching nothing" "$out" PREBUILT
+    # Nobody offers it: the run stops, and the programs stay as they are.
+    OFFER="libsodium26"
+    echo libsodium.so.23 >"$HEAL_MISSING"
+    : >"$HEAL_CALLS"
+    out=$( (ensure_programs) 2>&1)
+    has "programs that cannot start stop the run" "$out" "DIE the installed programs cannot start, because they need libsodium.so.23, which this system does not have. The programs were not changed. To build the programs here, run the setup from your copy of the repository (sudo bash relay-uws/install.sh) and choose Rebuild from this copy."
+    lacks "never a download outside an update" "$out" PREBUILT
+    lacks "nothing installed" "$(cat "$HEAL_CALLS")" install
+    # A package that does not bring the library stops too.
+    OFFER="libsodium23"
+    apt_install() { echo "install $*" >>"$HEAL_CALLS"; }
+    out=$( (ensure_programs) 2>&1)
+    has "a package that did not help stops" "$out" "DIE the installed programs cannot start, because they need libsodium.so.23"
+    # An update or a rebuild replaces them as before.
+    out=$(FORCE_PROGRAMS=1 ensure_programs 2>&1)
+    eq "a forced run fetches" "$out" PREBUILT
+    : >"$HEAL_MISSING"
+    out=$(ensure_programs 2>&1)
+    eq "nothing missing, nothing done" "$out" "  the relay programs are already installed, version 0.14.2"
+}
+in_sub t_programs_libs_heal
+
+# the_library_list_warns_on_the_screens (#153): the question, and the way back
+# to signed releases, which installs the release or nothing.
+t_library_doubt_screens() {
+    local out why="they need libsodium.so.23, which Ubuntu 26.10 does not offer"
+    feed_lib_present() { return 0; }
+    ui_menu() { UI_REPLY=prebuilt; }
+    ui_msg() { printf 'MSG %s | %s\n' "$1" "$2"; }
+    prebuilt_available() { PREBUILT_LIBS_DOUBT=1 PREBUILT_RELAY_ONLY=0 FEED_CHECKED=1 PREBUILT_LIBS_WHY=$why; return 0; }
+    out=$(ask_binaries; echo "binaries=$CFG_BINARIES")
+    has "the question warns" "$out" "MSG Checking the ready-made programs | The ready-made programs may not run on this machine, because $why. I will download them and check them before I install anything."
+    has "and keeps the ready-made choice" "$out" "binaries=prebuilt"
+    prebuilt_available() { PREBUILT_LIBS_DOUBT=0 PREBUILT_RELAY_ONLY=1 FEED_CHECKED=1 PREBUILT_LIBS_WHY=$why; return 0; }
+    mixed_possible() { MIXED_WHY="the relay sources in this copy differ from those of the release's commit 0123456789ab"; return 1; }
+    has "a copy that cannot build the release's relay says both are built" "$(ask_binaries)" "MSG Building the programs here | The ready-made relay cannot run on this machine, because $why. It cannot be built beside the ready-made media forwarder either, because the relay sources in this copy differ"
+    mixed_possible() { return 0; }
+    has "one that can builds only the relay" "$(ask_binaries)" "MSG Building the relay here"
+    prebuilt_available() { PREBUILT_LIBS_DOUBT=1 FEED_VERSION=0.14.3 PREBUILT_LIBS_WHY=$why; return 0; }
+    installed_version() { echo 0.14.2; }
+    ui_yesno() { printf '%s' "$3" >"$TMP/signed.text"; return 0; }
+    CFG_FORWARDER=no SIGNED_ONLY=0
+    manage_signed_again
+    has "going back to signed releases warns" "$(cat "$TMP/signed.text")" "They may not run here, because $why. I check the download before I install anything, and if they cannot start, the relay keeps the programs built here."
+    eq "and installs the release or nothing" "$SIGNED_ONLY" 1
+}
+in_sub t_library_doubt_screens
+
+# install_programs_names_the_mixed_pair (#153): BUILT_FROM says what was built here.
+t_built_from_mixed() {
+    local d=$TMP/bf
+    mkdir -p "$d/dl"
+    : >"$d/dl/hollow-relay"; : >"$d/dl/hollow-forwarder"; printf 'version=0.14.2\nbuild=0\n' >"$d/dl/VERSION"
+    BUILT_FROM_FILE=$d/BUILT_FROM VERSION_FILE=$d/VERSION DRY_RUN=1 CFG_FORWARDER=yes
+    put_file() { cat >"$1"; }
+    install_programs "$d/dl" mixed "relay built from commit abc of the copy of the repository at /home/x/HOLLOW" >/dev/null
+    eq "BUILT_FROM names the mix" "$(cat "$BUILT_FROM_FILE")" "mixed
+relay built from commit abc of the copy of the repository at /home/x/HOLLOW"
+    eq "installed_source reads it" "$(installed_source)" mixed
+    eq "VERSION is the release's marker, as it came" "$(cat "$VERSION_FILE")" "version=0.14.2
+build=0"
+    # The setup runs under set -euo pipefail, which a false test can end.
+    eq "a signed pair goes on under the setup's set -e" "$( (set -euo pipefail; install_programs "$d/dl" prebuilt >/dev/null; echo on) )" on
+    eq "a signed pair says only that" "$(cat "$BUILT_FROM_FILE")" prebuilt
+}
+in_sub t_built_from_mixed
 t_update_last_step() {
     # The last step runs the new copy, which applies everything with the new programs.
     INSTALLER_COPY=$TMP/ocopy
@@ -1224,6 +1793,13 @@ t_ssh_ports() {
     mkfake "$F" systemctl 'exit 0'
     mkfake "$F" ss 'exit 0'
     eq "nothing found means 22" "$(SSH_CONNECTION="1 2 3 22" hollow_ssh_ports)" 22
+    # sshd_settings_read_in_any_case (#153): OpenSSH 10.5 on Ubuntu 26.10 prints
+    # "Port 2299", as sshd_config spells it.
+    mkfake "$F" sshd "[ \"\$1\" = -T ] && cat '$T/fixtures/sshd/openssh-10.5-ubuntu-26.10.txt'"
+    eq "OpenSSH 10.5's Port and ListenAddress" "$(SSH_CONNECTION="1 2 3 22" hollow_ssh_ports)" "22 2299"
+    has "its keywords come out in lower case" "$(hollow_sshd_t)" "passwordauthentication yes"
+    mkfake "$F" sshd 'exit 1'
+    no_ hollow_sshd_t
 }
 in_sub t_ssh_ports
 
@@ -1454,6 +2030,103 @@ t_build_outputs() {
     no_ test -e "$TMP/st/link"
 }
 in_sub t_build_outputs
+
+# a_source_build_stages_cargos_hard_linked_output (#153): cargo leaves
+# target/release/<bin> as a second name of its copy under deps/, which root
+# must never stage, so the build account copies it out first.
+t_source_build_outputs() {
+    [ "$(id -u)" = 0 ] || { echo "skip  the source build's staging needs root"; return 0; }
+    local S=$TMP/srcbuild calls=$TMP/srcbuild.calls
+    REPO=$S/repo BUILD_DIR=$S/bld STATE_DIR=$S/state BUILD_USER=$(id -un) CFG_FORWARDER=yes DRY_RUN=0
+    mkdir -p "$REPO/relay-uws/src" "$REPO/relay-uws/uWebSockets/src" "$REPO/relay-uws/uSockets" \
+        "$REPO/rust/hollow_core" "$REPO/rust/hollow_dfn" "$S/installed"
+    touch "$REPO/relay-uws/src/main.cpp" "$REPO/relay-uws/CMakeLists.txt" "$REPO/relay-uws/uWebSockets/src/App.h" \
+        "$REPO/relay-uws/uSockets/Makefile" "$REPO/rust/hollow_core/Cargo.toml" "$REPO/rust/hollow_dfn/lib.rs"
+    printf '#define HOLLOW_RELAY_VERSION "9.9.9"\n' >"$REPO/relay-uws/src/version.h"
+    step() { :; }
+    apt_install() { :; }
+    ensure_account() { :; }
+    builder_idle() { :; }
+    builder_ready() { :; }
+    build_swap_on() { :; }
+    build_swap_off() { :; }
+    rust_toolchain() { :; }
+    install_programs() { cp -- "$1"/* "$S/installed/"; }
+    # Stands in for the build sandbox: cmake's output has one name, cargo's two.
+    as_builder() {
+        printf '%s\n' "$*" >>"$calls"
+        case " $* " in
+        *" cmake --build "*) mkdir -p "$BUILD_DIR/relay-build" && echo relay >"$BUILD_DIR/relay-build/hollow-relay"; return 0 ;;
+        *" cmake "*) return 0 ;;
+        *"/cargo/bin/cargo build "*)
+            mkdir -p "$BUILD_DIR/target/release/deps"
+            echo forwarder >"$BUILD_DIR/target/release/deps/hollow_forwarder-0123abcd"
+            ln -f "$BUILD_DIR/target/release/deps/hollow_forwarder-0123abcd" "$BUILD_DIR/target/release/hollow-forwarder"
+            return 0 ;;
+        esac
+        "$@"
+    }
+    local out rc=0
+    out=$( (programs_source) 2>&1) || rc=$?
+    eq "a source build whose cargo output has two names finishes" "$rc" 0
+    lacks "and stages it" "$out" "something other than a plain file"
+    eq "the forwarder staged is cargo's build" "$(cat "$S/installed/hollow-forwarder" 2>/dev/null)" forwarder
+    eq "and the relay cmake's" "$(cat "$S/installed/hollow-relay" 2>/dev/null)" relay
+    has "the build account makes the copies" "$(cat "$calls" 2>/dev/null)" "$BUILD_DIR/out hollow-forwarder $BUILD_DIR/target/release/hollow-forwarder"
+    yes_ test -f "$BUILD_DIR/target/release/hollow-forwarder"
+    eq "cargo's files stay for the next build" "$(stat -c %h "$BUILD_DIR/target/release/hollow-forwarder")" 2
+    no_ test -e "$BUILD_DIR/out"
+    # A copy the build account turned into a link is still refused.
+    as_builder() {
+        case " $* " in
+        *" cmake --build "*) mkdir -p "$BUILD_DIR/relay-build" && echo relay >"$BUILD_DIR/relay-build/hollow-relay"; return 0 ;;
+        *" cmake "* | *"/cargo/bin/cargo build "*) return 0 ;;
+        *" cp -- "*) mkdir -p "$BUILD_DIR/out" && ln -sfn /etc/passwd "$BUILD_DIR/out/hollow-relay"; return 0 ;;
+        esac
+        "$@"
+    }
+    rm -f "$S/installed/"*
+    rc=0
+    out=$( (programs_source) 2>&1) || rc=$?
+    eq "a copy that is a link stops the build" "$rc" 99
+    has "and says so" "$out" "the build left $BUILD_DIR/out/hollow-relay as something other than a plain file"
+    no_ test -e "$S/installed/hollow-relay"
+}
+in_sub t_source_build_outputs
+
+# builder_ready_waits_out_a_systemd_reexec (#153): on Ubuntu 26.04 the build's
+# first transient unit failed while systemd re-executed after an apt upgrade.
+t_builder_ready() {
+    local F=$TMP/fake_ready
+    export READY_N=$TMP/ready.n
+    echo 0 >"$READY_N"
+    mkfake "$F" systemd-run 'n=$(($(cat "$READY_N") + 1)); echo $n >"$READY_N"; [ "$n" -ge 3 ] || { echo "Failed to start transient service unit: Message recipient disconnected from message bus without replying" >&2; exit 1; }'
+    PATH=$F:$PATH BUILD_USER=nobody
+    sleep() { :; }
+    yes_ builder_ready
+    eq "it asks again until a unit runs" "$(cat "$READY_N")" 3
+    mkfake "$F" systemd-run 'exit 1'
+    has "a systemd that never starts one stops the build" "$( (builder_ready) 2>&1)" "DIE systemd does not start the build's units, so nothing was built."
+}
+in_sub t_builder_ready
+
+# follower_removal_ends_a_running_look_first (#153, Ubuntu 25.10): userdel
+# refuses an account whose probe still runs, and the account stayed.
+t_follow_remove_order() {
+    local log=$TMP/follow_rm.log
+    : >"$log"
+    DRY_RUN=0 UNIT_DIR=$TMP/no_units
+    unit_exists() { return 0; }
+    systemctl() { echo "systemctl $*" >>"$log"; }
+    getent() { [ "$1" = passwd ] && [ "$2" = hollow-addr ]; }
+    account_idle() { echo "idle $1" >>"$log"; }
+    userdel() { echo "userdel $1" >>"$log"; }
+    groupdel() { :; }
+    follow_remove
+    eq "the look is stopped, its account idle, then removed" "$(grep -E 'stop hollow-address-follow.service|^idle|^userdel' "$log" | tr '\n' '|')" \
+        "systemctl stop hollow-address-follow.service|idle hollow-addr|userdel hollow-addr|"
+}
+in_sub t_follow_remove_order
 
 echo "fail2ban"
 out=$(sh "$DEPLOY/harden-host.sh" --print --no-ssh 2>&1)
@@ -2793,6 +3466,9 @@ in_sub t_summary
 # check-host's sudo check of the service accounts.
 # shellcheck source=host_check_tests.sh
 . "$T/host_check_tests.sh"
+# The coreutils forms, which uutils must answer as GNU does (#153).
+# shellcheck source=coreutils_tests.sh
+. "$T/coreutils_tests.sh"
 
 if [ "$(id -u)" = 0 ] && [ -r /etc/os-release ]; then
     echo "dry run"

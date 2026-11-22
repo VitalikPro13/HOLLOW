@@ -57,6 +57,14 @@ To build from source, I compile both here from this copy of the repository. The 
     if [ "$CFG_BINARIES" = prebuilt ] && ! prebuilt_available; then
         CFG_BINARIES=source
         ui_msg "Building from source instead" "There are no ready-made programs for this machine, because $PREBUILT_WHY. I will build them here from this copy of the repository instead. That takes a few minutes for the relay and up to an hour or two for the media forwarder."
+    elif [ "$CFG_BINARIES" = prebuilt ] && [ "${PREBUILT_RELAY_ONLY:-0}" = 1 ]; then
+        if [ "${FEED_CHECKED:-0}" = 1 ] && ! mixed_possible; then
+            ui_msg "Building the programs here" "The ready-made relay cannot run on this machine, because $PREBUILT_LIBS_WHY. It cannot be built beside the ready-made media forwarder either, because $MIXED_WHY. So I will build both here from this copy of the repository. That takes a few minutes for the relay and up to an hour or two for the media forwarder."
+        else
+            ui_msg "Building the relay here" "The ready-made relay cannot run on this machine, because $PREBUILT_LIBS_WHY. I will build the relay here from this copy of the repository, which takes a few minutes, and install the ready-made media forwarder if you want one. To update later, check out the new release in this copy and run the setup from it again."
+        fi
+    elif [ "$CFG_BINARIES" = prebuilt ] && [ "${PREBUILT_LIBS_DOUBT:-0}" = 1 ]; then
+        ui_msg "Checking the ready-made programs" "The ready-made programs may not run on this machine, because $PREBUILT_LIBS_WHY. I will download them and check them before I install anything. If they cannot start here, I build them from this copy of the repository instead, which takes a few minutes for the relay and up to an hour or two for the media forwarder."
     fi
 }
 

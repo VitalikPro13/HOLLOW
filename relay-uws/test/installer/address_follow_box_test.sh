@@ -205,6 +205,12 @@ table ip box_follow {
     }
 }
 EOF
+# Ubuntu 22.04's systemd package runs systemd-resolved itself; this box is one
+# without it until the section that stands one in.
+if systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+    systemctl disable --now systemd-resolved >/dev/null 2>&1
+    rm -f /run/systemd/resolve/io.systemd.Resolve
+fi
 # From here on this machine's DNS server is fake_dns.py (apt needed the real one).
 cp /etc/resolv.conf "$WORK_DIR/resolv.conf"
 background python3 -I "$T/fake_dns.py" "$SHIM" 127.0.0.1 53
@@ -228,7 +234,20 @@ mkdir -p "$UNIT_DIR/hollow-address-follow.service.d"
 printf '[Service]\nExecStart=\nExecStart=/bin/true\n' >"$UNIT_DIR/hollow-address-follow.service.d/box.conf"
 systemctl daemon-reload
 
-follow() { PATH="$SHIM:$PATH" bash "$INSTALLER_COPY/deploy/address-follow.sh" run 2>&1; }
+# A running coturn answers an authenticated Allocate before a look starts: coturn
+# 4.18 (Ubuntu 26.10) takes a moment after a restart, which a look five minutes
+# later never sees.
+turn_ready() {
+    local cred _
+    systemctl is-active --quiet hollow-coturn || return 0
+    cred=$(/usr/bin/python3 -I "$INSTALLER_COPY/deploy/address-probe.py" turn-cred "$TURN_ETC/turn.env" 2>/dev/null) || return 0
+    for _ in $(seq 1 50); do
+        TURN_USER=${cred%%$'\n'*} TURN_PASS=${cred#*$'\n'} timeout 2 /usr/bin/python3 -I \
+            "$INSTALLER_COPY/deploy/address-probe.py" turn "$L" 3478 >/dev/null 2>&1 && return 0
+        sleep 0.2
+    done
+}
+follow() { turn_ready; PATH="$SHIM:$PATH" bash "$INSTALLER_COPY/deploy/address-follow.sh" run 2>&1; }
 inv() { systemctl show -p InvocationID --value "$1"; }
 turn_ip() { kv_get "$TURN_ETC/turn.env" PUBLIC_IP; }
 peers() { kv_get "$LOCK_ENV" TURN_PEERS; }
@@ -869,6 +888,8 @@ rm -f "$FOLLOW_STATE"
 systemctl reset-failed hollow-coturn hollow-forwarder
 systemctl restart hollow-coturn
 c2=$(inv hollow-coturn)
+# The unit's own TURN look must find coturn up, as follow() waits for it.
+turn_ready
 systemctl start hollow-address-follow.service
 eq "the unit runs to the end in its sandbox" "$(systemctl show -p Result --value hollow-address-follow.service)" success
 eq "and rewrites coturn's settings, the lock's and the forwarder's" "$(turn_ip) $(peers) $(fwd_ip)" "$NEW2 $NEW2 $L $NEW2"

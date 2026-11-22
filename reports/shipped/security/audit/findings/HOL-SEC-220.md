@@ -12,7 +12,7 @@ Category:    Fail-open configuration / Stale authorization
 Component:   relay-uws/src/license.cpp (load_from_file, try_reload),
              relay-uws/src/license_pool.h (validate, replace_keys), main.cpp
 Boundary:    TB-4 (relay host and its operator)
-Traces to:   R-RS-23
+Traces to:   R-RS-25
 Attacker:    anyone who can reach the relay
 Found:       2026-11-21 (hostile review 1 of fix/153-license-seats, item 1)
 Affected:    every relay with access keys, through 0.14.2
