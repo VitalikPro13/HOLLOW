@@ -18,7 +18,9 @@
 # from source to the end (an hour or two). FRESH_ONLY=mixed runs a first
 # install and updates where only the relay's library is missing, so the
 # official signed forwarder (fetched for this machine) is installed and the
-# relay is built here.
+# relay is built here; with /root/official (the release build's programs for
+# this machine, scripts/build_relay_binaries.sh) its last update is to them.
+# FRESH_ONLY=official runs only a first install of those programs whole.
 # shellcheck disable=SC2034
 set -uo pipefail
 [ "${HOLLOW_INSTALLER_TEST_BOX:-}" = 1 ] || { echo "Runs only inside the test container (run_systemd_tests.sh)." >&2; exit 2; }
@@ -125,8 +127,11 @@ _hf_protos() { printf '=file'; }
 EOF
 # The stand-in relay links to this system's own libraries, not the official
 # build's (scripts/build_relay_binaries.sh), so the setup judges by its list.
-RELAY_NEEDS=$(LC_ALL=C ldd /root/relay.bin | sed -n 's/^[[:space:]]*\([^[:space:]]*\) => .*/\1/p' | grep -v '^linux-vdso' | tr '\n' ' ')
-printf '\nPREBUILT_NEEDS="%s"\n' "$RELAY_NEEDS" >>"$SRC/relay-uws/deploy/lib/native.sh"
+# The release build's own programs keep the official list.
+if [ "${FRESH_ONLY:-}" != official ]; then
+    RELAY_NEEDS=$(LC_ALL=C ldd /root/relay.bin | sed -n 's/^[[:space:]]*\([^[:space:]]*\) => .*/\1/p' | grep -v '^linux-vdso' | tr '\n' ' ')
+    printf '\nPREBUILT_NEEDS="%s"\n' "$RELAY_NEEDS" >>"$SRC/relay-uws/deploy/lib/native.sh"
+fi
 # The same relay asking for a libsodium no system has.
 python3 -I -c 'import re, sys; b = open(sys.argv[1], "rb").read(); open(sys.argv[2], "wb").write(re.sub(rb"libsodium\.so\.\d\d", b"libsodium.so.99", b))' \
     /root/relay.bin "$W/relay99.bin"
@@ -147,9 +152,10 @@ case "$(uname -m)" in aarch64 | arm64) ARCH=linux-aarch64 ;; *) ARCH=linux-x86_6
 # noui or cannotstart (a setup that cannot start), badsettings (a setup whose
 # settings run fails), dead (a relay that does not start, with its setup) or
 # nolib (a relay that needs a library no system offers, with its setup).
-# FWD_BIN names the forwarder a release carries (the stand-in relay otherwise).
+# FWD_BIN names the forwarder a release carries (the stand-in relay otherwise),
+# RELAY_BIN its relay.
 publish() {
-    local b=$1 kind=$2 s=$W/stage name sha size relay=/root/relay.bin
+    local b=$1 kind=$2 s=$W/stage name sha size relay=${RELAY_BIN:-/root/relay.bin}
     rm -rf "$s" "$FEED"/*.tar.gz && mkdir -p "$s"
     [ "$kind" = dead ] && relay=/bin/false
     [ "$kind" = nolib ] && relay=$W/relay99.bin
@@ -249,12 +255,10 @@ EOF
     fi
     # The official build's own list, judged by this system's real package lists:
     # Ubuntu 26.10 offers only libsodium.so.26, and still the forwarder's libcrypto.so.3.
+    # Ubuntu 26.10 offers only libsodium.so.26, which the official relay no
+    # longer asks for (0.14.3).
     out=$(cd / && bash "$SRC/relay-uws/test/installer/fresh_box_offered.sh")
-    if apt-cache policy libsodium23 | grep 'Candidate: [0-9]' >/dev/null; then
-        eq "this system offers what the official programs need" "$out" offered
-    else
-        eq "this system offers only the official forwarder's libraries" "$out" "forwarder only: they need libsodium.so.23, which $PRETTY_NAME does not offer"
-    fi
+    eq "this system offers what the official programs need" "$out" offered
     finish
 fi
 
@@ -377,17 +381,73 @@ EOF
     lacks "with the relay built here" "$(LC_ALL=C ldd /usr/local/bin/hollow-relay)" libsodium.so.99
     yes_ "the relay runs" relay_up
     echo "a release whose relay runs here at last"
-    publish 4 setup
+    # a_mixed_pair_takes_the_whole_signed_pair_once_its_relay_runs (#153): the
+    # release build's relay carries libsodium since 0.14.3.
+    m4_relay=/root/relay.bin m4_fwd=$FWD_BIN
+    if [ -x /root/official/hollow-relay ]; then m4_relay=/root/official/hollow-relay m4_fwd=/root/official/hollow-forwarder; fi
+    RELAY_BIN=$m4_relay FWD_BIN=$m4_fwd publish 4 setup
     mupdate m4 menu
     rc=$?
     eq "the update finishes" "$rc" 0
     [ "$rc" = 0 ] || tail -n 30 "$W/m4.out"
     has "with the signed pair" "$(flat "$W/m4.out")" "installed version $REL (build 4), signature and checksum verified"
+    lacks "building nothing" "$(flat "$W/m4.out")" "compiling the relay"
     eq "BUILT_FROM says prebuilt" "$(cat "$LIB/BUILT_FROM")" prebuilt
-    eq "the relay is the release's" "$(cmp /usr/local/bin/hollow-relay /root/relay.bin && echo same)" same
+    eq "the relay is the release's" "$(cmp /usr/local/bin/hollow-relay "$m4_relay" && echo same)" same
+    eq "and the forwarder" "$(cmp /usr/local/bin/hollow-forwarder "$m4_fwd" && echo same)" same
+    if [ "$m4_relay" = /root/official/hollow-relay ]; then
+        lacks "a relay that links no libsodium" "$(LC_ALL=C readelf -d /usr/local/bin/hollow-relay)" libsodium
+    else
+        echo "skip  no release build in /root/official, so the last update is to the stand-in relay"
+    fi
     yes_ "the relay runs" relay_up
     yes_ "the forwarder runs" fwd_up
     has "the status screen says ready-made" "$(printf 'action=status\n' >"$W/ans_mstatus"; hollow-relay-setup --answers "$W/ans_mstatus" 2>&1 | tr '\n' ' ' | tr -s ' ')" "(ready-made, build 4"
+    finish
+fi
+
+# a_first_install_takes_the_release_builds_programs_whole (#153): on Ubuntu
+# 26.10 too, since the relay carries libsodium (0.14.3).
+if [ "${FRESH_ONLY:-}" = official ]; then
+    echo "first install of the release build's programs"
+    OFF=/root/official
+    yes_ "the release build's programs are here" test -x "$OFF/hollow-relay" -a -x "$OFF/hollow-forwarder"
+    lacks "its relay links no libsodium" "$(LC_ALL=C readelf -d "$OFF/hollow-relay" 2>&1)" libsodium
+    eq "this system offers what the official programs need" "$(cd / && bash "$SRC/relay-uws/test/installer/fresh_box_offered.sh")" offered
+    RELAY_BIN=$OFF/hollow-relay FWD_BIN=$OFF/hollow-forwarder publish 1 setup
+    printf '%s\n' mode=native binaries=prebuilt address=ip "public_ip=$PUBLIC_IP" "ip=$PUBLIC_IP" staging=yes turn=no push=no \
+        forwarder=yes members_only=no ssh_keys=no continue_anyway=yes confirm=yes >"$W/ans_off"
+    PATH="$SAFE:$PATH" bash "$SRC/relay-uws/install.sh" --answers "$W/ans_off" >"$W/off.out" 2>&1
+    rc=$?
+    eq "the install finishes" "$rc" 0
+    [ "$rc" = 0 ] || { tail -n 40 "$W/off.out"; finish; }
+    out=$(flat "$W/off.out")
+    has "with the signed pair" "$out" "installed version $REL (build 1), signature and checksum verified"
+    lacks "nothing is built here" "$out" "so I build"
+    lacks "not the relay" "$out" "compiling the relay"
+    lacks "nor the forwarder" "$out" "compiling the media forwarder"
+    lacks "and no warning of a library" "$out" "may not run on this machine"
+    eq "BUILT_FROM says prebuilt" "$(cat "$LIB/BUILT_FROM")" prebuilt
+    eq "the relay is the release's" "$(cmp /usr/local/bin/hollow-relay "$OFF/hollow-relay" && echo same)" same
+    eq "the forwarder is the release's" "$(cmp /usr/local/bin/hollow-forwarder "$OFF/hollow-forwarder" && echo same)" same
+    lacks "the installed relay asks for no libsodium" "$(LC_ALL=C ldd /usr/local/bin/hollow-relay)" libsodium
+    lacks "and both find every library" "$(LC_ALL=C ldd /usr/local/bin/hollow-relay /usr/local/bin/hollow-forwarder)" "not found"
+    yes_ "the relay runs" relay_up
+    fwd_up() { for _ in $(seq 1 30); do systemctl is-active --quiet hollow-forwarder && return 0; sleep 1; done; return 1; }
+    yes_ "the forwarder runs" fwd_up
+    mkdir -p /etc/ssh/sshd_config.d && printf 'PasswordAuthentication no\nKbdInteractiveAuthentication no\n' >/etc/ssh/sshd_config.d/00-box-keys.conf
+    # sshd -T needs the folder sshd makes at its first login, which a socket-started sshd (24.04) has not had.
+    install -d -m 0755 /run/sshd
+    systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
+    check=$(bash "$LIB/installer/deploy/check-host.sh" 2>&1)
+    echo "--- check-host after the install of the release build's programs"
+    printf '%s\n' "$check"
+    echo "--- end of check-host"
+    eq "check-host prints only ok and skip" "$(grep -vE '^  (ok|skip)  |^  \(|^[^ ]' <<<"$check" | grep -v 'kernel.core_pattern is ')" ""
+    has "the relay finds its libraries" "$check" "ok    hollow-relay's program /usr/local/bin/hollow-relay finds every library it needs"
+    has "and the forwarder" "$check" "ok    hollow-forwarder's program /usr/local/bin/hollow-forwarder finds every library it needs"
+    has "the notices of what the relay links in are installed" "$(cat "$LIB/installer/deploy/THIRD_PARTY_NOTICES.txt" 2>&1)" "crypto_core"
+    has "the status screen says ready-made" "$(printf 'action=status\n' >"$W/ans_ostatus"; hollow-relay-setup --answers "$W/ans_ostatus" 2>&1 | tr '\n' ' ' | tr -s ' ')" "(ready-made, build 1"
     finish
 fi
 

@@ -1121,13 +1121,21 @@ t_prebuilt_libs() {
     eq "libssl.so.3 comes from the t64 package" "$(lib_package libssl.so.3)" libssl3t64
     eq "a program built for libsodium.so.26 gets that one" "$(lib_package libsodium.so.26)" libsodium26
     no_ lib_package libhollow.so.1
+    # the_official_programs_run_on_ubuntu_2610 (#153): the relay carries its
+    # own libsodium since 0.14.3, so 26.10 offers all the rest.
+    yes_ prebuilt_libs_offered
+    eq "nothing is missing" "$PREBUILT_LIBS_WHY" ""
+    # The 0.14.2 relay's list named libsodium.so.23, which 26.10 lacks.
+    local official=$PREBUILT_NEEDS
+    PREBUILT_NEEDS="$official libsodium.so.23"
     no_ prebuilt_libs_offered
     eq "and says why" "$PREBUILT_LIBS_WHY" "they need libsodium.so.23, which Ubuntu 26.10 does not offer"
     PRESENT="libc.so.6 libm.so.6 libsodium.so.23"
     yes_ prebuilt_libs_offered
+    PREBUILT_NEEDS=$official
     OFFER="libssl3t64 zlib1g" PRESENT="libc.so.6"
     prebuilt_libs_offered
-    eq "several are named together" "$PREBUILT_LIBS_WHY" "they need libsodium.so.23, libstdc++.so.6, libm.so.6 and libgcc_s.so.1, which Ubuntu 26.10 does not offer"
+    eq "several are named together" "$PREBUILT_LIBS_WHY" "they need libstdc++.so.6, libm.so.6 and libgcc_s.so.1, which Ubuntu 26.10 does not offer"
     # Ubuntu 22.04 still names it libssl3; Debian 13 and Ubuntu 24.04 libssl3t64.
     OFFER="libsodium23 libssl3 zlib1g libzstd1 libstdc++6 libgcc-s1 libc6" PRESENT="libc.so.6"
     eq "libssl.so.3 from libssl3 where there is no t64" "$(lib_package libssl.so.3)" libssl3
@@ -1172,10 +1180,35 @@ t_prebuilt_needs_build_check() {
     local b=$REPO/scripts/build_relay_binaries.sh n=$DEPLOY/lib/native.sh out
     # shellcheck disable=SC2086 # one word per library
     yes_ bash "$b" --check-needed "$n" $PREBUILT_NEEDS ld-linux-x86-64.so.2
-    out=$(bash "$b" --check-needed "$n" ${PREBUILT_NEEDS/libsodium.so.23/libsodium.so.26} 2>&1)
-    has "a build linking to another libsodium stops" "$out" "Make them the same"
-    out=$(bash "$b" --check-needed "$n" ${PREBUILT_NEEDS/libsodium.so.23/} 2>&1)
+    # the_release_relay_carries_its_own_libsodium (#153): a relay built on 22.04
+    # that links libsodium.so.23 cannot start on Ubuntu 26.10.
+    lacks "the official programs link to no libsodium" "$PREBUILT_NEEDS" libsodium
+    out=$(bash "$b" --check-needed "$n" $PREBUILT_NEEDS libsodium.so.23 2>&1)
+    has "a build whose relay links libsodium as a shared library stops" "$out" "Make them the same"
+    out=$(bash "$b" --check-needed "$n" $PREBUILT_NEEDS libsodium.so.26 2>&1)
+    has "whatever its soname" "$out" "Make them the same"
+    out=$(bash "$b" --check-needed "$n" ${PREBUILT_NEEDS/libz.so.1/} 2>&1)
     has "so does one that no longer links to a library the setup still asks for" "$out" "Make them the same"
+    # Older ready-made relays and relays built here still get their own soname's package.
+    local e
+    for e in libsodium.so.23=libsodium23 libsodium.so.26=libsodium26; do
+        [[ " $LIB_PACKAGES " == *[[:space:]]"$e"[[:space:]]* ]] && ok || bad "LIB_PACKAGES lost $e"
+    done
+    # The signed build asks for the archive, a build here keeps the shared library.
+    has "the release build links libsodium in" "$(cat "$b")" "-DHOLLOW_STATIC_SODIUM=ON"
+    has "a build here does not" "$(cat "$RELAY/CMakeLists.txt")" 'option(HOLLOW_STATIC_SODIUM "Link libsodium statically (the signed release build)" OFF)'
+    # the_release_carries_the_notices_of_what_it_links_in (#153)
+    rm -rf "$TMP/notices_stage"
+    yes_ bash "$b" --stage-setup "$REPO" "$TMP/notices_stage/setup"
+    yes_ bash "$b" --check-notices "$TMP/notices_stage"
+    has "libsodium's ISC notice ships" "$(cat "$TMP/notices_stage/setup/deploy/THIRD_PARTY_NOTICES.txt")" "Permission to use, copy, modify, and/or distribute this software for any"
+    has "with its BSD-2-clause parts" "$(cat "$TMP/notices_stage/setup/deploy/THIRD_PARTY_NOTICES.txt")" "Copyright: 2009 Colin Percival"
+    : >"$TMP/notices_stage/setup/deploy/THIRD_PARTY_NOTICES.txt"
+    out=$(bash "$b" --check-notices "$TMP/notices_stage" 2>&1)
+    has "a copy without them stops the build" "$out" "does not name libsodium"
+    rm -f "$TMP/notices_stage/setup/deploy/THIRD_PARTY_NOTICES.txt"
+    out=$(bash "$b" --check-notices "$TMP/notices_stage" 2>&1)
+    has "so does one without the file" "$out" "THIRD_PARTY_NOTICES.txt is missing"
     printf 'PREBUILT_NEEDS="libc.so.6 libhollow.so.1"\nLIB_PACKAGES="libc.so.6=libc6"\n' >"$TMP/needs_native.sh"
     out=$(bash "$b" --check-needed "$TMP/needs_native.sh" libc.so.6 libhollow.so.1 2>&1)
     has "a library without packages stops it" "$out" "libhollow.so.1 has no packages in LIB_PACKAGES"
@@ -1185,7 +1218,7 @@ t_prebuilt_needs_build_check() {
     done
     # The forwarder's own list, judged alone (an aarch64 build also names the loader).
     yes_ bash "$b" --check-needed "$n" --list FORWARDER_NEEDS libcrypto.so.3 libgcc_s.so.1 libm.so.6 libc.so.6 ld-linux-aarch64.so.1
-    out=$(bash "$b" --check-needed "$n" --list FORWARDER_NEEDS libcrypto.so.3 libsodium.so.23 libgcc_s.so.1 libm.so.6 libc.so.6 2>&1)
+    out=$(bash "$b" --check-needed "$n" --list FORWARDER_NEEDS libcrypto.so.3 libz.so.1 libgcc_s.so.1 libm.so.6 libc.so.6 2>&1)
     has "a forwarder that links to more stops the build" "$out" "FORWARDER_NEEDS (relay-uws/deploy/lib/native.sh) names"
     for lib in $FORWARDER_NEEDS; do
         [[ " $PREBUILT_NEEDS " == *[[:space:]]"$lib"[[:space:]]* ]] && ok || bad "$lib in FORWARDER_NEEDS is not in PREBUILT_NEEDS"
@@ -1231,6 +1264,11 @@ t_prebuilt_libs_fallback() {
     hollow_feed_check() { FEED_VERSION=0.14.3 FEED_BUILD=0 FEED_COMMIT=$(printf '%040d' 3) FEED_SIZE=1; }
     OFFER="libsodium26 libssl3t64 zlib1g libstdc++6 libgcc-s1 libc6"
     yes_ prebuilt_available
+    eq "today's list warns of nothing on 26.10" "$PREBUILT_LIBS_DOUBT" 0
+    # A setup installed before 0.14.3 still names libsodium.so.23.
+    local official=$PREBUILT_NEEDS
+    PREBUILT_NEEDS="$official libsodium.so.23"
+    yes_ prebuilt_available
     eq "the list only warns" "$PREBUILT_LIBS_DOUBT" 1
     eq "and the feed is still checked" "$FEED_CHECKED" 1
     eq "naming the library" "$PREBUILT_LIBS_WHY" "they need libsodium.so.23, which Ubuntu 26.10 does not offer"
@@ -1241,6 +1279,7 @@ t_prebuilt_libs_fallback() {
     lacks "never built from source on the list's word" "$out" SOURCE-BUILD
     out=$( (UPDATE_RUNNING=1 programs_prebuilt) 2>&1)
     has "and so is an update to it" "$out" INSTALLED
+    PREBUILT_NEEDS=$official
     OFFER="libsodium26"
     # Found in the download.
     prebuilt_available() { FEED_CHECKED=1 FEED_VERSION=0.14.2 FEED_BUILD=0 FEED_SIZE=1; return 0; }
@@ -1313,8 +1352,14 @@ t_prebuilt_mixed() {
     STATE_DIR=$TMP/mix_state DRY_RUN=0 SETUP_FROM_RELEASE=0 CFG_FORWARDER=yes
     ensure_dir() { mkdir -p "$1"; }
 
-    # Before the download, from the package lists.
+    # Before the download, from the package lists. Since 0.14.3 the official
+    # pair runs on 26.10 whole.
     OFFER="libsodium26 libssl3t64 zlib1g libstdc++6 libgcc-s1 libc6"
+    yes_ prebuilt_libs_offered
+    eq "the official pair is not mixed on 26.10" "$PREBUILT_RELAY_ONLY" 0
+    # A relay that links libsodium.so.23, as the 0.14.2 one did.
+    local official=$PREBUILT_NEEDS
+    PREBUILT_NEEDS="$official libsodium.so.23"
     yes_ prebuilt_libs_offered
     eq "only the relay's are missing" "$PREBUILT_RELAY_ONLY" 1
     eq "named" "$PREBUILT_LIBS_WHY" "they need libsodium.so.23, which Ubuntu 26.10 does not offer"
@@ -1323,6 +1368,7 @@ t_prebuilt_mixed() {
     CFG_FORWARDER=yes OFFER="libsodium26 zlib1g libstdc++6 libgcc-s1 libc6"
     no_ prebuilt_libs_offered
     eq "a forwarder that cannot run either is no help" "$PREBUILT_RELAY_ONLY" 0
+    PREBUILT_NEEDS=$official
     OFFER="libsodium26 libssl3t64 zlib1g libstdc++6 libgcc-s1 libc6"
 
     # After the download.
