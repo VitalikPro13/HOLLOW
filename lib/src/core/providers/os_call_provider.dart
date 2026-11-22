@@ -21,9 +21,11 @@ import 'voice_channel_provider.dart';
 enum OsCallKind { dm, room, meeting }
 
 /// The one live session this device mirrors to the OS (CallKit, Telecom): a DM
-/// call we placed or accepted, a voice room, or a meeting. Never an incoming
-/// ring (decision Q2). The title is not here: it is fixed when the OS call
-/// begins (`osCallTitle`), so nothing that changes mid-call renames it.
+/// call from the moment it is answered (ours or theirs), a voice room, or a
+/// meeting. Never a ring either way (decision Q2): a call ringing out under
+/// CallKit plays the ringback as call audio, at the ear. The title is not
+/// here: it is fixed when the OS call begins (`osCallTitle`), so nothing that
+/// changes mid-call renames it.
 @immutable
 class OsSession {
   /// `dm:<callId>`, `vc:<server>/<channel>` or `meet:<confId>`; a media
@@ -85,9 +87,8 @@ OsSession? deriveOsSession({
   final callId = call.callId;
   if (callId != null) {
     final outgoing = call.direction == CallDirection.outgoing;
-    final placing = call.status == CallStatus.connecting ||
-        (call.status == CallStatus.ringing && outgoing);
-    if (placing || call.status == CallStatus.active) {
+    if (call.status == CallStatus.connecting ||
+        call.status == CallStatus.active) {
       return OsSession(
         key: 'dm:$callId',
         kind: OsCallKind.dm,

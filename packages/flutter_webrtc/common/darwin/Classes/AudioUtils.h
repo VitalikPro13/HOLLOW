@@ -24,6 +24,8 @@
 // the session, a fallback session holds it, or the safety net does. The fork
 // never calls setActive itself. Main thread only.
 extern NSString* const HollowCallAudioActivatedNotification;
+// CallKit took its session down (or dropped it in a reset).
+extern NSString* const HollowCallKitAudioDeactivatedNotification;
 
 @interface HollowCallAudio : NSObject
 // Before the engine runs Dart: manual audio for the process from now on.
@@ -40,6 +42,9 @@ extern NSString* const HollowCallAudioActivatedNotification;
 + (void)callKitReset;
 + (void)callKitDidActivate:(AVAudioSession*)session;
 + (void)callKitDidDeactivate:(AVAudioSession*)session;
+// CallKit's session is still up: true from didActivate to didDeactivate, so
+// for a moment after the last CallKit call ended.
++ (BOOL)callKitAudioActive;
 // A session running without CallKit (counted): activates through the owner.
 + (void)fallbackBegan;
 + (void)fallbackEnded;
@@ -48,6 +53,10 @@ extern NSString* const HollowCallAudioActivatedNotification;
 + (void)setSafetyNet:(BOOL)on;
 // Something holds the session active right now.
 + (BOOL)ownerActive;
+// No call holds the session: back to the category for the app's own sounds
+// (ambient: mixes with other audio, a headset first, else the loudspeaker).
+// A call leaves playAndRecord behind, whose default output is the earpiece.
++ (void)restoreSoundsCategoryIfIdle;
 @end
 
 #endif

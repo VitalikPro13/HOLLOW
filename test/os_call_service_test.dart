@@ -159,8 +159,10 @@ class _Profiles extends ProfileNotifier {
 }
 
 class _Speaker extends StartCallsOnSpeakerNotifier {
+  final bool on;
+  _Speaker([this.on = true]);
   @override
-  Future<bool> build() async => true;
+  Future<bool> build() async => on;
 }
 
 storage_api.UserProfile _profile(String id, String name) =>
@@ -199,6 +201,10 @@ CallState _outgoing(String id, {bool video = false}) => CallState(
     peerId: 'ada',
     callId: id,
     isVideoCall: video);
+
+/// A call we placed that the other side answered: media is coming up.
+CallState _placed(String id, {bool video = false}) =>
+    _outgoing(id, video: video).copyWith(status: CallStatus.connecting);
 
 CallState _incoming(String id) => CallState(
     status: CallStatus.ringing,
@@ -250,6 +256,7 @@ Future<_Rig> _rig({
   ConferenceState conference = const ConferenceState(),
   identity_api.ProtectionStatus protection = _noPassword,
   Set<String> ageHidden = const {},
+  bool startOnSpeaker = true,
 }) async {
   final native = _Native();
   final callN = _Call(call);
@@ -265,7 +272,7 @@ Future<_Rig> _rig({
     appLockedProvider.overrideWith(() => lock),
     profileProvider.overrideWith(() => profiles),
     identityProtectionProvider.overrideWith((ref) async => protection),
-    startCallsOnSpeakerProvider.overrideWith(_Speaker.new),
+    startCallsOnSpeakerProvider.overrideWith(() => _Speaker(startOnSpeaker)),
     keptServersProvider.overrideWithValue(
         {'s1': const ServerInfo(serverId: 's1', name: 'Den')}),
     serverAgeHiddenProvider
@@ -301,12 +308,14 @@ void main() {
       expect(derive(call: _incoming('c1')), isNull);
     });
 
-    test('a placed call is a session from its first ring, live once active',
-        () {
-      final ringing = derive(call: _outgoing('c1'))!;
-      expect(ringing.key, 'dm:c1');
-      expect(ringing.live, isFalse);
-      expect(ringing.outgoing, isTrue);
+    // Ringing out under CallKit plays the ringback as call audio, at the ear,
+    // so a call we place reaches the OS once answered.
+    test('a placed call is no session while it rings, one once answered', () {
+      expect(derive(call: _outgoing('c1')), isNull);
+      final answered = derive(call: _placed('c1'))!;
+      expect(answered.key, 'dm:c1');
+      expect(answered.live, isFalse);
+      expect(answered.outgoing, isTrue);
       final active = derive(
           call: _outgoing('c1').copyWith(status: CallStatus.active))!;
       expect(active.key, 'dm:c1');
@@ -345,10 +354,10 @@ void main() {
       expect(
           derive(voice: _room().copyWith(peerCameraOn: {'p': true}))!.video,
           isTrue);
-      expect(derive(call: _outgoing('c1', video: true))!.video, isTrue);
+      expect(derive(call: _placed('c1', video: true))!.video, isTrue);
       expect(
           derive(
-                  call: _outgoing('c1')
+                  call: _placed('c1')
                       .copyWith(status: CallStatus.active, remoteScreenSharing: true))!
               .video,
           isTrue);
@@ -357,7 +366,7 @@ void main() {
     test('a desktop builds nothing', () async {
       debugOsCallPlatform = false;
       final c = ProviderContainer(overrides: [
-        callProvider.overrideWith(() => _Call(_outgoing('c1'))),
+        callProvider.overrideWith(() => _Call(_placed('c1'))),
         voiceChannelProvider.overrideWith(() => _Voice(_room())),
         conferenceProvider.overrideWith(() => _Conference(const ConferenceState())),
       ]);
@@ -386,12 +395,12 @@ void main() {
     test('the system\'s id for a call is a fresh random uuid, never an id',
         () async {
       final r = await _rig();
-      r.call.set(_outgoing('c1'));
+      r.call.set(_placed('c1'));
       await r.settle();
       final first = r.native.lastOf('begin')['uuid'] as String;
       r.call.set(const CallState());
       await r.settle();
-      r.call.set(_outgoing('c1'));
+      r.call.set(_placed('c1'));
       await r.settle();
       final second = r.native.lastOf('begin')['uuid'] as String;
       expect(first, matches(_uuidShape));
@@ -399,9 +408,12 @@ void main() {
       expect(second, isNot(first), reason: 'the same call id, a new uuid');
     });
 
-    test('a placed call begins ringing and connects when answered', () async {
+    test('a placed call begins when answered, not while it rings', () async {
       final r = await _rig();
       r.call.set(_outgoing('c1'));
+      await r.settle();
+      expect(r.native.methods, isEmpty);
+      r.call.set(_placed('c1'));
       await r.settle();
       expect(r.native.methods, ['begin']);
       expect(r.native.lastOf('begin')['title'], 'Ada');
@@ -505,6 +517,32 @@ void main() {
     });
   });
 
+  group('start route', () {
+    test('a call we place starts where the setting says', () async {
+      final r = await _rig(startOnSpeaker: false);
+      r.call.set(_placed('c1'));
+      await r.settle();
+      expect(r.native.lastOf('begin')['loud'], isFalse);
+    });
+
+    test('an accepted call starts where the setting says', () async {
+      final r = await _rig(startOnSpeaker: false, call: _incoming('c1'));
+      r.call.set(_incoming('c1').copyWith(status: CallStatus.connecting));
+      await r.settle();
+      expect(r.native.lastOf('begin')['loud'], isFalse);
+    });
+
+    test('a reset of an answered call keeps the setting', () async {
+      final r = await _rig(
+          startOnSpeaker: false,
+          call: _outgoing('c1').copyWith(status: CallStatus.active));
+      expect(r.native.lastOf('begin')['loud'], isFalse);
+      await r.native.send('osReset');
+      await r.settle();
+      expect(r.native.lastOf('begin')['loud'], isFalse);
+    });
+  });
+
   group('mute', () {
     test('the app mute reaches the OS', () async {
       final r = await _rig(voice: _room());
@@ -538,10 +576,10 @@ void main() {
     });
 
     test('a refused mute puts the OS back to the truth', () async {
-      final r = await _rig(call: _outgoing('c1'));
+      final r = await _rig(call: _placed('c1'));
       final uuid = r.service.liveUuid;
       r.native.clear();
-      // Still ringing out: the app refuses a mute until connected.
+      // Answered, media not up yet: the app refuses a mute until connected.
       await r.native.send('osMute', {'uuid': uuid, 'muted': true});
       await r.settle();
       expect(r.call.mutes, 1);
@@ -683,7 +721,7 @@ void main() {
       r.voice.set(const VoiceChannelState());
       await r.settle();
       expect(r.native.lastOf('end')['uuid'], uuid);
-      r.call.set(_outgoing('c2'));
+      r.call.set(_placed('c2'));
       await r.settle();
       expect(r.native.of('begin').length, 2);
       expect(r.native.lastOf('begin')['live'], [r.service.liveUuid]);
@@ -729,7 +767,7 @@ void main() {
       final r = await _rig(voice: _room());
       final first = r.service.liveUuid;
       r.voice.set(const VoiceChannelState());
-      r.call.set(_outgoing('c9'));
+      r.call.set(_placed('c9'));
       await r.settle();
       final live = r.native.lastOf('begin')['live'] as List;
       expect(live, isNot(contains(first)));
@@ -754,7 +792,7 @@ void main() {
   group('title', () {
     test('a launch password hides the name from the start', () async {
       final r = await _rig(protection: _withPassword);
-      r.call.set(_outgoing('c1'));
+      r.call.set(_placed('c1'));
       await r.settle();
       expect(r.native.lastOf('begin')['title'], kHiddenNotificationTitle);
     });
@@ -763,7 +801,7 @@ void main() {
       final native = _Native();
       final c = ProviderContainer(overrides: [
         osCallChannelProvider.overrideWithValue(native),
-        callProvider.overrideWith(() => _Call(_outgoing('c1'))),
+        callProvider.overrideWith(() => _Call(_placed('c1'))),
         voiceChannelProvider.overrideWith(() => _Voice(const VoiceChannelState())),
         conferenceProvider.overrideWith(() => _Conference(const ConferenceState())),
         profileProvider.overrideWith(_Profiles.new),
@@ -793,7 +831,7 @@ void main() {
     });
 
     test('a profile change mid-call renames nothing', () async {
-      final r = await _rig(call: _outgoing('c1'));
+      final r = await _rig(call: _placed('c1'));
       r.native.clear();
       r.profiles.rename('ada', 'Someone else');
       await r.settle();
@@ -802,7 +840,7 @@ void main() {
 
     test('a name not known yet is never the id', () async {
       final r = await _rig();
-      r.call.set(_outgoing('c1').copyWith(peerId: 'stranger-id'));
+      r.call.set(_placed('c1').copyWith(peerId: 'stranger-id'));
       await r.settle();
       expect(r.native.lastOf('begin')['title'], kHiddenNotificationTitle);
     });

@@ -180,7 +180,7 @@
   {
    "peer": "all",
    "op": "log",
-   "message": "#154 OS call: k places a DM call; the OS hears it from the first ring"
+   "message": "#154 OS call: k places a DM call; the OS hears nothing until it is answered"
   },
   {
    "peer": "k",
@@ -191,9 +191,16 @@
   {
    "peer": "k",
    "op": "wait_for",
-   "provider": "osCall",
-   "equals": "dm placing",
+   "provider": "callStatus",
+   "equals": "ringing",
    "timeout_ms": 15000
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "provider": "osCall",
+   "equals": "none",
+   "timeout_ms": 2000
   },
   {
    "peer": "k",
@@ -205,6 +212,20 @@
    "op": "wait_for",
    "target": "semantics:Accept",
    "timeout_ms": 45000
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "provider": "callStatus",
+   "equals": "ringing",
+   "timeout_ms": 2000
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "provider": "osCall",
+   "equals": "none",
+   "timeout_ms": 2000
   },
   {
    "peer": "j",

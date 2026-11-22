@@ -91,12 +91,15 @@
 	<string>Hollow uses Face ID to unlock the app when App Lock is enabled.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Hollow uses your local network to reach a relay you run at home and to connect calls with people on the same network.</string>
+	<key>SRResearchDataGeneration</key>
+	<false/>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>
 		<string>remote-notification</string>
+		<string>voip</string>
 	</array>
 	<key>UILaunchStoryboardName</key>
 	<string>LaunchScreen</string>

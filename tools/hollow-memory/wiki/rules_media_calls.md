@@ -63,10 +63,17 @@ the signal whitelist's four touches, the stream overlay consent detail, share ba
 
 ## OS call state (#154, 0.14.3)
 
-- The OS mirrors the ONE session `osSessionProvider` derives (a placed or accepted DM call,
-  else the room or meeting we sit in; never a ring) through `OsCallService`'s single queue;
-  OS hang-up and mute run the app's own paths (`endCall`, `leaveVoiceForDmCall`: a meeting
-  host steps out), and the OS is told the mute truth after every OS mute. Wiki `os_calls`.
+- Only a DM call becomes a system call, and only once ANSWERED (placed or accepted; never a
+  ring, ours or theirs): a call ringing out under CallKit plays the ringback as call audio at
+  the ear. Rooms and meetings still `begin` (it gives them iOS audio) but native routes every
+  non-DM kind to the fallback, never CallKit (Vitalik, Nov 22). `OsCallService` keeps ONE queue;
+  OS hang-up and mute run the app's own paths (`endCall`), and the OS is told the mute truth
+  after every OS mute. Wiki `os_calls`.
+- When no call holds the iOS session, `HollowCallAudio restoreSoundsCategoryIfIdle` puts it
+  back to `ambient`, else every app sound plays from the earpiece (a call leaves
+  playAndRecord). A new place where call audio ends calls it, and so does any fork method that
+  can write the call category after a call ends (today both speaker methods: Dart's route reset
+  lands after a system hang-up's restore); never per sound (a voice note holds the session unseen).
 - iOS audio belongs to CallKit or the fork's `HollowCallAudio` (manual audio for the whole
   process from `AppDelegate`, set before the plugins register): the fork NEVER calls
   `setActive`, every session calls `begin` (else only the 3 s native safety net gives it

@@ -186,6 +186,10 @@
       NSLog(@"setSpeakerphoneOn: setActive failed due to: %@", error);
   }
   [session unlockForConfiguration];
+  // The template keeps the route for the next call. With no call holding the
+  // session (Dart resets the route after the system UI hung up), the live one
+  // goes back to the sounds category instead of keeping playAndRecord.
+  [HollowCallAudio restoreSoundsCategoryIfIdle];
 }
 
 + (void)setSpeakerphoneOnButPreferBluetooth {
@@ -213,6 +217,7 @@
       NSLog(@"setSpeakerphoneOnButPreferBluetooth: Audio session override failed: %@", error);
   }
   [session unlockForConfiguration];
+  [HollowCallAudio restoreSoundsCategoryIfIdle];
 }
 
 + (void)deactiveRtcAudioSession {
@@ -343,6 +348,7 @@
 @end
 
 NSString* const HollowCallAudioActivatedNotification = @"HollowCallAudioActivated";
+NSString* const HollowCallKitAudioDeactivatedNotification = @"HollowCallKitAudioDeactivated";
 
 static BOOL gHollowCallKitMode = NO;
 static NSInteger gHollowCallKitCalls = 0;
@@ -405,6 +411,7 @@ static BOOL gHollowOwnActive = NO;
     gHollowCallKitCalls--;
   }
   [self applyMixRuleToTemplate];
+  [self restoreSoundsCategoryIfIdle];
 }
 
 + (NSInteger)callKitCalls {
@@ -417,6 +424,12 @@ static BOOL gHollowOwnActive = NO;
   [self applyMixRuleToTemplate];
   [self applyAudioEnabled];
   [self reactivateOwnHolders];
+  [[NSNotificationCenter defaultCenter] postNotificationName:HollowCallKitAudioDeactivatedNotification
+                                                      object:nil];
+}
+
++ (BOOL)callKitAudioActive {
+  return gHollowCallKitAudioActive;
 }
 
 + (void)callKitDidActivate:(AVAudioSession*)session {
@@ -436,6 +449,9 @@ static BOOL gHollowOwnActive = NO;
   // CallKit took the session down with its call; a session still running
   // without CallKit gets it back.
   [self reactivateOwnHolders];
+  [self restoreSoundsCategoryIfIdle];
+  [[NSNotificationCenter defaultCenter] postNotificationName:HollowCallKitAudioDeactivatedNotification
+                                                      object:nil];
 }
 
 + (void)fallbackBegan {
@@ -450,6 +466,8 @@ static BOOL gHollowOwnActive = NO;
   }
   [self applyAudioEnabled];
   [self deactivateOwnIfIdle];
+  // Also when activateOwn failed: deactivateOwnIfIdle then returns early.
+  [self restoreSoundsCategoryIfIdle];
 }
 
 + (NSInteger)fallbackCount {
@@ -467,6 +485,7 @@ static BOOL gHollowOwnActive = NO;
   [self applyAudioEnabled];
   if (!on) {
     [self deactivateOwnIfIdle];
+    [self restoreSoundsCategoryIfIdle];
   }
 }
 
@@ -509,6 +528,27 @@ static BOOL gHollowOwnActive = NO;
                                                       object:nil];
 }
 
++ (void)restoreSoundsCategoryIfIdle {
+  // Outside CallKit mode WebRTC runs the session itself and none of these
+  // counts see its calls. A held CallKit call is still counted: its resume
+  // needs the call category.
+  if (!gHollowCallKitMode || gHollowCallKitCalls > 0 || gHollowCallKitAudioActive ||
+      gHollowOwnActive || gHollowFallback > 0 || gHollowNet) {
+    return;
+  }
+  RTCAudioSession* rtc = [RTCAudioSession sharedInstance];
+  if ([rtc.category isEqualToString:AVAudioSessionCategoryAmbient]) {
+    return;
+  }
+  NSError* error = nil;
+  [rtc lockForConfiguration];
+  if (![rtc setCategory:AVAudioSessionCategoryAmbient withOptions:0 error:&error]) {
+    NSLog(@"[HOLLOW-OSCALL] restoring the sounds category failed: %@", error);
+  }
+  [rtc setMode:AVAudioSessionModeDefault error:&error];
+  [rtc unlockForConfiguration];
+}
+
 + (void)deactivateOwnIfIdle {
   if (!gHollowOwnActive || gHollowFallback > 0 || gHollowNet) {
     return;
@@ -525,6 +565,7 @@ static BOOL gHollowOwnActive = NO;
     NSLog(@"[HOLLOW-OSCALL] deactivating the call session failed: %@", error);
   }
   [[RTCAudioSession sharedInstance] audioSessionDidDeactivate:av];
+  [self restoreSoundsCategoryIfIdle];
 }
 
 + (void)reactivateOwnHolders {

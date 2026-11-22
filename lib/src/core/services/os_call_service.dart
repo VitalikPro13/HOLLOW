@@ -240,7 +240,9 @@ class OsCallService {
     });
     if (answer is! Map || answer['ok'] != true) {
       mirror.unmirrored = true;
-      log('[HOLLOW-OSCALL] ${mirror.kind.name} runs without the OS call');
+      log(mirror.kind == OsCallKind.dm
+          ? '[HOLLOW-OSCALL] dm runs without the OS call'
+          : '[HOLLOW-OSCALL] ${mirror.kind.name} runs in the app');
     }
   }
 
@@ -317,8 +319,12 @@ class OsCallService {
         _osHold(mirror, args['held'] == true);
       case 'osFailed':
         mirror.unmirrored = true;
-        log('[HOLLOW-OSCALL] OS call failed (${args['why']}); '
-            'the ${mirror.kind.name} goes on without it');
+        // A room or meeting always runs in the app (begin logged it); only a
+        // DM call that the OS refused is news.
+        if (mirror.kind == OsCallKind.dm) {
+          log('[HOLLOW-OSCALL] OS call failed (${args['why']}); '
+              'the dm goes on without it');
+        }
     }
     return null;
   }

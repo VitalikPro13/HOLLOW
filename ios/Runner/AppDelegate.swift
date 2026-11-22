@@ -28,8 +28,9 @@ import flutter_webrtc
 /// started on an INACTIVE session would activate it ahead of CallKit (and cut
 /// another app's music): a call cue, and ANY sound while a CallKit call exists
 /// without an active session (starting or held), waits up to 1 s for the
-/// call's activation and is dropped after that; the ringback waits for it the
-/// same way and is dropped if the call ends first.
+/// call's activation and is dropped after that. The ringback has no CallKit
+/// call (ringing out is no OS call) and plays at once, except just after a
+/// call ended, while CallKit still holds that call's session.
 final class HollowSfxPlayer {
   static let shared = HollowSfxPlayer()
 
@@ -52,8 +53,11 @@ final class HollowSfxPlayer {
 
   /// How long a call cue waits for the call's audio session (N4).
   private static let cueWait: TimeInterval = 1
-  /// The ringback outlasts a CallKit start that falls back after 3 s.
-  private static let ringbackWait: TimeInterval = 6
+  /// A loop under a CallKit call outlasts a start that falls back after 3 s.
+  private static let loopWait: TimeInterval = 6
+  /// CallKit takes an ended call's session down within about a second; past
+  /// this the ringback plays anyway.
+  private static let endedCallWait: TimeInterval = 1.5
   private var cancelPendingLoop: (() -> Void)?
 
   private func activateIfAsked(_ activate: Bool) {
@@ -71,6 +75,15 @@ final class HollowSfxPlayer {
       run()
       return {}
     }
+    return whenPosted(.HollowCallAudioActivated, within: seconds, runLate: false, run)
+  }
+
+  /// Runs [run] once [name] is posted; after [seconds] it runs only if
+  /// [runLate]. Returns a cancel.
+  private func whenPosted(
+    _ name: Notification.Name, within seconds: TimeInterval, runLate: Bool,
+    _ run: @escaping () -> Void
+  ) -> () -> Void {
     var token: NSObjectProtocol?
     var done = false
     let finish: (Bool) -> Void = { fire in
@@ -80,10 +93,9 @@ final class HollowSfxPlayer {
       if fire { run() }
     }
     token = NotificationCenter.default.addObserver(
-      forName: .HollowCallAudioActivated,
-      object: nil, queue: .main
+      forName: name, object: nil, queue: .main
     ) { _ in finish(true) }
-    DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { finish(false) }
+    DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { finish(runLate) }
     return { finish(false) }
   }
 
@@ -126,12 +138,25 @@ final class HollowSfxPlayer {
 
   func startLoop(asset: String, volume: Float, activateSession: Bool) {
     stopLoop()
-    if HollowCallAudio.callKitMode() {
-      // The ringback belongs to a call being placed: it plays once the call's
-      // session is up (CallKit or the fallback), never activating it itself.
-      cancelPendingLoop = whenCallAudioActive(within: Self.ringbackWait) { [weak self] in
+    if HollowCallAudio.callKitCalls() > 0 {
+      // A loop under a CallKit call plays once the call's session is up, never
+      // activating it itself. The ringback has none: a call ringing out is not
+      // an OS call, so it plays at once, like any app sound.
+      cancelPendingLoop = whenCallAudioActive(within: Self.loopWait) { [weak self] in
         self?.cancelPendingLoop = nil
         self?.startLoopNow(asset: asset, volume: volume, activateSession: false)
+      }
+      return
+    }
+    if HollowCallAudio.callKitAudioActive() {
+      // A redial right after a hang-up: a loop started now plays in the ended
+      // call's playAndRecord (the earpiece) and dies when CallKit deactivates.
+      cancelPendingLoop = whenPosted(
+        .HollowCallKitAudioDeactivated, within: Self.endedCallWait, runLate: true
+      ) { [weak self] in
+        self?.cancelPendingLoop = nil
+        HollowCallAudio.restoreSoundsCategoryIfIdle()
+        self?.startLoopNow(asset: asset, volume: volume, activateSession: activateSession)
       }
       return
     }
@@ -327,6 +352,8 @@ struct TaskHolds {
     // process, set before the WebRTC plugin registers and Dart runs.
     HollowCallAudio.enableCallKitMode()
     GeneratedPluginRegistrant.register(with: self)
+    // App sounds play from the loudspeaker (or a headset) until a call starts.
+    HollowCallAudio.restoreSoundsCategoryIfIdle()
     excludeDataFromBackup()
     observeSwitcher()
 

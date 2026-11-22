@@ -16,6 +16,10 @@ import flutter_webrtc
 /// never activates within 3 s runs on a FALLBACK the owner activates itself.
 final class OsCallController: NSObject, CXProviderDelegate {
   static let channelName = "hollow/os_call"
+  /// Every call's handle: iOS treats the handle as the other side's contact and
+  /// may store it (Journaling Suggestions), so a person's name rides only
+  /// `localizedCallerName`, which is display.
+  private static let anonymousHandle = CXHandle(type: .generic, value: "Hollow")
 
   private enum Phase { case starting, live, fallback }
 
@@ -139,9 +143,14 @@ final class OsCallController: NSObject, CXProviderDelegate {
     let title = args["title"] as? String ?? "Hollow"
     let video = (args["video"] as? Bool) ?? false
     let loud = (args["loud"] as? Bool) ?? true
-    if forceFallback {
+    // Only a DM call becomes a system call: iOS has no call screen for a room
+    // or a meeting. They still begin here, because the fallback is what gives
+    // them audio.
+    let isDm = (args["kind"] as? String) == "dm"
+    if forceFallback || !isDm {
       calls[uuid] = Call(phase: .starting)
-      fallBack(uuid, why: "unavailable", hadCallKitCall: false)
+      fallBack(uuid, why: isDm ? "unavailable" : "rooms and meetings stay in the app",
+               hadCallKitCall: false)
       return false
     }
 
@@ -149,7 +158,7 @@ final class OsCallController: NSObject, CXProviderDelegate {
     HollowCallAudio.callKitCallBegan()
     // Configure, never activate: CallKit activates at call priority.
     AudioUtils.prepare(forCall: loud)
-    let start = CXStartCallAction(call: uuid, handle: CXHandle(type: .generic, value: title))
+    let start = CXStartCallAction(call: uuid, handle: Self.anonymousHandle)
     start.isVideo = video
     callController.request(CXTransaction(action: start)) { [weak self] error in
       guard let error else { return }
@@ -168,7 +177,7 @@ final class OsCallController: NSObject, CXProviderDelegate {
 
   private func callUpdate(title: String, video: Bool) -> CXCallUpdate {
     let update = CXCallUpdate()
-    update.remoteHandle = CXHandle(type: .generic, value: title)
+    update.remoteHandle = Self.anonymousHandle
     update.localizedCallerName = title
     update.hasVideo = video
     update.supportsHolding = true
