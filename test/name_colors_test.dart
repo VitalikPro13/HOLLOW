@@ -5,10 +5,16 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hollow/src/core/color_utils.dart';
 import 'package:hollow/src/theme/contrast.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
+import 'package:hollow/src/ui/call/call_theme.dart';
 import 'package:hollow/src/ui/settings/name_color_editor.dart';
 
 List<Color> _surfaces(HollowTheme t) =>
     [t.background, t.surface, t.elevated, t.overlay, t.hover];
+
+/// Where a name sits, which is what a CHOSEN colour is judged on (#140,
+/// Vitalik Nov 22): chrome, canvas, raised cards; not menus or their hover.
+List<Color> _nameSurfaces(HollowTheme t) =>
+    [t.background, t.surface, t.elevated];
 
 double _hueGap(double a, double b) {
   final d = (a - b).abs() % 360;
@@ -141,33 +147,39 @@ void main() {
       expect(chosenNamePaint(t, ''), isNull);
     });
 
-    // #140, Rong-Yao: a picked #C92222 showed as #F49D9D (pink) on dark.
-    test('a picked red stays red on dark and exact on light', () {
+    // #140, Rong-Yao: a picked #C92222 showed as #F49D9D (pink) on dark; he
+    // wants his true colour (Vitalik, Nov 22).
+    test('the reporter\'s red is drawn exactly as picked on both themes', () {
       const red = Color(0xffc92222); // design-ignore: the reporter's pick
       final field = nameColorField([red]);
-      final dark = HollowTheme.dark();
-      final shown = namePaintFor('x', dark, field: field).color;
-      final hsl = HSLColor.fromColor(shown);
-      final picked = HSLColor.fromColor(red);
-      expect(_hueGap(hsl.hue, picked.hue), lessThan(1));
-      expect((hsl.saturation - picked.saturation).abs(), lessThan(0.02));
-      // Lifted only as far as the floor needs, nowhere near the pink.
-      final worst = _surfaces(dark)
-          .map((bg) => Contrast.ratio(shown, bg))
-          .reduce((a, b) => a < b ? a : b);
-      expect(worst, inInclusiveRange(kChosenNameContrast, kChosenNameContrast + 0.1));
-      expect(hsl.lightness, lessThan(0.67));
-      expect(shown, isNot(const Color(0xfff49d9d))); // design-ignore: the reported pink
-      // The swatch they picked was the preset red of 0.14.1, which became
-      // exactly #F49D9D on dark at the old floor and #C71616 on light.
+      for (final t in [HollowTheme.dark(), HollowTheme.light()]) {
+        expect(namePaintFor('x', t, field: field).color, red);
+        expect(namePaintFor('x', t, field: field, self: true).color, red);
+        expect(callRingColor(t, isSelf: true, master: 'x', field: field), red,
+            reason: 'his speaking ring and share border');
+        expect(callRingColor(t, isSelf: false, master: 'x', field: field), red);
+        expect(chosenNameShifts(t, field), [0]);
+      }
+      // The preset red of 0.14.1 he picked first turned exactly that pink.
       final preset = nameColorField([const Color(0xffe83030)]); // design-ignore: the 0.14.1 preset red
-      final presetDark = namePaintFor('x', dark, field: preset).color;
+      final presetDark = namePaintFor('x', HollowTheme.dark(), field: preset).color;
       expect(presetDark, isNot(const Color(0xfff49d9d))); // design-ignore: the reported pink
       expect(HSLColor.fromColor(presetDark).lightness, lessThan(0.7));
-      expect(_hueGap(HSLColor.fromColor(presetDark).hue, 0), lessThan(1));
-      final light = HollowTheme.light();
-      expect(namePaintFor('x', light, field: field).color, red);
-      expect(namePaintFor('x', light, field: field, self: true).color, red);
+    });
+
+    test('a chosen colour is judged on where names sit, not on menus', () {
+      for (final t in [HollowTheme.dark(), HollowTheme.light()]) {
+        expect(chosenNameSurfaces(t), unorderedEquals(_nameSurfaces(t)));
+      }
+      // #C92222 reads at 3:1 on the dark canvas, chrome and cards, not on the
+      // lighter menu and hover surfaces; it stays exact anyway.
+      const red = Color(0xffc92222); // design-ignore: the reporter's pick
+      final dark = HollowTheme.dark();
+      expect(Contrast.ratio(red, dark.hover), lessThan(kChosenNameContrast));
+      expect(
+          _nameSurfaces(dark)
+              .every((bg) => Contrast.ratio(red, bg) >= kChosenNameContrast),
+          isTrue);
     });
 
     // A selected row lays the accent-muted fill under the name. Lifting every
@@ -181,7 +193,16 @@ void main() {
         final worst = selectedNameSurfaces(t)
             .map((bg) => Contrast.ratio(selected.color, bg))
             .reduce((a, b) => a < b ? a : b);
-        expect(worst, inInclusiveRange(kChosenNameContrast, kChosenNameContrast + 0.1));
+        final plainWorst = selectedNameSurfaces(t)
+            .map((bg) => Contrast.ratio(plain.color, bg))
+            .reduce((a, b) => a < b ? a : b);
+        if (plainWorst >= kChosenNameContrast) {
+          expect(selected.color, plain.color,
+              reason: 'a red that reads on the fill is not moved');
+        } else {
+          expect(worst,
+              inInclusiveRange(kChosenNameContrast, kChosenNameContrast + 0.1));
+        }
         final hsl = HSLColor.fromColor(selected.color);
         expect(_hueGap(hsl.hue, 0), lessThan(1));
         expect((hsl.saturation - HSLColor.fromColor(red).saturation).abs(),
@@ -269,7 +290,7 @@ void main() {
                 field: nameColorField(picks.sublist(i, i + 3)));
             expect(paint.stops, hasLength(3));
             for (final stop in paint.stops) {
-              for (final bg in _surfaces(t)) {
+              for (final bg in _nameSurfaces(t)) {
                 expect(Contrast.ratio(stop, bg),
                     greaterThanOrEqualTo(min - 0.01),
                     reason: '$stop on $bg');
@@ -422,5 +443,107 @@ void main() {
           isFalse, reason: 'yours is cached apart');
     });
   });
-}
 
+  // #140, Rong-Yao on 0.14.2: the swatch, the name on light, the name on dark,
+  // the speaking ring and the share border were four different reds. A pick
+  // that reads is drawn as picked; only one below the floor moves.
+  group('a chosen colour shows as picked', () {
+    final themes = [
+      ('dark', HollowTheme.dark()),
+      ('light', HollowTheme.light()),
+    ];
+
+    bool clearsFloor(Color c, HollowTheme t) => _nameSurfaces(t)
+        .every((bg) => Contrast.ratio(c, bg) >= kChosenNameContrast);
+
+    test('the floor is 3:1, a product choice for a picked colour', () {
+      expect(kChosenNameContrast, 3.0);
+    });
+
+    for (final (label, t) in themes) {
+      test('the preset red is the same red everywhere ($label)', () {
+        final red = nameColorFromHue(0);
+        final field = nameColorField([red]);
+        expect(namePaintFor('x', t, field: field).color, red);
+        expect(namePaintFor('x', t, field: field, self: true).color, red);
+        expect(chosenNamePaint(t, field)!.color, red);
+        expect(callRingColor(t, isSelf: true, master: 'x', field: field), red,
+            reason: 'your speaking ring and share border');
+        expect(callRingColor(t, isSelf: false, master: 'x', field: field), red);
+        expect(
+            callRingColor(callMediaTheme(t),
+                isSelf: false, master: 'x', field: field),
+            red,
+            reason: 'a ring over video measures on the dark ladder');
+      });
+
+      test('every editor hue that reads is drawn untouched ($label)', () {
+        var untouched = 0;
+        for (var h = 0.0; h < 360; h += 5) {
+          final pick = nameColorFromHue(h);
+          final shown = namePaintFor('x', t,
+                  field: nameColorField([pick]), self: true)
+              .color;
+          if (clearsFloor(pick, t)) {
+            expect(shown, pick, reason: 'hue $h');
+            untouched++;
+          } else {
+            // Moved only as far as the worst surface needs.
+            final worst = _nameSurfaces(t)
+                .map((bg) => Contrast.ratio(shown, bg))
+                .reduce((a, b) => a < b ? a : b);
+            expect(worst,
+                inInclusiveRange(kChosenNameContrast, kChosenNameContrast + 0.1),
+                reason: 'hue $h');
+            expect(_hueGap(HSLColor.fromColor(shown).hue, h), lessThan(2),
+                reason: 'hue $h');
+          }
+        }
+        expect(untouched, greaterThan(24),
+            reason: 'at least a third of the wheel needs no help on $label');
+      });
+
+      test('a gradient draws each stop as that colour alone does ($label)', () {
+        final picks = [nameColorFromHue(0), nameColorFromHue(250),
+          nameColorFromHue(40)];
+        final gradient =
+            namePaintFor('x', t, field: nameColorField(picks), self: true);
+        for (var i = 0; i < picks.length; i++) {
+          expect(gradient.stops[i],
+              namePaintFor('x', t, field: nameColorField([picks[i]]), self: true)
+                  .color,
+              reason: 'stop $i');
+        }
+      });
+    }
+
+    test('a pick below the floor is lifted on dark only as far as 3:1', () {
+      const blue = Color(0xff0000ff); // design-ignore: worst-case pick
+      final dark = HollowTheme.dark();
+      final shown =
+          namePaintFor('x', dark, field: nameColorField([blue]), self: true)
+              .color;
+      expect(shown, isNot(blue));
+      final worst = _nameSurfaces(dark)
+          .map((bg) => Contrast.ratio(shown, bg))
+          .reduce((a, b) => a < b ? a : b);
+      expect(worst, inInclusiveRange(3.0, 3.1));
+      // Indigo and near-black vanish on dark: still lifted, hue kept.
+      for (final pick in const [
+        Color(0xff4b0082), // design-ignore: indigo pick
+        Color(0xff141414), // design-ignore: near-black pick
+      ]) {
+        final drawn =
+            namePaintFor('x', dark, field: nameColorField([pick]), self: true)
+                .color;
+        expect(drawn, isNot(pick));
+        expect(
+            _nameSurfaces(dark)
+                .map((bg) => Contrast.ratio(drawn, bg))
+                .reduce((a, b) => a < b ? a : b),
+            inInclusiveRange(3.0, 3.1));
+        expect(chosenNameShifts(dark, nameColorField([pick])), [1]);
+      }
+    });
+  });
+}

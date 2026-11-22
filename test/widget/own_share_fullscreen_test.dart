@@ -5,6 +5,7 @@
 library;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show LogicalKeyboardKey;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
@@ -19,6 +20,7 @@ import 'package:hollow/src/ui/call/call_stage_bar.dart';
 import 'package:hollow/src/ui/call/call_stage_data.dart';
 import 'package:hollow/src/ui/call/call_stage_sources.dart';
 import 'package:hollow/src/ui/call/share_tile.dart';
+import 'package:hollow/src/ui/components/overlay_hosts.dart';
 import 'package:hollow/src/ui/mobile/mobile_call_chrome.dart';
 
 import '../helpers/test_app.dart';
@@ -231,6 +233,26 @@ void main() {
   }
 
   group('full screen', () {
+    // #159 review: Escape on a kept preview must not also leave full screen.
+    testWidgets('escape stays with a host that holds the keyboard',
+        (tester) async {
+      await _pumpStage(tester, _hosts.first, _mira);
+      await tester.tap(_fullscreenButton());
+      await _settle(tester);
+      expect(find.byType(CallFullscreenRoute), findsOneWidget);
+      final token = Object();
+      OverlayHosts.register(token, () {}, holdsKeys: true);
+      addTearDown(() => OverlayHosts.unregister(token));
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await _settle(tester);
+      expect(find.byType(CallFullscreenRoute), findsOneWidget);
+
+      OverlayHosts.unregister(token);
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await _settle(tester);
+      expect(find.byType(CallFullscreenRoute), findsNothing);
+    });
+
     testWidgets("another person's strip share still takes focus",
         (tester) async {
       const kai = kFriendPeerId2;

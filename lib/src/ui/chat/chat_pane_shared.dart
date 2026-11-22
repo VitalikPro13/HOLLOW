@@ -1,3 +1,4 @@
+import 'dart:math' as math;
 import 'dart:async';
 import 'dart:io';
 
@@ -666,9 +667,22 @@ Widget reversedChatList({
         positions: itemPositionsListener,
         onJumpToNewest: onJumpToNewest,
         unreadRevIndex: unreadRevIndex,
+        rowKeyAt: _rowKeysByRevIndex(indexByMessageId, itemCount),
+        scrollOffsetController: scrollOffsetController,
       ),
     ),
   );
+}
+
+/// The message id of each reversed row, for [ChatScrollRail.rowKeyAt]. The
+/// first id per index is the row's own; album items alias their anchor after it.
+Object Function(int revIndex) _rowKeysByRevIndex(
+    Map<String, int> indexByMessageId, int itemCount) {
+  final byIndex = <int, String>{};
+  for (final e in indexByMessageId.entries) {
+    byIndex.putIfAbsent(e.value, () => e.key);
+  }
+  return (revIndex) => byIndex[itemCount - 1 - revIndex] ?? revIndex;
 }
 
 /// Puts the scrollbar [rail] in a column of its own to the right of [list].
@@ -744,11 +758,14 @@ bool get _isTouchForm => Platform.isAndroid || Platform.isIOS;
 /// The chat feed's scrollbar and jump controls (issue #54).
 ///
 /// [ScrollablePositionedList] has no pixel offset a [Scrollbar] could map onto,
-/// so this is an INDEX scrollbar: the thumb spans the visible index range out
-/// of [itemCount] and a drag jumps to the index under the pointer. With rows of
-/// different heights the thumb is an estimate, which is the trade for a list
-/// you can prepend to without the view moving. Indexes are the REVERSED builder
-/// indexes (feedback_reverse_chat_lists), so a HIGHER index is further UP.
+/// so the rail keeps its own: the height of every row it has seen laid out,
+/// and the average of those for rows it has not. Sizing the thumb by the COUNT
+/// of visible rows instead made it grow and shrink with whatever was on screen,
+/// and a drag then fed that size back into where the pointer pointed, so the
+/// list flicked between two places under a still pointer (#158, worst in a
+/// voice room's narrow chat, where one card is many lines tall). Indexes are
+/// the REVERSED builder indexes (feedback_reverse_chat_lists), so a HIGHER
+/// index is further UP.
 ///
 /// The jump controls are CAPS at the ends of the track, where a native
 /// scrollbar puts its arrows, rather than buttons floating inside the list,
@@ -768,6 +785,14 @@ class ChatScrollRail extends StatefulWidget {
   /// visit has no line. A tap near the mark snaps onto it.
   final int? unreadRevIndex;
 
+  /// A key that stays with a row while new messages shift every index (its
+  /// message id), so a measured height stays with its row. Null = the index.
+  final Object Function(int revIndex)? rowKeyAt;
+
+  /// Lets a thumb drag move the list by pixels, as a native scrollbar does.
+  /// Without it a drag jumps to the place under the pointer instead.
+  final ScrollOffsetController? scrollOffsetController;
+
   const ChatScrollRail({
     super.key,
     required this.itemCount,
@@ -775,6 +800,8 @@ class ChatScrollRail extends StatefulWidget {
     required this.positions,
     this.onJumpToNewest,
     this.unreadRevIndex,
+    this.rowKeyAt,
+    this.scrollOffsetController,
   });
 
   @override
@@ -785,20 +812,167 @@ class _ChatScrollRailState extends State<ChatScrollRail> {
   bool _hovering = false;
   bool _dragging = false;
 
-  /// Jumps so the message [fraction] down the track (0 = oldest) sits at the
-  /// viewport's bottom edge. The list clamps an out-of-range jump, which lands
-  /// the two extremes exactly on the first and last row.
-  void _jumpToFraction(double fraction) {
-    if (!widget.controller.isAttached || widget.itemCount == 0) return;
-    final f = fraction.clamp(0.0, 1.0);
-    final index = ((1.0 - f) * (widget.itemCount - 1)).round();
-    widget.controller.jumpTo(index: index.clamp(0, widget.itemCount - 1));
+  /// The thumb's height when the drag began, held for the whole drag: rows
+  /// measured on the way change the estimate, and a thumb resizing under the
+  /// pointer moves the place the pointer maps to.
+  double? _dragThumb;
+
+  /// Height in pixels of every row seen laid out, by [ChatScrollRail.rowKeyAt].
+  final Map<Object, double> _heights = {};
+
+  /// The list's viewport height, which is the rail's own (they share a row).
+  double _viewport = 0;
+
+  /// Latest model, for the jumps a gesture makes between two builds.
+  _RailMetrics? _metrics;
+
+  /// The model a drag maps the pointer through, fixed at its start, so the
+  /// list moves by the same pixels per pointer pixel while rows get measured.
+  _RailMetrics? _dragMetrics;
+
+  /// A jump into a row whose height was a guess, placed again once the list
+  /// has laid that row out.
+  ({Object key, int revIndex, double into, double height})? _settle;
+
+  /// Leading edge in pixels of each row laid out at the last position update,
+  /// by [ChatScrollRail.rowKeyAt]: rows in both updates show which way the
+  /// list moved.
+  Map<Object, double> _lastLeads = const {};
+
+  /// Which way every row on screen moved at the update [_motionFor] (-1 =
+  /// toward the oldest, 1 = toward the newest, 0 = not all one way).
+  int _motion = 0;
+  Iterable<ItemPosition>? _motionFor;
+
+  /// Where the thumb was last drawn, for holding it to [_motion].
+  double? _lastTop;
+
+  @override
+  void initState() {
+    super.initState();
+    widget.positions.itemPositions.addListener(_onPositions);
   }
 
-  void _jumpToOldest() {
-    if (!widget.controller.isAttached || widget.itemCount == 0) return;
-    widget.controller.jumpTo(index: widget.itemCount - 1);
+  @override
+  void didUpdateWidget(ChatScrollRail old) {
+    super.didUpdateWidget(old);
+    if (old.positions != widget.positions) {
+      old.positions.itemPositions.removeListener(_onPositions);
+      widget.positions.itemPositions.addListener(_onPositions);
+    }
   }
+
+  @override
+  void dispose() {
+    widget.positions.itemPositions.removeListener(_onPositions);
+    super.dispose();
+  }
+
+  void _onPositions() {
+    final positions = widget.positions.itemPositions.value;
+    _measure(positions);
+    _noteMotion(positions);
+    final settle = _settle;
+    if (settle == null) return;
+    _settle = null;
+    if (settle.revIndex >= widget.itemCount ||
+        _keyAt(settle.revIndex) != settle.key) {
+      return;
+    }
+    final measured = _heights[settle.key];
+    if (measured == null || (measured - settle.height).abs() < 1.0) return;
+    _jumpIntoRow(settle.revIndex, settle.into.clamp(0.0, measured), measured,
+        settle: false);
+  }
+
+  Object _keyAt(int revIndex) => widget.rowKeyAt?.call(revIndex) ?? revIndex;
+
+  /// Notes which way the list moved since the last update, from the rows laid
+  /// out in both; a jump shares no row and counts as no motion.
+  void _noteMotion(Iterable<ItemPosition> positions) {
+    final leads = <Object, double>{};
+    var lo = double.infinity;
+    var hi = double.negativeInfinity;
+    var shared = 0;
+    for (final p in positions) {
+      if (p.index < 0 || p.index >= widget.itemCount) continue;
+      final key = _keyAt(p.index);
+      final lead = p.itemLeadingEdge * _viewport;
+      leads[key] = lead;
+      final before = _lastLeads[key];
+      if (before == null) continue;
+      shared++;
+      final moved = lead - before;
+      if (moved < lo) lo = moved;
+      if (moved > hi) hi = moved;
+    }
+    _lastLeads = leads;
+    // Reversed list: rows sliding toward the bottom edge = toward the oldest.
+    _motion = shared == 0 ? 0 : (hi < -0.5 ? -1 : (lo > 0.5 ? 1 : 0));
+    _motionFor = positions;
+  }
+
+  /// Records the rows the list has laid out (unclipped, the cache extent too).
+  void _measure(Iterable<ItemPosition> positions) {
+    if (_viewport <= 0) return;
+    for (final p in positions) {
+      if (p.index < 0 || p.index >= widget.itemCount) continue;
+      final h = (p.itemTrailingEdge - p.itemLeadingEdge) * _viewport;
+      if (h > 0) _heights[_keyAt(p.index)] = h;
+    }
+    // Rows paged out or deleted leave their heights behind; keep it bounded.
+    if (_heights.length > widget.itemCount * 2 + 256) {
+      final live = {for (var i = 0; i < widget.itemCount; i++) _keyAt(i)};
+      _heights.removeWhere((k, _) => !live.contains(k));
+    }
+  }
+
+  /// Jumps so the point [fraction] of the way down the scrollable height (0 =
+  /// the oldest message at the top) is the top of the viewport.
+  void _jumpToFraction(double fraction) {
+    final m = _metrics;
+    if (!widget.controller.isAttached ||
+        widget.itemCount == 0 ||
+        m == null ||
+        m.heights.length != widget.itemCount) {
+      return;
+    }
+    final f = fraction.clamp(0.0, 1.0);
+    if (f >= 1.0) {
+      widget.controller.jumpTo(index: 0, alignment: 0.0);
+      return;
+    }
+    final target = f * m.scrollable;
+    var above = 0.0;
+    for (var i = widget.itemCount - 1; i >= 0; i--) {
+      final h = m.heights[i];
+      if (above + h > target || i == 0) {
+        _jumpIntoRow(i, target - above, h);
+        return;
+      }
+      above += h;
+    }
+  }
+
+  /// Puts the viewport's top edge [into] pixels below the top of row
+  /// [revIndex], taking the row as [height] tall. A row never measured is
+  /// placed again once it has been, or a wrong guess at the oldest row leaves
+  /// blank space above it.
+  void _jumpIntoRow(int revIndex, double into, double height,
+      {bool settle = true}) {
+    if (!widget.controller.isAttached || _viewport <= 0) return;
+    // Alignment places the row's BOTTOM edge, measured up from the bottom.
+    final alignment = 1.0 + (into - height) / _viewport;
+    _settle = settle
+        ? (key: _keyAt(revIndex), revIndex: revIndex, into: into, height: height)
+        : null;
+    widget.controller
+        .jumpTo(index: revIndex, alignment: alignment.clamp(0.0, 1.0));
+  }
+
+  /// The oldest message with its top at the top of the list. Jumping to its
+  /// index alone puts its BOTTOM at the bottom, with blank space above it.
+  void _jumpToOldest() => _jumpToFraction(0);
 
   /// Lands the unread line in the upper-middle of the viewport, like the
   /// reply-jump, so the first new message reads downward from there.
@@ -817,11 +991,10 @@ class _ChatScrollRailState extends State<ChatScrollRail> {
   /// The mark is a LOCATOR, so it maps onto the WHOLE track rather than onto
   /// the thumb's travel, which in a barely-overflowing list squeezes every
   /// position into the remainder. Jumping stays exact either way.
-  double? _unreadCentre(double trackHeight) {
+  double? _unreadCentre(double trackHeight, _RailMetrics metrics) {
     final index = widget.unreadRevIndex;
     if (index == null || widget.itemCount <= 1) return null;
-    final fraction =
-        (1.0 - index / (widget.itemCount - 1)).clamp(0.0, 1.0);
+    final fraction = metrics.fractionAbove(index.clamp(0, widget.itemCount - 1));
     // Keep the whole target on the track; at either extreme half of it would
     // hang off the end.
     final limit = trackHeight - kRailUnreadSnap;
@@ -843,14 +1016,21 @@ class _ChatScrollRailState extends State<ChatScrollRail> {
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
-    return ValueListenableBuilder<Iterable<ItemPosition>>(
-      valueListenable: widget.positions.itemPositions,
-      builder: (context, positions, _) {
-        final metrics = _RailMetrics.from(positions, widget.itemCount);
-        if (metrics == null) return const SizedBox.shrink();
-        return _rail(hollow, metrics);
-      },
-    );
+    return LayoutBuilder(builder: (context, constraints) {
+      _viewport = constraints.maxHeight;
+      return ValueListenableBuilder<Iterable<ItemPosition>>(
+        valueListenable: widget.positions.itemPositions,
+        builder: (context, positions, _) {
+          _measure(positions);
+          final metrics = _metrics = _RailMetrics.from(
+              positions, widget.itemCount, _viewport,
+              (i) => _heights[_keyAt(i)]);
+          if (metrics == null) return const SizedBox.shrink();
+          return _rail(hollow, metrics,
+              identical(positions, _motionFor) ? _motion : 0);
+        },
+      );
+    });
   }
 
   /// Cap, track, cap: three segments of one width in one column.
@@ -859,7 +1039,7 @@ class _ChatScrollRailState extends State<ChatScrollRail> {
   /// because showing and hiding them resizes the track and shifts the thumb.
   /// Inert means no `onTap` and no semantic label, so nothing announces a dead
   /// button.
-  Widget _rail(HollowTheme hollow, _RailMetrics metrics) {
+  Widget _rail(HollowTheme hollow, _RailMetrics metrics, int motion) {
     return Padding(
       // Everything interactive stays [kWindowEdgeDeadStrip] clear of the
       // window's outer edge.
@@ -882,7 +1062,7 @@ class _ChatScrollRailState extends State<ChatScrollRail> {
               enabled: !metrics.atOldest,
             ),
             const SizedBox(height: kRailSegmentGap),
-            Expanded(child: _track(hollow, metrics)),
+            Expanded(child: _track(hollow, metrics, motion)),
             const SizedBox(height: kRailSegmentGap),
             _RailCap(
               hollow: hollow,
@@ -898,7 +1078,7 @@ class _ChatScrollRailState extends State<ChatScrollRail> {
     );
   }
 
-  Widget _track(HollowTheme hollow, _RailMetrics metrics) {
+  Widget _track(HollowTheme hollow, _RailMetrics metrics, int motion) {
     final active = _hovering || _dragging;
     return DecoratedBox(
       decoration: BoxDecoration(
@@ -908,24 +1088,51 @@ class _ChatScrollRailState extends State<ChatScrollRail> {
       child: LayoutBuilder(
         builder: (context, constraints) {
           final trackHeight = constraints.maxHeight;
-          final thumbHeight =
-              (metrics.extent * trackHeight).clamp(28.0, trackHeight);
+          final thumbHeight = (_dragThumb ??
+                  (metrics.extent * trackHeight).clamp(28.0, trackHeight))
+              .clamp(0.0, trackHeight);
           // The thumb's top is scaled into `trackHeight - thumbHeight`, its
           // real travel, or the oldest page could never be reached.
-          final top = metrics.offset * (trackHeight - thumbHeight);
-          final unreadCentre = _unreadCentre(trackHeight);
+          final travel = trackHeight - thumbHeight;
+          var top = metrics.offset * travel;
+          // Each row measured for the first time moves the average standing
+          // in for unseen rows, and with it the thumb's size and place: while
+          // the list moves one way, the thumb follows it or stays, never
+          // stepping back against a steady wheel.
+          final last = _lastTop;
+          if (last != null && motion < 0) top = math.min(top, last);
+          if (last != null && motion > 0) top = math.max(top, last);
+          top = top.clamp(0.0, math.max(0.0, travel));
+          _lastTop = top;
+          final unreadCentre = _unreadCentre(trackHeight, metrics);
+          bool onThumb(double dy) => dy >= top && dy <= top + thumbHeight;
           return GestureDetector(
             behavior: HitTestBehavior.opaque,
-            onTapDown: (d) =>
-                _jumpFromPointer(d.localPosition.dy, trackHeight, thumbHeight),
+            // A press on the thumb is a grab, as on a native scrollbar: only
+            // the bare track jumps. A press that rests before it moves reaches
+            // here too, 100 ms in.
+            onTapDown: (d) {
+              final dy = d.localPosition.dy;
+              if (onThumb(dy)) return;
+              _jumpFromPointer(dy, trackHeight, thumbHeight);
+            },
             onVerticalDragStart: (d) {
-              setState(() => _dragging = true);
-              _jumpFromPointer(d.localPosition.dy, trackHeight, thumbHeight);
+              setState(() {
+                _dragging = true;
+                _dragThumb = thumbHeight;
+                _dragMetrics = metrics;
+              });
+              // A grab on the thumb keeps the list where it is; a grab beside
+              // it brings the thumb to the pointer first, as a press does.
+              final dy = d.localPosition.dy;
+              if (!onThumb(dy) || widget.scrollOffsetController == null) {
+                _jumpFromPointer(dy, trackHeight, thumbHeight);
+              }
             },
             onVerticalDragUpdate: (d) =>
-                _jumpFromPointer(d.localPosition.dy, trackHeight, thumbHeight),
-            onVerticalDragEnd: (_) => setState(() => _dragging = false),
-            onVerticalDragCancel: () => setState(() => _dragging = false),
+                _dragBy(d, trackHeight, thumbHeight),
+            onVerticalDragEnd: (_) => _endDrag(),
+            onVerticalDragCancel: _endDrag,
             child: Semantics(
               label: 'Message list scrollbar',
               child: Stack(
@@ -985,6 +1192,35 @@ class _ChatScrollRailState extends State<ChatScrollRail> {
     );
   }
 
+  /// Moves the list by the pixels the pointer moved, scaled once for the whole
+  /// drag: a thumb pulled up shows older messages, and only ever older ones.
+  void _dragBy(DragUpdateDetails d, double trackHeight, double thumbHeight) {
+    final scroller = widget.scrollOffsetController;
+    final m = _dragMetrics;
+    final travel = trackHeight - thumbHeight;
+    if (scroller == null || m == null || travel <= 0) {
+      _jumpFromPointer(d.localPosition.dy, trackHeight, thumbHeight);
+      return;
+    }
+    // Reversed list: pixels grow toward the OLDEST end, the top of the track.
+    final pixels = -d.delta.dy * m.scrollable / travel;
+    final now = _metrics;
+    // A pixel scroll lays out every row it passes; past two screens a flick
+    // over a long history would build thousands in one frame, so it lands by
+    // index instead, where those pixels end.
+    if (pixels.abs() > 2 * _viewport && now != null) {
+      _jumpToFraction((now.offset * now.scrollable - pixels) / now.scrollable);
+      return;
+    }
+    scroller.jumpScroll(pixels);
+  }
+
+  void _endDrag() => setState(() {
+        _dragging = false;
+        _dragThumb = null;
+        _dragMetrics = null;
+      });
+
   /// Maps a pointer on the track to a position, treating the pointer as the
   /// MIDDLE of the thumb so the list does not jump out from under the grab.
   ///
@@ -994,11 +1230,12 @@ class _ChatScrollRailState extends State<ChatScrollRail> {
   /// (test/widget/chat_scroll_rail_test.dart).
   void _jumpFromPointer(double dy, double trackHeight, double thumbHeight) {
     final travel = trackHeight - thumbHeight;
-    if (travel <= 0) return;
+    final metrics = _metrics;
+    if (travel <= 0 || metrics == null) return;
     // The mark is 3px of a 10px gutter, too small to hit exactly, so anything
     // within [kRailUnreadSnap] snaps to the message rather than to the
     // pointer's fraction.
-    final centre = _unreadCentre(trackHeight);
+    final centre = _unreadCentre(trackHeight, metrics);
     if (centre != null && (dy - centre).abs() <= kRailUnreadSnap) {
       _jumpToUnread();
       return;
@@ -1065,8 +1302,9 @@ class _RailCap extends StatelessWidget {
   }
 }
 
-/// Where the thumb sits and how big it is, from the visible index range. Null
-/// when the whole conversation fits.
+/// Where the thumb sits and how big it is, in pixels: rows laid out now are
+/// exact, rows never seen count as the average of those measured. Null when
+/// the whole conversation fits.
 class _RailMetrics {
   /// 0 = thumb at the top of its travel (oldest), 1 = at the bottom (newest).
   final double offset;
@@ -1076,34 +1314,89 @@ class _RailMetrics {
   final bool atNewest;
   final bool atOldest;
 
+  /// Pixels the list can scroll: everything above and below the viewport.
+  final double scrollable;
+
+  /// Every row's height, measured or estimated, by reversed index.
+  final List<double> heights;
+
+  /// Sum of [heights].
+  final double total;
+
   const _RailMetrics({
     required this.offset,
     required this.extent,
     required this.atNewest,
     required this.atOldest,
+    required this.scrollable,
+    required this.heights,
+    required this.total,
   });
 
-  static _RailMetrics? from(Iterable<ItemPosition> positions, int itemCount) {
-    if (itemCount <= 1 || positions.isEmpty) return null;
+  /// Share of the conversation above the top of row [revIndex], 0..1.
+  double fractionAbove(int revIndex) {
+    if (total <= 0) return 0;
+    var above = 0.0;
+    for (var i = heights.length - 1; i > revIndex; i--) {
+      above += heights[i];
+    }
+    return (above / total).clamp(0.0, 1.0);
+  }
+
+  static _RailMetrics? from(Iterable<ItemPosition> positions, int itemCount,
+      double viewport, double? Function(int revIndex) measured) {
+    if (itemCount <= 1 || positions.isEmpty || viewport <= 0) return null;
+    final laidOut = <int, ItemPosition>{};
     var minIndex = itemCount;
     var maxIndex = -1;
     for (final p in positions) {
+      if (p.index < 0 || p.index >= itemCount) continue;
+      laidOut[p.index] = p;
       if (p.index < minIndex) minIndex = p.index;
       if (p.index > maxIndex) maxIndex = p.index;
     }
     if (maxIndex < 0) return null;
-    final visible = (maxIndex - minIndex + 1).clamp(1, itemCount);
-    if (visible >= itemCount) return null;
-    // Reversed indexes: a higher top-most visible index is closer to the
-    // OLDEST end, which is the TOP of the track.
-    final aboveViewport = itemCount - 1 - maxIndex;
-    final scrollable = itemCount - visible;
+    final known = List<double?>.generate(itemCount, measured);
+    var sum = 0.0;
+    var count = 0;
+    for (final h in known) {
+      if (h != null) {
+        sum += h;
+        count++;
+      }
+    }
+    final average = count == 0 ? viewport / laidOut.length : sum / count;
+    final heights = [for (final h in known) h ?? average];
+    final total = heights.fold(0.0, (a, b) => a + b);
+
+    // Edges are in viewport heights measured UP from the bottom (reversed).
+    var above = 0.0;
+    var below = 0.0;
+    for (final p in laidOut.values) {
+      final lead = p.itemLeadingEdge * viewport;
+      final trail = p.itemTrailingEdge * viewport;
+      above += math.max(0.0, trail - math.max(lead, viewport));
+      below += math.max(0.0, math.min(trail, 0.0) - lead);
+    }
+    for (var i = 0; i < itemCount; i++) {
+      if (laidOut.containsKey(i)) continue;
+      if (i > maxIndex) {
+        above += heights[i];
+      } else if (i < minIndex) {
+        below += heights[i];
+      }
+    }
+    // Under a pixel either way is the end: the list rounds its edges.
+    final scrollable = above + below;
+    if (scrollable < 1.0) return null;
     return _RailMetrics(
-      offset:
-          scrollable <= 0 ? 0 : (aboveViewport / scrollable).clamp(0.0, 1.0),
-      extent: visible / itemCount,
-      atNewest: minIndex <= 0,
-      atOldest: maxIndex >= itemCount - 1,
+      offset: (above / scrollable).clamp(0.0, 1.0),
+      extent: (viewport / (scrollable + viewport)).clamp(0.0, 1.0),
+      atNewest: below < 1.0,
+      atOldest: above < 1.0,
+      scrollable: scrollable,
+      heights: heights,
+      total: total,
     );
   }
 }

@@ -7,7 +7,6 @@ import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/ui/components/hollow_divider.dart';
 import 'package:hollow/src/ui/components/edge_scroll_row.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
-import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -31,6 +30,8 @@ import '../components/hollow_text_field.dart';
 import '../components/hollow_toast.dart';
 import '../components/hollow_tooltip.dart';
 import 'emoji_data.dart';
+import 'expression_preview.dart';
+import 'gif_picker.dart' show GifMenuItem;
 import 'emote_image.dart';
 import 'package:hollow/src/ui/components/overlay_hosts.dart';
 import 'package:hollow/src/ui/components/hollow_spinner.dart';
@@ -154,115 +155,6 @@ void _saveRecents(List<String> recents) {
         .saveSetting(key: _recentsKey, value: jsonEncode(recents))
         .catchError((_) {});
   } catch (_) {}
-}
-
-/// Small anchored menu for removing an emote from a personal collection.
-///
-/// Deliberately a menu, not a dialog: the picker stays open behind it and the
-/// single destructive item doubles as the confirmation. It goes in as an
-/// OverlayEntry on top of the root overlay, because the picker is itself a raw
-/// OverlayEntry above the navigator's routes and a dialog route renders BEHIND
-/// it.
-void _showEmoteContextMenu(
-  BuildContext context,
-  Offset globalPosition, {
-  required String header,
-  required String actionLabel,
-  required VoidCallback onAction,
-}) {
-  final position = overlayPositionOf(context, globalPosition);
-  final hollow = HollowTheme.of(context);
-  const menuWidth = 200.0;
-  final screen = MediaQuery.of(context).size;
-  final left = position.dx.clamp(8.0, screen.width - menuWidth - 8);
-  final top = position.dy.clamp(8.0, screen.height - 96);
-
-  final overlay = Overlay.of(context);
-  late OverlayEntry entry;
-  // Same double-remove guard as the picker itself.
-  var removed = false;
-  void dismiss() {
-    if (removed) return;
-    removed = true;
-    OverlayHosts.unregister(entry);
-    entry.remove();
-    entry.dispose();
-  }
-
-  entry = OverlayEntry(
-    builder: (ctx) => Stack(
-      children: [
-        Positioned.fill(
-          child: GestureDetector(
-            onTap: dismiss,
-            onSecondaryTap: dismiss,
-            behavior: HitTestBehavior.opaque,
-            child: const SizedBox.expand(),
-          ),
-        ),
-        Positioned(
-          left: left,
-          top: top,
-          child: DefaultTextStyle(
-            style: HollowTypography.body.copyWith(color: hollow.textPrimary),
-            child: Container(
-              width: menuWidth,
-              decoration: BoxDecoration(
-                color: hollow.overlay,
-                borderRadius: BorderRadius.circular(hollow.radiusMd),
-                border: Border.all(color: hollow.border),
-                boxShadow: HollowShadows.float,
-              ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(HollowSpacing.md,
-                        HollowSpacing.sm, HollowSpacing.md, HollowSpacing.xs),
-                    child: Text(
-                      header,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: HollowTypography.caption
-                          .copyWith(color: hollow.textTertiary),
-                    ),
-                  ),
-                  const HollowDivider(),
-                  Padding(
-                    padding: const EdgeInsets.all(HollowSpacing.xs),
-                    child: HollowPressable(
-                      onTap: () {
-                        dismiss();
-                        onAction();
-                      },
-                      borderRadius: BorderRadius.circular(hollow.radiusMd),
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: HollowSpacing.sm,
-                          vertical: HollowSpacing.sm),
-                      child: Row(
-                        children: [
-                          Icon(LucideIcons.trash2, size: 14, color: hollow.error),
-                          const SizedBox(width: HollowSpacing.sm),
-                          Text(
-                            actionLabel,
-                            style: HollowTypography.label
-                                .copyWith(color: hollow.error),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
-      ],
-    ),
-  );
-  overlay.insert(entry);
-  OverlayHosts.register(entry, dismiss);
 }
 
 enum _PickerTab { emoji, server, mine, ffz }
@@ -449,7 +341,10 @@ class _EmojiPickerBodyState extends ConsumerState<EmojiPickerBody> {
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) =>
+      ExpressionPreviewArea(child: _body(context));
+
+  Widget _body(BuildContext context) {
     final hollow = HollowTheme.of(context);
     return Column(
       children: [
@@ -780,31 +675,37 @@ class _EmojiPickerBodyState extends ConsumerState<EmojiPickerBody> {
     Future<void> Function()? onRemove,
   }) {
     final hollow = HollowTheme.of(context);
-    final cell = HollowPressable(
-      onTap: () =>
-          _select(emotes_api.emoteToken(name: name, hash: hash)),
-      semanticLabel: 'Emote $name',
-      borderRadius: BorderRadius.circular(hollow.radiusMd),
-      padding: const EdgeInsets.all(HollowSpacing.xs),
-      child: HollowTooltip(
-        message: ':$name:',
-        child: Center(
-          child: EmoteImage(name: name, hash: hash, size: 26),
+    void select() => _select(emotes_api.emoteToken(name: name, hash: hash));
+    return ExpressionPreviewTarget(
+      data: ExpressionPreviewData(
+        label: ':$name:',
+        media: (_) => EmoteImage(
+            name: name, hash: hash, size: kExpressionPreviewGlyph),
+      ),
+      onSend: select,
+      sendLabel: 'Use this emote',
+      actions: onRemove == null
+          ? null
+          : (_) => [
+                GifMenuItem(
+                  icon: LucideIcons.trash2,
+                  label: 'Remove from my emotes',
+                  danger: true,
+                  onTap: onRemove,
+                ),
+              ],
+      child: HollowPressable(
+        onTap: select,
+        semanticLabel: 'Emote $name',
+        borderRadius: BorderRadius.circular(hollow.radiusMd),
+        padding: const EdgeInsets.all(HollowSpacing.xs),
+        child: HollowTooltip(
+          message: ':$name:',
+          child: Center(
+            child: EmoteImage(name: name, hash: hash, size: 26),
+          ),
         ),
       ),
-    );
-    if (onRemove == null) return cell;
-    void menu(Offset position) => _showEmoteContextMenu(
-          context,
-          position,
-          header: ':$name:',
-          actionLabel: 'Remove from my emotes',
-          onAction: onRemove,
-        );
-    return GestureDetector(
-      onSecondaryTapUp: (d) => menu(d.globalPosition),
-      onLongPressStart: (d) => menu(d.globalPosition),
-      child: cell,
     );
   }
 }
@@ -990,17 +891,38 @@ class _EmojiCell extends StatelessWidget {
               ),
       ),
     );
-    if (onRemove == null) return cell;
-    void menu(Offset position) => _showEmoteContextMenu(
-          context,
-          position,
-          header: emote != null ? ':${emote.name}:' : emoji.char,
-          actionLabel: 'Remove from recents',
-          onAction: onRemove!,
-        );
-    return GestureDetector(
-      onSecondaryTapUp: (d) => menu(d.globalPosition),
-      onLongPressStart: (d) => menu(d.globalPosition),
+    final remove = onRemove;
+    // The preview draws in an overlay: it takes the grid's emoji fonts along.
+    final fallback = DefaultTextStyle.of(context).style.fontFamilyFallback;
+    return ExpressionPreviewTarget(
+      data: ExpressionPreviewData(
+        label: emote != null
+            ? ':${emote.name}:'
+            : (emoji.name.isEmpty ? emoji.char : emoji.name),
+        media: (_) => emote != null
+            ? EmoteImage(
+                name: emote.name,
+                hash: emote.hash,
+                size: kExpressionPreviewGlyph)
+            : SizedBox.square(
+                dimension: kExpressionPreviewGlyph,
+                child: FittedBox(
+                  child: Text(emoji.char,
+                      style: TextStyle(fontSize: 21, fontFamilyFallback: fallback)), // design-ignore: emoji glyph, scaled to the preview
+                ),
+              ),
+      ),
+      onSend: () => onSelect(emoji.char),
+      sendLabel: emote != null ? 'Use this emote' : 'Use this emoji',
+      actions: remove == null
+          ? null
+          : (_) => [
+                GifMenuItem(
+                  icon: LucideIcons.x,
+                  label: 'Remove from recents',
+                  onTap: remove,
+                ),
+              ],
       child: cell,
     );
   }

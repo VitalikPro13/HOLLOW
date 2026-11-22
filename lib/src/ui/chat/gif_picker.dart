@@ -26,6 +26,7 @@ import '../components/hollow_toast.dart';
 import '../components/edge_scroll_row.dart';
 import '../components/overlay_anchor.dart';
 import '../components/popup_animator.dart';
+import 'package:hollow/src/ui/chat/expression_preview.dart';
 import 'package:hollow/src/ui/components/hollow_divider.dart';
 import 'package:hollow/src/ui/components/hollow_empty_state.dart';
 import 'package:hollow/src/ui/components/overlay_hosts.dart';
@@ -420,7 +421,10 @@ class _GifPickerBodyState extends ConsumerState<GifPickerBody> {
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) =>
+      ExpressionPreviewArea(child: _body(context));
+
+  Widget _body(BuildContext context) {
     final hollow = HollowTheme.of(context);
     // Results are cached per rating, so a rating change must re-issue the
     // query or the old grid sits there. `ref.listen` belongs in build and
@@ -727,7 +731,7 @@ class _GifPickerBodyState extends ConsumerState<GifPickerBody> {
             picking: _pickingId == item.id,
             enabled: _pickingId == null,
             onTap: () => _pick(item),
-            onMenu: (pos) => _showCellMenu(item, pos,
+            actions: (_) => _cellActions(item,
                 inFavorites: inFavorites, inRecents: inRecents),
           ),
         ));
@@ -758,21 +762,16 @@ class _GifPickerBodyState extends ConsumerState<GifPickerBody> {
     });
   }
 
-  void _showCellMenu(
-    gifs_api.GifItem item,
-    Offset globalPosition, {
+  /// A cell's own actions, for its right-click menu and its kept preview.
+  List<GifMenuItem> _cellActions(
+    gifs_api.GifItem item, {
     required bool inFavorites,
     required bool inRecents,
   }) {
     final library = ref.read(gifLibraryProvider);
     final notifier = ref.read(gifLibraryProvider.notifier);
     final fav = library.isFavorite(item.id);
-    final title = item.title.trim();
-    showGifMenu(
-      context,
-      globalPosition,
-      header: title.isEmpty ? 'GIF' : title,
-      items: [
+    return [
         GifMenuItem(
           icon: fav ? LucideIcons.starOff : LucideIcons.star,
           label: fav ? 'Remove from favourites' : 'Add to favourites',
@@ -806,14 +805,65 @@ class _GifPickerBodyState extends ConsumerState<GifPickerBody> {
             danger: true,
             onTap: () => notifier.removeRecent(item.id),
           ),
-      ],
-    );
+    ];
   }
 }
 
 // An OverlayEntry on top of the root overlay: the picker is itself a raw
 // OverlayEntry above the navigator's routes, so a dialog route renders BEHIND
 // it.
+
+/// One row of a [showGifMenu] menu, and of a kept expression preview.
+class GifMenuRow extends StatelessWidget {
+  final GifMenuItem item;
+  final VoidCallback onTap;
+
+  /// A phone row: tall enough for a finger.
+  final bool touch;
+
+  const GifMenuRow({
+    super.key,
+    required this.item,
+    required this.onTap,
+    this.touch = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final hollow = HollowTheme.of(context);
+    return HollowPressable(
+      onTap: onTap,
+      semanticLabel: item.label,
+      hoverColor: hollow.hover,
+      borderRadius: BorderRadius.circular(hollow.radiusMd),
+      padding: const EdgeInsets.symmetric(
+          horizontal: HollowSpacing.sm, vertical: HollowSpacing.sm),
+      child: ConstrainedBox(
+        // A finger's 44 px whatever the label's height.
+        constraints: BoxConstraints(minHeight: touch ? 44 - 2 * HollowSpacing.sm : 0),
+        child: Row(
+        children: [
+          Icon(item.icon,
+              size: 14, color: item.danger ? hollow.error : hollow.textSecondary),
+          const SizedBox(width: HollowSpacing.sm),
+          Expanded(
+            child: Text(
+              item.label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: HollowTypography.label.copyWith(
+                color: item.danger ? hollow.error : hollow.textPrimary,
+              ),
+            ),
+          ),
+          if (item.checked)
+            Icon(LucideIcons.check, size: 14, color: hollow.accentText),
+        ],
+      ),
+      ),
+    );
+  }
+}
 
 class GifMenuItem {
   final IconData icon;
@@ -950,43 +1000,12 @@ void showGifMenu(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
                         for (final item in items)
-                          HollowPressable(
+                          GifMenuRow(
+                            item: item,
                             onTap: () {
                               dismiss();
                               item.onTap();
                             },
-                            semanticLabel: item.label,
-                            hoverColor: hollow.hover,
-                            borderRadius:
-                                BorderRadius.circular(hollow.radiusMd),
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: HollowSpacing.sm,
-                                vertical: HollowSpacing.sm),
-                            child: Row(
-                              children: [
-                                Icon(item.icon,
-                                    size: 14,
-                                    color: item.danger
-                                        ? hollow.error
-                                        : hollow.textSecondary),
-                                const SizedBox(width: HollowSpacing.sm),
-                                Expanded(
-                                  child: Text(
-                                    item.label,
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: HollowTypography.label.copyWith(
-                                      color: item.danger
-                                          ? hollow.error
-                                          : hollow.textPrimary,
-                                    ),
-                                  ),
-                                ),
-                                if (item.checked)
-                                  Icon(LucideIcons.check,
-                                      size: 14, color: hollow.accentText),
-                              ],
-                            ),
                           ),
                       ],
                     ),
@@ -1016,7 +1035,7 @@ class _GifCell extends ConsumerStatefulWidget {
   final bool picking;
   final bool enabled;
   final VoidCallback onTap;
-  final void Function(Offset globalPosition) onMenu;
+  final List<GifMenuItem> Function(Offset globalPosition) actions;
 
   const _GifCell({
     super.key,
@@ -1028,7 +1047,7 @@ class _GifCell extends ConsumerStatefulWidget {
     required this.picking,
     required this.enabled,
     required this.onTap,
-    required this.onMenu,
+    required this.actions,
   });
 
   @override
@@ -1095,37 +1114,19 @@ class _GifCellState extends ConsumerState<_GifCell> {
         focused && (ref.watch(gifAutoplayProvider) ? widget.visible : _hovering);
     if (wantsAnim) _loadSm();
 
-    final Widget image;
-    final sm = _sm;
-    final still = _still;
-    if (wantsAnim && sm != null) {
-      image = AnimatedGifImage(
-        bytes: sm,
-        width: widget.width,
-        height: widget.height,
-        fit: BoxFit.cover,
-      );
-    } else if (still != null) {
-      image = Image.memory(
-        still,
-        width: widget.width,
-        height: widget.height,
-        fit: BoxFit.cover,
-        gaplessPlayback: true,
-        filterQuality: FilterQuality.medium,
-        errorBuilder: (_, _, _) => Container(color: hollow.elevated),
-      );
-    } else {
-      image = Container(color: hollow.elevated);
-    }
+    final image = _gif(hollow, widget.width, widget.height, animate: wantsAnim);
 
     final title = widget.item.title.trim();
     return MouseRegion(
       onEnter: (_) => setState(() => _hovering = true),
       onExit: (_) => setState(() => _hovering = false),
-      child: GestureDetector(
-        onSecondaryTapDown: (d) => widget.onMenu(d.globalPosition),
-        onLongPressStart: (d) => widget.onMenu(d.globalPosition),
+      child: ExpressionPreviewTarget(
+        data: ExpressionPreviewData(
+          label: title.isEmpty ? 'GIF' : title,
+          media: (_) => _previewMedia(hollow),
+        ),
+        onSend: widget.enabled ? widget.onTap : null,
+        actions: widget.actions,
         child: HollowPressable(
           onTap: widget.enabled ? widget.onTap : null,
           semanticLabel: title.isEmpty ? 'Insert GIF' : 'Insert GIF $title',
@@ -1162,6 +1163,48 @@ class _GifCellState extends ConsumerState<_GifCell> {
         ),
       ),
     );
+  }
+
+  /// The GIF at preview size: the animated variant, loading it if this cell
+  /// had only its still, and the still meanwhile.
+  Widget _previewMedia(HollowTheme hollow) {
+    _loadSm();
+    final aspect = (widget.item.w / widget.item.h).clamp(0.6, 2.5);
+    final w = aspect >= 1
+        ? kExpressionPreviewMedia
+        : kExpressionPreviewMedia * aspect;
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(hollow.radiusMd),
+      child: _gif(hollow, w, w / aspect, animate: true),
+    );
+  }
+
+  /// The animated variant when [animate] and it has loaded, else the still,
+  /// else a placeholder of the same size.
+  Widget _gif(HollowTheme hollow, double width, double height,
+      {required bool animate}) {
+    final sm = _sm;
+    final still = _still;
+    if (animate && sm != null) {
+      return AnimatedGifImage(
+        bytes: sm,
+        width: width,
+        height: height,
+        fit: BoxFit.cover,
+      );
+    }
+    if (still != null) {
+      return Image.memory(
+        still,
+        width: width,
+        height: height,
+        fit: BoxFit.cover,
+        gaplessPlayback: true,
+        filterQuality: FilterQuality.medium,
+        errorBuilder: (_, _, _) => Container(color: hollow.elevated),
+      );
+    }
+    return Container(width: width, height: height, color: hollow.elevated);
   }
 
   Widget _star(HollowTheme hollow, bool isFavorite) {

@@ -30,6 +30,7 @@ import '../components/hollow_text_field.dart';
 import '../components/hollow_toast.dart';
 import '../components/popup_animator.dart';
 import 'emote_image.dart';
+import 'expression_preview.dart';
 import 'gif_picker.dart' show GifMenuItem, PickerListDropdown, showGifMenu;
 import 'sticker_pack_card.dart' show kStickerPackExtension;
 import 'package:hollow/src/ui/components/hollow_divider.dart';
@@ -528,7 +529,10 @@ class _StickerPickerBodyState extends ConsumerState<StickerPickerBody> {
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context) =>
+      ExpressionPreviewArea(child: _body(context));
+
+  Widget _body(BuildContext context) {
     final hollow = HollowTheme.of(context);
     return Column(
       children: [
@@ -1131,14 +1135,15 @@ class _StickerPickerBodyState extends ConsumerState<StickerPickerBody> {
           onTap: () => _pick(cell),
           onSave:
               savable ? () => _saveToVault(cell, _packFilter ?? '') : null,
-          onMenu: (pos) => _menuFor(cell, pos,
+          actions: (pos) => _actionsFor(cell, pos,
               removable: removable, savable: savable, recent: recent),
         );
       },
     );
   }
 
-  void _menuFor(
+  /// A cell's own actions, for its right-click menu and its kept preview.
+  List<GifMenuItem> _actionsFor(
     _Cell cell,
     Offset globalPosition, {
     required bool removable,
@@ -1146,7 +1151,7 @@ class _StickerPickerBodyState extends ConsumerState<StickerPickerBody> {
     required bool recent,
   }) {
     final inPack = _packFilter != null && _packFilter!.isNotEmpty;
-    final items = <GifMenuItem>[
+    return <GifMenuItem>[
       if (savable)
         GifMenuItem(
           icon: LucideIcons.bookmarkPlus,
@@ -1184,12 +1189,6 @@ class _StickerPickerBodyState extends ConsumerState<StickerPickerBody> {
           onTap: () => _deleteEverywhere(cell),
         ),
     ];
-    showGifMenu(
-      context,
-      globalPosition,
-      header: cell.label.isEmpty ? 'Sticker' : cell.label,
-      items: items,
-    );
   }
 
   /// Second-level menu listing every pack this sticker is not already in.
@@ -1301,7 +1300,7 @@ class _StickerCell extends ConsumerStatefulWidget {
   final bool picking;
   final bool enabled;
   final VoidCallback onTap;
-  final void Function(Offset globalPosition) onMenu;
+  final List<GifMenuItem> Function(Offset globalPosition) actions;
 
   /// One-tap "save to my stickers" corner badge. Null where saving is
   /// meaningless (the vault itself, recents, a server's set).
@@ -1313,7 +1312,7 @@ class _StickerCell extends ConsumerStatefulWidget {
     required this.picking,
     required this.enabled,
     required this.onTap,
-    required this.onMenu,
+    required this.actions,
     this.onSave,
   });
 
@@ -1377,9 +1376,13 @@ class _StickerCellState extends ConsumerState<_StickerCell> {
     return MouseRegion(
       onEnter: (_) => setState(() => _hovering = true),
       onExit: (_) => setState(() => _hovering = false),
-      child: GestureDetector(
-        onSecondaryTapDown: (d) => widget.onMenu(d.globalPosition),
-        onLongPressStart: (d) => widget.onMenu(d.globalPosition),
+      child: ExpressionPreviewTarget(
+        data: ExpressionPreviewData(
+          label: label.isEmpty ? 'Sticker' : label,
+          media: (_) => _image(hollow, preview: true),
+        ),
+        onSend: widget.enabled ? widget.onTap : null,
+        actions: widget.actions,
         child: HollowPressable(
           onTap: widget.enabled ? widget.onTap : null,
           semanticLabel: semantic,
@@ -1427,16 +1430,31 @@ class _StickerCellState extends ConsumerState<_StickerCell> {
     );
   }
 
-  Widget _image(HollowTheme hollow) {
+  /// The sticker in its cell, or at [preview] size (animated, whatever the
+  /// autoplay setting: the person is holding it to look at it).
+  Widget _image(HollowTheme hollow, {bool preview = false}) {
+    final aspect = widget.cell.w / widget.cell.h;
+    final previewWidth = aspect >= 1
+        ? kExpressionPreviewMedia
+        : kExpressionPreviewMedia * aspect;
     // LOCAL: a content-addressed blob, so a missing hash pulls itself over the
     // asset rail and flips in when it lands.
     if (widget.cell.remote == null) {
       return ChatAssetImage(
         kind: 's',
         hash: widget.cell.hash,
-        aspect: widget.cell.w / widget.cell.h,
-        width: 68,
-        height: 68,
+        aspect: aspect,
+        width: preview ? previewWidth : 68,
+        height: preview ? previewWidth / aspect : 68,
+      );
+    }
+    if (preview) {
+      // Built in the preview's context: nothing here may watch a provider.
+      _loadSm();
+      return SizedBox(
+        width: previewWidth,
+        height: previewWidth / aspect,
+        child: _remoteImage(hollow, animate: true),
       );
     }
 
@@ -1445,10 +1463,13 @@ class _StickerCellState extends ConsumerState<_StickerCell> {
     final wantsAnim =
         focused && (ref.watch(gifAutoplayProvider) || _hovering);
     if (wantsAnim) _loadSm();
+    return _remoteImage(hollow, animate: wantsAnim);
+  }
 
+  Widget _remoteImage(HollowTheme hollow, {required bool animate}) {
     final sm = _sm;
     final still = _still;
-    if (wantsAnim && sm != null) {
+    if (animate && sm != null) {
       return AnimatedGifImage(bytes: sm, fit: BoxFit.contain);
     }
     if (still != null) {

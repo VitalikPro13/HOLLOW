@@ -378,7 +378,7 @@ Same reversed-list model as ui_chat_dm (reverse:true, newest = index 0, `_frozen
 
 ## Scrollbar rail (issue #54, 2026-08-21)
 
-The list is built by `reversedChatList`, which since 2026-08-21 hangs `ChatScrollRail` in a column beside it on desktop (index scrollbar + a jump cap at each end). The pane's only job is to pass `onJumpToNewest: _scrollToBottom` — "jump to present" MUST go through the pane, because the display list is frozen while reading (`_frozenLen`) and index 0 is not the newest message until that freeze is released. Mechanics and the traps (reversed index maths, the window-edge dead strip, why it is a column and not an overlay) live in `wiki/ui_chat_pane_shared.md`.
+The list is built by `reversedChatList`, which since 2026-08-21 hangs `ChatScrollRail` in a column beside it on desktop (a scrollbar sized from measured row heights, #158, + a jump cap at each end). The pane's only job is to pass `onJumpToNewest: _scrollToBottom` — "jump to present" MUST go through the pane, because the display list is frozen while reading (`_frozenLen`) and index 0 is not the newest message until that freeze is released. Mechanics and the traps (reversed index maths, the window-edge dead strip, why it is a column and not an overlay) live in `wiki/ui_chat_pane_shared.md`.
 
 ## The unread line (issue #54, 2026-08-21)
 

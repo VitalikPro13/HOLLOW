@@ -117,8 +117,8 @@ final _chosenCache = <String, NamePaint?>{};
 /// shows only hashed colours); without one this is [nameColorFor].
 ///
 /// A chosen colour keeps its hue and saturation, and its lightness moves only
-/// until every stop clears [kChosenNameContrast] on every surface (a selected
-/// row takes [namePaintOnSelected] on top). Unless
+/// until every stop clears [kChosenNameContrast] on [chosenNameSurfaces] (a
+/// selected row takes [namePaintOnSelected] on top). Unless
 /// [self] (the viewer's own name), a stop whose hue sits within
 /// [kNameAccentBand] of the accent turns to the nearest edge of the band
 /// first, and a blend between two stops that would pass through the band
@@ -206,11 +206,44 @@ Color _outsideAccentBand(Color c, double accentHue) {
   return hsl.withHue((accentHue + side * kNameAccentBand + 360) % 360).toColor();
 }
 
-/// The contrast a chosen name colour clears on every surface a name sits on,
-/// selected fills included: the design language's floor for all text. The
-/// hashed colours sit higher so they read as pastels; a chosen colour held
-/// that high loses its tone (red goes pink).
-const double kChosenNameContrast = 4.5;
+/// The contrast a chosen name colour clears on [chosenNameSurfaces], selected
+/// fills included. A pick that clears it is drawn exactly as picked, in both
+/// themes and on the speaking ring and share border (#140).
+///
+/// A deliberate product choice BELOW WCAG AA for small text (1.4.3 asks 4.5:1
+/// of a 14 or 16 px name): the person picked the colour and wants it shown
+/// true, and 4.5 moved even the editor's own red on both themes. 3:1 still
+/// lifts the picks that would vanish (pure blue or black on dark, yellow on
+/// light). The ring and share border are non-text indicators, where 3:1 is
+/// what WCAG 1.4.11 asks. Hashed colours sit far higher: nobody chose them.
+const double kChosenNameContrast = 3.0;
+
+/// The surfaces a name sits on and a chosen colour is judged against: chrome,
+/// the canvas and raised cards. Menus and hovered rows inside them (overlay,
+/// hover) are left out on purpose (Vitalik, Nov 22): judged there too, the
+/// reporter's #C92222 moved on dark, though no message row sits on them.
+List<Color> chosenNameSurfaces(HollowTheme hollow) =>
+    [hollow.surface, hollow.background, hollow.elevated];
+
+/// How the floor moved each stop of [field] for your own name on [hollow]:
+/// per picked stop, 1 lightened, -1 darkened, 0 drawn as picked; null when
+/// [field] holds no colour. Read off the paint the renderer draws, so the
+/// editor's note can never disagree with the name.
+List<int>? chosenNameShifts(HollowTheme hollow, String field) {
+  final picked = nameColorStops(field);
+  final drawn = chosenNamePaint(hollow, field, self: true)?.stops;
+  if (picked == null || drawn == null || drawn.length != picked.length) {
+    return null;
+  }
+  return [
+    for (var i = 0; i < picked.length; i++)
+      drawn[i] == picked[i]
+          ? 0
+          : (drawn[i].computeLuminance() > picked[i].computeLuminance()
+              ? 1
+              : -1),
+  ];
+}
 
 List<Color> _surfaces(HollowTheme hollow) => [
       hollow.surface,
@@ -251,7 +284,7 @@ Color _readable(Color c, HollowTheme hollow, bool dark) =>
         targetRatio: dark ? 7.0 : 5.0);
 
 Color _readableChosen(Color c, HollowTheme hollow) =>
-    Contrast.ensureContrastOnAll(c, _surfaces(hollow),
+    Contrast.ensureContrastOnAll(c, chosenNameSurfaces(hollow),
         targetRatio: kChosenNameContrast);
 
 Color _nameColor(

@@ -538,8 +538,16 @@ function Test-PeerStaged($peer) {
         $udid = Get-SimUdid $peer
         if (-not $udid) { return $false }
         Start-SimDevice $udid
-        $null = & xcrun simctl get_app_container $udid com.anonlisten.hollow 2>$null
-        return ($LASTEXITCODE -eq 0)
+        $installed = "$(& xcrun simctl get_app_container $udid com.anonlisten.hollow app 2>$null)".Trim()
+        if ($LASTEXITCODE -ne 0 -or -not $installed) { return $false }
+        # A simulator keeps the app installed last from ANY tree: a BEFORE run
+        # once drove the AFTER build that way (Nov 22), so a stale app is
+        # simply reinstalled from this tree's build.
+        if (-not (Test-MacStageCurrent (Get-BuildOutput $peer) $installed $script:SimStampFiles)) {
+            Write-Step "$peer's installed app differs from this tree's build" 'Yellow'
+            return $false
+        }
+        return $true
     }
     if (Test-AndroidBackend $peer) {
         Start-AndroidDevice $peer

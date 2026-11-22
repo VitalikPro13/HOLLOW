@@ -17,7 +17,10 @@ import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/relay_domain_provider.dart';
 import 'package:hollow/src/core/providers/server_banner_provider.dart';
 import 'package:hollow/src/core/providers/server_strip_layout_provider.dart';
+import 'package:hollow/src/core/providers/sticker_provider.dart';
 import 'package:hollow/src/rust/api/crdt.dart' as crdt;
+import 'package:hollow/src/rust/api/emotes.dart' as emotes_api;
+import 'package:hollow/src/rust/api/stickers.dart' as stickers_api;
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
 import 'package:hollow/src/ui/chat/staged_attachments.dart';
@@ -41,6 +44,8 @@ import 'package:path_provider/path_provider.dart';
 /// | `seed_banner` | `name` | a generated banner on a server this peer owns |
 /// | `seed_layout` | `name`, `layout` | orders a server's channels: names, `category:X` |
 /// | `seed_folder` | `name`, `servers` (two server names) | puts two servers in one dock folder |
+/// | `seed_sticker` | `seed` | a generated sticker in my stickers |
+/// | `seed_emote` | `server`, `name` | a generated server emote on a server we own |
 const linkSeedOps = {
   'seed_server',
   'seed_join',
@@ -53,6 +58,8 @@ const linkSeedOps = {
   'seed_banner',
   'seed_layout',
   'seed_folder',
+  'seed_sticker',
+  'seed_emote',
 };
 
 class LinkSeedFailure implements Exception {
@@ -180,6 +187,41 @@ Future<String> linkSeedOp(String op, WidgetTester tester,
       if (folder == null) throw LinkSeedFailure('no folder holds ${names[0]}');
       strip.renameFolder(folder.id, name);
       return 'folded ${names.join(' and ')} into $name';
+    case 'seed_sticker':
+      // A generated picture saved to my stickers, as Upload in the sticker
+      // tab saves one (#159: a held sticker needs one to hold).
+      await tester.runAsync(() async {
+        final processed = await stickers_api.processAndStoreSticker(
+            rawBytes: Uint8List.fromList(
+                await _png('sticker-${step['seed'] ?? 'a'}', 320)));
+        await stickers_api.addPersonalSticker(
+          pack: '',
+          hash: processed.hash,
+          name: '',
+          animated: processed.animated,
+          w: processed.w,
+          h: processed.h,
+          source: 'upload',
+        );
+      });
+      container.invalidate(personalStickersProvider);
+      return 'saved a generated sticker';
+    case 'seed_emote':
+      // A server emote from a generated picture, as Server settings' Add
+      // emote adds one; the server must be ours.
+      final name = arg('name');
+      await tester.runAsync(() async {
+        final id = await _serverId(arg('server'), const Duration(seconds: 10));
+        final processed = await emotes_api.processAndStoreEmote(
+            rawBytes: Uint8List.fromList(await _png('emote-$name', 128)));
+        await emotes_api.addServerEmote(
+          serverId: id,
+          name: name,
+          hash: processed.hash,
+          animated: processed.animated,
+        );
+      });
+      return 'added :$name: to ${step['server']}';
     case 'seed_delete_server':
       final name = arg('name');
       await tester.runAsync(() async =>

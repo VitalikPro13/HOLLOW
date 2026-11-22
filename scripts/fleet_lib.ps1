@@ -233,8 +233,12 @@ $script:MacStampFiles = @(
     'Contents/Frameworks/App.framework/Resources/flutter_assets/kernel_blob.bin',
     'Contents/Frameworks/hollow_core.framework/hollow_core'
 )
-function Test-MacStageCurrent($built, $staged) {
-    foreach ($relative in $script:MacStampFiles) {
+$script:SimStampFiles = @(
+    'Frameworks/App.framework/flutter_assets/kernel_blob.bin',
+    'Frameworks/hollow_core.framework/hollow_core'
+)
+function Test-MacStageCurrent($built, $staged, $stampFiles = $script:MacStampFiles) {
+    foreach ($relative in $stampFiles) {
         $source = Join-Path $built $relative
         if (-not (Test-Path $source)) { continue }
         & cmp -s $source (Join-Path $staged $relative)

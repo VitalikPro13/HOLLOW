@@ -15,10 +15,10 @@ import 'package:hollow/src/ui/settings/settings_kit.dart';
 import 'package:hollow/src/ui/settings/settings_shared.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Hues of the preset swatches. Each theme moves a stop's lightness until it
-/// reads, so only the hue and saturation of a pick survive everywhere: these
-/// are the hues that still read as themselves at 4.5:1 on dark and on light
-/// (a warmer amber, since a yellow that dark turns olive on light).
+/// Hues of the preset swatches. A pick is drawn as picked wherever it clears
+/// [kChosenNameContrast]; where it does not (yellows on light, deep blues on
+/// dark) its lightness moves, so these are the hues that still read as
+/// themselves then (a warmer amber, since a darkened yellow turns olive).
 const List<double> kNameColorPresetHues = [
   0, 20, 40, 95, 150, 185, 210, 250, 280, 320,
 ];
@@ -197,8 +197,128 @@ class _NameColorEditorState extends ConsumerState<NameColorEditor> {
             );
           },
         ),
+        _ReadabilityNote(field: field),
         const SizedBox(height: HollowSpacing.md),
       ],
+    );
+  }
+}
+
+/// What the readability floor did to a pick's stops on the dark and light
+/// themes, as one line, or null when every stop is drawn as picked. [dark] and
+/// [light] are [chosenNameShifts] for those themes.
+String? nameColorShiftNote(List<int>? dark, List<int>? light) {
+  final moves = <_Move>[];
+  for (final (theme, shifts) in [('dark', dark), ('light', light)]) {
+    if (shifts == null) continue;
+    final moved = [
+      for (var i = 0; i < shifts.length; i++)
+        if (shifts[i] != 0) i,
+    ];
+    if (moved.isEmpty) continue;
+    final way = moved.every((i) => shifts[i] > 0)
+        ? 'ightened'
+        : moved.every((i) => shifts[i] < 0)
+            ? 'arkened'
+            : 'djusted';
+    // Every stop moved: the pick as a whole, no colour named.
+    moves.add(_Move(way, theme, moved.length == shifts.length ? null : moved));
+  }
+  if (moves.isEmpty) return null;
+  final one = moves.length == 1 ||
+      _sameStops(moves[0].stops, moves[1].stops);
+  final stops = moves.first.stops;
+  if (one && stops == null) {
+    return '${moves.first.how(capital: true)}'
+        '${moves.length > 1 ? ' and ${moves[1].how()}' : ''} '
+        'so it stays readable.';
+  }
+  if (one) {
+    return '${_colours(stops!, capital: true)} '
+        '${moves.map((m) => m.how()).join(' and ')} '
+        'so ${stops.length == 1 ? 'it stays' : 'they stay'} readable.';
+  }
+  return '${moves[0].clause(capital: true)} and ${moves[1].clause()} '
+      'so they stay readable.';
+}
+
+bool _sameStops(List<int>? a, List<int>? b) {
+  if (a == null || b == null) return a == b;
+  if (a.length != b.length) return false;
+  for (var i = 0; i < a.length; i++) {
+    if (a[i] != b[i]) return false;
+  }
+  return true;
+}
+
+String _colours(List<int> stops, {bool capital = false}) {
+  final n = [for (final i in stops) '${i + 1}'];
+  final word = capital ? 'Colour' : 'colour';
+  return n.length == 1
+      ? '$word ${n.first} is'
+      : '${word}s ${n.sublist(0, n.length - 1).join(', ')} and ${n.last} are';
+}
+
+/// One theme's move: [way] is the verb past its first letter, so a sentence
+/// can start with it without changing case at run time.
+class _Move {
+  final String way;
+  final String theme;
+
+  /// Which stops moved, or null for all of them.
+  final List<int>? stops;
+
+  const _Move(this.way, this.theme, this.stops);
+
+  String how({bool capital = false}) {
+    final first = switch (way) {
+      'ightened' => capital ? 'L' : 'l',
+      'arkened' => capital ? 'D' : 'd',
+      _ => capital ? 'A' : 'a',
+    };
+    return '$first$way on $theme';
+  }
+
+  String clause({bool capital = false}) => stops == null
+      ? '${capital ? 'Every' : 'every'} colour is ${how()}'
+      : '${_colours(stops!, capital: capital)} ${how()}';
+}
+
+/// The floor's note under the previews (#140), from the paint they draw.
+class _ReadabilityNote extends StatelessWidget {
+  final String field;
+
+  const _ReadabilityNote({required this.field});
+
+  @override
+  Widget build(BuildContext context) {
+    final note = nameColorShiftNote(
+      chosenNameShifts(HollowTheme.dark(), field),
+      chosenNameShifts(HollowTheme.light(), field),
+    );
+    if (note == null) return const SizedBox.shrink();
+    final hollow = HollowTheme.of(context);
+    return Padding(
+      padding: const EdgeInsets.only(top: HollowSpacing.sm),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            // Level with the first line's x-height.
+            padding: const EdgeInsets.only(top: HollowSpacing.xxs),
+            child: Icon(LucideIcons.triangleAlert,
+                size: 14, color: hollow.warning),
+          ),
+          const SizedBox(width: HollowSpacing.xs),
+          Expanded(
+            child: Text(
+              note,
+              style: HollowTypography.bodySmall
+                  .copyWith(color: hollow.textSecondary),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

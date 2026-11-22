@@ -55,6 +55,9 @@ bool guestSweepTakes({
     isImage &&
     sweepTakes(limitMb: limitMb, sizeBytes: sizeBytes, voiceNote: false);
 
+/// The rail's key for the "Load more" row above the oldest message.
+const _loadMoreRow = #loadMore;
+
 class GuestChatPane extends ConsumerStatefulWidget {
   final String serverId;
   final String channelId;
@@ -72,6 +75,7 @@ class GuestChatPane extends ConsumerStatefulWidget {
 class _GuestChatPaneState extends ConsumerState<GuestChatPane> {
   final _itemScrollController = ItemScrollController();
   final _itemPositionsListener = ItemPositionsListener.create();
+  final _scrollOffsetController = ScrollOffsetController();
   bool _showSearch = false;
   String _searchQuery = '';
   final _searchController = TextEditingController();
@@ -419,6 +423,13 @@ class _GuestChatPaneState extends ConsumerState<GuestChatPane> {
                         itemCount: filtered.length + (hasMore ? 1 : 0),
                         controller: _itemScrollController,
                         positions: _itemPositionsListener,
+                        scrollOffsetController: _scrollOffsetController,
+                        // By message id: every arrival shifts the indexes.
+                        rowKeyAt: (revIndex) => revIndex < filtered.length
+                            ? filtered[filtered.length - 1 - revIndex]
+                                    .messageId ??
+                                revIndex
+                            : _loadMoreRow,
                       ),
                       list: ChatTextScale(
                             // Issue #35: off 100% the SelectionArea moves to
@@ -433,6 +444,8 @@ class _GuestChatPaneState extends ConsumerState<GuestChatPane> {
                                       'guest-list-${widget.serverId}-${widget.channelId}'),
                                   itemScrollController: _itemScrollController,
                                   itemPositionsListener: _itemPositionsListener,
+                                  scrollOffsetController:
+                                      _scrollOffsetController,
                                   // reverse:true, so the newest message is
                                   // builder index 0 pinned to the bottom edge
                                   // and "Load more" is the LAST reversed index.

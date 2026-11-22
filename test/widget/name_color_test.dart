@@ -27,6 +27,7 @@ import 'package:hollow/src/ui/components/hollow_list_row.dart';
 import 'package:hollow/src/ui/components/name_text.dart';
 import 'package:hollow/src/ui/settings/name_color_editor.dart';
 
+import 'package:lucide_icons_flutter/lucide_icons.dart';
 import '../helpers/test_app.dart';
 import '../helpers/test_data.dart';
 
@@ -335,5 +336,100 @@ void main() {
     draft.setNameColor('');
     await draft.save();
     expect(profiles.sentNameColors.last, '', reason: 'an explicit clear');
+  });
+
+  // #140, Vitalik Nov 22: the editor says when, and which way, the floor moves
+  // a pick, read off the same paint the previews draw.
+  group('the readability note', () {
+    Future<ProviderContainer> pumpEditor(WidgetTester tester, String saved) async {
+      tester.view.physicalSize = const Size(900, 1200);
+      tester.view.devicePixelRatio = 1.0;
+      addTearDown(tester.view.reset);
+      final c = _container(_Profiles({kLocalPeerId: saved}));
+      await tester.pumpWidget(UncontrolledProviderScope(
+        container: c,
+        child: MaterialApp(
+          theme: HollowThemeData.dark(),
+          home: const Scaffold(
+            body: SingleChildScrollView(
+                child: NameColorEditor(peerId: kLocalPeerId)),
+          ),
+        ),
+      ));
+      await tester.pump();
+      return c;
+    }
+
+    final note = find.textContaining('readable');
+    const indigo = Color(0xff4b0082); // design-ignore: a pick below the floor on dark
+    const nearBlack = Color(0xff141414); // design-ignore: a pick below the floor on dark
+    const yellow = Color(0xffffff00); // design-ignore: a pick below the floor on light
+    const reporterRed = Color(0xffc92222); // design-ignore: the reporter's pick
+
+    testWidgets('a pick drawn as picked says nothing', (tester) async {
+      for (final pick in [nameColorFromHue(0), reporterRed]) {
+        await pumpEditor(tester, nameColorField([pick]));
+        expect(note, findsNothing, reason: '$pick');
+      }
+    });
+
+    testWidgets('a pick lightened on dark says so', (tester) async {
+      for (final pick in [indigo, nearBlack]) {
+        await pumpEditor(tester, nameColorField([pick]));
+        expect(find.text('Lightened on dark so it stays readable.'),
+            findsOneWidget, reason: '$pick');
+        expect(find.byIcon(LucideIcons.triangleAlert), findsOneWidget);
+      }
+    });
+
+    testWidgets('a pick darkened on light says so', (tester) async {
+      await pumpEditor(tester, nameColorField([yellow]));
+      expect(find.text('Darkened on light so it stays readable.'),
+          findsOneWidget);
+    });
+
+    testWidgets('a gradient names the one colour that moved', (tester) async {
+      await pumpEditor(tester, nameColorField([nameColorFromHue(0), indigo]));
+      expect(find.text('Colour 2 is lightened on dark so it stays readable.'),
+          findsOneWidget);
+    });
+
+    test('the note names the theme, the way and the colours', () {
+      expect(nameColorShiftNote([0], [0]), isNull);
+      expect(nameColorShiftNote(null, null), isNull);
+      expect(nameColorShiftNote([1], [-1]),
+          'Lightened on dark and darkened on light so it stays readable.');
+      expect(nameColorShiftNote([0, 1, 1], [0, 0, 0]),
+          'Colours 2 and 3 are lightened on dark so they stay readable.');
+      expect(nameColorShiftNote([0, 1], [0, -1]),
+          'Colour 2 is lightened on dark and darkened on light so it stays '
+          'readable.');
+      expect(nameColorShiftNote([1, 0], [0, -1]),
+          'Colour 1 is lightened on dark and colour 2 is darkened on light so '
+          'they stay readable.');
+      expect(nameColorShiftNote([1, 1], [0, -1]),
+          'Every colour is lightened on dark and colour 2 is darkened on '
+          'light so they stay readable.');
+      for (final note in [
+        nameColorShiftNote([1], [-1])!,
+        nameColorShiftNote([1, 0], [0, -1])!,
+      ]) {
+        expect(note.contains('\u2014'), isFalse, reason: 'no em dash');
+      }
+    });
+
+    testWidgets('the note follows the pick as it changes', (tester) async {
+      final c = await pumpEditor(tester, nameColorField([nameColorFromHue(0)]));
+      expect(note, findsNothing);
+      c.read(profileDraftProvider.notifier).setNameColor(nameColorField([yellow]));
+      await tester.pump();
+      expect(find.text('Darkened on light so it stays readable.'),
+          findsOneWidget);
+      c
+          .read(profileDraftProvider.notifier)
+          .setNameColor(nameColorField([nameColorFromHue(0)]));
+      await tester.pump();
+      expect(note, findsNothing);
+    });
   });
 }
