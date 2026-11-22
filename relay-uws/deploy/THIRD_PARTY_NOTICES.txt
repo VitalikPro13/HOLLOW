@@ -8,6 +8,7 @@ installs, under their own licenses.
   1. libsodium (ISC License, with parts under BSD-2-clause, CC0 and public domain)
   2. uWebSockets and uSockets (Apache License 2.0)
   3. JSON for Modern C++ (MIT License)
+  4. any_invocable, in uWebSockets' MoveOnlyFunction.h (MIT License)
 
 ==============================================================================
 1. libsodium
@@ -163,6 +164,10 @@ License: CC0
    https://github.com/uNetworking/uSockets
    Authored by Alex Hultman, 2018-2020. Intellectual property of third-party.
    Licensed under the Apache License, Version 2.0, whose text follows.
+   Its UTF-8 check (WebSocketProtocol.h) is based on utf8_check.c by Markus Kuhn,
+   2005 (https://www.cl.cam.ac.uk/~mgk25/ucs/utf8_check.c), which its author
+   offers under any of several licenses, the Apache License 2.0 among them
+   (https://www.cl.cam.ac.uk/~mgk25/short-license.html).
 
                                  Apache License
                            Version 2.0, January 2004
@@ -377,6 +382,36 @@ License: CC0
    MIT License, whose text follows. The Hedley macros it holds are under CC0 1.0.
 
 MIT License
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+==============================================================================
+4. any_invocable (uWebSockets/src/MoveOnlyFunction.h)
+   https://github.com/ofats/any_invocable
+   Built in where the compiler has no std::move_only_function (the release
+   build's g++ 11).
+   Copyright (c) 2020 Oleg Fatkhiev
+   MIT License, whose text follows.
+
+MIT License
+
+Copyright (c) 2020 Oleg Fatkhiev
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

@@ -137,7 +137,7 @@ stock_box() {
         if [ -z "$tb" ]; then
             echo "FAIL  $BOX_OFFICIAL has no release build for this box's machine"; total_fail=1
         else
-            docker exec -i "$name" sh -c 'mkdir -p /root/official && tar -C /root/official -xzf - hollow-relay hollow-forwarder' <"$tb"
+            docker exec -i "$name" sh -c 'mkdir -p /root/official && tar -C /root/official -xzf -' <"$tb"
         fi
     fi
     docker exec -e HOLLOW_INSTALLER_TEST_BOX=1 -e FRESH_ONLY="${FRESH_ONLY:-}" "$name" bash /src/relay-uws/test/installer/fresh_box_test.sh || total_fail=1

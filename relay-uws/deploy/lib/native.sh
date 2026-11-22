@@ -13,6 +13,11 @@ INSTALLER_COPY=$LIB_DIR/installer
 VERSION_FILE=$LIB_DIR/VERSION
 BUILT_FROM_FILE=$LIB_DIR/BUILT_FROM
 PREVIOUS_DIR=$LIB_DIR/previous
+# The third-party notices a release carries in its setup copy, installed beside
+# the programs from the verified download (scripts/build_relay_binaries.sh
+# NOTICES, FWD_NOTICES): a first install keeps the copy of the setup it runs
+# from, which may predate them.
+RELEASE_NOTICES="THIRD_PARTY_NOTICES.txt THIRD_PARTY_NOTICES_FORWARDER.txt"
 STATE_DIR=/var/lib/hollow-installer
 BUILD_DIR=/var/cache/hollow-build
 BUILD_SWAP=$STATE_DIR/build.swap
@@ -89,8 +94,12 @@ install_programs() {
     if [ "$DRY_RUN" = 0 ] && [ -x /usr/local/bin/hollow-relay ] && ! update_kept programs; then
         install -d -m 0755 "$PREVIOUS_DIR"
         rm -f -- "$PREVIOUS_DIR/hollow-relay" "$PREVIOUS_DIR/hollow-forwarder" "$PREVIOUS_DIR/VERSION" "$PREVIOUS_DIR/BUILT_FROM"
+        for f in $RELEASE_NOTICES; do rm -f -- "${PREVIOUS_DIR:?}/$f"; done
         for f in /usr/local/bin/hollow-relay /usr/local/bin/hollow-forwarder "$VERSION_FILE" "$BUILT_FROM_FILE"; do
             [ -e "$f" ] && cp -p "$f" "$PREVIOUS_DIR/"
+        done
+        for f in $RELEASE_NOTICES; do
+            [ -f "$LIB_DIR/$f" ] && cp -p "$LIB_DIR/$f" "$PREVIOUS_DIR/"
         done
         if update_pending; then update_mark_add programs; fi
     fi
@@ -102,6 +111,14 @@ install_programs() {
         fi
         install -m 0755 -o root -g root "$dir/$f" "/usr/local/bin/$f.new"
         mv -f "/usr/local/bin/$f.new" "/usr/local/bin/$f"
+    done
+    # The notices of the programs from a release, never of programs built here.
+    for f in $RELEASE_NOTICES; do
+        if [ "$2" != source ] && [ -f "$dir/setup/deploy/$f" ]; then
+            put_file "$LIB_DIR/$f" 0644 root root <"$dir/setup/deploy/$f"
+        elif [ "$DRY_RUN" = 0 ]; then
+            rm -f -- "${LIB_DIR:?}/$f"
+        fi
     done
     put_file "$VERSION_FILE" 0644 root root <"$dir/VERSION"
     # An if, not &&: under set -e a false test at the end fails the pipe.
@@ -122,6 +139,9 @@ restore_previous_programs() {
     done
     [ -f "$PREVIOUS_DIR/VERSION" ] && cp -p "$PREVIOUS_DIR/VERSION" "$VERSION_FILE"
     [ -f "$PREVIOUS_DIR/BUILT_FROM" ] && cp -p "$PREVIOUS_DIR/BUILT_FROM" "$BUILT_FROM_FILE"
+    for f in $RELEASE_NOTICES; do
+        if [ -f "$PREVIOUS_DIR/$f" ]; then cp -p "$PREVIOUS_DIR/$f" "$LIB_DIR/$f"; else rm -f -- "${LIB_DIR:?}/$f"; fi
+    done
     return 0
 }
 

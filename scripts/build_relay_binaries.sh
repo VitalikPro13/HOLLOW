@@ -8,7 +8,10 @@
 #   bash scripts/build_relay_binaries.sh --stage-setup <repo> <dir> | --pack <dir> <out.tar.gz>
 #                                                        (the two packing steps alone, for tests)
 #   bash scripts/build_relay_binaries.sh --check-needed <native.sh> [--list NAME] <soname...> | --check-notices <dir>
-#                                        | --check-sodium <libsodium-dev version>
+#                                        | --check-covers <notices> <cargo tree output>
+#                                        | --check-sodium <libsodium-dev version> | --check-sodium-archive <deb arch...>
+#                                        | --check-sodium-owner <libsodium.a> <deb arch>
+#                                        | --forwarder-notices <out> <rust/hollow_core>
 #                                                        (the build's library, notices and libsodium checks alone, for tests)
 #
 # Builds hollow-relay (relay-uws, C++, libsodium linked in) and hollow-forwarder
@@ -28,7 +31,10 @@
 # (never the working tree), VERSION and relay.json name the commit, and
 # SOURCE_DATE_EPOCH defaults to its commit time. Cargo downloads and build
 # trees live only in the container, so no cache carries from one release into
-# the next; `--clean` removes the builder image.
+# the next. The builder image is kept between builds; `--clean` builds it again
+# from nothing (no layer cache), so its apt layer takes the archive as it is
+# today. The build refuses an image whose libsodium-dev is older than the one
+# the archive offers, and says to use `--clean`.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -96,25 +102,161 @@ needed_known() {
   done
 }
 
-# <stage>: the release carries the license notices of what is linked into its
-# programs (libsodium, uWebSockets, uSockets, JSON for Modern C++), as a file
-# of the setup's copy: the tarball's root holds only the programs and VERSION.
+# <stage>: the release carries the license notices of what is built into its
+# programs, as files of the setup's copy (the tarball's root holds only the
+# programs and VERSION): the relay's (libsodium, uWebSockets, uSockets and
+# what they bundle, JSON for Modern C++) from the tree, and the forwarder's
+# (every crate, and the C libraries three of them bundle), written by this
+# build from the locked tree. The setup installs both beside the programs
+# (native.sh RELEASE_NOTICES).
 NOTICES=setup/deploy/THIRD_PARTY_NOTICES.txt
+FWD_NOTICES=setup/deploy/THIRD_PARTY_NOTICES_FORWARDER.txt
+# release_feed.sh _HF_SETUP_MAX_FILE: a bigger setup file strands every box.
+NOTICES_MAX=1048576
 notices_ok() {
-  local f=$1/$NOTICES part
-  [ -f "$f" ] || { echo "$f is missing" >&2; return 1; }
-  for part in "libsodium" "License: ISC" "Colin Percival" "uWebSockets" "uSockets" "Apache License" "JSON for Modern C++"; do
+  local f part
+  for f in "$1/$NOTICES" "$1/$FWD_NOTICES"; do
+    [ -f "$f" ] || { echo "$f is missing" >&2; return 1; }
+    [ "$(wc -c <"$f")" -le "$NOTICES_MAX" ] || { echo "$f is over $NOTICES_MAX bytes, more than a setup file may hold" >&2; return 1; }
+  done
+  f=$1/$NOTICES
+  for part in "libsodium" "License: ISC" "Colin Percival" "uWebSockets" "uSockets" "Apache License" "Fatkhiev" "Markus Kuhn" "JSON for Modern C++"; do
+    grep -qF -- "$part" "$f" || { echo "$f does not name $part" >&2; return 1; }
+  done
+  f=$1/$FWD_NOTICES
+  for part in "Mozilla Public License" "https://crates.io/crates/" "SQLCipher" "ZETETIC LLC" "AWS-LC" "Eric Young" "BoringSSL" "from the crate ring "; do
     grep -qF -- "$part" "$f" || { echo "$f does not name $part" >&2; return 1; }
   done
 }
 
-# Ubuntu 22.04's libsodium with the crypto_core_ed25519_is_valid_point fix (CVE-2025-69277).
+# <notices> <cargo tree --prefix none output>: every crate the forwarder is
+# built from, but the forwarder's own, is named under a license.
+notices_cover() {
+  local want have missing
+  want="$(sed -e 's/ (.*)$//' -e '/^hollow_core v/d' -e '/^$/d' "$2" | LC_ALL=C sort -u)"
+  have="$(awk '/^Used by:$/ { f = 1; next } /^---TEXT---$/ { f = 0 } f && NF >= 2 { print $1 " v" $2 }' "$1" | LC_ALL=C sort -u)"
+  [ -n "$want" ] || { echo "no crates in $2" >&2; return 1; }
+  missing="$(LC_ALL=C comm -23 <(printf '%s\n' "$want") <(printf '%s\n' "$have"))"
+  [ -z "$missing" ] || { echo "the forwarder's notices name no license for: $(tr '\n' ' ' <<<"$missing")" >&2; return 1; }
+}
+
+# <Cargo.lock> <crate>: its one locked version.
+lock_version() {
+  local v
+  v="$(awk -v n="$2" '$0 == "name = \"" n "\"" { getline; if ($1 == "version") { gsub(/"/, "", $3); print $3 } }' "$1")"
+  [ -n "$v" ] && [ "$(printf '%s\n' "$v" | wc -l)" -eq 1 ] || { echo "Cargo.lock does not lock exactly one $2" >&2; return 1; }
+  printf '%s\n' "$v"
+}
+
+# Ubuntu 22.04's libsodium with the crypto_core_ed25519_is_valid_point fix
+# (CVE-2025-69277): the hard minimum, whatever the archive says.
 SODIUM_FLOOR=1.0.18-1ubuntu0.22.04.1
 # <version>: a libsodium-dev the relay may link in.
 sodium_ok() { [ -n "$1" ] && dpkg --compare-versions "$1" ge "$SODIUM_FLOOR"; }
 
+# <deb arch> <installed version> <apt-cache policy output>: the candidate
+# comes from the archive and the installed libsodium-dev is not older than it,
+# nor than the floor. Without fresh package lists apt names the
+# installed version itself as the candidate (from /var/lib/dpkg/status only),
+# which would pass any image, so that case is refused too.
+sodium_judge() {
+  local a=$1 installed=$2 policy=$3 cand
+  cand="$(printf '%s\n' "$policy" | sed -n 's/^  Candidate: //p' | head -n 1)"
+  if [ -z "$cand" ] || [ "$cand" = "(none)" ] || ! printf '%s\n' "$policy" | awk -v c="$cand" '
+      /^ \*\*\* / || /^     [^ ]/ { v = $(NF - 1); next }
+      /^      +-?[0-9]+ [^ ]/ { if (v == c && $2 != "/var/lib/dpkg/status") ok = 1 }
+      END { exit !ok }'; then
+    echo "ERROR: apt offers no libsodium-dev:$a from the Ubuntu archive (its package lists could not be read), so the libsodium linked in cannot be checked against the newest one. Check this machine's network and build again." >&2
+    return 1
+  fi
+  if [ -z "$installed" ] || ! dpkg --compare-versions "$installed" ge "$cand"; then
+    echo "ERROR: the builder image has libsodium-dev:$a ${installed:-(none)}, older than $cand in the Ubuntu archive. Build again with --clean, which builds the image from nothing." >&2
+    return 1
+  fi
+  sodium_ok "$installed" ||
+    { echo "ERROR: the builder image has libsodium-dev:$a $installed, older than $SODIUM_FLOOR. Build again with --clean once the archive has the fix." >&2; return 1; }
+}
+
+# <deb arch...>: after a fresh apt-get update, each machine's libsodium-dev is
+# the newest the archive offers. A list that fails to download fails the update
+# (Error-Mode=any), never leaving the old lists to judge by.
+sodium_current() {
+  local a out
+  out="$(LC_ALL=C apt-get -o APT::Update::Error-Mode=any -o Acquire::Retries=3 -qq update 2>&1)" ||
+    { printf 'ERROR: apt-get update failed, so the libsodium linked in cannot be checked against the newest one. Check this machine'"'"'s network and build again:\n%s\n' "$out" >&2; return 1; }
+  for a in "$@"; do
+    sodium_judge "$a" "$(dpkg-query -W -f='${Version}' "libsodium-dev:$a" 2>/dev/null || true)" \
+      "$(LC_ALL=C apt-cache policy "libsodium-dev:$a" 2>/dev/null || true)" || return 1
+  done
+}
+
+# <libsodium.a> <deb arch>: the archive CMake linked is libsodium-dev's for
+# that machine, so the version judged above is the one linked in.
+sodium_archive_owned() {
+  local path owner
+  path="$(readlink -f -- "$1")" && [ -f "$path" ] || { echo "ERROR: no libsodium archive at ${1:-(none)}" >&2; return 1; }
+  owner="$(LC_ALL=C dpkg -S "$path" 2>/dev/null || true)"
+  [ "$owner" = "libsodium-dev:$2: $path" ] && return 0
+  owner=${owner%": $path"}
+  echo "ERROR: the relay links $path, which belongs to ${owner:-no package}, not libsodium-dev:$2" >&2
+  return 1
+}
+
+# The forwarder's notices for both machines, from the locked tree: cargo-about
+# (pinned in the Dockerfile) with --frozen reads only the crates as packaged,
+# never the network, then the license files of the C libraries three crates
+# bundle, from their locked sources. A crate the tree has and the notices miss
+# stops the build.
+# <out> <rust/hollow_core>
+forwarder_notices() {
+  local out=$1 core=$2 lock=$2/Cargo.lock t v dir f files name title spec
+  rm -f "$out" "$out.part"
+  cargo fetch --locked --quiet --manifest-path "$core/Cargo.toml"
+  (cd "$core" && cargo about generate --frozen --features forwarder -c about_forwarder.toml \
+    --target x86_64-unknown-linux-gnu --target aarch64-unknown-linux-gnu -o "$out.crates" about_forwarder.hbs) ||
+    { echo "ERROR: cargo about could not write the forwarder's notices" >&2; return 1; }
+  : >"$out.tree"
+  for t in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
+    cargo tree --frozen --quiet -e normal,build --features forwarder --target "$t" --prefix none --format '{p}' \
+      --manifest-path "$core/Cargo.toml" >>"$out.tree"
+  done
+  notices_cover "$out.crates" "$out.tree" || return 1
+  {
+    cat "$out.crates"
+    printf '%s\n' "==============================================================================" \
+      "C libraries built in" "" \
+      "Three of the crates above build C code into the program. Their license files" \
+      "follow as those crates ship them: SQLCipher (sqlcipher-src, with the LibTomCrypt" \
+      "license it also ships; SQLite itself is in the public domain), AWS-LC with the" \
+      "OpenSSL and SSLeay licenses of the code it derives from (aws-lc-sys), and" \
+      "ring's BoringSSL-derived code (ring)." ""
+    for spec in "sqlcipher-src:SQLCipher:sqlcipher/LICENSE-sqlcipher sqlcipher/LICENSE-libtomcrypt" \
+      "aws-lc-sys:AWS-LC:aws-lc/LICENSE" "ring:ring:LICENSE LICENSE-BoringSSL LICENSE-other-bits"; do
+      IFS=: read -r name title files <<<"$spec"
+      v=$(lock_version "$lock" "$name") || return 1
+      dir=$(ls -d "${CARGO_HOME:-/opt/cargo}"/registry/src/*/"$name-$v" 2>/dev/null) && [ "$(printf '%s\n' "$dir" | wc -l)" -eq 1 ] ||
+        { echo "ERROR: no one locked source of $name $v" >&2; return 1; }
+      printf '%s\n' "------------------------------------------------------------------------------" \
+        "$title, from the crate $name $v (https://crates.io/crates/$name/$v)" ""
+      for f in $files; do
+        [ -f "$dir/$f" ] || { echo "ERROR: $name $v has no $f" >&2; return 1; }
+        printf '%s\n' "--- $f" ""
+        cat "$dir/$f"
+        printf '\n'
+      done
+    done
+  } >"$out.part" || return 1
+  mv -f "$out.part" "$out"
+  rm -f "$out.crates" "$out.tree"
+}
+
 case "${1:-}" in
   --check-sodium) sodium_ok "${2:-}"; exit $? ;;
+  --check-sodium-archive) shift; sodium_current "$@"; exit $? ;;
+  --check-sodium-owner) sodium_archive_owned "${2:-}" "${3:-}"; exit $? ;;
+  --check-covers) notices_cover "${2:?notices}" "${3:?tree}"; exit $? ;;
+  --forwarder-notices)
+    forwarder_notices "$(cd "$(dirname "${2:?out}")" && pwd)/$(basename "$2")" "$(cd "${3:?rust/hollow_core}" && pwd)"; exit $? ;;
   --check-notices) notices_ok "${2:?stage dir}"; exit $? ;;
   --stage-setup) stage_setup "${2:?repo}" "${3:?dir}"; exit $? ;;
   --check-needed) shift; needed_known "$@"; exit $? ;;
@@ -156,12 +298,15 @@ VERSION="$(sed -nE 's/^#define HOLLOW_RELAY_VERSION "([0-9]+\.[0-9]+\.[0-9]+)"$/
 [ -n "$VERSION" ] || { echo "HOLLOW_RELAY_VERSION not found in relay-uws/src/version.h" >&2; exit 1; }
 if [ "$build" -gt 0 ]; then TAG="$VERSION-b$build"; else TAG="$VERSION"; fi
 
+docker_build_fresh=()
 if [ "$clean" = 1 ]; then
   docker image rm -f "$IMAGE" >/dev/null 2>&1 || true
   # Volumes earlier versions of this script kept between runs.
   docker volume rm -f hollow-relay-cargo hollow-relay-cargo-git hollow-relay-work >/dev/null 2>&1 || true
-  echo "removed $IMAGE"
-  exit 0
+  echo "removed $IMAGE; it is built again from nothing"
+  # Removing the image alone keeps BuildKit's cached apt layer, so the same
+  # libsodium-dev would come back.
+  docker_build_fresh=(--no-cache --pull)
 fi
 
 # ---------------------------------------------------------------------------
@@ -187,6 +332,8 @@ build_one() {
       ;;
   esac
 
+  local deb_arch=amd64 sodium_version sodium_archive
+  [ "$a" = aarch64 ] && deb_arch=arm64
   echo "==> [$a] hollow-relay"
   rm -rf "$relay_dir"
   # libsodium linked in, so the relay starts on systems with another libsodium
@@ -194,14 +341,14 @@ build_one() {
   # links it as a shared library.
   cmake -S /src/relay-uws -B "$relay_dir" -DCMAKE_BUILD_TYPE=Release -DHOLLOW_STATIC_SODIUM=ON "${cmake_cross[@]}" >/dev/null
   cmake --build "$relay_dir" -j"${jobs:-$(nproc)}" >/dev/null
-  # The archive's fixes reach a self-hoster only through a release, so a builder
-  # image older than the last libsodium security update is refused.
-  local deb_arch=amd64 sodium_version
-  [ "$a" = aarch64 ] && deb_arch=arm64
+  # The archive's fixes reach a self-hoster only through a release: the
+  # libsodium-dev judged newest at the start must be the one linked in.
+  sodium_archive=$(sed -n 's/^HOLLOW_SODIUM_ARCHIVE:FILEPATH=//p' "$relay_dir/CMakeCache.txt")
+  sodium_archive_owned "$sodium_archive" "$deb_arch" || exit 1
   sodium_version=$(dpkg-query -W -f='${Version}' "libsodium-dev:$deb_arch")
   sodium_ok "$sodium_version" ||
-    { echo "ERROR: the builder image has libsodium-dev $sodium_version ($a), older than $SODIUM_FLOOR. Run with --clean once, then build again." >&2; exit 1; }
-  echo "    libsodium linked in: $(sed -n 's/^HOLLOW_SODIUM_ARCHIVE:FILEPATH=//p' "$relay_dir/CMakeCache.txt"), libsodium-dev $sodium_version"
+    { echo "ERROR: the builder image has libsodium-dev $sodium_version ($a), older than $SODIUM_FLOOR. Build again with --clean." >&2; exit 1; }
+  echo "    libsodium linked in: $sodium_archive, libsodium-dev:$deb_arch $sodium_version"
 
   echo "==> [$a] hollow-forwarder"
   CARGO_TARGET_DIR=/work/cargo-target CARGO_PROFILE_RELEASE_DEBUG=0 CARGO_PROFILE_RELEASE_STRIP=symbols \
@@ -216,7 +363,8 @@ build_one() {
   printf 'version=%s\nbuild=%s\ncommit=%s\n' "$VERSION" "$build" "$RELAY_COMMIT" > "$stage/VERSION"
   chmod 0644 "$stage/VERSION"
   stage_setup /src "$stage/setup"
-  notices_ok "$stage" || { echo "ERROR: the setup copy ($a) lacks the notices of what the programs link in" >&2; exit 1; }
+  install -m 0644 /work/forwarder-notices.txt "$stage/$FWD_NOTICES"
+  notices_ok "$stage" || { echo "ERROR: the setup copy ($a) lacks the notices of what the programs build in" >&2; exit 1; }
 
   # Built on 22.04, so nothing should need a newer glibc; this catches a base
   # image change before a self-hoster's box does.
@@ -249,6 +397,14 @@ if [ "$inside" = 1 ]; then
   mkdir -p /work
   # A tarball from an earlier run must never end up in this run's feed.
   rm -f /out/hollow-relay-*.tar.gz /out/hollow-relay-*.part /out/relay.json
+  # Before anything is built: the libsodium each relay links in is the newest
+  # the archive offers.
+  debs=""
+  for a in $arches; do case "$a" in x86_64) debs="$debs amd64" ;; aarch64) debs="$debs arm64" ;; esac; done
+  # shellcheck disable=SC2086 # one word per machine
+  sodium_current $debs || exit 1
+  echo "==> the forwarder's notices"
+  forwarder_notices /work/forwarder-notices.txt /src/rust/hollow_core || exit 1
   for a in $arches; do build_one "$a"; done
   echo "==> relay.json"
   CARGO_TARGET_DIR=/work/manifest-target cargo build --release --locked --quiet \
@@ -300,7 +456,7 @@ while read -r _ path _; do
   git -C "$ROOT_DIR/$path" archive --format=tar --prefix="$path/" HEAD | tar -x -C "$src"
 done < <(printf '%s\n' "$submods" | grep -E '^ ')
 echo "==> Hollow relay $TAG, commit $COMMIT, machines: $arches"
-docker build -q -t "$IMAGE" --build-arg RUST_VERSION="$RUST_VERSION" \
+docker build -q -t "$IMAGE" ${docker_build_fresh[@]+"${docker_build_fresh[@]}"} --build-arg RUST_VERSION="$RUST_VERSION" \
   -f "$SCRIPT_DIR/relay_binaries.Dockerfile" "$SCRIPT_DIR" >/dev/null
 docker run --rm \
   -v "$src:/src:ro" -v "$out:/out" \

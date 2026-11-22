@@ -1,0 +1,29 @@
+# The ready-made media forwarder's notices (setup/deploy/THIRD_PARTY_NOTICES_FORWARDER.txt
+# in the relay release), written by scripts/build_relay_binaries.sh inside the
+# builder image with the cargo-about it pins:
+#   cargo about generate --frozen --features forwarder -c about_forwarder.toml \
+#     --target x86_64-unknown-linux-gnu --target aarch64-unknown-linux-gnu about_forwarder.hbs
+# Build dependencies stay in: sqlcipher-src carries the SQLCipher C code that is
+# compiled in. The build fails on any crate of the tree this leaves out.
+
+accepted = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "BSL-1.0",
+    "CC0-1.0",
+    "OpenSSL",
+    "MPL-2.0",
+    "BlueOak-1.0.0",
+    "CDLA-Permissive-2.0",
+    "MIT-0",
+    "WTFPL",
+    "blessing",
+]
+ignore-dev-dependencies = true
