@@ -73,7 +73,8 @@ public class AudioSwitchManager {
             RELEASE_GRACE_MS,
             this::releaseIfIdle);
 
-    // Main thread, once the holders stayed empty for the whole grace.
+    // Main thread, once the holders stayed empty for the whole grace. The service
+    // stops even if call audio never activated: an app hold starts it alone.
     private void releaseIfIdle() {
         // A start remembered while Telecom owned the audio is over too: a later fallback must
         // not activate call audio for nobody.
@@ -81,8 +82,8 @@ public class AudioSwitchManager {
         if (isActive && audioSwitch != null) {
             audioSwitch.deactivate();
             isActive = false;
-            CallForegroundService.stop(context);
         }
+        CallForegroundService.stop(context);
     }
 
     /**

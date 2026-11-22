@@ -92,6 +92,17 @@ public class CallAudioWiringTest {
     }
 
     @Test
+    public void anIdleReleaseStopsTheServiceEvenWhenCallAudioNeverActivated() throws IOException {
+        // A placed call that rang out held only its app key: the service started,
+        // AudioSwitch never activated, and the service must still end.
+        String release = body("audio/AudioSwitchManager.java", "private void releaseIfIdle()");
+        assertTrue(release.contains("CallForegroundService.stop(context)"));
+        int guard = release.indexOf("if (isActive");
+        String activeOnly = release.substring(guard, release.indexOf('}', guard) + 1);
+        assertFalse(activeOnly.contains("CallForegroundService.stop"));
+    }
+
+    @Test
     public void everyHoldRetriesTheForegroundService() throws IOException {
         String start = body("audio/AudioSwitchManager.java", "public void start()");
         assertTrue(start.contains("CallForegroundService.start(context)"));
