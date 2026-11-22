@@ -103,7 +103,10 @@ Media forwarder: $( [ "$CFG_FORWARDER" = yes ] && docker_state forwarder || echo
 DuckDNS updates: $(docker_state duckdns)"
     else
         local how="ready-made"
-        [ "$(installed_source)" = source ] && how="built from source"
+        case "$(installed_source)" in
+        source) how="built from source" ;;
+        mixed) how="built here from source, beside the ready-made forwarder" ;;
+        esac
         t="$t
 Setup: full setup under systemd
 Relay: $(svc_state hollow-relay)${relay_v:+, version $relay_v} ($how, build $(installed_build)$(c=$(kv_get "$VERSION_FILE" commit); [ -n "$c" ] && printf ', commit %s' "${c:0:8}"))
@@ -397,9 +400,15 @@ We recommend no unless you know why you want the older one. $SNAPSHOT_LOSS" no |
         return 0
     fi
     local from_release="" was=$CFG_BINARIES
-    [ "$(installed_source)" = source ] || from_release="
+    case "$(installed_source)" in
+    source) ;;
+    mixed) from_release="
 
-The relay here now runs the programs of a signed release. After the rebuild it runs the ones built here, and the menu no longer offers signed updates. To update it later, pull this copy and rebuild."
+The forwarder here now comes from a signed release. After the rebuild both programs are built here, and the menu no longer offers signed updates. To update it later, pull this copy and rebuild." ;;
+    *) from_release="
+
+The relay here now runs the programs of a signed release. After the rebuild it runs the ones built here, and the menu no longer offers signed updates. To update it later, pull this copy and rebuild." ;;
+    esac
     ui_yesno confirm "Rebuild the relay" \
 "I will build $SOURCE_LABEL from this copy of the repository, install it and restart the relay$( [ "$CFG_FORWARDER" = yes ] && echo " and the forwarder. Building the forwarder takes up to an hour or two on a small machine"). The relay keeps running during the build.
 

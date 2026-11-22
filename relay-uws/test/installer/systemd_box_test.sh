@@ -51,7 +51,8 @@ has "the installed install.sh can run" "$(stat -c %a "$INSTALLER_COPY/install.sh
 yes_ "sudo hollow-relay-setup is a command" hollow-relay-setup --help
 
 echo "ssh ports"
-if [ "$ID" = ubuntu ]; then
+# Ubuntu starts sshd from ssh.socket since 22.10; 22.04 runs ssh.service.
+if [ "$ID" = ubuntu ] && [ "${VERSION_ID%%.*}" -ge 23 ]; then
     SSH_TEST_PORT=2222
     systemctl disable --now ssh.service >/dev/null 2>&1
     mkdir -p /etc/systemd/system/ssh.socket.d
@@ -412,7 +413,11 @@ printf '# Allow any user to check for new system updates without\n# requiring us
 printf '# Allow any user to remove the live media from the APT sources.\n\nALL ALL = NOPASSWD:/usr/bin/mintdrivers-remove-live-media\nALL ALL = NOPASSWD:/usr/bin/mintdrivers-load-broadcom-modules\n' >/etc/sudoers.d/mintdrivers
 printf 'Defaults pwfeedback\n' >/etc/sudoers.d/0pwfeedback
 chmod 0440 /etc/sudoers.d/mintupdate /etc/sudoers.d/mintdrivers /etc/sudoers.d/0pwfeedback
-yes_ "sudo reads them" visudo -cq
+# One file at a time: Ubuntu 26.04's sudo-common ships /etc/sudoers as 0644,
+# which sudo-rs reads and visudo-rs -c refuses as a whole.
+for f in /etc/sudoers.d/mintupdate /etc/sudoers.d/mintdrivers /etc/sudoers.d/0pwfeedback; do
+    yes_ "sudo reads $f" visudo -cq -f "$f"
+done
 part=$(acct_part)
 has "Mint's tools pass under NoNewPrivileges" "$part" "ok    hollow-coturn runs as hollow-turn, which cannot become root. Linux Mint lets every account run 5 of its own maintenance tools with sudo, which this service's sandbox (NoNewPrivileges) blocks"
 eq "with no account failing" "$(grep FAIL <<<"$part")" ""
@@ -506,6 +511,14 @@ if [ -e "$WORK_DIR/out-link" ]; then bad "root copied through the build's link";
 (stage_build_output "$BUILD_DIR/out-file" "$WORK_DIR") >/dev/null 2>&1
 has "a plain output is staged as root's" "$(stat -c '%U %a' "$WORK_DIR/out-file" 2>/dev/null)" "root 755"
 rm -f "$BUILD_DIR/out-link" "$BUILD_DIR/out-file"
+# a_source_build_stages_cargos_hard_linked_output (#153): cargo's output is a
+# second name of its copy under deps/.
+as_builder /bin/sh -c "mkdir -p $BUILD_DIR/t/deps && echo cargo >$BUILD_DIR/t/deps/bin-0123 && ln -f $BUILD_DIR/t/deps/bin-0123 $BUILD_DIR/t/hollow-fwd-test"
+has "a hard-linked output is refused as it is" "$( (stage_build_output "$BUILD_DIR/t/hollow-fwd-test" "$WORK_DIR") 2>&1)" "something other than a plain file"
+(take_build_output "$BUILD_DIR/t/hollow-fwd-test" "$WORK_DIR") >/dev/null 2>&1
+eq "and staged from the build account's own copy" "$(cat "$WORK_DIR/hollow-fwd-test" 2>/dev/null) $(stat -c '%U %a' "$WORK_DIR/hollow-fwd-test" 2>/dev/null)" "cargo root 755"
+eq "which the build account made" "$(stat -c '%U %h' "$BUILD_DIR/out/hollow-fwd-test" 2>/dev/null)" "$BUILD_USER 1"
+rm -rf "$BUILD_DIR/t" "$BUILD_DIR/out" "$WORK_DIR/hollow-fwd-test"
 if [ "${BOX_BUILD_RELAY:-1}" = 1 ]; then
     CFG_FORWARDER=no
     log=$( (programs_source) 2>&1)
@@ -738,7 +751,7 @@ hollow_sshd_dropin boxu >"$HOLLOW_SSHD_DROPIN"
 printf 'Match User boxu\n    PasswordAuthentication yes\n' >/etc/ssh/sshd_config.d/99-box-match.conf
 if sshd -t 2>/dev/null; then
     eq_box "sshd -T alone says passwords are off" "$(ssh_password_state)" off
-    has "while sshd itself lets boxu use a password" "$(sshd -T -C user=boxu,host=x,addr=203.0.113.9 2>/dev/null)" "passwordauthentication yes"
+    has "while sshd itself lets boxu use a password" "$(hollow_sshd_t -C user=boxu,host=x,addr=203.0.113.9)" "passwordauthentication yes"
     eq_box "the block is found" "$(ssh_match_passwords)" "/etc/ssh/sshd_config.d/99-box-match.conf line 1 (Match User boxu)"
     SUDO_USER=boxu
     audit_collect
@@ -754,7 +767,8 @@ rm -f /etc/ssh/sshd_config.d/99-box-match.conf "$HOLLOW_SSHD_DROPIN"
 
 echo "adopt: a program that only shares the relay's name"
 mkdir -p /opt/box-stray
-cp /bin/sleep /opt/box-stray/hollow-relay
+# Ubuntu 26.10's sleep is uutils' one program, which goes by the name it is run as.
+cp "$(command -v gnusleep || command -v sleep)" /opt/box-stray/hollow-relay
 chmod 0755 /opt/box-stray/hollow-relay
 runuser -u boxu -- /opt/box-stray/hollow-relay 60 &
 stray=$!

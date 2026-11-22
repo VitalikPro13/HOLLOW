@@ -212,6 +212,28 @@ sudo_verdict() {
     echo
 }
 
+# The programs the services start find every library they link to: a release
+# upgrade can take away one the ready-made programs were built for (#153).
+if [[ " ${units[*]} " == *" hollow-relay "* ]] || [[ " ${units[*]} " == *" hollow-forwarder "* ]]; then
+    echo "Programs"
+    for u in hollow-relay hollow-forwarder; do
+        [[ " ${units[*]} " == *" $u "* ]] || continue
+        exe=$(systemctl show -p ExecStart --value "$u" | sed -n 's/.*path=\([^ ;]*\).*/\1/p' | head -n 1)
+        if [ -z "$exe" ] || [ ! -f "$exe" ]; then
+            bad "$u starts ${exe:-no program}, which is not there"
+            continue
+        fi
+        # ldd lists the libraries; nothing of the program runs.
+        missing=$(LC_ALL=C ldd "$exe" 2>/dev/null | sed -n 's/^[[:space:]]*\([^[:space:]]*\) => not found.*/\1/p' |
+            LC_ALL=C sort -u | paste -sd' ' -)
+        if [ -n "$missing" ]; then
+            bad "$u cannot start: $exe needs $missing, which this system does not have. To build the programs here, run the setup from your copy of the repository (sudo bash relay-uws/install.sh) and choose Rebuild from this copy"
+        else
+            ok "$u's program $exe finds every library it needs"
+        fi
+    done
+fi
+
 echo "Service accounts"
 for u in "${units[@]}"; do
     user=$(systemctl show -p User --value "$u")
@@ -844,7 +866,8 @@ if command -v unattended-upgrade >/dev/null 2>&1; then
 fi
 
 echo "SSH"
-sshd_t=$(sshd -T 2>/dev/null)
+# Keywords in lower case: OpenSSH 10.5 (Ubuntu 26.10) prints them as written in sshd_config.
+sshd_t=$(sshd -T 2>/dev/null | awk 'NF { $1 = tolower($1); print }')
 if echo "$sshd_t" | grep -qx "passwordauthentication no"; then ok "password logins off"; else bad "SSH password logins are on"; fi
 if echo "$sshd_t" | grep -qx "permitrootlogin yes"; then bad "root may log in over SSH with a password"; else ok "no root password login"; fi
 

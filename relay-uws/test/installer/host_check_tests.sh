@@ -125,3 +125,67 @@ Sudoers entry: /etc/sudoers.d/mintdrivers}")" "bad "
     rm -rf "$etc" "$rs"
 }
 in_sub t_host_sudo
+
+echo "check-host: the programs' libraries"
+# check_host_names_a_missing_library (#153): a program that cannot load a library
+# fails by the library's name, and one that finds them all passes.
+t_host_libs() {
+    local block F=$TMP/fake_hostlibs out
+    block=$(sed -n '/^# The programs the services start find every library/,/^echo "Service accounts"/p' "$DEPLOY/check-host.sh" | sed '$d')
+    has "check-host reads the programs' libraries" "$block" 'echo "Programs"'
+    mkfake "$F" ldd 'for l in $MISSING_LIBS; do printf "\t%s => not found\n" "$l"; done; printf "\tlibc.so.6 => /lib/libc.so.6 (0x00007f)\n"'
+    : >"$F/relaybin"; : >"$F/fwdbin"
+    host_libs() { # <units...>
+        local units=("$@")
+        ok() { echo "ok $1"; }
+        bad() { echo "FAIL $1"; }
+        systemctl() {
+            case "$5" in
+            hollow-relay) echo "{ path=$F/relaybin ; argv[]=$F/relaybin --denylist-file /x ; ignore_errors=no }" ;;
+            hollow-forwarder) echo "{ path=$F/fwdbin ; argv[]=$F/fwdbin --config /y ; ignore_errors=no }" ;;
+            esac
+        }
+        PATH=$F:$PATH
+        eval "$block"
+    }
+    out=$(MISSING_LIBS="" host_libs hollow-relay hollow-forwarder)
+    has "the relay finds its libraries" "$out" "ok hollow-relay's program $F/relaybin finds every library it needs"
+    has "and the forwarder" "$out" "ok hollow-forwarder's program $F/fwdbin finds every library it needs"
+    lacks "nothing fails" "$out" FAIL
+    out=$(MISSING_LIBS="libsodium.so.23" host_libs hollow-relay)
+    has "a missing library fails by name" "$out" "FAIL hollow-relay cannot start: $F/relaybin needs libsodium.so.23, which this system does not have"
+    has "and says how to build the programs here" "$out" "sudo bash relay-uws/install.sh"
+    out=$(MISSING_LIBS="libsodium.so.23 libssl.so.3" host_libs hollow-relay)
+    has "every missing one is named" "$out" "needs libsodium.so.23 libssl.so.3,"
+    out=$(MISSING_LIBS="" host_libs hollow-push)
+    lacks "nothing to say without the relay or forwarder" "$out" "Programs"
+    rm -f "$F/fwdbin"
+    out=$(MISSING_LIBS="" host_libs hollow-forwarder)
+    has "a program that is not there fails" "$out" "FAIL hollow-forwarder starts $F/fwdbin, which is not there"
+}
+in_sub t_host_libs
+
+# sshd_settings_read_in_any_case (#153): OpenSSH 10.5 on Ubuntu 26.10 prints
+# PasswordAuthentication as sshd_config spells it.
+echo "check-host: SSH settings"
+t_host_ssh() {
+    local block out
+    block=$(sed -n '/^echo "SSH"$/,/permitrootlogin yes/p' "$DEPLOY/check-host.sh")
+    has "check-host has the SSH section" "$block" "sshd -T"
+    run_ssh() {
+        ok() { echo "ok $*"; }
+        bad() { echo "FAIL $*"; }
+        sshd() { [ "$1" = -T ] && printf '%s\n' "$SSHD_OUT"; }
+        eval "$block"
+    }
+    out=$(SSHD_OUT=$(sed 's/^PasswordAuthentication yes$/PasswordAuthentication no/' "$T/fixtures/sshd/openssh-10.5-ubuntu-26.10.txt") run_ssh)
+    has "OpenSSH 10.5's keys-only setting passes" "$out" "ok password logins off"
+    lacks "and nothing fails" "$out" FAIL
+    out=$(SSHD_OUT=$(cat "$T/fixtures/sshd/openssh-10.5-ubuntu-26.10.txt") run_ssh)
+    has "its password logins fail" "$out" "FAIL SSH password logins are on"
+    out=$(SSHD_OUT=$'PermitRootLogin yes\nPasswordAuthentication no' run_ssh)
+    has "and so does root's password login" "$out" "FAIL root may log in over SSH with a password"
+    out=$(SSHD_OUT=$'permitrootlogin no\npasswordauthentication no' run_ssh)
+    lacks "older OpenSSH's lower case still passes" "$out" FAIL
+}
+in_sub t_host_ssh

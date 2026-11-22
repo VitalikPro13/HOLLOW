@@ -64,8 +64,37 @@ pack_tarball() {
   mv -f "$out.part" "$out"
 }
 
+# <file> <name>: the words of a NAME="..." list that may span lines, one a line.
+shell_list() {
+  awk -v n="$2" 'index($0, n "=\"") == 1 { f = 1; sub(/^[^"]*"/, "") }
+    f { l = $0; e = sub(/".*$/, "", l); print l; if (e) exit }' "$1" | tr -s '[:blank:]' '\n' | sed '/^$/d'
+}
+
+# <native.sh> [--list NAME] <soname...>: the libraries both programs link to,
+# together, must be exactly the setup's PREBUILT_NEEDS (the forwarder's alone,
+# FORWARDER_NEEDS), each with its packages in LIB_PACKAGES: a box judges from
+# those lists whether the programs can start there (#153).
+needed_known() {
+  local lib needs known got file=$1 list=PREBUILT_NEEDS
+  shift
+  if [ "${1:-}" = --list ]; then list=$2; shift 2; fi
+  needs="$(shell_list "$file" "$list" | LC_ALL=C sort -u)"
+  known="$(shell_list "$file" LIB_PACKAGES | sed -n 's/=.*//p')"
+  [ -n "$needs" ] && [ -n "$known" ] || { echo "no $list or LIB_PACKAGES in $file" >&2; return 1; }
+  # The dynamic loader (ld-linux-*) is the system's own, never a package to judge.
+  got="$(printf '%s\n' "$@" | sed '/^$/d; /^ld-linux/d' | LC_ALL=C sort -u)"
+  if [ "$got" != "$needs" ]; then
+    echo "the programs link to: $(tr '\n' ' ' <<<"$got"); $list (relay-uws/deploy/lib/native.sh) names: $(tr '\n' ' ' <<<"$needs"). Make them the same." >&2
+    return 1
+  fi
+  for lib in $got; do
+    grep -qxF -- "$lib" <<<"$known" || { echo "$lib has no packages in LIB_PACKAGES (relay-uws/deploy/lib/native.sh): add the ones that hold it" >&2; return 1; }
+  done
+}
+
 case "${1:-}" in
   --stage-setup) stage_setup "${2:?repo}" "${3:?dir}"; exit $? ;;
+  --check-needed) shift; needed_known "$@"; exit $? ;;
   --pack) pack_tarball "${2:?dir}" "${3:?out}"; exit $? ;;
 esac
 RUST_VERSION=1.95.0
@@ -156,15 +185,24 @@ build_one() {
 
   # Built on 22.04, so nothing should need a newer glibc; this catches a base
   # image change before a self-hoster's box does.
-  local bin newest
+  local bin newest needs all_needs="" fwd_needs=""
   for bin in hollow-relay hollow-forwarder; do
     newest="$("${prefix}objdump" -T "$stage/$bin" | grep -oE 'GLIBC_[0-9]+(\.[0-9]+)+' | sed 's/GLIBC_//' | sort -uV | tail -1)"
     if [ "$(printf '%s\n%s\n' "$newest" "$GLIBC_FLOOR" | sort -V | tail -1)" != "$GLIBC_FLOOR" ]; then
       echo "ERROR: $bin ($a) needs glibc $newest, newer than $GLIBC_FLOOR" >&2
       exit 1
     fi
-    echo "    $bin: newest glibc symbol $newest; needs $("${prefix}readelf" -d "$stage/$bin" | sed -nE 's/.*Shared library: \[(.*)\]/\1/p' | tr '\n' ' ')"
+    needs="$("${prefix}readelf" -d "$stage/$bin" | sed -nE 's/.*Shared library: \[(.*)\]/\1/p' | tr '\n' ' ')"
+    all_needs="$all_needs $needs"
+    [ "$bin" = hollow-forwarder ] && fwd_needs=$needs
+    echo "    $bin: newest glibc symbol $newest; needs $needs"
   done
+  # shellcheck disable=SC2086 # one word per library
+  needed_known /src/relay-uws/deploy/lib/native.sh $all_needs ||
+    { echo "ERROR: the programs ($a) link to libraries the setup does not judge" >&2; exit 1; }
+  # shellcheck disable=SC2086 # one word per library
+  needed_known /src/relay-uws/deploy/lib/native.sh --list FORWARDER_NEEDS $fwd_needs ||
+    { echo "ERROR: the forwarder ($a) links to libraries the setup does not judge" >&2; exit 1; }
 
   local tarball="/out/hollow-relay-$TAG-linux-$a.tar.gz"
   pack_tarball "$stage" "$tarball"

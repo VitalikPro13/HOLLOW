@@ -102,7 +102,9 @@ clock_synced() {
 }
 
 mem_mb() { awk '/^MemTotal:/ {print int($2 / 1024)}' /proc/meminfo; }
-disk_free_mb() { df -Pm "${1:-/}" | awk 'NR == 2 {print $4}'; }
+# In KiB, the one block size GNU, uutils (Ubuntu 26.10's df takes no -m) and
+# busybox all take.
+disk_free_mb() { df -P -k -- "${1:-/}" | awk 'NR == 2 {print int($4 / 1024)}'; }
 
 # Sets PF_VERDICT (ok, steps or no), PF_HEAD (the verdict and what needs doing),
 # PF_FOUND (what was found, one line each), PF_TEXT (both, for one screen),

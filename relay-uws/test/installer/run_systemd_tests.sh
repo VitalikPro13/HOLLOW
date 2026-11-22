@@ -7,7 +7,10 @@
 #
 #   bash relay-uws/test/installer/run_systemd_tests.sh [image ...]
 #
-# Defaults to ubuntu:24.04 and debian:12. BOX_DNS=<address> hands the boxes
+# Defaults to ubuntu:24.04 and debian:12; "all" runs every release the setup
+# supports (SELF_HOSTING.md "Which system"). On Ubuntu 25.10 and newer the boxes
+# carry what a server install does there: uutils coreutils (all of them from
+# 26.10) and sudo-rs. BOX_DNS=<address> hands the boxes
 # that resolver (a private one tests the push sender's address wall), and
 # BOX_BUILD_RELAY=0 skips the relay build, BOX_SKIP_SUITE=1 skips run_tests.sh,
 # and KEEP=1 leaves the containers up. Then each take over scenario of
@@ -15,13 +18,25 @@
 # BOX_ADOPT=0 skips them, BOX_ADOPT="takeover leave" picks some, and
 # BOX_ONLY_ADOPT=1 runs nothing else. Then fresh_box_test.sh runs a first
 # install and the menu's updates in a box with only a stock server's packages
-# (BOX_STOCK=0 skips it, BOX_ONLY_STOCK=1 runs nothing else). BOX_TAG names
-# the images.
+# (BOX_STOCK=0 skips it, BOX_ONLY_STOCK=1 runs nothing else), and once more
+# with a release that needs a library the system does not offer, which the
+# setup builds from source instead (BOX_LIBS=0 skips it, BOX_ONLY_LIBS=1 runs
+# nothing else), and with a release whose relay alone needs such a library, where
+# the official signed forwarder is fetched and kept and only the relay is built
+# (BOX_MIXED=0 skips it, BOX_ONLY_MIXED=1 runs nothing else). BOX_ONLY_FWDSRC=1 runs only that first install with the
+# forwarder built from source as well, which takes an hour or two and is in
+# no other run. BOX_TAG names the images.
 set -uo pipefail
 
 T=$(cd "$(dirname "$0")" && pwd)
 ROOT=$(cd "$T/../../.." && pwd)
 IMAGES=${*:-ubuntu:24.04 debian:12}
+[ "$IMAGES" = all ] && IMAGES="ubuntu:22.04 ubuntu:24.04 ubuntu:25.10 ubuntu:26.04 ubuntu:26.10 debian:12 debian:13"
+
+# sudo_pkg <image>: the sudo a server install of that release has.
+sudo_pkg() {
+    case "$1" in ubuntu:2[0-4].* | ubuntu:25.04 | debian:*) echo sudo ;; *) echo sudo-rs ;; esac
+}
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 total_fail=0
@@ -107,14 +122,36 @@ stock_box() {
     rtag=$(relay_image "$tag" "$slug") || { echo "FAIL  the relay did not build in the $img box"; total_fail=1; return 0; }
     stag=${BOX_TAG:-hollow-installer-box}-stock:$slug
     case "$img" in ubuntu*) extra="curl unattended-upgrades" ;; esac
-    printf 'FROM %s\nRUN apt-get -o Acquire::Retries=5 update && DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=5 install -y -q --no-install-recommends systemd systemd-sysv dbus openssh-server sudo wget python3 whiptail iproute2 procps ca-certificates openssl bind9-dnsutils netcat-openbsd util-linux less cron logrotate ncurses-term %s && rm -rf /var/lib/apt/lists/*\nCMD ["/sbin/init"]\n' "$img" "$extra" |
+    printf 'FROM %s\nRUN apt-get -o Acquire::Retries=5 update && DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=5 install -y -q --no-install-recommends systemd systemd-sysv dbus openssh-server %s wget python3 whiptail iproute2 procps ca-certificates openssl bind9-dnsutils netcat-openbsd util-linux less cron logrotate ncurses-term %s && rm -rf /var/lib/apt/lists/*\nCMD ["/sbin/init"]\n' "$img" "$(sudo_pkg "$img")" "$extra" |
         docker build -q -t "$stag" - >/dev/null || { echo "FAIL  the stock $img box did not build"; total_fail=1; return 0; }
     name=hollow-stock-box-$slug-$$
     echo "--- fresh_box_test.sh in a stock $img box"
     start_box "$name" "$stag" || { echo "FAIL  the stock $img box did not start"; total_fail=1; return 0; }
     docker run --rm --entrypoint cat "$rtag" /opt/hollow-test-relay/hollow-relay | docker exec -i "$name" sh -c 'cat >/root/relay.bin && chmod 755 /root/relay.bin'
-    docker exec -e HOLLOW_INSTALLER_TEST_BOX=1 "$name" bash /src/relay-uws/test/installer/fresh_box_test.sh || total_fail=1
+    docker exec -e HOLLOW_INSTALLER_TEST_BOX=1 -e FRESH_ONLY="${FRESH_ONLY:-}" "$name" bash /src/relay-uws/test/installer/fresh_box_test.sh || total_fail=1
     [ "${KEEP:-0}" = 1 ] || docker rm -fv "$name" >/dev/null
+}
+
+# libs_box <image> <box tag> <slug>: fresh_box_test.sh's first install whose
+# release needs a library this system does not offer, in a stock box of its own.
+libs_box() {
+    [ "${BOX_LIBS:-1}" = 0 ] && return 0
+    echo "--- the same, with a release that needs a library this system does not offer"
+    FRESH_ONLY=libs BOX_STOCK=1 stock_box "$@"
+}
+
+# mixed_box <image> <box tag> <slug>: the official forwarder beside a relay built here.
+mixed_box() {
+    [ "${BOX_MIXED:-1}" = 0 ] && return 0
+    echo "--- the same, with a release whose forwarder runs here and whose relay does not"
+    FRESH_ONLY=mixed BOX_STOCK=1 stock_box "$@"
+}
+
+# fwdsrc_box <image> <box tag> <slug>: the same with the forwarder, built from
+# source to the end.
+fwdsrc_box() {
+    echo "--- the same, with the forwarder built from source"
+    FRESH_ONLY=fwdsrc BOX_STOCK=1 stock_box "$@"
 }
 
 for img in $IMAGES; do
@@ -124,8 +161,8 @@ for img in $IMAGES; do
     cat >"$WORK/Dockerfile" <<EOF
 FROM $img
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends \\
-    systemd systemd-sysv dbus openssh-server coturn ufw iptables iproute2 curl ca-certificates jq openssl \\
-    rsyslog fail2ban python3-systemd procps psmisc git python3 sudo shellcheck util-linux && \\
+    systemd systemd-sysv dbus openssh-server openssh-client coturn ufw iptables iproute2 curl ca-certificates jq openssl \\
+    rsyslog fail2ban python3-systemd procps psmisc git python3 $(sudo_pkg "$img") shellcheck util-linux && \\
     rm -rf /var/lib/apt/lists/*
 CMD ["/sbin/init"]
 EOF
@@ -133,6 +170,9 @@ EOF
     docker build -q -t "$tag" "$WORK" >/dev/null || { echo "FAIL  the $img box did not build"; total_fail=1; continue; }
     [ "${BOX_ONLY_ADOPT:-0}" = 1 ] && { adopt_boxes "$img" "$tag" "$slug"; continue; }
     [ "${BOX_ONLY_STOCK:-0}" = 1 ] && { stock_box "$img" "$tag" "$slug"; continue; }
+    [ "${BOX_ONLY_LIBS:-0}" = 1 ] && { libs_box "$img" "$tag" "$slug"; continue; }
+    [ "${BOX_ONLY_FWDSRC:-0}" = 1 ] && { fwdsrc_box "$img" "$tag" "$slug"; continue; }
+    [ "${BOX_ONLY_MIXED:-0}" = 1 ] && { mixed_box "$img" "$tag" "$slug"; continue; }
     dns=()
     [ -n "${BOX_DNS:-}" ] && dns=(--dns "$BOX_DNS")
     docker run -d --name "$name" --privileged --cgroupns=private --tmpfs /run --tmpfs /run/lock \
@@ -158,9 +198,12 @@ EOF
     echo "--- from outside the box"
     ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$name")
     port=$(docker exec "$name" cat /root/ssh_test_port)
-    sshb=(ssh -i "$WORK/key" -p "$port" -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null
-        -o ConnectTimeout=8 -o LogLevel=ERROR "root@$ip")
-    if got=$("${sshb[@]}" 'bash -c "env -u SSH_CONNECTION sh -c \". /src/relay-uws/deploy/lib/host.sh; hollow_session_ssh_port\"; true"'); then
+    # From another box on the same network: with colima or Docker Desktop this
+    # machine itself cannot reach a container's address.
+    # shellcheck disable=SC2016 # the other box's shell expands them
+    sshb=(docker run --rm -i --entrypoint sh "$tag" -c 'cat >/tmp/k && chmod 600 /tmp/k && exec ssh -i /tmp/k -p "$1" \
+        -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 -o LogLevel=ERROR "root@$2" "$3"' _ "$port" "$ip")
+    if got=$("${sshb[@]}" 'bash -c "env -u SSH_CONNECTION sh -c \". /src/relay-uws/deploy/lib/host.sh; hollow_session_ssh_port\"; true"' <"$WORK/key"); then
         echo "ok    a new SSH login on port $port gets through the box's firewall"
         if [ "$got" = "$port" ]; then echo "ok    the session's port is found without SSH_CONNECTION"
         else echo "FAIL  the session's port came out as [$got], not $port"; total_fail=1; fi
@@ -171,6 +214,8 @@ EOF
     [ "${KEEP:-0}" = 1 ] || docker rm -f "$name" >/dev/null
     adopt_boxes "$img" "$tag" "$slug"
     stock_box "$img" "$tag" "$slug"
+    libs_box "$img" "$tag" "$slug"
+    mixed_box "$img" "$tag" "$slug"
 done
 
 echo ""

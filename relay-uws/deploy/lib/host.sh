@@ -7,13 +7,22 @@
 # shellcheck disable=SC2034 # read by harden-host.sh and install.sh
 HOLLOW_FW_OPTIONAL="80/tcp 3478/tcp 3478/udp 5349/tcp 5349/udp 49152:65535/udp 40000:40199/udp"
 
+# sshd -T [args]: sshd's effective settings, keywords in lower case as OpenSSH
+# before 10.5 prints them (Ubuntu 26.10's prints Port, PasswordAuthentication).
+# Fails when sshd cannot say.
+# shellcheck disable=SC2120 # a caller may pass -C
+hollow_sshd_t() {
+    hst_out=$(sshd -T "$@" 2>/dev/null) || return 1
+    printf '%s\n' "$hst_out" | awk 'NF { $1 = tolower($1); print }'
+}
+
 # Every TCP port SSH may be reached on, so the firewall never shuts anyone out:
 # sshd's Port and ListenAddress settings, what sshd and its systemd sockets
 # (Ubuntu 24.04 starts sshd from ssh.socket) listen on right now, and the port
 # of the SSH session running this.
 hollow_ssh_ports() {
     hsp_ports=$({
-        sshd -T 2>/dev/null | awk '$1 == "port" {print $2} $1 == "listenaddress" {n = split($2, a, ":"); print a[n]}'
+        hollow_sshd_t | awk '$1 == "port" {print $2} $1 == "listenaddress" {n = split($2, a, ":"); print a[n]}'
         for hsp_u in ssh.socket sshd.socket; do
             systemctl show -p Listen --value "$hsp_u" 2>/dev/null | tr ' ' '\n' | sed -n 's/.*:\([0-9][0-9]*\)$/\1/p'
         done
@@ -205,7 +214,7 @@ hollow_base_version() {
     ubuntu:bionic) echo 18.04 ;; ubuntu:focal) echo 20.04 ;; ubuntu:jammy) echo 22.04 ;;
     ubuntu:kinetic) echo 22.10 ;; ubuntu:lunar) echo 23.04 ;; ubuntu:mantic) echo 23.10 ;;
     ubuntu:noble) echo 24.04 ;; ubuntu:oracular) echo 24.10 ;; ubuntu:plucky) echo 25.04 ;;
-    ubuntu:questing) echo 25.10 ;; ubuntu:resolute) echo 26.04 ;;
+    ubuntu:questing) echo 25.10 ;; ubuntu:resolute) echo 26.04 ;; ubuntu:stonking) echo 26.10 ;;
     debian:buster) echo 10 ;; debian:bullseye) echo 11 ;; debian:bookworm) echo 12 ;;
     debian:trixie) echo 13 ;;
     esac

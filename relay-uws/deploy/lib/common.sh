@@ -231,11 +231,15 @@ apt_install() {
     [ ${#missing[@]} -eq 0 ] && return 0
     # On the screen, unlike apt's own output: a wait can take minutes.
     if [ "$DRY_RUN" = 0 ] && ! hollow_apt_wait 2>"$WORK_DIR/apt.wait"; then die "$(cat "$WORK_DIR/apt.wait")"; fi
-    if [ "$APT_UPDATED" = 0 ]; then
-        run_logged hollow_apt update -q || return 1
-        APT_UPDATED=1
-    fi
+    apt_refresh || return 1
     run_logged hollow_apt install -y -q --no-install-recommends "${missing[@]}"
+}
+
+# The package lists, fetched once a run, before a package's name is judged.
+apt_refresh() {
+    [ "$APT_UPDATED" = 1 ] && return 0
+    run_logged hollow_apt update -q || return 1
+    APT_UPDATED=1
 }
 
 # The name a package has on this release: Ubuntu 24.04 renamed libssl3 to

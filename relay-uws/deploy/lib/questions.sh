@@ -57,6 +57,8 @@ To build from source, I compile both here from this copy of the repository. The 
     if [ "$CFG_BINARIES" = prebuilt ] && ! prebuilt_available; then
         CFG_BINARIES=source
         ui_msg "Building from source instead" "There are no ready-made programs for this machine, because $PREBUILT_WHY. I will build them here from this copy of the repository instead. That takes a few minutes for the relay and up to an hour or two for the media forwarder."
+    elif [ "$CFG_BINARIES" = prebuilt ] && [ "${PREBUILT_RELAY_ONLY:-0}" = 1 ]; then
+        ui_msg "Building the relay here" "The ready-made relay cannot run on this machine, because $PREBUILT_LIBS_WHY. I will build the relay here from this copy of the repository, which takes a few minutes, and install the ready-made media forwarder if you want one. To update later, check out the new release in this copy and run the setup from it again."
     fi
 }
 

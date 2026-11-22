@@ -12,6 +12,13 @@
 #
 # /root/relay.bin is a relay built for this box's system. Let's Encrypt is a
 # self-signed staging-style lineage and certbot a stand-in that renews nothing.
+# FRESH_ONLY=libs runs only a first install whose release needs a library this
+# system does not offer, which the setup builds from source instead (#153).
+# FRESH_ONLY=fwdsrc runs only such a first install with the forwarder, built
+# from source to the end (an hour or two). FRESH_ONLY=mixed runs a first
+# install and updates where only the relay's library is missing, so the
+# official signed forwarder (fetched for this machine) is installed and the
+# relay is built here.
 # shellcheck disable=SC2034
 set -uo pipefail
 [ "${HOLLOW_INSTALLER_TEST_BOX:-}" = 1 ] || { echo "Runs only inside the test container (run_systemd_tests.sh)." >&2; exit 2; }
@@ -116,6 +123,14 @@ _hf_release_keys() { cat /root/feed/pubkey.hex; }
 _hf_base() { printf 'file:///root/feed'; }
 _hf_protos() { printf '=file'; }
 EOF
+# The stand-in relay links to this system's own libraries, not the official
+# build's (scripts/build_relay_binaries.sh), so the setup judges by its list.
+RELAY_NEEDS=$(LC_ALL=C ldd /root/relay.bin | sed -n 's/^[[:space:]]*\([^[:space:]]*\) => .*/\1/p' | grep -v '^linux-vdso' | tr '\n' ' ')
+printf '\nPREBUILT_NEEDS="%s"\n' "$RELAY_NEEDS" >>"$SRC/relay-uws/deploy/lib/native.sh"
+# The same relay asking for a libsodium no system has.
+python3 -I -c 'import re, sys; b = open(sys.argv[1], "rb").read(); open(sys.argv[2], "wb").write(re.sub(rb"libsodium\.so\.\d\d", b"libsodium.so.99", b))' \
+    /root/relay.bin "$W/relay99.bin"
+chmod 0755 "$W/relay99.bin"
 # The setup a release carries, marked so a run shows which copy it is.
 setup_tree() { # <dir> <mark>
     rm -rf "$1"
@@ -130,13 +145,16 @@ case "$(uname -m)" in aarch64 | arm64) ARCH=linux-aarch64 ;; *) ARCH=linux-x86_6
 # publish <build> <kind>: kind setup (a release with its setup, marked
 # b<build>), old (programs only), extra, link, dotdot, big (a tampered setup),
 # noui or cannotstart (a setup that cannot start), badsettings (a setup whose
-# settings run fails) or dead (a relay that does not start, with its setup).
+# settings run fails), dead (a relay that does not start, with its setup) or
+# nolib (a relay that needs a library no system offers, with its setup).
+# FWD_BIN names the forwarder a release carries (the stand-in relay otherwise).
 publish() {
     local b=$1 kind=$2 s=$W/stage name sha size relay=/root/relay.bin
     rm -rf "$s" "$FEED"/*.tar.gz && mkdir -p "$s"
     [ "$kind" = dead ] && relay=/bin/false
+    [ "$kind" = nolib ] && relay=$W/relay99.bin
     install -m 0755 "$relay" "$s/hollow-relay"
-    install -m 0755 /root/relay.bin "$s/hollow-forwarder"
+    install -m 0755 "${FWD_BIN:-/root/relay.bin}" "$s/hollow-forwarder"
     printf 'version=%s\nbuild=%s\ncommit=%s\n' "$REL" "$b" "$(printf '%040d' 0)" >"$s/VERSION"
     chmod 0644 "$s/VERSION"
     [ "$kind" = old ] || setup_tree "$s/setup" "b$b"
@@ -167,7 +185,264 @@ publish() {
     { base64 -w0 "$W/sig.bin"; echo; } >"$FEED/relay.json.sig"
     rm -rf "$s" "$W/msg" "$W/sig.bin"
 }
+
 relay_up() { for _ in $(seq 1 30); do systemctl is-active --quiet hollow-relay && return 0; sleep 1; done; return 1; }
+
+# a_first_install_builds_from_source_where_the_release_needs_a_missing_library
+# (#153): the download is checked before anything is installed.
+if [ "${FRESH_ONLY:-}" = libs ]; then
+    echo "first install, the release needs a library this system does not offer"
+    publish 1 nolib
+    cat >"$W/ans_libs" <<EOF
+mode=native
+binaries=prebuilt
+address=ip
+public_ip=$PUBLIC_IP
+ip=$PUBLIC_IP
+staging=yes
+turn=no
+push=no
+forwarder=no
+members_only=no
+ssh_keys=no
+continue_anyway=yes
+confirm=yes
+EOF
+    PATH="$SAFE:$PATH" bash "$SRC/relay-uws/install.sh" --answers "$W/ans_libs" >"$W/libs.out" 2>&1
+    rc=$?
+    eq "the install finishes" "$rc" 0
+    out=$(flat "$W/libs.out")
+    [ "$rc" = 0 ] || { tail -n 40 "$W/libs.out"; finish; }
+    has "it says why it builds here" "$out" "there are no ready-made programs for this machine (they need libsodium.so.99, which $PRETTY_NAME does not offer), so I build them from source instead"
+    has "and builds" "$out" "Building the relay from source"
+    lacks "the download was never installed" "$out" "signature and checksum verified"
+    eq "the programs are a build from here" "$(head -n 1 "$LIB/BUILT_FROM")" source
+    eq "and remembered as one" "$(sed -n 's/^binaries=//p' /etc/hollow-relay/install.conf)" source
+    lacks "the relay is not the download" "$(LC_ALL=C ldd /usr/local/bin/hollow-relay)" libsodium.so.99
+    yes_ "the relay runs" relay_up
+    # An operator with SSH keys turns password logins off (ssh_keys=no left them).
+    mkdir -p /etc/ssh/sshd_config.d && printf 'PasswordAuthentication no\nKbdInteractiveAuthentication no\n' >/etc/ssh/sshd_config.d/00-box-keys.conf
+    # sshd -T needs the folder sshd makes at its first login, which a socket-started sshd (24.04) has not had.
+    install -d -m 0755 /run/sshd
+    systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
+    check=$(bash "$LIB/installer/deploy/check-host.sh" 2>&1)
+    echo "--- check-host after the build from source"
+    printf '%s\n' "$check"
+    echo "--- end of check-host"
+    # kernel.core_pattern is the box host's, which the stand-in sysctl leaves alone.
+    eq "check-host prints only ok and skip" "$(grep -vE '^  (ok|skip)  |^  \(|^[^ ]' <<<"$check" | grep -v 'kernel.core_pattern is ')" ""
+    has "the relay finds its libraries" "$check" "ok    hollow-relay's program /usr/local/bin/hollow-relay finds every library it needs"
+    # check_host_names_a_library_the_relay_lost: a release upgrade can take one away.
+    so=$(LC_ALL=C ldd /usr/local/bin/hollow-relay | sed -n 's/^[[:space:]]*\(libsodium[^[:space:]]*\) => \(\/[^[:space:]]*\).*/\1 \2/p' | head -n 1)
+    lib=${so#* } so=${so%% *}
+    if [ -n "$lib" ] && [ -f "$(readlink -f "$lib")" ]; then
+        real=$(readlink -f "$lib")
+        # Out of the library folder: ldconfig links any lib*.so* file it finds there.
+        mv "$real" /root/hidden-libsodium && ldconfig
+        has "check-host names the missing library" "$(bash "$LIB/installer/deploy/check-host.sh" 2>&1)" \
+            "FAIL  hollow-relay cannot start: /usr/local/bin/hollow-relay needs $so, which this system does not have"
+        mv /root/hidden-libsodium "$real" && ldconfig
+        has "and passes once it is back" "$(bash "$LIB/installer/deploy/check-host.sh" 2>&1)" \
+            "ok    hollow-relay's program /usr/local/bin/hollow-relay finds every library it needs"
+    else
+        bad "the relay links to a libsodium this check can find ($so $lib)"
+    fi
+    # The official build's own list, judged by this system's real package lists:
+    # Ubuntu 26.10 offers only libsodium.so.26, and still the forwarder's libcrypto.so.3.
+    out=$(cd / && bash "$SRC/relay-uws/test/installer/fresh_box_offered.sh")
+    if apt-cache policy libsodium23 | grep 'Candidate: [0-9]' >/dev/null; then
+        eq "this system offers what the official programs need" "$out" offered
+    else
+        eq "this system offers only the official forwarder's libraries" "$out" "forwarder only: they need libsodium.so.23, which $PRETTY_NAME does not offer"
+    fi
+    finish
+fi
+
+# a_first_install_keeps_the_signed_forwarder_and_builds_the_relay (#153):
+# Ubuntu 26.10 offers the official forwarder's libraries but not the relay's,
+# and the updates of such a relay: from the menu, from the clone, one whose
+# relay does not start, and one whose relay runs here at last.
+if [ "${FRESH_ONLY:-}" = mixed ]; then
+    echo "first install, the release's relay needs a library this system does not offer and its forwarder runs"
+    # The official forwarder for this machine, as the public release list names it.
+    python3 -I - "$ARCH" "$W/official.tar.gz" <<'PY' || { bad "the official release for this machine could be fetched"; finish; }
+import hashlib, json, sys, urllib.request
+feed = json.load(urllib.request.urlopen("https://anonlisten.com/hollow/releases/relay.json", timeout=60))
+art = feed["artifacts"][sys.argv[1]]
+data = urllib.request.urlopen(art["url"], timeout=300).read()
+assert hashlib.sha256(data).hexdigest() == art["sha256"], "checksum"
+open(sys.argv[2], "wb").write(data)
+PY
+    mkdir -p "$W/official" && tar -C "$W/official" -xzf "$W/official.tar.gz" hollow-forwarder
+    FWD_BIN=$W/official/hollow-forwarder
+    yes_ "the official forwarder is a program for this machine" test -x "$FWD_BIN"
+    # The release is this clone's version: only then is the relay built beside it.
+    REL=$(sed -n 's/^#define HOLLOW_RELAY_VERSION "\(.*\)"/\1/p' "$SRC/relay-uws/src/version.h")
+    publish 1 nolib
+    cat >"$W/ans_mixed" <<EOF
+mode=native
+binaries=prebuilt
+address=ip
+public_ip=$PUBLIC_IP
+ip=$PUBLIC_IP
+staging=yes
+turn=no
+push=no
+forwarder=yes
+members_only=no
+ssh_keys=no
+continue_anyway=yes
+confirm=yes
+EOF
+    PATH="$SAFE:$PATH" bash "$SRC/relay-uws/install.sh" --answers "$W/ans_mixed" >"$W/mixed.out" 2>&1
+    rc=$?
+    eq "the install finishes" "$rc" 0
+    [ "$rc" = 0 ] || { tail -n 40 "$W/mixed.out"; finish; }
+    out=$(flat "$W/mixed.out")
+    has "it says what it does" "$out" "the release's relay cannot run here (they need libsodium.so.99, which $PRETTY_NAME does not offer), so I build the relay from this copy of the repository and install the release's signed forwarder"
+    has "and how it ended" "$out" "the forwarder from the signed release, signature and checksum verified, and the relay built here"
+    lacks "it never builds the forwarder" "$out" "compiling the media forwarder"
+    eq "the forwarder is the signed release's" "$(cmp /usr/local/bin/hollow-forwarder "$FWD_BIN" && echo same)" same
+    lacks "the relay is a build from here" "$(LC_ALL=C ldd /usr/local/bin/hollow-relay)" libsodium.so.99
+    eq "BUILT_FROM says mixed" "$(head -n 1 "$LIB/BUILT_FROM")" mixed
+    has "and what the relay was built from" "$(sed -n 2p "$LIB/BUILT_FROM")" "the copy of the repository at $SRC"
+    eq "VERSION is the release's" "$(sed -n 's/^build=//p' "$LIB/VERSION")" 1
+    eq "the choice stays the ready-made programs" "$(sed -n 's/^binaries=//p' /etc/hollow-relay/install.conf)" prebuilt
+    yes_ "the relay runs" relay_up
+    fwd_up() { for _ in $(seq 1 30); do systemctl is-active --quiet hollow-forwarder && return 0; sleep 1; done; return 1; }
+    yes_ "the forwarder runs" fwd_up
+    mkdir -p /etc/ssh/sshd_config.d && printf 'PasswordAuthentication no\nKbdInteractiveAuthentication no\n' >/etc/ssh/sshd_config.d/00-box-keys.conf
+    # sshd -T needs the folder sshd makes at its first login, which a socket-started sshd (24.04) has not had.
+    install -d -m 0755 /run/sshd
+    systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
+    check=$(bash "$LIB/installer/deploy/check-host.sh" 2>&1)
+    echo "--- check-host after the mixed install"
+    printf '%s\n' "$check"
+    echo "--- end of check-host"
+    eq "check-host prints only ok and skip" "$(grep -vE '^  (ok|skip)  |^  \(|^[^ ]' <<<"$check" | grep -v 'kernel.core_pattern is ')" ""
+    has "the forwarder finds its libraries" "$check" "ok    hollow-forwarder's program /usr/local/bin/hollow-forwarder finds every library it needs"
+    has "the status screen says how" "$(printf 'action=status\n' >"$W/ans_mstatus"; hollow-relay-setup --answers "$W/ans_mstatus" 2>&1 | tr '\n' ' ' | tr -s ' ')" "built here from source, beside the ready-made forwarder"
+    # mixed_counts_as_the_ready_made_choice: a settings change rebuilds nothing.
+    printf 'action=change\nchange=grace\ngrace_secs=150\nconfirm=yes\n' >"$W/ans_mgrace"
+    PATH="$SAFE:$PATH" hollow-relay-setup --answers "$W/ans_mgrace" >"$W/mgrace.out" 2>&1
+    eq "a settings change finishes" "$?" 0
+    has "keeping the programs" "$(flat "$W/mgrace.out")" "the relay programs are already installed"
+    lacks "building nothing" "$(flat "$W/mgrace.out")" "compiling the relay"
+    eq "the pair stays mixed" "$(head -n 1 "$LIB/BUILT_FROM")" mixed
+
+    printf 'action=update\nconfirm=yes\n' >"$W/ans_update"
+    mupdate() { # <label> <how>: the menu's update from the installed setup, or from the clone
+        local rc=0
+        if [ "$2" = clone ]; then
+            PATH="$SAFE:$PATH" bash "$SRC/relay-uws/install.sh" --answers "$W/ans_update" >"$W/$1.out" 2>&1 || rc=$?
+        else
+            PATH="$SAFE:$PATH" hollow-relay-setup --answers "$W/ans_update" >"$W/$1.out" 2>&1 || rc=$?
+        fi
+        return "$rc"
+    }
+    echo "an update of the mixed pair from the menu"
+    publish 2 nolib
+    mupdate m2 menu
+    out=$(flat "$W/m2.out")
+    has "the installed setup cannot build the relay, so it stops" "$out" "it cannot be built here either, because this copy of the setup has no relay sources next to it. Nothing was installed."
+    has "and says where to update from" "$out" "check out the release's tag in your copy of the repository and run sudo bash relay-uws/install.sh from it"
+    eq "the relay is build 1 still" "$(sed -n 's/^build=//p' "$LIB/VERSION")" 1
+    no_ "the update left no mark" test -e /var/lib/hollow-installer/update_pending
+    echo "the same update from the clone"
+    mupdate m2c clone
+    rc=$?
+    out=$(flat "$W/m2c.out")
+    eq "it finishes" "$rc" 0
+    [ "$rc" = 0 ] || tail -n 30 "$W/m2c.out"
+    has "building only the relay" "$out" "so I build the relay from this copy of the repository and install the release's signed forwarder"
+    eq "to build 2" "$(sed -n 's/^build=//p' "$LIB/VERSION")" 2
+    eq "mixed again" "$(head -n 1 "$LIB/BUILT_FROM")" mixed
+    eq "the pair it replaced is kept for a rollback" "$(head -n 1 "$LIB/previous/BUILT_FROM")" mixed
+    yes_ "the relay runs" relay_up
+    yes_ "the forwarder runs" fwd_up
+    echo "a release whose relay runs here but does not start"
+    publish 3 dead
+    mupdate m3 menu
+    has "the update is undone" "$(flat "$W/m3.out")" "Update undone"
+    eq "the relay is build 2 again" "$(sed -n 's/^build=//p' "$LIB/VERSION")" 2
+    eq "the mixed pair is back" "$(head -n 1 "$LIB/BUILT_FROM")" mixed
+    lacks "with the relay built here" "$(LC_ALL=C ldd /usr/local/bin/hollow-relay)" libsodium.so.99
+    yes_ "the relay runs" relay_up
+    echo "a release whose relay runs here at last"
+    publish 4 setup
+    mupdate m4 menu
+    rc=$?
+    eq "the update finishes" "$rc" 0
+    [ "$rc" = 0 ] || tail -n 30 "$W/m4.out"
+    has "with the signed pair" "$(flat "$W/m4.out")" "installed version $REL (build 4), signature and checksum verified"
+    eq "BUILT_FROM says prebuilt" "$(cat "$LIB/BUILT_FROM")" prebuilt
+    eq "the relay is the release's" "$(cmp /usr/local/bin/hollow-relay /root/relay.bin && echo same)" same
+    yes_ "the relay runs" relay_up
+    yes_ "the forwarder runs" fwd_up
+    has "the status screen says ready-made" "$(printf 'action=status\n' >"$W/ans_mstatus"; hollow-relay-setup --answers "$W/ans_mstatus" 2>&1 | tr '\n' ' ' | tr -s ' ')" "(ready-made, build 4"
+    finish
+fi
+
+# a_first_install_builds_the_forwarder_from_source (#153): the whole build,
+# cargo's two-name output included, to a running forwarder. Takes an hour or two.
+if [ "${FRESH_ONLY:-}" = fwdsrc ]; then
+    echo "first install, relay and forwarder built from source"
+    publish 1 setup
+    cat >"$W/ans_fwd" <<EOF
+mode=native
+binaries=source
+address=ip
+public_ip=$PUBLIC_IP
+ip=$PUBLIC_IP
+staging=yes
+turn=no
+push=no
+forwarder=yes
+members_only=no
+ssh_keys=no
+continue_anyway=yes
+confirm=yes
+EOF
+    t0=$(date +%s)
+    PATH="$SAFE:$PATH" bash "$SRC/relay-uws/install.sh" --answers "$W/ans_fwd" >"$W/fwd.out" 2>&1
+    rc=$?
+    t1=$(date +%s)
+    echo "the install took $(( (t1 - t0) / 60 )) min $(( (t1 - t0) % 60 )) s"
+    grep -E 'built in|peak memory|^Stopped' "$W/fwd.out"
+    eq "the install finishes" "$rc" 0
+    [ "$rc" = 0 ] || { tail -n 40 "$W/fwd.out"; finish; }
+    out=$(flat "$W/fwd.out")
+    has "it builds the forwarder" "$out" "compiling the media forwarder"
+    eq "the programs are a build from here" "$(head -n 1 "$LIB/BUILT_FROM")" source
+    no_ "the forwarder is the build's, not the download" cmp -s /usr/local/bin/hollow-forwarder /root/relay.bin
+    no_ "the build leaves no copies behind" test -e /var/cache/hollow-build/out
+    yes_ "cargo's files stay for the next build" test -f /var/cache/hollow-build/target/release/hollow-forwarder
+    yes_ "the relay runs" relay_up
+    fwd_up() { for _ in $(seq 1 30); do systemctl is-active --quiet hollow-forwarder && return 0; sleep 1; done; return 1; }
+    yes_ "the forwarder runs" fwd_up
+    mkdir -p /etc/ssh/sshd_config.d && printf 'PasswordAuthentication no\nKbdInteractiveAuthentication no\n' >/etc/ssh/sshd_config.d/00-box-keys.conf
+    # sshd -T needs the folder sshd makes at its first login, which a socket-started sshd (24.04) has not had.
+    install -d -m 0755 /run/sshd
+    systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
+    check=$(bash "$LIB/installer/deploy/check-host.sh" 2>&1)
+    echo "--- check-host after the build from source"
+    printf '%s\n' "$check"
+    echo "--- end of check-host"
+    eq "check-host prints only ok and skip" "$(grep -vE '^  (ok|skip)  |^  \(|^[^ ]' <<<"$check" | grep -v 'kernel.core_pattern is ')" ""
+    has "the forwarder finds its libraries" "$check" "ok    hollow-forwarder's program /usr/local/bin/hollow-forwarder finds every library it needs"
+    # a_rebuild_reuses_the_forwarders_compiled_parts: cargo's target folder stays.
+    printf 'action=rebuild\nconfirm=yes\n' >"$W/ans_rebuild"
+    t0=$(date +%s)
+    PATH="$SAFE:$PATH" bash "$SRC/relay-uws/install.sh" --answers "$W/ans_rebuild" >"$W/rebuild.out" 2>&1
+    rc=$?
+    t1=$(date +%s)
+    echo "the rebuild took $(( (t1 - t0) / 60 )) min $(( (t1 - t0) % 60 )) s"
+    grep -E 'built in' "$W/rebuild.out"
+    eq "a rebuild from the same copy finishes" "$rc" 0
+    [ "$rc" = 0 ] || tail -n 30 "$W/rebuild.out"
+    yes_ "the forwarder runs after it" fwd_up
+    finish
+fi
 
 # ---------------------------------------------------------------- first install
 
@@ -205,6 +480,11 @@ yes_ "curl came with the setup, after the plan" command -v curl
 yes_ "and jq" command -v jq
 has "the setup's copy is the clone's" "$(sed -n 2p "$LIB/installer/install.sh")" "# Hollow relay setup"
 has "hollow-relay-setup runs it" "$(hollow-relay-setup --help)" "sudo bash install.sh"
+# An operator with SSH keys turns password logins off (ssh_keys=no left them).
+mkdir -p /etc/ssh/sshd_config.d && printf 'PasswordAuthentication no\nKbdInteractiveAuthentication no\n' >/etc/ssh/sshd_config.d/00-box-keys.conf
+# sshd -T needs the folder sshd makes at its first login, which a socket-started sshd (24.04) has not had.
+install -d -m 0755 /run/sshd
+systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || true
 
 echo "daily security updates"
 dump=$(apt-config dump)
@@ -238,6 +518,9 @@ echo "the fair-share shaper on a stock server"
 echo "--- check-host after the first install"
 printf '%s\n' "$check"
 echo "--- end of check-host"
+# check_host_prints_only_ok_after_a_first_install; kernel.core_pattern is the
+# box host's, which the stand-in sysctl leaves alone.
+eq "check-host prints only ok and skip" "$(grep -vE '^  (ok|skip)  |^  \(|^[^ ]' <<<"$check" | grep -v 'kernel.core_pattern is ')" ""
 fair_part() { sed -n '/^Fair share$/,/^[A-Za-z]/p' <<<"$1"; }
 stats() {
     local out
@@ -301,7 +584,8 @@ echo "net_get and redirects"
 openssl req -x509 -newkey rsa:2048 -nodes -keyout "$W/ca.key" -out "$W/ca.crt" -days 2 -subj /CN=hollow-test-ca \
     -addext "basicConstraints=critical,CA:TRUE" -addext "keyUsage=critical,keyCertSign,cRLSign" >/dev/null 2>&1
 openssl req -newkey rsa:2048 -nodes -keyout "$W/srv.key" -out "$W/srv.csr" -subj /CN=ipcheck.test >/dev/null 2>&1
-printf 'subjectAltName=DNS:ipcheck.test\n' >"$W/ext"
+# And an authority key id on the server's: Python on OpenSSL 4 (Ubuntu 26.10) refuses one without.
+printf 'subjectAltName=DNS:ipcheck.test\nauthorityKeyIdentifier=keyid,issuer\nsubjectKeyIdentifier=hash\n' >"$W/ext"
 openssl x509 -req -in "$W/srv.csr" -CA "$W/ca.crt" -CAkey "$W/ca.key" -CAcreateserial -out "$W/srv.crt" -days 2 \
     -extfile "$W/ext" >/dev/null 2>&1
 cp "$W/ca.crt" /usr/local/share/ca-certificates/hollow-test-ca.crt && update-ca-certificates >/dev/null 2>&1
@@ -550,5 +834,39 @@ systemctl daemon-reload
 systemctl reset-failed hollow-relay
 part=$(turn_part "$(bash "$LIB/installer/deploy/check-host.sh" 2>&1)")
 eq "the port lock passes after the rollbacks" "$(grep FAIL <<<"$part")" ""
+
+# an_update_never_installs_programs_that_cannot_start_here (#153)
+echo "a release whose relay needs a library this system does not offer"
+publish 8 nolib
+update u8
+out=$(flat "$W/u8.out")
+has "the update stops" "$out" "the release list has no programs for this machine now (they need libsodium.so.99, which $PRETTY_NAME does not offer). Nothing was installed."
+eq "the relay is build 5 still" "$(installed_build)" 5
+eq "and the setup the copy it was" "$(tree_sum "$LIB/installer")" "$before"
+no_ "the update left no mark" test -e /var/lib/hollow-installer/update_pending
+yes_ "the relay runs" relay_up
+
+# a_rerun_puts_back_what_a_release_upgrade_took (#153): the relay's libsodium
+# goes, check-host names it, and the next run of the setup installs it again.
+echo "a library the relay lost"
+sofile=$(LC_ALL=C ldd /usr/local/bin/hollow-relay | sed -n 's/^[[:space:]]*libsodium[^[:space:]]* => \(\/[^[:space:]]*\).*/\1/p' | head -n 1)
+sodium=$(dpkg-query -S "$(readlink -f "$sofile")" 2>/dev/null | cut -d: -f1)
+if [ -n "$sodium" ]; then
+    DEBIAN_FRONTEND=noninteractive apt-get remove -y -q "$sodium" >/dev/null 2>&1
+    has "check-host names it" "$(bash "$LIB/installer/deploy/check-host.sh" 2>&1)" \
+        "FAIL  hollow-relay cannot start: /usr/local/bin/hollow-relay needs libsodium"
+    publish 9 setup
+    printf 'action=change\nchange=grace\ngrace_secs=160\nconfirm=yes\n' >"$W/ans_heal"
+    PATH="$SAFE:$PATH" hollow-relay-setup --answers "$W/ans_heal" >"$W/heal.out" 2>&1
+    rc=$?
+    eq "the next run finishes" "$rc" 0
+    [ "$rc" = 0 ] || tail -n 30 "$W/heal.out"
+    eq "with $sodium back" "$(dpkg-query -W -f='${Status}' "$sodium" 2>/dev/null)" "install ok installed"
+    has "check-host passes again" "$(bash "$LIB/installer/deploy/check-host.sh" 2>&1)" \
+        "ok    hollow-relay's program /usr/local/bin/hollow-relay finds every library it needs"
+    yes_ "the relay runs" relay_up
+else
+    bad "the relay's libsodium belongs to a package"
+fi
 
 finish

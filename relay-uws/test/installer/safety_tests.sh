@@ -127,6 +127,16 @@ t_audit_says_unknown_when_sshd_cannot_tell() {
     eq "on" "$(ssh_password_state)" on
     audit_collect
     has "on is on" "${AUD_LINES[0]}" "SSH: password logins on"
+    # sshd_settings_read_in_any_case (#153): OpenSSH 10.5 (Ubuntu 26.10).
+    sshd() { [ "$1" = -T ] && cat "$T/fixtures/sshd/openssh-10.5-ubuntu-26.10.txt"; }
+    eq "OpenSSH 10.5's PasswordAuthentication yes is on" "$(ssh_password_state)" on
+    audit_collect
+    has "and the audit says so" "${AUD_LINES[0]}" "SSH: password logins on"
+    has "with root's login read too" "${AUD_LINES[0]}" "root may log in with a key only"
+    sshd() { [ "$1" = -T ] && printf 'PasswordAuthentication no\nKbdInteractiveAuthentication yes\n'; }
+    eq "and its KbdInteractiveAuthentication yes" "$(ssh_password_state)" on
+    sshd() { [ "$1" = -T ] && printf 'PasswordAuthentication no\nKbdInteractiveAuthentication no\n'; }
+    eq "off is off" "$(ssh_password_state)" off
 }
 in_sub t_audit_says_unknown_when_sshd_cannot_tell
 

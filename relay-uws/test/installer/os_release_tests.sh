@@ -19,6 +19,9 @@ os_case() {
 
 echo "systems built on Ubuntu or Debian"
 os_case ubuntu-24.04 ubuntu 24.04 noble 0 yes
+os_case ubuntu-25.10 ubuntu 25.10 questing 0 yes
+os_case ubuntu-26.04 ubuntu 26.04 resolute 0 yes
+os_case ubuntu-26.10 ubuntu 26.10 stonking 0 yes
 os_case debian-12 debian 12 bookworm 0 yes
 os_case mint-22 ubuntu 24.04 noble 1 yes
 os_case pop-22.04 ubuntu 22.04 jammy 1 yes
@@ -48,6 +51,7 @@ eq "no os-release, no base" "$HOLLOW_OS_BASE" ""
 no_ os_supported "$HOLLOW_OS_BASE" "$HOLLOW_OS_BASE_VER"
 eq "an Ubuntu codename" "$(hollow_base_version ubuntu resolute)" 26.04
 eq "a Debian codename" "$(hollow_base_version debian trixie)" 13
+eq "Ubuntu 26.10's codename" "$(hollow_base_version ubuntu stonking)" 26.10
 eq "an Ubuntu codename is not Debian's" "$(hollow_base_version debian noble)" ""
 
 echo "a derivative's security updates"

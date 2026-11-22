@@ -11,7 +11,7 @@ command -v sudo >/dev/null || { echo "skip sudo_matrix (no sudo here)"; exit 0; 
 
 T=$(cd "$(dirname "$0")" && pwd)
 CH=$T/../../deploy/check-host.sh
-pass=0 fail=0
+pass=0 fail=0 skipped=0
 made=()
 acct_made=0
 cleanup() {
@@ -22,8 +22,9 @@ cleanup() {
 trap cleanup EXIT
 
 rs=0
-sudo -V 2>/dev/null | head -n 1 | grep -q '^sudo-rs' && rs=1
-echo "sudo_matrix on $(sudo -V 2>/dev/null | head -n 1)"
+# sudo-rs 0.2.8 prints its version on stderr.
+sudo -V 2>&1 | head -n 1 | grep -q '^sudo-rs' && rs=1
+echo "sudo_matrix on $(sudo -V 2>&1 | head -n 1)"
 if ! id hollow-relay >/dev/null 2>&1; then
     useradd -r -s /usr/sbin/nologin hollow-relay && acct_made=1
 fi
@@ -49,7 +50,11 @@ case_() {
     [[ $want == *"|"* ]] && { if [ "$rs" = 1 ]; then want=${want#*|}; else want=${want%|*}; fi; }
     rm -f /etc/sudoers.d/zz-matrix
     if [ -n "$body" ]; then printf '%s\n' "$body" >/etc/sudoers.d/zz-matrix; chmod 0440 /etc/sudoers.d/zz-matrix; fi
-    if ! visudo -cq >/dev/null 2>&1; then echo "skip  $name (this sudo does not take it)"; return; fi
+    # One file at a time: Ubuntu 26.04's sudo-common ships /etc/sudoers as 0644,
+    # which sudo-rs reads and visudo-rs -c refuses as a whole.
+    if [ -n "$body" ] && ! visudo -cq -f /etc/sudoers.d/zz-matrix >/dev/null 2>&1; then
+        skipped=$((skipped + 1)); echo "skip  $name (this sudo does not take it)"; return
+    fi
     l=$(LC_ALL=C sudo -l -U hollow-relay 2>&1 </dev/null)
     ll=$(LC_ALL=C sudo -ll -U hollow-relay 2>/dev/null </dev/null)
     v=$(sudo_verdict hollow-relay hollow-relay yes "$l" "$ll")
@@ -88,7 +93,13 @@ case_ sudoedit bad 'ALL ALL=(root) NOPASSWD: sudoedit /etc/shadow'
 case_ setenv_tag bad 'ALL ALL=(root) NOPASSWD:SETENV: /usr/bin/mint-refresh-cache'
 case_ group_only bad 'ALL ALL=(:root) NOPASSWD: /usr/bin/mint-refresh-cache'
 case_ two_runas bad 'ALL ALL=(root) NOPASSWD: /usr/bin/mint-refresh-cache, (nobody) NOPASSWD: /bin/sh'
-case_ empty_args bad 'ALL ALL=(root) NOPASSWD: /usr/bin/mint-refresh-cache ""'
+# sudo-rs 0.2.8 lists this rule without its "", so the check sees Mint's own
+# rule, which is all the account may run or more.
+printf '%s\n' 'ALL ALL=(root) NOPASSWD: /usr/bin/mint-refresh-cache ""' >/etc/sudoers.d/zz-matrix
+chmod 0440 /etc/sudoers.d/zz-matrix
+empty_shown=bad
+LC_ALL=C sudo -l -U hollow-relay 2>&1 </dev/null | grep -qF 'mint-refresh-cache ""' || empty_shown="mint 5"
+case_ empty_args "bad|$empty_shown" 'ALL ALL=(root) NOPASSWD: /usr/bin/mint-refresh-cache ""'
 case_ user_spec_all bad 'hollow-relay ALL=(ALL:ALL) NOPASSWD: ALL'
 case_ notafter bad 'ALL ALL=(root) NOTAFTER=20991231000000Z NOPASSWD: /usr/bin/mint-refresh-cache'
 case_ passwd_then_nopw bad 'ALL ALL=(root) PASSWD: /bin/sh, NOPASSWD: /usr/bin/mint-refresh-cache'
@@ -102,5 +113,7 @@ chmod 0777 /usr/lib/linuxmint/mintUpdate
 case_ tool_dir_writable bad ''
 chmod 0755 /usr/lib/linuxmint/mintUpdate
 
+# A matrix whose cases all skip proves nothing.
+[ "$pass" -ge 20 ] || { fail=$((fail + 1)); echo "FAIL  only $pass cases ran ($skipped skipped)"; }
 echo "sudo_matrix: $pass passed, $fail failed"
 [ "$fail" = 0 ]
