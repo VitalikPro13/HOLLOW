@@ -29,6 +29,10 @@ pub(super) const CHECKPOINT_MIN_GAP_MS: u64 = 3600 * 1000;
 /// How long a row a rebuild refuses stays stored, judged again at every rebuild.
 pub(crate) const PARK_MS: u64 = 30 * 24 * 3600 * 1000;
 
+/// HOL-SEC-222: founding ops of one id a replica holds at most: the one it founds on and
+/// the best of each other device the view lists, so a view change can choose again.
+pub(crate) const MAX_FOUNDING_KEPT: usize = 4;
+
 /// The bytes of ops a base leaves undecided that one server folds (H3). Shared max-min
 /// over the members of the anchor (the base, else the founding state), each with the tree
 /// of authors its admissions rooted, plus one pool for authors rooted in nobody; within a
@@ -1037,10 +1041,9 @@ impl ServerState {
         // a stranger's op costs no store read and no entry (section 14).
         let judged = self.judged_authors(&passed);
         self.fill_view(judged.iter().map(|&i| &passed[i]));
-        let passed = self.founded_once(passed, &mut out);
+        let (passed, mut refold) = self.founded_once(passed, &mut out);
         let mut batch: HashMap<OpKey, (CrdtOp, [u8; 32])> = HashMap::new();
         let mut rival = false;
-        let mut refold = false;
         for op in passed {
             let key = (op.author.clone(), op.hlc.clone());
             let hash = op.content_hash();
@@ -1210,40 +1213,105 @@ impl ServerState {
         (0..ops.len()).filter(|&i| admitted.contains(ops[i].author.as_str()) || self.known_author(&ops[i])).collect()
     }
 
-    /// HOL-SEC-222: a self-certifying server is founded once. The founding op is exempt
-    /// from the device clause (a removed founder's still anchors its server), so a device
-    /// removed since, holding the master key, can mint another of the same id. Only the
-    /// founding op held here passes, else the batch's best (a counted device's, then fold
-    /// order); every other `ServerCreated` drops unstored.
-    fn founded_once(&self, ops: Vec<CrdtOp>, out: &mut Ingested) -> Vec<CrdtOp> {
-        if !super::anchor::is_genesis_id(&self.server_id) || !ops.iter().any(|o| matches!(o.payload, CrdtPayload::ServerCreated { .. })) {
-            return ops;
+    /// HOL-SEC-222, the door of [`Self::founding_kept`]: a founding op it would not keep
+    /// drops unstored. True when the batch changes what is kept (a better founding op,
+    /// or an op refuting the one held), so the caller folds again.
+    fn founded_once(&self, ops: Vec<CrdtOp>, out: &mut Ingested) -> (Vec<CrdtOp>, bool) {
+        if !super::anchor::is_genesis_id(&self.server_id) {
+            return (ops, false);
         }
-        let founds = |o: &CrdtOp| {
-            matches!(&o.payload, CrdtPayload::ServerCreated { owner_peer_id, nonce, .. }
-                if o.author == *owner_peer_id && super::anchor::derive_server_id(owner_peer_id, nonce) == self.server_id)
+        let founding = ops.iter().any(|o| matches!(o.payload, CrdtPayload::ServerCreated { .. }));
+        // An op older than the founding op may refute it, which matters only with a
+        // runner-up to found on instead.
+        let refutes = || {
+            let floor = super::authority::founding_op(self).map(|f| &f.hlc);
+            floor.is_some_and(|f| ops.iter().any(|o| o.hlc < *f)) && self.stored.iter().any(|(o, _)| self.founds(o))
         };
-        let held = self.op_log.iter().chain(self.stored.iter().map(|(o, _)| o)).chain(self.held.iter().map(|(o, _)| o)).find(|o| founds(o));
-        let best = || {
-            ops.iter()
-                .filter(|o| founds(o))
-                .min_by(|a, b| {
-                    let rank = |o: &CrdtOp| std::cmp::Reverse(self.verdict(o).rank());
-                    rank(a).cmp(&rank(b)).then_with(|| fold_order(a, b)).then_with(|| a.content_hash().cmp(&b.content_hash()))
-                })
-                .map(CrdtOp::content_hash)
-        };
-        let stands = held.map(CrdtOp::content_hash).or_else(best);
-        ops.into_iter()
+        if !founding && !refutes() {
+            return (ops, false);
+        }
+        let held: Vec<&CrdtOp> = self.op_log.iter().chain(self.stored.iter().map(|(o, _)| o)).chain(self.held.iter().map(|(o, _)| o)).collect();
+        let before: Vec<[u8; 32]> = self.founding_kept(&held).into_iter().map(CrdtOp::content_hash).collect();
+        let mut all = held;
+        all.extend(ops.iter());
+        let after: Vec<[u8; 32]> = self.founding_kept(&all).into_iter().map(CrdtOp::content_hash).collect();
+        let refold = before != after;
+        let ops = ops
+            .into_iter()
             .filter(|o| {
-                let passes = !matches!(o.payload, CrdtPayload::ServerCreated { .. }) || Some(o.content_hash()) == stands;
+                let passes = !matches!(o.payload, CrdtPayload::ServerCreated { .. }) || after.contains(&o.content_hash());
                 if !passes {
                     out.rejected += 1;
                     log_refusal(o, &OpReject::NotAllowed);
                 }
                 passes
             })
-            .collect()
+            .collect();
+        (ops, refold)
+    }
+
+    /// An op founding this self-certifying id: its owner's, naming its nonce.
+    pub(crate) fn founds(&self, op: &CrdtOp) -> bool {
+        matches!(&op.payload, CrdtPayload::ServerCreated { owner_peer_id, nonce, .. }
+            if op.author == *owner_peer_id && super::anchor::derive_server_id(owner_peer_id, nonce) == self.server_id)
+    }
+
+    /// HOL-SEC-222: the founding ops of this id kept among `ops` (everything held and
+    /// arriving, which the owner's counted ops judge too), best first: the first founds
+    /// the server. Chosen by content and the view alone, never by arrival: a counted
+    /// device's first, then one the view lists, then the earliest clock, then the content
+    /// id. One clocked after a counted op of the owner's is refuted, since no honest op
+    /// predates its founding op. Besides the first, the best of each other listed device,
+    /// never a refuted one, up to `MAX_FOUNDING_KEPT`.
+    pub(crate) fn founding_kept<'a>(&self, ops: &[&'a CrdtOp]) -> Vec<&'a CrdtOp> {
+        if !super::anchor::is_genesis_id(&self.server_id) {
+            return Vec::new();
+        }
+        // One copy per key, the one the dedup keeps.
+        let mut by_key: HashMap<(&str, &HlcTimestamp), &'a CrdtOp> = HashMap::new();
+        for &o in ops.iter().filter(|o| self.founds(o)) {
+            let held = by_key.entry((o.author.as_str(), &o.hlc)).or_insert(o);
+            if self.copy_rank(o, o.content_hash()) < self.copy_rank(held, held.content_hash()) {
+                *held = o;
+            }
+        }
+        let mut found: Vec<&'a CrdtOp> = by_key.into_values().collect();
+        if found.len() < 2 {
+            return found;
+        }
+        let owner = found[0].author.as_str();
+        let counted = |o: &CrdtOp| self.verdict(o) == super::authority::Verdict::Counted;
+        let evidence = ops
+            .iter()
+            .filter(|o| o.author == owner && !matches!(o.payload, CrdtPayload::ServerCreated { .. } | CrdtPayload::ServerCheckpoint { .. }))
+            .filter(|o| counted(o))
+            .map(|o| &o.hlc)
+            .min();
+        let refuted = |o: &CrdtOp| evidence.is_some_and(|e| *e < o.hlc);
+        found.sort_by_cached_key(|o| (refuted(o), !counted(o), !self.lists_device(o), o.hlc.clone(), o.content_hash()));
+        let mut slots: HashSet<&str> = HashSet::new();
+        let mut kept = Vec::new();
+        for (i, o) in found.into_iter().enumerate() {
+            if kept.len() == MAX_FOUNDING_KEPT {
+                break;
+            }
+            let slot = o.dev.as_deref().map_or("~", |d| d.device.as_str());
+            if (i > 0 && (refuted(o) || !self.lists_device(o))) || !slots.insert(slot) {
+                continue;
+            }
+            kept.push(o);
+        }
+        kept
+    }
+
+    /// Whether the view lists the device `op`'s proof names for its author (counted or
+    /// removed); a proofless op, or an author the view holds no statements for, passes.
+    fn lists_device(&self, op: &CrdtOp) -> bool {
+        let Some(dev) = op.dev.as_deref() else { return true };
+        self.authority
+            .entry(&op.author)
+            .and_then(|e| e.auth.as_ref())
+            .is_none_or(|a| a.counts(&dev.device) || a.removed.contains_key(&dev.device))
     }
 
     pub(super) fn known_author(&self, op: &CrdtOp) -> bool {
@@ -1864,6 +1932,8 @@ impl ServerState {
         let refold_pins = base.as_ref().map(|(_, b)| refold_pins(&b.state, now_ms)).unwrap_or_default();
         let rivals = self.rival_settlings(&all, &bases, base.as_ref().map(|(_, b)| b), owner.as_deref());
         let me: Option<String> = self.hlc.as_ref().map(|h| h.actor().to_string());
+        let founding: Vec<(String, HlcTimestamp)> =
+            self.founding_kept(&all.iter().map(|e| &e.0).collect::<Vec<_>>()).into_iter().map(|o| (o.author.clone(), o.hlc.clone())).collect();
         let base_at = base.as_ref().map(|(i, _)| *i);
         let parent_at = parent.as_ref().map(|(i, _)| *i);
         for (i, entry) in all.iter_mut().enumerate() {
@@ -1884,7 +1954,11 @@ impl ServerState {
                     },
                 }
             } else if genesis && matches!(op.payload, CrdtPayload::ServerCreated { .. }) {
-                Class::Founding
+                match founding.iter().position(|(a, h)| *a == op.author && *h == op.hlc) {
+                    Some(0) => Class::Founding,
+                    Some(_) => Class::Row(RowKind::Dormant),
+                    None => Class::Drop,
+                }
             } else if matches!(op.payload, CrdtPayload::SettleSign { .. }) {
                 if marks.kept.contains(&i) { Class::Row(RowKind::SettleSign) } else { Class::Drop }
             } else if matches!(op.payload, CrdtPayload::FloorMark { .. }) {

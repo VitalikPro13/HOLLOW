@@ -89,37 +89,30 @@ impl ServerState {
 
     /// HOL-SEC-221: the founding op a settling keeps even when a dropped device wrote it
     /// and this device first stored it at or after T: it is R when no checkpoint precedes
-    /// T, and names the owner a checkpoint R must come from. Of the held ops founding this
-    /// self-certifying id, only the one first stored here; another one a lost device
-    /// minted with the master key passes only the dropped devices' rule.
-    fn founding_stand(&self, seen: &SeenAt) -> Option<[u8; 32]> {
-        let founds = |o: &CrdtOp| {
-            matches!(&o.payload, CrdtPayload::ServerCreated { owner_peer_id, nonce, .. }
-                if o.author == *owner_peer_id && super::anchor::derive_server_id(owner_peer_id, nonce) == self.server_id)
-        };
-        let first_seen = |o: &CrdtOp| seen.get(&(o.author.clone(), o.hlc.physical_ms, o.hlc.counter)).copied().unwrap_or(u64::MAX);
-        self.op_log
-            .iter()
-            .chain(self.stored.iter().map(|(o, _)| o))
-            .filter(|o| founds(o))
-            .min_by(|a, b| first_seen(a).cmp(&first_seen(b)).then_with(|| super::server_state::fold_order(a, b)))
-            .map(CrdtOp::content_hash)
+    /// T, and names the owner a checkpoint R must come from. The one the fold founds on
+    /// (HOL-SEC-222, `founding_kept`), never one first stored here.
+    fn founding_stand(&self) -> Option<[u8; 32]> {
+        let held: Vec<&CrdtOp> = self.op_log.iter().chain(self.stored.iter().map(|(o, _)| o)).chain(self.held.iter().map(|(o, _)| o)).collect();
+        self.founding_kept(&held).first().map(|o| o.content_hash())
     }
 
     /// The ops a settling folds on R: what counted before the removal, a dropped device's
-    /// only when stored here before T (its founding op aside); no checkpoint but R.
+    /// only when stored here before T (its founding op aside); no checkpoint
+    /// but R, no founding op but the one the fold founds on.
     fn settling_input(&mut self, r: Option<&CrdtOp>, s: &Settling<'_>) -> Vec<CrdtOp> {
-        let stand = self.founding_stand(s.seen);
+        let stand = self.founding_stand();
         let now_view = std::mem::replace(&mut self.authority, s.before.clone());
         let before_t = |o: &CrdtOp| s.seen.get(&(o.author.clone(), o.hlc.physical_ms, o.hlc.counter)).is_some_and(|ms| *ms < s.t_ms);
         let dropped = |o: &CrdtOp| o.dev.as_deref().is_some_and(|d| s.dropped.contains(&d.device));
+        let kept = |o: &CrdtOp| stand == Some(o.content_hash());
         let mut ops: Vec<CrdtOp> = self
             .op_log
             .iter()
             .chain(self.stored.iter().map(|(o, _)| o))
             .chain(self.held.iter().map(|(o, _)| o))
             .filter(|o| !is_checkpoint(o) && !matches!(o.payload, CrdtPayload::SettleSign { .. }))
-            .filter(|o| self.device_counts_here(o) && (!dropped(o) || before_t(o) || stand == Some(o.content_hash())))
+            .filter(|o| !matches!(o.payload, CrdtPayload::ServerCreated { .. }) || stand == Some(o.content_hash()))
+            .filter(|o| self.device_counts_here(o) && (!dropped(o) || before_t(o) || kept(o)))
             .cloned()
             .collect();
         self.authority = now_view;
@@ -709,9 +702,10 @@ pub(crate) mod tests {
 
     /// HOL-SEC-221: the laptop founds, checkpoints (cp1) and renames twice; the phone first
     /// stores all of it at 3,000 (cp1's first fold, so "not sure" reads T = 3,000), the
-    /// second rename at 4,000. With `forged`, the laptop also mints a second founding op
-    /// of the same id, clocked before the first and named "stolen", first stored here at
-    /// the time it names (none: no record of it), as a build before HOL-SEC-222 kept it.
+    /// second rename at 4,000.
+    /// With `forged`, the laptop also mints a second founding op of the same id, clocked
+    /// before the first and named "stolen", first stored here at the time it names (none:
+    /// no record of it).
     fn founded_by_the_laptop(forged: Option<Option<u64>>) -> (ServerState, SeenAt) {
         let (before, _) = rosters();
         let r_pub = before.r_pub.clone();
@@ -737,10 +731,10 @@ pub(crate) mod tests {
             second.sign(&master, &pk);
             second.sign_device(&laptop_kp);
             phone.ingest_remote(std::slice::from_ref(&second));
-            let holds = |s: &ServerState| s.op_log.iter().chain(s.stored.iter().map(|(o, _)| o)).any(|o| o.hlc == second.hlc);
-            assert!(!holds(&phone), "HOL-SEC-222: the door refuses a second founding op");
-            // As a replica that stored it before HOL-SEC-222 still holds it.
-            phone.stored.push((second.clone(), RowKind::Dormant));
+            // HOL-SEC-222's residual: the same device's, clocked earlier, founds instead,
+            // and only one of each device's founding ops stays held.
+            assert_eq!(authority::founding_op(&phone).map(CrdtOp::content_hash), Some(second.content_hash()), "precondition: the earlier op founds");
+            assert!(!phone.stored.iter().any(|(o, _)| o.hlc == founding.hlc), "a second founding op of the laptop's stayed held");
             if let Some(at) = stored_at {
                 seen.insert(key(&second), at);
             }
@@ -780,23 +774,29 @@ pub(crate) mod tests {
         assert_eq!(phone.name.read().as_str(), "s", "the founder's renames stored here at T and after drop");
     }
 
-    /// HOL-SEC-221: of two founding ops of one id, the settling keeps only the one first
-    /// stored here; the other, by the lost device and stored after T (or with no record of
-    /// when), drops.
+    /// HOL-SEC-221 with HOL-SEC-222: the settling stands on the founding op the fold
+    /// founds on, whenever this device first stored it. The lost founder's own second one,
+    /// clocked earlier, is that op (the residual): it changes the founding name, and only
+    /// because nothing renamed the server where the settling keeps it.
     #[test]
-    fn a_founding_op_the_lost_device_minted_later_never_founds_the_settling() {
-        for stored_at in [Some(4_500), None] {
+    fn a_settling_stands_on_the_founding_op_the_fold_chose_whenever_stored() {
+        for stored_at in [Some(4_500), Some(1_000), None] {
             let (mut phone, seen) = founded_by_the_laptop(Some(stored_at));
+            let chosen = authority::founding_op(&phone).map(CrdtOp::content_hash);
+            assert_eq!(phone.founding_stand(), chosen, "the settling's founding op is not the fold's ({stored_at:?})");
             assert!(settle_the_laptops_server(&mut phone, &seen).is_some(), "the settling is written ({stored_at:?})");
-            assert_eq!(phone.name.read().as_str(), "s", "the later founding op stayed out ({stored_at:?})");
+            assert_eq!(authority::founding_op(&phone).map(CrdtOp::content_hash), chosen, "the settling founded on another op ({stored_at:?})");
+            assert_eq!(phone.name.read().as_str(), "stolen", "the settling named the server other than its founding op ({stored_at:?})");
+            assert_eq!(phone.current_owner().as_deref(), Some(keys(OWNER).1.as_str()), "the owner's seat ({stored_at:?})");
         }
     }
 
     /// HOL-SEC-222: the laptop, removed, still holds the master key and mints a second
     /// founding op of the server the phone founded (clocked before the first, so a fold
-    /// from genesis would take it first, or at the first's own clock). No replica stores
-    /// it: not the founder's, not one folding the log again from genesis, not a fresh one
-    /// handed both in one batch; each stays founded on the first.
+    /// from genesis would take it first, or at the first's own clock). It founds nothing:
+    /// not on the founder's replica, not on one folding the log again from genesis, not on
+    /// a fresh one handed both in one batch. At most one of the laptop's stays held, as
+    /// the runner-up a later view may choose.
     #[test]
     fn a_second_founding_op_from_a_removed_device_founds_nothing() {
         let (before, after) = rosters();
@@ -810,35 +810,325 @@ pub(crate) mod tests {
             let P::ServerCreated { name, .. } = &mut op.payload else { unreachable!() };
             *name = "stolen".into();
             op.hlc.physical_ms -= ms_back;
+            op.hlc.counter = crate::crdt::hlc::lane_of(&keys(LAPTOP).1);
             op.sign(&master, &pk);
             op.sign_device(&keys(LAPTOP).0);
+            assert!(op.proven_device().is_some(), "precondition: the laptop's proof verifies");
             op
         };
-        let holds = |s: &ServerState, op: &CrdtOp| {
-            s.op_log.iter().chain(s.stored.iter().map(|(o, _)| o)).chain(s.held.iter().map(|(o, _)| o)).any(|o| o.content_hash() == op.content_hash())
+        let founding_ops = |s: &ServerState| {
+            s.op_log.iter().chain(s.stored.iter().map(|(o, _)| o)).chain(s.held.iter().map(|(o, _)| o)).filter(|o| matches!(o.payload, P::ServerCreated { .. })).count()
         };
         let founded_on_the_first = |s: &ServerState, what: &str| {
             assert_eq!(authority::founding_op(s).map(CrdtOp::content_hash), Some(founding.content_hash()), "{what}: founded on another op");
             assert_eq!(s.name.read().as_str(), "s", "{what}: named by the second founding op");
+            assert!(founding_ops(s) <= 2, "{what}: more than one of the laptop's founding ops held");
         };
-        for ms_back in [10, 0] {
-            let forged = second(ms_back);
-            let out = owner.ingest_remote(std::slice::from_ref(&forged));
-            assert!(!holds(&owner, &forged) && out.rows.is_empty(), "the founder's replica kept a second founding op ({ms_back} ms back)");
+        for ms_back in [10, 0, 20] {
+            let out = owner.ingest_remote(std::slice::from_ref(&second(ms_back)));
             founded_on_the_first(&owner, "the founder's replica");
+            // One worse than the laptop's runner-up drops at the door, unstored, no rebuild.
+            if ms_back == 0 {
+                assert!(out.rejected == 1 && !out.rebuilt && out.rows.is_empty(), "the door let a worse founding op in ({ms_back} ms back)");
+            }
         }
         let mut replica = device_replica(&owner.server_id, OTHER);
         judged_by(&mut replica, after.clone());
         replica.ingest_remote(std::slice::from_ref(&founding));
         let forged = second(10);
         replica.ingest_remote(std::slice::from_ref(&forged));
-        assert!(!holds(&replica, &forged), "a replica folding from genesis kept a second founding op");
         founded_on_the_first(&replica, "a replica folding from genesis");
+        let _ = replica.rebuild_now();
+        founded_on_the_first(&replica, "a replica folding from genesis, rebuilt");
         let mut fresh = device_replica(&owner.server_id, OTHER);
         judged_by(&mut fresh, after);
         fresh.ingest_remote(&[forged.clone(), founding.clone()]);
-        assert!(!holds(&fresh, &forged), "a fresh replica handed both kept the removed device's");
         founded_on_the_first(&fresh, "a fresh replica handed both");
+    }
+
+    /// HOL-SEC-222: a view change chooses the founding op again from what is held, with
+    /// no op sent. The laptop, counted, mints one clocked before the phone's, which then
+    /// founds (same verdict, earlier clock); its removal puts the phone's back.
+    #[test]
+    fn a_view_change_chooses_the_founding_op_again_without_sync() {
+        let (before, after) = rosters();
+        let (master, m_id, pk) = keys(OWNER);
+        let (phone, phone_id, _) = keys(PHONE);
+        let (mut owner, founding) =
+            ServerState::found_on("s".into(), m_id, Founder { device_peer_id: &phone_id, device: Some(&phone), r_pub: Some(&before.r_pub) }, master.clone(), pk.clone());
+        let renamed = rename(&mut owner, "real");
+        let mut forged = founding.clone();
+        let P::ServerCreated { name, .. } = &mut forged.payload else { unreachable!() };
+        *name = "stolen".into();
+        forged.hlc.physical_ms -= 10;
+        forged.hlc.counter = crate::crdt::hlc::lane_of(&keys(LAPTOP).1);
+        forged.sign(&master, &pk);
+        forged.sign_device(&keys(LAPTOP).0);
+        assert!(forged.proven_device().is_some(), "precondition: the laptop's proof verifies");
+        let mut r = device_replica(&owner.server_id, OTHER);
+        judged_by(&mut r, before);
+        r.ingest_remote(&[founding.clone(), renamed.clone(), forged.clone()]);
+        let f = |s: &ServerState| authority::founding_op(s).map(CrdtOp::content_hash);
+        assert_eq!(f(&r), Some(forged.content_hash()), "precondition: the counted laptop's earlier op founds");
+        assert!(r.stored.iter().any(|(o, _)| o.content_hash() == founding.content_hash()), "the phone's founding op was not kept");
+        assert_eq!(r.name.read().as_str(), "real", "the owner's rename is never refused");
+        judged_by(&mut r, after);
+        let _ = r.rebuild_now();
+        assert_eq!(f(&r), Some(founding.content_hash()), "the removal did not choose the phone's founding op again");
+        assert!(r.stored.iter().any(|(o, _)| o.content_hash() == forged.content_hash()), "the laptop's founding op was not kept as the runner-up");
+        assert_eq!(r.name.read().as_str(), "real");
+    }
+
+    /// HOL-SEC-222: what a replica keeps of a flood of founding ops of one id is bounded:
+    /// one per proving device and `MAX_FOUNDING_KEPT` in all; under a view, none from a
+    /// device it does not list.
+    #[test]
+    fn the_founding_ops_kept_are_one_per_listed_device_and_capped() {
+        let (before, _) = rosters();
+        let (master, m_id, pk) = keys(OWNER);
+        let (phone, phone_id, _) = keys(PHONE);
+        let (_, founding) =
+            ServerState::found_on("s".into(), m_id, Founder { device_peer_id: &phone_id, device: Some(&phone), r_pub: Some(&before.r_pub) }, master.clone(), pk.clone());
+        let variant = |device: u8, back: u64| {
+            let mut op = founding.clone();
+            op.hlc.physical_ms -= back;
+            op.hlc.counter = crate::crdt::hlc::lane_of(&keys(device).1);
+            op.sign(&master, &pk);
+            op.sign_device(&keys(device).0);
+            assert!(op.proven_device().is_some(), "precondition: each proof verifies");
+            op
+        };
+        let flood: Vec<CrdtOp> = (0..8u8).flat_map(|d| [variant(10 + d, 1 + u64::from(d)), variant(10 + d, 20 + u64::from(d))]).collect();
+        let founding_ops = |s: &ServerState| {
+            let mut devices: Vec<String> = s
+                .op_log
+                .iter()
+                .chain(s.stored.iter().map(|(o, _)| o))
+                .filter(|o| matches!(o.payload, P::ServerCreated { .. }))
+                .map(|o| o.dev.as_ref().map(|d| d.device.clone()).unwrap_or_default())
+                .collect();
+            let n = devices.len();
+            devices.sort();
+            devices.dedup();
+            (n, devices.len())
+        };
+        let mut unjudged = device_replica(&founding.server_id, OTHER);
+        unjudged.ingest_remote(std::slice::from_ref(&founding));
+        unjudged.ingest_remote(&flood);
+        let (n, devices) = founding_ops(&unjudged);
+        assert_eq!(n, crate::crdt::fold::MAX_FOUNDING_KEPT, "the founding ops held");
+        assert_eq!(devices, n, "two founding ops of one device held");
+        let mut judged = device_replica(&founding.server_id, OTHER);
+        judged_by(&mut judged, before);
+        judged.ingest_remote(std::slice::from_ref(&founding));
+        judged.ingest_remote(&flood);
+        assert_eq!(founding_ops(&judged).0, 1, "a device the view does not list kept a founding op");
+        assert_eq!(authority::founding_op(&judged).map(CrdtOp::content_hash), Some(founding.content_hash()));
+    }
+
+    /// HOL-SEC-222: two copies of a founding op at one key (the founding device signing
+    /// another name at the same clock) found the same one on every replica, the one the
+    /// dedup keeps, whichever arrived first.
+    #[test]
+    fn same_key_founding_copies_found_the_same_one_in_any_order() {
+        let (before, _) = rosters();
+        let (master, m_id, pk) = keys(OWNER);
+        let (phone, phone_id, _) = keys(PHONE);
+        let (_, founding) =
+            ServerState::found_on("s".into(), m_id, Founder { device_peer_id: &phone_id, device: Some(&phone), r_pub: Some(&before.r_pub) }, master.clone(), pk.clone());
+        let mut variant = founding.clone();
+        let P::ServerCreated { name, .. } = &mut variant.payload else { unreachable!() };
+        *name = "variant".into();
+        variant.sign(&master, &pk);
+        variant.sign_device(&phone);
+        assert!(variant.proven_device().is_some(), "precondition: the phone's proof verifies");
+        let f = |first: &CrdtOp, then: &CrdtOp| {
+            let mut r = device_replica(&founding.server_id, OTHER);
+            judged_by(&mut r, before.clone());
+            r.ingest_remote(std::slice::from_ref(first));
+            r.ingest_remote(std::slice::from_ref(then));
+            authority::founding_op(&r).map(CrdtOp::content_hash)
+        };
+        assert_eq!(f(&founding, &variant), f(&variant, &founding), "arrival order chose between copies at one key");
+    }
+
+    /// HOL-SEC-222: an unlisted device's founding op founds nothing, even clocked before
+    /// a real one no device counts now (the laptop founded, then was removed).
+    #[test]
+    fn an_unlisted_devices_founding_op_never_founds() {
+        let (before, after) = rosters();
+        let (master, m_id, pk) = keys(OWNER);
+        let (laptop_kp, laptop_id, _) = keys(LAPTOP);
+        let (_, founding) =
+            ServerState::found_on("s".into(), m_id, Founder { device_peer_id: &laptop_id, device: Some(&laptop_kp), r_pub: Some(&before.r_pub) }, master.clone(), pk.clone());
+        let mut stranger = founding.clone();
+        stranger.hlc.physical_ms -= 30;
+        stranger.hlc.counter = crate::crdt::hlc::lane_of(&keys(OTHER).1);
+        stranger.sign(&master, &pk);
+        stranger.sign_device(&keys(OTHER).0);
+        let mut r = device_replica(&founding.server_id, PHONE);
+        judged_by(&mut r, after);
+        r.ingest_remote(&[stranger.clone(), founding.clone()]);
+        assert_eq!(authority::founding_op(&r).map(CrdtOp::content_hash), Some(founding.content_hash()), "an unlisted device's earlier op founded");
+    }
+
+    /// HOL-SEC-222 (b): no honest op predates its founding op. The laptop founds and the
+    /// phone renames; a founding op the phone (counted, unlike the removed laptop) mints
+    /// after the rename founds only until the rename arrives, alone, and refutes it.
+    #[test]
+    fn a_later_founding_op_is_refuted_by_an_earlier_counted_op_of_the_owner() {
+        let (before, after) = rosters();
+        let (master, m_id, pk) = keys(OWNER);
+        let (laptop_kp, laptop_id, _) = keys(LAPTOP);
+        let (mut laptop, founding) =
+            ServerState::found_on("s".into(), m_id, Founder { device_peer_id: &laptop_id, device: Some(&laptop_kp), r_pub: Some(&before.r_pub) }, master.clone(), pk.clone());
+        judged_by(&mut laptop, before.clone());
+        let mut phone = device_replica(&laptop.server_id, PHONE);
+        judged_by(&mut phone, before);
+        phone.ingest_remote(std::slice::from_ref(&founding));
+        let renamed = rename(&mut phone, "real");
+        let mut later = founding.clone();
+        let P::ServerCreated { name, .. } = &mut later.payload else { unreachable!() };
+        *name = "later".into();
+        later.hlc.physical_ms = renamed.hlc.physical_ms + 1_000;
+        later.hlc.counter = crate::crdt::hlc::lane_of(&keys(PHONE).1);
+        later.sign(&master, &pk);
+        later.sign_device(&keys(PHONE).0);
+        let mut r = device_replica(&laptop.server_id, OTHER);
+        judged_by(&mut r, after);
+        r.ingest_remote(std::slice::from_ref(&founding));
+        r.ingest_remote(std::slice::from_ref(&later));
+        let f = |s: &ServerState| authority::founding_op(s).map(CrdtOp::content_hash);
+        assert_eq!(f(&r), Some(later.content_hash()), "precondition: the counted device's op founds while nothing refutes it");
+        r.ingest_remote(std::slice::from_ref(&renamed));
+        assert_eq!(f(&r), Some(founding.content_hash()), "an earlier counted op of the owner's did not refute the later founding op");
+        assert_eq!(r.name.read().as_str(), "real", "the owner's rename was refused");
+        assert!(!r.stored.iter().any(|(o, _)| o.content_hash() == later.content_hash()), "a refuted founding op stayed held");
+    }
+
+    /// HOL-SEC-222 (b): only a counted op of the owner's own refutes a founding op. A
+    /// member's counted op and the removed laptop's owner op, both clocked before the
+    /// phone's founding op (and after the laptop's earlier one), refute nothing: the
+    /// phone's still founds.
+    #[test]
+    fn only_a_counted_op_of_the_owner_refutes_a_founding_op() {
+        let (before, after) = rosters();
+        let (master, m_id, pk) = keys(OWNER);
+        let (phone, phone_id, _) = keys(PHONE);
+        let (_, founding) =
+            ServerState::found_on("s".into(), m_id.clone(), Founder { device_peer_id: &phone_id, device: Some(&phone), r_pub: Some(&before.r_pub) }, master.clone(), pk.clone());
+        let (j_kp, j_id, j_pk) = keys(20);
+        let (j_dev, j_dev_id, _) = keys(22);
+        let j_roster = Roster::genesis(&j_kp, &keys(21).0, &j_dev, 1_000);
+        let at = |op: &mut CrdtOp, ms_back: u64, lane: &str| {
+            op.hlc.physical_ms = founding.hlc.physical_ms - ms_back;
+            op.hlc.counter = crate::crdt::hlc::lane_of(lane);
+        };
+        let mut forged = founding.clone();
+        at(&mut forged, 10, &keys(LAPTOP).1);
+        forged.sign(&master, &pk);
+        forged.sign_device(&keys(LAPTOP).0);
+        let mut member = ServerState::skeleton(founding.server_id.clone());
+        member.set_hlc(Hlc::for_device(j_id.clone(), &j_dev_id));
+        member.set_signer(j_kp.clone(), j_pk.clone());
+        member.set_device_signer(j_dev.clone());
+        let mut by_member = member.create_op(P::NicknameChanged { peer_id: j_id.clone(), nickname: "j".into() });
+        at(&mut by_member, 5, &j_dev_id);
+        by_member.sign(&j_kp, &j_pk);
+        by_member.sign_device(&j_dev);
+        let mut by_laptop = member.create_op(P::NicknameChanged { peer_id: m_id.clone(), nickname: "m".into() });
+        by_laptop.author = m_id.clone();
+        by_laptop.hlc.actor = m_id.clone();
+        at(&mut by_laptop, 5, &keys(LAPTOP).1);
+        by_laptop.sign(&master, &pk);
+        by_laptop.sign_device(&keys(LAPTOP).0);
+        for o in [&forged, &by_member, &by_laptop] {
+            assert!(o.proven_device().is_some() && o.verify_author().is_ok(), "precondition: signed and proven");
+        }
+        let mut r = device_replica(&founding.server_id, OTHER);
+        let owner_id = m_id.clone();
+        r.set_view_source(ViewSource(Arc::new(move |_: &ServerState, m: &str| {
+            if m == owner_id {
+                Some(authority::judge(m, &KeyRule::FirstHeld, &[&after]))
+            } else if m == j_id {
+                Some(authority::judge(m, &KeyRule::FirstHeld, &[&j_roster]))
+            } else {
+                None
+            }
+        })));
+        r.refresh_view();
+        r.fill_view([&by_member]);
+        assert_eq!(r.verdict(&by_member), authority::Verdict::Counted, "precondition: the member's op counts");
+        r.ingest_remote(&[founding.clone(), forged.clone(), by_member.clone(), by_laptop.clone()]);
+        assert_eq!(authority::founding_op(&r).map(CrdtOp::content_hash), Some(founding.content_hash()), "an op that is not the owner's counted one refuted the founding op");
+    }
+
+    /// HOL-SEC-222: a settling folds no founding op but the one the fold founds on. The
+    /// phone, counted, holds a founding op of its own besides the laptop's (seen before T
+    /// here); with the laptop removed the phone's founds, so the settling names it.
+    #[test]
+    fn a_settling_folds_no_founding_op_but_the_stand() {
+        let (mut phone, mut seen) = founded_by_the_laptop(None);
+        let (master, _, pk) = keys(OWNER);
+        let founding = authority::founding_op(&phone).cloned().expect("the founding op");
+        let mut own = founding.clone();
+        let P::ServerCreated { name, .. } = &mut own.payload else { unreachable!() };
+        *name = "phone's".into();
+        own.hlc.physical_ms += 1;
+        own.hlc.counter = crate::crdt::hlc::lane_of(&keys(PHONE).1);
+        own.sign(&master, &pk);
+        own.sign_device(&keys(PHONE).0);
+        phone.ingest_remote(std::slice::from_ref(&own));
+        assert!(phone.stored.iter().any(|(o, _)| o.content_hash() == own.content_hash()), "precondition: the phone's founding op is the runner-up");
+        seen.insert((founding.author.clone(), founding.hlc.physical_ms, founding.hlc.counter), 2_000);
+        assert!(settle_the_laptops_server(&mut phone, &seen).is_some(), "the settling is written");
+        assert_eq!(authority::founding_op(&phone).map(CrdtOp::content_hash), Some(own.content_hash()), "the settling founded on another op");
+        assert_eq!(phone.name.read().as_str(), "phone's", "the settling folded a founding op besides the one the fold chose");
+    }
+
+    /// HOL-SEC-222 review: two replicas holding the same two founding ops of one id hold
+    /// the same server whatever order they arrived in. The laptop, counted then, mints a
+    /// second founding op clocked after the phone's rename; one replica gets it first.
+    #[test]
+    fn two_replicas_with_the_same_founding_ops_found_the_same_server() {
+        let (before, after) = rosters();
+        let (master, m_id, pk) = keys(OWNER);
+        let (phone, phone_id, _) = keys(PHONE);
+        let (laptop_kp, laptop_id, _) = keys(LAPTOP);
+        let (mut owner, founding) =
+            ServerState::found_on("s".into(), m_id, Founder { device_peer_id: &phone_id, device: Some(&phone), r_pub: Some(&before.r_pub) }, master.clone(), pk.clone());
+        judged_by(&mut owner, before.clone());
+        let renamed = rename(&mut owner, "real");
+        let mut forged = founding.clone();
+        let P::ServerCreated { name, .. } = &mut forged.payload else { unreachable!() };
+        *name = "stolen".into();
+        forged.hlc.physical_ms = renamed.hlc.physical_ms + 1_000;
+        forged.hlc.counter = crate::crdt::hlc::lane_of(&laptop_id);
+        forged.sign(&master, &pk);
+        forged.sign_device(&laptop_kp);
+        assert!(forged.proven_device().is_some(), "precondition: the laptop's proof verifies");
+        let mut first_real = device_replica(&owner.server_id, OTHER);
+        judged_by(&mut first_real, before.clone());
+        first_real.ingest_remote(&[founding.clone(), renamed.clone()]);
+        first_real.ingest_remote(std::slice::from_ref(&forged));
+        let mut first_forged = device_replica(&owner.server_id, OTHER);
+        judged_by(&mut first_forged, before.clone());
+        first_forged.ingest_remote(std::slice::from_ref(&forged));
+        first_forged.ingest_remote(&[founding.clone(), renamed.clone()]);
+        let f = |s: &ServerState| authority::founding_op(s).map(CrdtOp::content_hash);
+        for (what, r) in [("real first", &first_real), ("forged first", &first_forged)] {
+            assert_eq!(f(r), Some(founding.content_hash()), "{what}: founded on the later-clocked op");
+            assert_eq!(r.name.read().as_str(), "real", "{what}: the owner's rename was refused");
+        }
+        // The laptop's removal reaches both, and the real founding op is offered again.
+        for r in [&mut first_real, &mut first_forged] {
+            judged_by(r, after.clone());
+            r.ingest_remote(&[founding.clone(), renamed.clone()]);
+            let _ = r.rebuild_now();
+        }
+        assert_eq!(f(&first_forged), f(&first_real), "arrival order chose the founding op");
+        assert_eq!(first_forged.name.read().as_str(), first_real.name.read().as_str(), "arrival order named the server");
+        assert_eq!(first_real.name.read().as_str(), "real", "after the removal");
     }
 
     #[test]

@@ -249,8 +249,16 @@ prove the door, and post as the identity through backfill. AR-02 closed the rost
    eligible or not, or a founding op that commits to a key. From then on `op_allowed`
    admits only `Counted` ops; the core drops dominated ops before `op_allowed`. The
    founding op and checkpoints are judged by their own rules instead (a removed founder's
-   founding op still anchors its server), so a replica takes ONE founding op per id: the
-   one it holds, else a counted device's from the batch, never a second (HOL-SEC-222).
+   founding op still anchors its server), so a replica founds on ONE founding op per id,
+   chosen by content and its view alone, never by arrival (HOL-SEC-222, `founding_kept`):
+   a counted device's first, then one the view lists, then the earliest clock, then the
+   content id; one clocked after a counted op of the owner's own is refuted. It keeps at
+   most one other per listed device (4 in all) as runner-ups, so a view change chooses
+   again without sync. Residual: while the founding device is uncounted and unendorsed,
+   it (or another listed device holding the master key) can found again on an earlier op
+   of its own, which changes the founding name only, and only where nothing renamed the
+   server later; it never refuses an owner op. Planned (0.15): a founding nonce that
+   commits to the founding clock and name, for new servers.
 5. Evaluation is stratified (section 10): owner key, owner view, owner endorsements and
    settlings, checkpoint eligibility, base, member views, fold.
 6. Removing a device (section 8):
@@ -851,10 +859,9 @@ checkpoint. Order:
    - **State** = the core's fold of R as the base plus every op this device holds or got in
      step 1, judged by the ordinary rules, except that an op proofed by a dropped device
      counts only if its `seen_ms < T` here. The founding op of a server a dropped device
-     founded is the exception (HOL-SEC-221): the one first stored here always counts, since
-     R stands on it or names its owner; any other founding op of the id keeps the rule.
-     Since HOL-SEC-222 a replica stores no second founding op of an id it holds one of
-     (`fold_remote`, `founded_once`), so only data an older build kept reaches this rule.
+     founded is the exception (HOL-SEC-221): the one the fold founds on (HOL-SEC-222,
+     `founding_kept`) always counts, since R stands on it or names its owner, and the
+     settling folds no other founding op.
    - **Shape** = a child of our CURRENT base (generation plus one, `cp_parent` and
      `cp_lineage` from it, `cp_cut` from it), so it is the greatest eligible checkpoint and
      every checkpoint on its line stays eligible by descent.

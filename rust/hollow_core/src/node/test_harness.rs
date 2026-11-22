@@ -72816,13 +72816,15 @@ async fn pr221_expect_settled(settler: &TestNode, server_id: &str, m_id: &str, l
 // pr-hol-sec-222
 
 /// HOL-SEC-222: the lost founder D1 ("not sure", T = 0) still holds the master key and
-/// mints second founding ops of its server, clocked before the first; J carries one to
-/// D2 before the removal and one after it. D2 holds no restore point, so its settling
-/// folds from genesis: it stores neither and stays founded on the first, after a restart
-/// too.
+/// mints second founding ops of its server, clocked before the first: one before its
+/// removal, carried to D2 and J, one after it, carried to D2. That is the residual: the
+/// device that founded the server, while nothing endorses its first op, founds it again
+/// on its earlier one. D2 and J found on the same op; it changes the founding name (the
+/// server was never renamed) and nothing else: every op that folded still folds, the
+/// owner's seat stands, and the settling and a restart keep the same choice.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)]
-async fn pr222_a_lost_founders_second_founding_op_changes_nothing_on_a_replica_folding_from_genesis() {
+async fn pr222_a_lost_founders_second_founding_op_changes_only_the_founding_name() {
     use crate::crdt::operations::CrdtPayload as P;
     use base64::Engine as _;
     let _g = test_guard();
@@ -72844,29 +72846,29 @@ async fn pr222_a_lost_founders_second_founding_op_changes_nothing_on_a_replica_f
         op.sign_device(&tag_kp(d1_tag));
         op
     };
-    // J carries the forged op, then a probe of D2's own: once the probe folds, D2 judged the op.
-    let carry_then_probe = async |forged: &crate::crdt::operations::CrdtOp, probe: &str| {
-        let probe = w3c1_device_op(&server_id, &master, &tag_kp(d2_tag), P::NicknameChanged { peer_id: m_id.clone(), nickname: probe.into() }, 0);
-        carry_as(&j, &d2, crdt_broadcast(&server_id, forged)).await;
-        carry_as(&j, &d2, crdt_broadcast(&server_id, &probe)).await;
-        assert!(
-            wait_until(15, async || d2.live_server_state(&server_id).await.is_some_and(|s| s.op_log.iter().any(|o| o.hlc == probe.hlc))).await,
-            "precondition: the probe after the forged op folded",
-        );
-    };
-    let founded_on_the_first = async |n: &TestNode, forged: &[&crate::crdt::operations::CrdtOp], what: &str| {
+    let founded_on = async |n: &TestNode| n.live_server_state(&server_id).await.and_then(|s| crate::crdt::authority::founding_op(&s).map(|o| o.content_hash()));
+    let folded = async |n: &TestNode| -> std::collections::BTreeSet<(String, crate::crdt::hlc::HlcTimestamp)> {
         let s = n.live_server_state(&server_id).await.expect("the node holds the server");
-        assert_eq!(crate::crdt::authority::founding_op(&s).map(|o| o.content_hash()), Some(founding.content_hash()), "{what}: founded on another op");
-        assert_eq!(s.name.read().as_str(), "Cut", "{what}: named by a second founding op");
-        let seen = n.store().op_seen_ms(&server_id).unwrap();
-        for op in forged {
-            assert!(!seen.contains_key(&(op.author.clone(), op.hlc.physical_ms, op.hlc.counter)), "{what}: a second founding op was stored");
-        }
+        s.op_log.iter().filter(|o| !matches!(o.payload, P::ServerCreated { .. })).map(|o| (o.author.clone(), o.hlc.clone())).collect()
+    };
+    let stands = async |n: &TestNode, name: &str, what: &str| {
+        let s = n.live_server_state(&server_id).await.expect("the node holds the server");
+        assert_eq!(s.name.read().as_str(), name, "{what}: the name");
+        assert_eq!(s.current_owner().as_deref(), Some(m_id.as_str()), "{what}: the owner's seat");
     };
 
+    let (d2_folded, j_folded) = (folded(&d2).await, folded(&j).await);
     let before = second("stolen before", 10);
-    carry_then_probe(&before, "probe 1").await;
-    founded_on_the_first(&d2, &[&before], "before the removal").await;
+    carry_as(&j, &d2, crdt_broadcast(&server_id, &before)).await;
+    carry_as(&d2, &j, crdt_broadcast(&server_id, &before)).await;
+    assert!(
+        wait_until(15, async || founded_on(&d2).await == Some(before.content_hash()) && founded_on(&j).await == Some(before.content_hash())).await,
+        "before the removal: D2 and J did not both found on the earlier op of the founding device",
+    );
+    stands(&d2, "stolen before", "before the removal, D2").await;
+    stands(&j, "stolen before", "before the removal, J").await;
+    assert!(folded(&d2).await.is_superset(&d2_folded), "before the removal: an op that folded at D2 stopped folding");
+    assert!(folded(&j).await.is_superset(&j_folded), "before the removal: an op that folded at J stopped folding");
 
     relay.set_online(&d1.device_id, false);
     drop(d1);
@@ -72883,13 +72885,28 @@ async fn pr222_a_lost_founders_second_founding_op_changes_nothing_on_a_replica_f
     super::roster_book::note_recovery_lost_since(&d2.store(), &recovered.base(), 0).unwrap();
     super::roster_book::merge_for_test(&d2.store(), &recovered, &m_id, &d2_id);
     d2.cmd_tx.send(NodeCommand::RosterChanged { newly_revoked: vec![d1_id.clone()] }).await.unwrap();
-    pr221_expect_settled(&d2, &server_id, &m_id, &d1_id, &j.master_id).await;
-    founded_on_the_first(&d2, &[&before], "the settling").await;
+    let settled = |s: &ServerState| s.base.as_ref().is_some_and(|b| b.state.cp_settles.as_ref().is_some_and(|st| st.devices.contains(&d1_id)));
+    assert!(wait_until(30, async || d2.live_server_state(&server_id).await.is_some_and(|s| settled(&s))).await, "the not-sure settling was never written");
+    assert_eq!(founded_on(&d2).await, Some(before.content_hash()), "the settling founded on another op");
+    stands(&d2, "stolen before", "the settling").await;
 
+    // After the removal both of D1's ops are uncounted alike, so the earlier founds; the
+    // settling's base still names the server.
+    let settled_folded = folded(&d2).await;
     let after = second("stolen after", 20);
-    carry_then_probe(&after, "probe 2").await;
-    founded_on_the_first(&d2, &[&before, &after], "after the removal").await;
+    let probe = w3c1_device_op(&server_id, &master, &tag_kp(d2_tag), P::NicknameChanged { peer_id: m_id.clone(), nickname: "probe".into() }, 0);
+    carry_as(&j, &d2, crdt_broadcast(&server_id, &after)).await;
+    carry_as(&j, &d2, crdt_broadcast(&server_id, &probe)).await;
+    assert!(
+        wait_until(15, async || d2.live_server_state(&server_id).await.is_some_and(|s| s.op_log.iter().any(|o| o.hlc == probe.hlc))).await,
+        "precondition: the probe after the forged op folded",
+    );
+    let chosen = founded_on(&d2).await;
+    assert_eq!(chosen, Some(after.content_hash()), "after the removal: the earliest of the founding device's ops did not found");
+    stands(&d2, "stolen before", "after the removal").await;
+    assert!(folded(&d2).await.is_superset(&settled_folded), "after the removal: an op that folded stopped folding");
     let d2 = restart_node(&relay, d2, m_tag, d2_tag).await;
     assert!(wait_until(30, async || d2.live_server_state(&server_id).await.is_some()).await, "the sibling loads the server again");
-    founded_on_the_first(&d2, &[&before, &after], "after a restart").await;
+    assert_eq!(founded_on(&d2).await, chosen, "a restart founded on another op");
+    stands(&d2, "stolen before", "after a restart").await;
 }

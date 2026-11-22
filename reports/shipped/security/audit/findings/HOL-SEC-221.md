@@ -37,9 +37,10 @@ no owner pin.
 
 The settling keeps the founding op of the server whoever wrote it and whenever it was
 stored here (`ServerState::founding_stand`): it is R when no checkpoint precedes T, and it
-names the owner a checkpoint R must come from. Only the founding op first stored here
-counts this way; another founding op of the same id that a lost device minted with the
-master key keeps the ordinary rule and drops when stored at or after T. The founding op of
+names the owner a checkpoint R must come from. Only the founding op the fold founds on
+counts this way (since HOL-SEC-222 chosen by content and the view, never by when it was
+stored: the first version of this fix took the one first stored here, which depended on
+arrival order), and the settling folds no other founding op. The founding op of
 a self-certifying id carries nothing the id does not already fix except its name and clock,
 and on a server the lost device did not found the rule changes nothing. Every other op of
 the lost founder stored at or after T still drops, so on a device that first held the
@@ -61,8 +62,10 @@ whole first batch), and the second would stand on that restore point, a checkpoi
 lost device may have written after it was lost.
 
 Tests: `a_not_sure_settling_stands_on_the_founding_op_the_lost_device_wrote`,
-`a_founding_op_the_lost_device_minted_later_never_founds_the_settling` (two founding ops
-as an older build stored them; since HOL-SEC-222 a replica stores no second one), harness
+`a_settling_stands_on_the_founding_op_the_fold_chose_whenever_stored` (the same choice
+whenever the founding op was first stored; renamed from
+`a_founding_op_the_lost_device_minted_later_never_founds_the_settling`, which asserted the
+arrival-order rule HOL-SEC-222's review replaced), `a_settling_folds_no_founding_op_but_the_stand`, harness
 `pr216_a_not_sure_removal_of_the_founding_device_settles_from_the_joiners_oldest_point`,
 `pr216_a_not_sure_recovery_dropping_the_founding_device_settles_its_server`,
 `pr216_a_not_sure_lost_removal_settles_from_the_founding_op` (renamed from
