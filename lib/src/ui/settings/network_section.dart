@@ -254,8 +254,8 @@ class _RelaySettingsSectionState extends ConsumerState<RelaySettingsSection> {
                       'Open Hollow again to connect to the new relay.'),
                 if (end == RelaySwitchEnd.closeByHand &&
                     _selectedRelay != _activeRelay)
-                  const SettingsNote('Hollow connects to the new relay the '
-                      'next time it opens.'),
+                  const SettingsNote('Hollow connects to the new relay after '
+                      'you close it from the app switcher and open it again.'),
               ],
             ),
           ),

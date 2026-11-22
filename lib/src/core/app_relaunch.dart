@@ -93,23 +93,22 @@ RelaySwitchEnd get relaySwitchEnd =>
             : RelaySwitchEnd.restart);
 
 /// Moves this install to [domain], the one path every relay switch takes:
-/// saved and listed, then the app ends so the node starts on it.
+/// saved for the next launch and listed, then the app ends so the node
+/// starts on it. Until that launch, this process and the push fetch stay on
+/// the relay it runs on.
 ///
 /// False where the person closes the app ([RelaySwitchEnd.closeByHand]):
-/// [domain] then waits in [pendingRelayProvider] for the next launch, and
-/// this process, its calls included, stays on the relay it runs on.
-/// [endProcess] ends it there too: a linking device's throwaway must not stay
-/// open beneath the next launch's wipe.
+/// [domain] then waits in [pendingRelayProvider], and this process, its calls
+/// included, keeps running. [endProcess] ends it there too: a linking
+/// device's throwaway must not stay open beneath the next launch's wipe.
 Future<bool> switchRelay(
     T Function<T>(ProviderListenable<T>) read, String domain,
     {bool endProcess = false}) async {
+  await read(relayDomainProvider.notifier).saveForNextLaunch(domain);
+  await read(savedRelayListProvider.notifier).addRelay(domain);
   if (!endProcess && relaySwitchEnd == RelaySwitchEnd.closeByHand) {
-    await read(relayDomainProvider.notifier).saveForNextLaunch(domain);
-    await read(savedRelayListProvider.notifier).addRelay(domain);
     return false;
   }
-  await read(relayDomainProvider.notifier).setDomain(domain);
-  await read(savedRelayListProvider.notifier).addRelay(domain);
   return exitForRelaySwitch();
 }
 

@@ -8,7 +8,6 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
-import 'package:hollow/src/ui/dialogs/relay_switch_dialog.dart';
 
 /// Asks for the access key a SELF-HOSTED relay's owner switched on; the
 /// default relay never asks. Resolves to the typed key. The only other way
@@ -42,6 +41,10 @@ class _LicenseKeyContentState extends ConsumerState<_LicenseKeyContent>
     with HollowDialogAction {
   final _controller = TextEditingController();
   String? _error;
+
+  /// This prompt saved the waiting switch (iOS), so a typed key takes it back.
+  /// One saved on another screen stays: the key is for the relay running now.
+  bool _switchedHere = false;
 
   @override
   void initState() {
@@ -95,8 +98,7 @@ class _LicenseKeyContentState extends ConsumerState<_LicenseKeyContent>
       return;
     }
 
-    // A key for this relay takes back a switch waiting for the next launch.
-    if (ref.read(pendingRelayProvider) != null) {
+    if (_switchedHere && ref.read(pendingRelayProvider) != null) {
       final relay = ref.read(relayDomainProvider);
       if (!await runDialogAction(
               () => ref
@@ -119,7 +121,10 @@ class _LicenseKeyContentState extends ConsumerState<_LicenseKeyContent>
             fallback: "Couldn't switch relays. Try again.") &&
         !ending &&
         mounted) {
-      setState(() => actionRunning = false);
+      setState(() {
+        actionRunning = false;
+        _switchedHere = true;
+      });
     }
   }
 
@@ -130,6 +135,8 @@ class _LicenseKeyContentState extends ConsumerState<_LicenseKeyContent>
     final onDefault = relay == kDefaultRelayDomain;
     final pending = ref.watch(pendingRelayProvider);
     final end = relaySwitchEnd;
+    // Relay names are what the protocol produces: the console voice.
+    final host = HollowTypography.mono.copyWith(color: hollow.textPrimary);
     // A linking device ends its process on every platform.
     final closes = end == RelaySwitchEnd.close ||
         (widget.linking && end == RelaySwitchEnd.closeByHand);
@@ -173,9 +180,31 @@ class _LicenseKeyContentState extends ConsumerState<_LicenseKeyContent>
           ),
           if (pending != null) ...[
             const SizedBox(height: HollowSpacing.md),
-            Text(closeByHandText(pending),
-                style: HollowTypography.body
-                    .copyWith(color: hollow.textSecondary)),
+            Text.rich(
+              TextSpan(
+                  children: _switchedHere
+                      ? [
+                          const TextSpan(
+                              text: 'Close Hollow from the app switcher and '
+                                  'open it again to connect to '),
+                          TextSpan(text: pending, style: host),
+                          const TextSpan(text: '.'),
+                        ]
+                      : [
+                          const TextSpan(text: 'Hollow connects to '),
+                          TextSpan(text: pending, style: host),
+                          const TextSpan(
+                              text: ' after you close it from the app '
+                                  'switcher and open it again. A key you '
+                                  'enter here is for '),
+                          TextSpan(text: relay, style: host),
+                          const TextSpan(text: ', and Hollow stays on '),
+                          TextSpan(text: relay, style: host),
+                          const TextSpan(text: ' until then.'),
+                        ]),
+              style:
+                  HollowTypography.body.copyWith(color: hollow.textSecondary),
+            ),
           ],
         ],
       ),

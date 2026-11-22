@@ -28,6 +28,11 @@ import 'package:hollow/src/ui/settings/network_section.dart';
 const _running = 'hollowtest.duckdns.org';
 const _other = 'other.example.org';
 
+// The keys as stored, spelled out: the push fetch reads `relay_domain` from
+// Rust (`fetch::RELAY_DOMAIN_KEY`).
+const _relayKey = 'relay_domain';
+const _nextKey = 'relay_domain_next';
+
 class _Api implements RustLibApi {
   final saved = <String, String>{};
   var shutdowns = 0;
@@ -39,6 +44,10 @@ class _Api implements RustLibApi {
   }) async {
     saved[key] = value;
   }
+
+  @override
+  Future<String?> crateApiStorageLoadSetting({required String key}) async =>
+      saved[key];
 
   @override
   Future<void> crateApiNetworkNotifyShutdown() async => shutdowns++;
@@ -130,7 +139,9 @@ void main() {
 
   setUpAll(() => RustLib.initMock(api: api));
   setUp(() {
-    api.saved.clear();
+    api.saved
+      ..clear()
+      ..[_relayKey] = _running;
     api.shutdowns = 0;
     platformCalls.clear();
     hookRuns = 0;
@@ -150,6 +161,22 @@ void main() {
     });
     addTearDown(() => tester.binding.defaultBinaryMessenger
         .setMockMethodCallHandler(SystemChannels.platform, null));
+  }
+
+  /// What the push fetch dials now, and what the next launch runs on.
+  void expectRunningRelayKept({String? next}) {
+    expect(api.saved[_relayKey], _running,
+        reason: 'the push fetch dials this key: it must name the relay this '
+            'install runs on, holding its push token and buffers');
+    expect(api.saved[_nextKey] ?? '', next ?? '');
+  }
+
+  /// A fresh launch: the real notifier loads what was saved.
+  Future<String> relaunch() async {
+    final c = ProviderContainer();
+    addTearDown(c.dispose);
+    await c.read(relayDomainProvider.notifier).loadCached();
+    return c.read(relayDomainProvider);
   }
 
   void expectNothingEnded() {
@@ -176,7 +203,7 @@ void main() {
           reason: 'the switch button spun forever');
       expect(find.textContaining('Close Hollow from the app switcher'),
           findsOneWidget);
-      expect(api.saved['relay_domain'], _other);
+      expectRunningRelayKept(next: _other);
       expect(_ref.read(relayDomainProvider), _running,
           reason: 'this process still runs on the old relay');
       expect(_ref.read(pendingRelayProvider), _other);
@@ -188,7 +215,7 @@ void main() {
       await tester.tap(find.byWidget(_filled(tester).single));
       await tester.pump();
       await tester.pump();
-      expect(api.saved['relay_domain'], _running);
+      expectRunningRelayKept();
       expect(_ref.read(pendingRelayProvider), isNull);
       expect(find.textContaining('Close Hollow from the app switcher'),
           findsNothing);
@@ -210,7 +237,7 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.text('Remove from the list'));
       await tester.pumpAndSettle();
-      expect(api.saved['relay_domain'], _running);
+      expectRunningRelayKept();
       expect(_ref.read(pendingRelayProvider), isNull);
       expect(find.textContaining('Close Hollow from the app switcher'),
           findsNothing);
@@ -235,7 +262,7 @@ void main() {
       expect(find.textContaining('Close Hollow from the app switcher'),
           findsOneWidget);
       expect(_filled(tester).where((b) => b.loading), isEmpty);
-      expect(api.saved['relay_domain'], _other);
+      expectRunningRelayKept(next: _other);
       expect(api.saved[kPendingInviteAfterSwitchKey], link.fullUrl);
       expect(_ref.read(relayDomainProvider), _running);
       expectNothingEnded();
@@ -256,7 +283,7 @@ void main() {
       expect(find.textContaining('Close Hollow from the app switcher'),
           findsOneWidget);
       expect(find.textContaining('Use the default relay'), findsNothing);
-      expect(api.saved['relay_domain'], kDefaultRelayDomain);
+      expectRunningRelayKept(next: kDefaultRelayDomain);
       expect(_ref.read(relayDomainProvider), _running);
       expectNothingEnded();
 
@@ -264,9 +291,88 @@ void main() {
       await tester.tap(find.text('Connect'));
       await tester.pumpAndSettle();
       expect(key, 'ABCD-1234-EFGH-5678');
-      expect(api.saved['relay_domain'], _running,
+      expectRunningRelayKept();
+      expect(_ref.read(pendingRelayProvider), isNull,
           reason: 'a key for this relay keeps the person on it');
-      expect(_ref.read(pendingRelayProvider), isNull);
+    });
+
+    testWidgets('an access key prompt keeps a switch made on another screen '
+        'and says what a typed key does', (tester) async {
+      await _pump(tester);
+      await _ref.read(relayDomainProvider.notifier).saveForNextLaunch(_other);
+      String? key = 'unanswered';
+      unawaited(showLicenseKeyDialog(_ctx).then((k) => key = k));
+      await tester.pumpAndSettle();
+
+      expect(
+          find.text('Hollow connects to $_other after you close it from the '
+              'app switcher and open it again. A key you enter here is for '
+              '$_running, and Hollow stays on $_running until then.'),
+          findsOneWidget);
+      expect(find.textContaining('Use the default relay'), findsNothing);
+
+      await tester.enterText(find.byType(TextField), 'ABCD1234EFGH5678');
+      await tester.tap(find.text('Connect'));
+      await tester.pumpAndSettle();
+      expect(key, 'ABCD-1234-EFGH-5678');
+      expect(_ref.read(pendingRelayProvider), _other,
+          reason: 'the prompt took back a switch it did not make');
+      expectRunningRelayKept(next: _other);
+      expect(await relaunch(), _other);
+    });
+
+    testWidgets('the next launch runs on the saved relay and the push fetch '
+        'follows it', (tester) async {
+      await _pump(tester, child: const RelaySettingsSection());
+      await tester.tap(find.text('Change'));
+      await tester.pump();
+      await tester.tap(find.text(_other));
+      await tester.pump();
+      await tester.tap(find.byWidget(_filled(tester).single));
+      await _settleExit(tester);
+      expectRunningRelayKept(next: _other);
+      await _unmount(tester);
+
+      expect(await relaunch(), _other);
+      expect(api.saved[_relayKey], _other);
+      expect(api.saved[_nextKey], '',
+          reason: 'a later launch must not take the switch again');
+      expect(await relaunch(), _other);
+    });
+
+    testWidgets('taking a switch back drops the invite it parked, so no later '
+        'launch joins it', (tester) async {
+      await _pump(tester, child: const RelaySettingsSection());
+      final link =
+          classifyHollowLink('hollow://join?server=abc123&relay=$_other')!;
+      unawaited(ensureRelayForInvite(_ctx, _ref, link));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Switch relay'));
+      await _settleExit(tester);
+      expect(api.saved[kPendingInviteAfterSwitchKey], link.fullUrl);
+      await tester.tap(find.bySemanticsLabel('Close'));
+      await tester.pumpAndSettle();
+
+      // Settings still has the running relay picked: staying on it takes
+      // the switch back.
+      await tester.tap(find.text('Stay on this relay'));
+      await tester.pump();
+      await tester.pump();
+      expectRunningRelayKept();
+      expect(api.saved[kPendingInviteAfterSwitchKey], '',
+          reason: 'a later switch to $_other would join the invite unasked');
+      await _unmount(tester);
+    });
+
+    testWidgets('every take-back clears the waiting relay', (tester) async {
+      await _pump(tester);
+      final n = _ref.read(relayDomainProvider.notifier);
+      await n.saveForNextLaunch(_other);
+      api.saved[kPendingInviteAfterSwitchKey] = 'hollow://join?server=x';
+      await n.saveForNextLaunch(_running);
+      expectRunningRelayKept();
+      expect(api.saved[kPendingInviteAfterSwitchKey], '');
+      expect(await relaunch(), _running);
     });
   });
 
@@ -282,6 +388,21 @@ void main() {
     final body = src.substring(at, src.indexOf('\n}\n', at));
     expect(body, contains('return relaunchApp();'));
     expect(src, contains('return exitForRelaySwitch();'));
+  });
+
+  test('every switch waits for the next launch, Android and desktop too', () {
+    // A process ending on its own still leaves the push fetch a window (a
+    // cold Android process) before the next launch: it must dial the relay
+    // holding this install's push token, never the new one.
+    final src = File('lib/src/core/app_relaunch.dart')
+        .readAsStringSync()
+        .replaceAll('\r\n', '\n');
+    final at = src.indexOf('Future<bool> switchRelay(');
+    expect(at, isNot(-1));
+    final body = src.substring(at, src.indexOf('\n}\n', at));
+    expect(body, isNot(contains('setDomain(')));
+    expect(body.indexOf('saveForNextLaunch(domain)'),
+        lessThan(body.indexOf('exitForRelaySwitch()')));
   });
 
   group('copy says what happens', () {
@@ -300,7 +421,11 @@ void main() {
 
     testWidgets('iOS says the switch lands on the next open', (tester) async {
       final body = await switchBody(tester);
-      expect(body, contains('next time Hollow opens'));
+      expect(
+          body,
+          contains('Switching takes effect after you close Hollow from the '
+              'app switcher and open it again. Then your servers and friends '
+              'on $_running go quiet until you switch back.'));
       expect(body, isNot(contains('restarts')));
       expect(find.text('Switch relay'), findsOneWidget);
       await tester.pumpWidget(const SizedBox.shrink());
@@ -311,8 +436,10 @@ void main() {
       await tester.tap(find.text(_other));
       await tester.pump();
       expect(find.text('Switch relay'), findsOneWidget);
-      expect(find.text('Hollow connects to the new relay the next time it '
-          'opens.'), findsOneWidget);
+      expect(
+          find.text('Hollow connects to the new relay after you close it '
+              'from the app switcher and open it again.'),
+          findsOneWidget);
       await _unmount(tester);
     });
 

@@ -226,7 +226,7 @@ After Welcome pops `'link_device'` the node starts (the "Connecting" placeholder
 - Title "This relay needs an access key"
 - Body names the relay (mono span from `relayDomainProvider`): "<relay> only lets people in with an access key, set by whoever runs it. Ask them for one and enter it here."
 - `HollowTextField` (mono, hint `XXXX-XXXX-XXXX-XXXX`, `errorText`)
-- Leading ghost "Use the default relay" (Android and a linking iPhone: "... and close"), shown only off `kDefaultRelayDomain`: `switchRelay(read, default, endProcess: linking)` inside the dialog with loading and an inline error. On iOS (not linking) nothing ends: the button goes, a line under the field says to close Hollow from the app switcher, and a key typed after that takes the waiting switch back (`saveForNextLaunch(current)`) before the dialog pops.
+- Leading ghost "Use the default relay" (Android and a linking iPhone: "... and close"), shown only off `kDefaultRelayDomain`: `switchRelay(read, default, endProcess: linking)` inside the dialog with loading and an inline error. On iOS (not linking) nothing ends: the button goes, a line under the field says to close Hollow from the app switcher, and a key typed after that takes the waiting switch back (`saveForNextLaunch(current)`) before the dialog pops. Only a switch THIS prompt made (`_switchedHere`): one made on another screen stays, and the line says Hollow connects to it after the close while a typed key is for the relay running now.
 - Filled "Connect".
 
 ### No key FFI here -- the caller passes the key to `set_license_key()`.

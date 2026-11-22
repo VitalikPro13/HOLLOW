@@ -113,7 +113,6 @@ import 'package:hollow/src/core/providers/link_preview_settings_provider.dart';
 import 'package:hollow/src/core/providers/relay_domain_provider.dart';
 import 'package:hollow/src/core/providers/relay_status_provider.dart';
 import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
-import 'package:hollow/src/ui/dialogs/relay_switch_dialog.dart';
 import 'package:hollow/src/core/providers/app_shortcuts_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/services/hotkeys/hotkey_binding.dart';

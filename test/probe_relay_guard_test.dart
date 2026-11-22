@@ -167,6 +167,48 @@ void main() {
       expect(api.settings['relay_domain'], 'b.test.example');
     });
 
+    test('a switch saved for the next launch is judged and restamps, and the '
+        'launch takes it', () async {
+      api.settings['relay_domain'] = 'a.test.example';
+      final c = ProviderContainer(
+          overrides: guardWith(expect: 'a.test.example, b.test.example').overrides);
+      addTearDown(c.dispose);
+      await c.read(relayDomainProvider.notifier).loadCached();
+      await expectLater(
+          c.read(relayDomainProvider.notifier)
+              .saveForNextLaunch('relay.anonlisten.com'),
+          throwsA(isA<RelayGuardRefusal>()));
+      expect(api.settings['relay_domain_next'], isNull);
+
+      await c.read(relayDomainProvider.notifier).saveForNextLaunch('b.test.example');
+      expect(api.settings['relay_domain'], 'a.test.example');
+      expect(File('${out.path}/$kFleetRelayStampFile').readAsStringSync().trim(),
+          'b.test.example',
+          reason: 'the tooling judges the next launch by the stamp');
+      // Taking it back stamps the running relay again.
+      await c.read(relayDomainProvider.notifier).saveForNextLaunch('a.test.example');
+      expect(File('${out.path}/$kFleetRelayStampFile').readAsStringSync().trim(),
+          'a.test.example');
+      await c.read(relayDomainProvider.notifier).saveForNextLaunch('b.test.example');
+      final next = ProviderContainer(
+          overrides: guardWith(expect: 'a.test.example, b.test.example').overrides);
+      addTearDown(next.dispose);
+      await next.read(relayDomainProvider.notifier).loadCached();
+      expect(next.read(relayDomainProvider), 'b.test.example');
+      expect(File('${out.path}/$kFleetRelayStampFile').readAsStringSync().trim(),
+          'b.test.example');
+    });
+
+    test('a launch never takes a saved switch the run does not expect', () async {
+      api.settings['relay_domain'] = 'a.test.example';
+      api.settings['relay_domain_next'] = 'stale.example';
+      final c = ProviderContainer(
+          overrides: guardWith(expect: 'a.test.example').overrides);
+      addTearDown(c.dispose);
+      await expectLater(c.read(relayDomainProvider.notifier).loadCached(),
+          throwsA(isA<RelayGuardRefusal>()));
+    });
+
     test('the expected set never admits the official relay', () {
       expect(relayVerdict('relay.anonlisten.com',
               expect: 'hollowtest.duckdns.org,relay.anonlisten.com')

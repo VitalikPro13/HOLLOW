@@ -9,9 +9,6 @@ import 'package:hollow/src/ui/chat/hollow_link_utils.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 
-/// Where an invite waits out the restart a relay switch needs.
-const String kPendingInviteAfterSwitchKey = 'pending_invite_after_switch';
-
 /// Reads providers for the relay switch from either a widget or the service
 /// layer, so the dialog has exactly one builder.
 class RelaySwitch {
@@ -197,8 +194,9 @@ class _RelaySwitchDialogState extends State<_RelaySwitchDialog>
                     'your servers and friends on ',
                 RelaySwitchEnd.close => '. Switching closes Hollow, and your '
                     'servers and friends on ',
-                RelaySwitchEnd.closeByHand => '. Switching takes effect the '
-                    'next time Hollow opens, and your servers and friends on ',
+                RelaySwitchEnd.closeByHand => '. Switching takes effect after '
+                    'you close Hollow from the app switcher and open it '
+                    'again. Then your servers and friends on ',
               }),
           TextSpan(text: widget.current, style: host),
           TextSpan(
@@ -208,8 +206,8 @@ class _RelaySwitchDialogState extends State<_RelaySwitchDialog>
                       ' Hollow finishes this join after the restart.',
                     RelaySwitchEnd.close =>
                       ' Open Hollow again to finish joining.',
-                    RelaySwitchEnd.closeByHand => ' Hollow finishes joining '
-                        'when it opens again.',
+                    RelaySwitchEnd.closeByHand =>
+                      ' Hollow finishes joining when it reopens.',
                   }}',
           ),
         ]),

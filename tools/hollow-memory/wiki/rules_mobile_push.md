@@ -40,8 +40,12 @@ device, device targeting, channel push fan-out, the NSE) stay in CLAUDE.md; wiki
   `test/relay_triggers_native_test.dart`).
 - A relay switch never ends an iOS app (no sanctioned quit: `SystemNavigator.pop` does nothing
   there, `exit` reads as a crash): `switchRelay` saves the relay for the next launch
-  (`pendingRelayProvider`), this process stays on its relay, calls stay up, and the copy says
-  to close Hollow from the app switcher. Any new relay-change surface goes through
+  (`relay_domain_next`, `pendingRelayProvider`), this process stays on its relay, calls stay
+  up, and the copy says, before the press too, that it takes effect once Hollow is closed from
+  the app switcher. Every switch (Android and desktop too) writes ONLY `relay_domain_next`; the
+  launch moves it to `relay_domain`, which the push fetch reads, so the NSE never dials a relay
+  the app is not on. Saving the running relay takes a switch back and drops the invite it
+  parked; the access-key prompt takes back only a switch it made itself. Any new relay-change surface goes through
   `switchRelay` and handles its `false`. Android ENDS the process (`relaunchApp`), never only
   `SystemNavigator.pop()`: a finished activity keeps the process and a node bound to the old
   relay, and the reopened app fails with "Node is already running". Guard:
