@@ -11,9 +11,13 @@ import 'package:flutter/gestures.dart' show PointerDeviceKind;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hollow/src/core/models/channel_chat_message.dart';
+import 'package:hollow/src/core/providers/channel_chat_provider.dart';
+import 'package:hollow/src/core/providers/guest_provider.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme_data.dart';
 import 'package:hollow/src/ui/chat/chat_pane_shared.dart';
+import 'package:hollow/src/ui/guest/guest_chat_pane.dart';
 import 'package:scrollable_positioned_list/scrollable_positioned_list.dart';
 
 import '../helpers/test_app.dart';
@@ -24,6 +28,7 @@ const _kNewest = 'Jump to the newest message';
 late ItemScrollController _controller;
 late ItemPositionsListener _positions;
 late ScrollOffsetController _offsets;
+var _builds = 0;
 
 Future<void> _pumpList(WidgetTester tester,
     {required int itemCount,
@@ -57,6 +62,7 @@ Future<void> _pumpList(WidgetTester tester,
                 for (var i = 0; i < itemCount; i++) 'm$i': i,
               },
               itemBuilder: (context, revIndex) {
+                _builds++;
                 final i = itemCount - 1 - revIndex;
                 return SizedBox(
                   key: ValueKey('m$i'),
@@ -72,6 +78,11 @@ Future<void> _pumpList(WidgetTester tester,
   );
   await tester.pumpAndSettle();
 }
+
+Rect thumbRect(WidgetTester tester) => tester.getRect(find.descendant(
+      of: find.bySemanticsLabel('Message list scrollbar'),
+      matching: find.byType(AnimatedContainer),
+    ));
 
 void main() {
   testWidgets('a conversation that fits offers nothing to jump to',
@@ -255,6 +266,23 @@ void main() {
     final cap = tester.getRect(find.bySemanticsLabel(_kNewest));
     expect(cap.top - track.bottom, kRailSegmentGap,
         reason: 'the track must END above the cap, not run underneath it');
+  });
+
+  // A jump shares no row with where the list was, so it is no motion and
+  // nothing holds the thumb where it last stood.
+  testWidgets('a jump either way puts the thumb where the list went',
+      (tester) async {
+    await _pumpList(tester, itemCount: 200);
+    final track =
+        tester.getRect(find.bySemanticsLabel('Message list scrollbar'));
+    await tester.tap(find.bySemanticsLabel(_kOldest));
+    await tester.pumpAndSettle();
+    expect(thumbRect(tester).top, moreOrLessEquals(track.top, epsilon: 0.5));
+    await tester.tap(find.bySemanticsLabel(_kNewest));
+    await tester.pumpAndSettle();
+    expect(thumbRect(tester).bottom,
+        moreOrLessEquals(track.bottom, epsilon: 0.5),
+        reason: 'back at the newest message, the thumb is at the bottom');
   });
 
   testWidgets('the caps hold their place when they stop being actionable',
@@ -455,10 +483,6 @@ void main() {
 group('rows of very different heights (#158)', () {
   // Every fourth message is a card ten times the height of a text line.
   double mixed(int i) => i % 4 == 0 ? 400 : 40;
-  Rect thumbRect(WidgetTester tester) => tester.getRect(find.descendant(
-        of: find.bySemanticsLabel('Message list scrollbar'),
-        matching: find.byType(AnimatedContainer),
-      ));
   Future<void> wheel(WidgetTester tester, double dy) async {
     final list = tester.getCenter(find.byType(ScrollablePositionedList));
     final mouse = TestPointer(1, PointerDeviceKind.mouse);
@@ -539,5 +563,128 @@ group('rows of very different heights (#158)', () {
             'somewhere down it with blank space over it');
     expect(find.bySemanticsLabel(_kOldest), findsNothing);
   });
+
+  // #158 review: a press that rests on the thumb before moving (tap down fires
+  // after 100 ms) recentred the thumb under the pointer.
+  testWidgets('a still press on the thumb leaves the list where it is',
+      (tester) async {
+    await _pumpList(tester, itemCount: 200);
+    await tester.drag(find.byType(Scrollable).first, const Offset(0, 4000));
+    await tester.pumpAndSettle();
+    Set<int> visible() => _positions.itemPositions.value
+        .where((p) => p.itemTrailingEdge > 0 && p.itemLeadingEdge < 1)
+        .map((p) => p.index)
+        .toSet();
+    final before = visible();
+    final thumb = thumbRect(tester);
+    final g = await tester.startGesture(Offset(thumb.center.dx, thumb.top + 3),
+        kind: PointerDeviceKind.mouse);
+    await tester.pump(const Duration(milliseconds: 150));
+    await tester.pumpAndSettle();
+    expect(visible(), before,
+        reason: 'grabbing the thumb moves nothing until the pointer does');
+    await g.up();
+    await tester.pumpAndSettle();
+    expect(visible(), before);
+  });
+
+  // #158 review: a pixel drag lays out every row it passes, so a quick flick
+  // of the thumb over a long history built hundreds of rows in one frame.
+  // A long step lands by index instead, which costs what any jump costs,
+  // however far it goes.
+  testWidgets('a long drag step builds about what a jump builds',
+      (tester) async {
+    await _pumpList(tester, itemCount: 10000);
+    final g = await tester.startGesture(thumbRect(tester).center,
+        kind: PointerDeviceKind.mouse);
+    await tester.pump();
+    await g.moveBy(const Offset(0, -2));
+    await tester.pump();
+    final small = _positions.itemPositions.value.map((p) => p.index).toSet();
+    _builds = 0;
+    await g.moveBy(const Offset(0, -40));
+    await tester.pump();
+    final built = _builds;
+    final after = _positions.itemPositions.value.map((p) => p.index).toSet();
+    await g.up();
+    await tester.pumpAndSettle();
+    expect(after.intersection(small), isEmpty,
+        reason: 'the list still moved the whole way');
+    expect(after.reduce((a, b) => a < b ? a : b),
+        greaterThan(small.reduce((a, b) => a > b ? a : b)),
+        reason: 'pulling the thumb up shows older messages');
+
+    // A jump lays out about two screens and the cache extent: ~120 rows here.
+    expect(built, lessThan(200),
+        reason: 'a 40 px thumb move built $built rows in one frame');
+  });
+
+  // #158: rows never seen count as the average of those measured, and each
+  // first measurement moves that average; the thumb must not step back
+  // against a steady wheel while it does.
+  testWidgets('a steady wheel moves the thumb one way on a first pass',
+      (tester) async {
+    double ragged(int i) => const <double>[40, 400, 40, 120, 40, 40, 260, 40][i % 8];
+    await _pumpList(tester,
+        itemCount: 60, heightOf: ragged, size: const Size(400, 700));
+    final tops = <double>[thumbRect(tester).top];
+    while (find.bySemanticsLabel(_kOldest).evaluate().isNotEmpty &&
+        tops.length < 400) {
+      await wheel(tester, -60);
+      tops.add(thumbRect(tester).top);
+    }
+    for (var i = 1; i < tops.length; i++) {
+      expect(tops[i], lessThanOrEqualTo(tops[i - 1] + 0.01),
+          reason: 'step $i of a wheel toward older messages: $tops');
+    }
+    final track =
+        tester.getRect(find.bySemanticsLabel('Message list scrollbar'));
+    expect(tops.last, closeTo(track.top, 0.5),
+        reason: 'the oldest message puts the thumb at the top');
+  });
+});
+
+// #158 review: the guest pane built its rail without row keys, so measured
+// heights were kept by index and slid onto the wrong row with every arrival.
+testWidgets('the guest pane keys its rail rows by message id', (tester) async {
+  tester.view.physicalSize = const Size(900, 800);
+  tester.view.devicePixelRatio = 1.0;
+  addTearDown(tester.view.reset);
+  final container = ProviderContainer(overrides: hollowTestOverrides());
+  addTearDown(container.dispose);
+  const key = 'srv:general';
+  List<ChannelChatMessage> rows(int n) => [
+        for (var i = 0; i < n; i++)
+          ChannelChatMessage(
+              senderId: 'carol',
+              text: 'message $i',
+              isMe: false,
+              messageId: 'm$i',
+              timestamp: DateTime(2026, 11, 22, 12, i)),
+      ];
+  container.read(guestHasMoreProvider.notifier).state = {key: true};
+  container.read(channelChatProvider.notifier).state = {key: rows(40)};
+  await tester.pumpWidget(UncontrolledProviderScope(
+    container: container,
+    child: MaterialApp(
+      theme: HollowThemeData.dark(),
+      home: const Scaffold(
+          body: GuestChatPane(serverId: 'srv', channelId: 'general')),
+    ),
+  ));
+  await tester.pump();
+  ChatScrollRail rail() => tester.widget(find.byType(ChatScrollRail));
+  expect(rail().rowKeyAt, isNotNull);
+  expect(rail().rowKeyAt!(0), 'm39', reason: 'the newest row');
+  expect(rail().rowKeyAt!(39), 'm0');
+  expect(rail().rowKeyAt!(40), isNot(anyOf('m0', 40)),
+      reason: '"Load more" has a key of its own');
+
+  container.read(channelChatProvider.notifier).state = {key: rows(41)};
+  await tester.pump();
+  expect(rail().rowKeyAt!(1), 'm39',
+      reason: 'a row keeps its key when a new message shifts every index');
+  await tester.pumpWidget(const SizedBox());
+  await tester.pump(const Duration(seconds: 13));
 });
 }

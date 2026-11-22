@@ -55,6 +55,9 @@ bool guestSweepTakes({
     isImage &&
     sweepTakes(limitMb: limitMb, sizeBytes: sizeBytes, voiceNote: false);
 
+/// The rail's key for the "Load more" row above the oldest message.
+const _loadMoreRow = #loadMore;
+
 class GuestChatPane extends ConsumerStatefulWidget {
   final String serverId;
   final String channelId;
@@ -421,6 +424,12 @@ class _GuestChatPaneState extends ConsumerState<GuestChatPane> {
                         controller: _itemScrollController,
                         positions: _itemPositionsListener,
                         scrollOffsetController: _scrollOffsetController,
+                        // By message id: every arrival shifts the indexes.
+                        rowKeyAt: (revIndex) => revIndex < filtered.length
+                            ? filtered[filtered.length - 1 - revIndex]
+                                    .messageId ??
+                                revIndex
+                            : _loadMoreRow,
                       ),
                       list: ChatTextScale(
                             // Issue #35: off 100% the SelectionArea moves to

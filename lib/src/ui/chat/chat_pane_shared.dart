@@ -834,6 +834,19 @@ class _ChatScrollRailState extends State<ChatScrollRail> {
   /// has laid that row out.
   ({Object key, int revIndex, double into, double height})? _settle;
 
+  /// Leading edge in pixels of each row laid out at the last position update,
+  /// by [ChatScrollRail.rowKeyAt]: rows in both updates show which way the
+  /// list moved.
+  Map<Object, double> _lastLeads = const {};
+
+  /// Which way every row on screen moved at the update [_motionFor] (-1 =
+  /// toward the oldest, 1 = toward the newest, 0 = not all one way).
+  int _motion = 0;
+  Iterable<ItemPosition>? _motionFor;
+
+  /// Where the thumb was last drawn, for holding it to [_motion].
+  double? _lastTop;
+
   @override
   void initState() {
     super.initState();
@@ -856,7 +869,9 @@ class _ChatScrollRailState extends State<ChatScrollRail> {
   }
 
   void _onPositions() {
-    _measure(widget.positions.itemPositions.value);
+    final positions = widget.positions.itemPositions.value;
+    _measure(positions);
+    _noteMotion(positions);
     final settle = _settle;
     if (settle == null) return;
     _settle = null;
@@ -871,6 +886,31 @@ class _ChatScrollRailState extends State<ChatScrollRail> {
   }
 
   Object _keyAt(int revIndex) => widget.rowKeyAt?.call(revIndex) ?? revIndex;
+
+  /// Notes which way the list moved since the last update, from the rows laid
+  /// out in both; a jump shares no row and counts as no motion.
+  void _noteMotion(Iterable<ItemPosition> positions) {
+    final leads = <Object, double>{};
+    var lo = double.infinity;
+    var hi = double.negativeInfinity;
+    var shared = 0;
+    for (final p in positions) {
+      if (p.index < 0 || p.index >= widget.itemCount) continue;
+      final key = _keyAt(p.index);
+      final lead = p.itemLeadingEdge * _viewport;
+      leads[key] = lead;
+      final before = _lastLeads[key];
+      if (before == null) continue;
+      shared++;
+      final moved = lead - before;
+      if (moved < lo) lo = moved;
+      if (moved > hi) hi = moved;
+    }
+    _lastLeads = leads;
+    // Reversed list: rows sliding toward the bottom edge = toward the oldest.
+    _motion = shared == 0 ? 0 : (hi < -0.5 ? -1 : (lo > 0.5 ? 1 : 0));
+    _motionFor = positions;
+  }
 
   /// Records the rows the list has laid out (unclipped, the cache extent too).
   void _measure(Iterable<ItemPosition> positions) {
@@ -986,7 +1026,8 @@ class _ChatScrollRailState extends State<ChatScrollRail> {
               positions, widget.itemCount, _viewport,
               (i) => _heights[_keyAt(i)]);
           if (metrics == null) return const SizedBox.shrink();
-          return _rail(hollow, metrics);
+          return _rail(hollow, metrics,
+              identical(positions, _motionFor) ? _motion : 0);
         },
       );
     });
@@ -998,7 +1039,7 @@ class _ChatScrollRailState extends State<ChatScrollRail> {
   /// because showing and hiding them resizes the track and shifts the thumb.
   /// Inert means no `onTap` and no semantic label, so nothing announces a dead
   /// button.
-  Widget _rail(HollowTheme hollow, _RailMetrics metrics) {
+  Widget _rail(HollowTheme hollow, _RailMetrics metrics, int motion) {
     return Padding(
       // Everything interactive stays [kWindowEdgeDeadStrip] clear of the
       // window's outer edge.
@@ -1021,7 +1062,7 @@ class _ChatScrollRailState extends State<ChatScrollRail> {
               enabled: !metrics.atOldest,
             ),
             const SizedBox(height: kRailSegmentGap),
-            Expanded(child: _track(hollow, metrics)),
+            Expanded(child: _track(hollow, metrics, motion)),
             const SizedBox(height: kRailSegmentGap),
             _RailCap(
               hollow: hollow,
@@ -1037,7 +1078,7 @@ class _ChatScrollRailState extends State<ChatScrollRail> {
     );
   }
 
-  Widget _track(HollowTheme hollow, _RailMetrics metrics) {
+  Widget _track(HollowTheme hollow, _RailMetrics metrics, int motion) {
     final active = _hovering || _dragging;
     return DecoratedBox(
       decoration: BoxDecoration(
@@ -1052,12 +1093,29 @@ class _ChatScrollRailState extends State<ChatScrollRail> {
               .clamp(0.0, trackHeight);
           // The thumb's top is scaled into `trackHeight - thumbHeight`, its
           // real travel, or the oldest page could never be reached.
-          final top = metrics.offset * (trackHeight - thumbHeight);
+          final travel = trackHeight - thumbHeight;
+          var top = metrics.offset * travel;
+          // Each row measured for the first time moves the average standing
+          // in for unseen rows, and with it the thumb's size and place: while
+          // the list moves one way, the thumb follows it or stays, never
+          // stepping back against a steady wheel.
+          final last = _lastTop;
+          if (last != null && motion < 0) top = math.min(top, last);
+          if (last != null && motion > 0) top = math.max(top, last);
+          top = top.clamp(0.0, math.max(0.0, travel));
+          _lastTop = top;
           final unreadCentre = _unreadCentre(trackHeight, metrics);
+          bool onThumb(double dy) => dy >= top && dy <= top + thumbHeight;
           return GestureDetector(
             behavior: HitTestBehavior.opaque,
-            onTapDown: (d) =>
-                _jumpFromPointer(d.localPosition.dy, trackHeight, thumbHeight),
+            // A press on the thumb is a grab, as on a native scrollbar: only
+            // the bare track jumps. A press that rests before it moves reaches
+            // here too, 100 ms in.
+            onTapDown: (d) {
+              final dy = d.localPosition.dy;
+              if (onThumb(dy)) return;
+              _jumpFromPointer(dy, trackHeight, thumbHeight);
+            },
             onVerticalDragStart: (d) {
               setState(() {
                 _dragging = true;
@@ -1067,8 +1125,7 @@ class _ChatScrollRailState extends State<ChatScrollRail> {
               // A grab on the thumb keeps the list where it is; a grab beside
               // it brings the thumb to the pointer first, as a press does.
               final dy = d.localPosition.dy;
-              final onThumb = dy >= top && dy <= top + thumbHeight;
-              if (!onThumb || widget.scrollOffsetController == null) {
+              if (!onThumb(dy) || widget.scrollOffsetController == null) {
                 _jumpFromPointer(dy, trackHeight, thumbHeight);
               }
             },
@@ -1135,13 +1192,6 @@ class _ChatScrollRailState extends State<ChatScrollRail> {
     );
   }
 
-  /// Maps a pointer on the track to a position, treating the pointer as the
-  /// MIDDLE of the thumb so the list does not jump out from under the grab.
-  ///
-  /// The top of the track is the OLDEST end, the direction
-  /// [_RailMetrics.offset] measures, so the normalised pointer IS the fraction
-  /// and inverting it sends every drag the wrong way
-  /// (test/widget/chat_scroll_rail_test.dart).
   /// Moves the list by the pixels the pointer moved, scaled once for the whole
   /// drag: a thumb pulled up shows older messages, and only ever older ones.
   void _dragBy(DragUpdateDetails d, double trackHeight, double thumbHeight) {
@@ -1153,7 +1203,16 @@ class _ChatScrollRailState extends State<ChatScrollRail> {
       return;
     }
     // Reversed list: pixels grow toward the OLDEST end, the top of the track.
-    scroller.jumpScroll(-d.delta.dy * m.scrollable / travel);
+    final pixels = -d.delta.dy * m.scrollable / travel;
+    final now = _metrics;
+    // A pixel scroll lays out every row it passes; past two screens a flick
+    // over a long history would build thousands in one frame, so it lands by
+    // index instead, where those pixels end.
+    if (pixels.abs() > 2 * _viewport && now != null) {
+      _jumpToFraction((now.offset * now.scrollable - pixels) / now.scrollable);
+      return;
+    }
+    scroller.jumpScroll(pixels);
   }
 
   void _endDrag() => setState(() {
@@ -1162,6 +1221,13 @@ class _ChatScrollRailState extends State<ChatScrollRail> {
         _dragMetrics = null;
       });
 
+  /// Maps a pointer on the track to a position, treating the pointer as the
+  /// MIDDLE of the thumb so the list does not jump out from under the grab.
+  ///
+  /// The top of the track is the OLDEST end, the direction
+  /// [_RailMetrics.offset] measures, so the normalised pointer IS the fraction
+  /// and inverting it sends every drag the wrong way
+  /// (test/widget/chat_scroll_rail_test.dart).
   void _jumpFromPointer(double dy, double trackHeight, double thumbHeight) {
     final travel = trackHeight - thumbHeight;
     final metrics = _metrics;
