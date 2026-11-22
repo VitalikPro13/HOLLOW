@@ -183,19 +183,26 @@ the signal whitelist's four touches, the stream overlay consent detail, share ba
   `project_voice_enhance_chain`.
 - Call audio: the Android mic survives backgrounding ONLY via a foreground service whose
   type includes `microphone` (`phoneCall` alone is silenced, #154 spike), started while the app
-  is in front (a mic FGS cannot start from the background). Since #154 that is the app's
+  is in front (Android 12+ refuses it from the background). Since #154 that is the app's
   `HollowCallService`, held from a call's ring-out or the OS call session's `begin` to its
   `end` (Telecom or not; the mic type at start when RECORD_AUDIO is granted, else added on the
   next `onResume`, never from the background); the fork's `CallForegroundService` stands down
   while `appOwnsCallService` is set (by the bridge's `available`) and is the only one without
   the Dart OS call service. Never remove either. AudioSwitch (MODE_IN_COMMUNICATION, focus) and
-  the fork's FGS live while `CallAudioHolders` holds anything: each live gUM mic track and each
-  peer connection that received an audio track, released 4 s after the last one goes (a
-  rebuild, mic switch or room handing over to a DM call keeps it). NEVER tie it to "no peer
+  the fork's FGS live while `CallAudioHolders` holds anything, released 4 s after the last
+  holder goes: each gUM mic track, each peer connection that received an audio track, and
+  Dart's `CallAudioHold` keys, which carry the gaps tracks leave (a media restart drops every
+  track until the peer's new offer; a call answered inside a room has none between the room's
+  leave and the offer). `dm-call` is held from `startCall`/`acceptCall` (before the room's
+  leave) to `_cleanup()`; `voice-channel` sits on every `RealtimeSessionFlag` edge of a room;
+  every hold asks for the fork's FGS again. While Telecom owns the audio, a hold only remembers
+  the start (`wantsActive`), and the idle release forgets it. NEVER tie call audio to "no peer
   connections left": data-channel lanes outlive every call, and the shipped rule kept a lying
   "Ongoing call" FGS and call mode up after every call, so `HollowSfx` played cues as call
-  signalling (#154). A new path that captures or receives call audio holds; one that ends it
-  releases; an engine's detach releases what that engine held. Adaptive capture respects
+  signalling (#154). ONE audio manager per process; an engine's detach gives back only its own
+  holds (an FCM wake's engine attaches mid-call). A new path that captures or receives call
+  audio holds; one that ends it releases. `call_audio_hold_test`, the fork's
+  `CallAudioHoldersTest`/`CallAudioWiringTest`. Adaptive capture respects
   `setCaptureMuted` + `setCaptureServoHold`; voice-QUALITY bugs only count from a REMOTE
   peer. `feedback_capture_servo_mute_freeze`, wiki `os_calls`.
 - Audio-track ops (`setEnabled`/`setVolume`/dispose) are blocking signaling-thread hops:

@@ -90,9 +90,11 @@ import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -115,6 +117,7 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
   private PeerConnectionFactory mFactory;
   private final Map<String, MediaStream> localStreams = new HashMap<>();
   private final Map<String, LocalTrack> localTracks = new HashMap<>();
+  private final Set<String> appCallAudioKeys = new HashSet<>();
   private final LongSparseArray<FlutterRTCVideoRenderer> renders = new LongSparseArray<>();
 
   public RecordSamplesReadyCallbackAdapter recordSamplesReadyCallbackAdapter;
@@ -298,7 +301,19 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
       }
     }
     mPeerConnectionObservers.clear();
+    releaseAppCallAudioKeys();
   }
+
+  // The keys Dart holds for its calls and voice rooms, given back with the engine.
+  private void releaseAppCallAudioKeys() {
+    AudioSwitchManager manager = AudioSwitchManager.instance;
+    if (manager == null) return;
+    for (String key : appCallAudioKeys) {
+      manager.release(CallAudioHolders.app(key));
+    }
+    appCallAudioKeys.clear();
+  }
+
   private void initialize(boolean bypassVoiceProcessing, int networkIgnoreMask, boolean forceSWCodec, List<String> forceSWCodecList,
   @Nullable ConstraintsMap androidAudioConfiguration, Severity logSeverity, @Nullable Integer audioSampleRate, @Nullable Integer audioOutputSampleRate) {
     if (mFactory != null) {
@@ -756,6 +771,25 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
         String trackId = call.argument("trackId");
         mediaStreamRemoveTrack(streamId, trackId, result);
         removeStreamForRendererById(streamId);
+        break;
+      }
+      case "holdCallAudioKey": {
+        // Hollow fork (#154): Dart holds call audio for a call or voice room from
+        // its start to its end, across media rebuilds that drop every track.
+        String key = call.argument("key");
+        if (key != null) {
+          appCallAudioKeys.add(key);
+          AudioSwitchManager.instance.hold(CallAudioHolders.app(key));
+        }
+        result.success(null);
+        break;
+      }
+      case "releaseCallAudioKey": {
+        String key = call.argument("key");
+        if (key != null && appCallAudioKeys.remove(key)) {
+          AudioSwitchManager.instance.release(CallAudioHolders.app(key));
+        }
+        result.success(null);
         break;
       }
       case "trackDispose": {

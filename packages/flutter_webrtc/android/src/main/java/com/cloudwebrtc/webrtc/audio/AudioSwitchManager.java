@@ -58,13 +58,23 @@ public class AudioSwitchManager {
 
     private static final long RELEASE_GRACE_MS = 4000;
 
-    private final CallAudioHolders callAudioHolders = new CallAudioHolders();
+    private final CallAudioHolders callAudioHolders = new CallAudioHolders(
+            new CallAudioHolders.Scheduler() {
+                @Override
+                public void schedule(Runnable task, long delayMs) {
+                    handler.postDelayed(task, delayMs);
+                }
 
-    private final Runnable releaseIfIdle = this::releaseIfIdle;
+                @Override
+                public void cancel(Runnable task) {
+                    handler.removeCallbacks(task);
+                }
+            },
+            RELEASE_GRACE_MS,
+            this::releaseIfIdle);
 
-    // Re-checks at run time: a hold that landed meanwhile keeps call audio.
+    // Main thread, once the holders stayed empty for the whole grace.
     private void releaseIfIdle() {
-        if (!callAudioHolders.isIdle()) return;
         // A start remembered while Telecom owned the audio is over too: a later fallback must
         // not activate call audio for nobody.
         wantsActive = false;
@@ -269,8 +279,6 @@ public class AudioSwitchManager {
     public void release(@NonNull String holder) {
         if (callAudioHolders.release(holder)) {
             Log.i(TAG, "call audio idle, releasing in " + RELEASE_GRACE_MS + " ms");
-            handler.removeCallbacks(releaseIfIdle);
-            handler.postDelayed(releaseIfIdle, RELEASE_GRACE_MS);
         }
     }
 
@@ -285,12 +293,12 @@ public class AudioSwitchManager {
                     }
                     Objects.requireNonNull(audioSwitch).activate();
                     isActive = true;
-                    // Hollow fork: hold a microphone-typed FGS for the call's
-                    // lifetime so the mic survives backgrounding (must start
-                    // while the app is still foregrounded — i.e. right here,
-                    // at mic acquisition).
-                    CallForegroundService.start(context);
                 }
+                // Hollow fork: hold a microphone-typed FGS for the call's
+                // lifetime so the mic survives backgrounding. It can only start
+                // while the app is foregrounded, so every hold asks again: one
+                // refused in the background is retried by the next hold.
+                CallForegroundService.start(context);
             });
         }
     }

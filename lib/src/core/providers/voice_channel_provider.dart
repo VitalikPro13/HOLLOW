@@ -21,6 +21,7 @@ import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/core/providers/link_health_provider.dart';
 import 'package:hollow/src/core/providers/media_route_provider.dart';
+import 'package:hollow/src/core/services/call_audio_hold.dart';
 import 'package:hollow/src/core/services/realtime_session_flag.dart';
 import 'package:hollow/src/core/providers/recording_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
@@ -783,6 +784,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     // a phone also stays visible and connected in the background. Taken only
     // now: a blocked join or the old room's leave above must not strand it.
     RealtimeSessionFlag.acquire('voice-channel');
+    CallAudioHold.acquire('voice-channel');
     try {
       await network_api.voiceChannelJoin(
         serverId: serverId,
@@ -790,6 +792,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
       );
     } catch (_) {
       RealtimeSessionFlag.release('voice-channel');
+      CallAudioHold.release('voice-channel');
       rethrow;
     }
   }
@@ -831,6 +834,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   Future<void> onLocalJoined(String serverId, String channelId) async {
     // A join this device did not start through joinChannel holds it too.
     RealtimeSessionFlag.acquire('voice-channel');
+    CallAudioHold.acquire('voice-channel');
     final gen = ++_joinGen;
     if (state.currentServerId != serverId ||
         state.currentChannelId != channelId) {
@@ -1320,6 +1324,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   Future<void> leaveChannel() async {
     _noTurnWarned = false;
     RealtimeSessionFlag.release('voice-channel');
+    CallAudioHold.release('voice-channel');
     if (!state.isInVoiceChannel || _leaving) return;
     _leaving = true;
     // Retire the join before the FFI round-trip, not after it.
@@ -1438,6 +1443,7 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   void onLocalLeft() {
     // A forced leave never runs leaveChannel, which is the other release.
     RealtimeSessionFlag.release('voice-channel');
+    CallAudioHold.release('voice-channel');
     final ownLeave = _leaving;
     _leaving = false;
     if (state.isInVoiceChannel) {

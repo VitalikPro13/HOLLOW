@@ -39,6 +39,7 @@ import 'package:hollow/src/core/services/ice_route_probe.dart';
 import 'package:hollow/src/core/services/link_watchdog.dart';
 import 'package:hollow/src/core/services/macos_version.dart';
 import 'package:hollow/src/core/services/overlay_mic.dart';
+import 'package:hollow/src/core/services/call_audio_hold.dart';
 import 'package:hollow/src/core/services/realtime_session_flag.dart';
 import 'package:hollow/src/core/services/setup_failure_grace.dart';
 import 'package:hollow/src/core/services/screen_audio_receiver.dart';
@@ -1065,6 +1066,10 @@ class CallNotifier extends Notifier<CallState> {
     RealtimeSessionFlag.acquire('dm-call');
     if (state.status != CallStatus.idle) return;
     unawaited(_readStartRoute());
+    // Android call audio is held from here (the person is on screen, so the
+    // mic service may start) to `_cleanup()`, across a room's leave and any
+    // media rebuild.
+    CallAudioHold.acquire('dm-call');
 
     await _leaveVoiceChannelIfActive(hostMeeting);
     // The leave awaited real teardown; an incoming invite may have started ringing.
@@ -1147,6 +1152,9 @@ class CallNotifier extends Notifier<CallState> {
     // Everything before this was the user deciding; machine time starts here.
     CallSetupTrace.markCurrent(CallSetupTrace.kAccept);
     state = state.copyWith(status: CallStatus.connecting);
+    // Held before the room lets go, so nothing empties call audio until the
+    // caller's offer brings the call's own mic and connection.
+    CallAudioHold.acquire('dm-call');
 
     // Leave any voice channel before the call media comes up (issue #49).
     await _leaveVoiceChannelIfActive(hostMeeting);
@@ -2695,6 +2703,7 @@ class CallNotifier extends Notifier<CallState> {
     _pendingMediaRestart = null;
     _restoreVideoAfterRestart = false;
     RealtimeSessionFlag.release('dm-call');
+    CallAudioHold.release('dm-call');
     ref.read(callLinkHealthProvider.notifier).clear();
     ref.read(callMediaRouteProvider.notifier).clear();
     ref.read(callShareRouteProvider.notifier).clear();

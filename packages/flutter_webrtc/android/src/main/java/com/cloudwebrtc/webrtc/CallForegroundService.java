@@ -41,13 +41,13 @@ public class CallForegroundService extends Service {
     private static final String CHANNEL_ID = "flutter_webrtc_ongoing_call";
     private static final int NOTIFICATION_ID = 0x43414C4C; // 'CALL'
 
-    private static volatile boolean running;
+    private static final ForegroundServiceGate gate = new ForegroundServiceGate();
 
     /** Hollow fork (#154): set by the app while its own call service covers every call. */
     public static volatile boolean appOwnsCallService;
 
     public static void start(Context context) {
-        if (running || appOwnsCallService) return;
+        if (appOwnsCallService || !gate.shouldStart()) return;
         Intent intent = new Intent(context, CallForegroundService.class);
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -65,7 +65,7 @@ public class CallForegroundService extends Service {
 
     // Never gated on appOwnsCallService: a service started before the app took over must still end.
     public static void stop(Context context) {
-        if (!running) return;
+        if (!gate.stopRequested()) return;
         context.stopService(new Intent(context, CallForegroundService.class));
     }
 
@@ -80,7 +80,7 @@ public class CallForegroundService extends Service {
             } else {
                 startForeground(NOTIFICATION_ID, notification);
             }
-            running = true;
+            gate.started();
         } catch (Exception e) {
             // MissingForegroundServiceTypeException / start-not-allowed edge
             // cases: never take the call down over the keep-alive.
@@ -92,7 +92,7 @@ public class CallForegroundService extends Service {
 
     @Override
     public void onDestroy() {
-        running = false;
+        gate.destroyed();
         super.onDestroy();
     }
 

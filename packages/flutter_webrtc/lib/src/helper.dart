@@ -338,6 +338,16 @@ class Helper {
   static Future<void> clearAndroidCommunicationDevice() =>
       WebRTC.invokeMethod('clearAndroidCommunicationDevice');
 
+  /// Hollow fork (#154, Android only): keeps call audio (the audio mode and
+  /// the microphone foreground service) up under [key] until
+  /// [releaseCallAudioKey], whatever tracks and connections come and go.
+  static Future<void> holdCallAudioKey(String key) =>
+      WebRTC.invokeMethod('holdCallAudioKey', <String, dynamic>{'key': key});
+
+  /// Hollow fork (#154, Android only): the end of [holdCallAudioKey].
+  static Future<void> releaseCallAudioKey(String key) =>
+      WebRTC.invokeMethod('releaseCallAudioKey', <String, dynamic>{'key': key});
+
   /// Set the audio configuration for iOS
   static Future<void> setAppleAudioConfiguration(
           AppleAudioConfiguration appleAudioConfiguration) =>
