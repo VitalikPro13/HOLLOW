@@ -15,10 +15,10 @@ import 'package:hollow/src/ui/settings/settings_kit.dart';
 import 'package:hollow/src/ui/settings/settings_shared.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
-/// Hues of the preset swatches. Each theme moves a stop's lightness until it
-/// reads, so only the hue and saturation of a pick survive everywhere: these
-/// are the hues that still read as themselves at 4.5:1 on dark and on light
-/// (a warmer amber, since a yellow that dark turns olive on light).
+/// Hues of the preset swatches. A pick is drawn as picked wherever it clears
+/// [kChosenNameContrast]; where it does not (yellows on light, deep blues on
+/// dark) its lightness moves, so these are the hues that still read as
+/// themselves then (a warmer amber, since a darkened yellow turns olive).
 const List<double> kNameColorPresetHues = [
   0, 20, 40, 95, 150, 185, 210, 250, 280, 320,
 ];

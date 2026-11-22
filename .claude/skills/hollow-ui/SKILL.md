@@ -95,12 +95,13 @@ times for chips alone. Do not invent a 47th. Reach for the component.
   exists is exactly the bug this guards. A solid red behind a label is
   `errorFill` with `textOnError`, never `error` (too light for white ink).
 - Never colour alone: pair it with shape, an icon or a word.
-- **Name colours.** A colour a person chose clears 4.5:1 on every surface
-  their name sits on, a selected row's or chip's accent-muted fill included
-  (`namePaintOnSelected` lifts it there, and only there); the hashed colours
-  clear 7:1 on dark and 5:1 on light. A pick must still look like the pick:
-  hue and saturation kept, lightness moved only as far as that surface needs
-  (`kChosenNameContrast`, `test/name_colors_test.dart`).
+- **Name colours.** A colour a person chose is drawn EXACTLY as picked
+  (name, gradient stop, speaking ring, share border, both themes) unless it
+  falls under 3:1 on a surface their name sits on, a selected row's or
+  chip's accent-muted fill included (`namePaintOnSelected` lifts it there,
+  and only there); then its lightness moves only as far as that surface
+  needs, hue and saturation kept (`kChosenNameContrast`, #140). The hashed
+  colours clear 7:1 on dark and 5:1 on light (`test/name_colors_test.dart`).
 
 ## Spacing and gaps
 

@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hollow/src/core/color_utils.dart';
 import 'package:hollow/src/theme/contrast.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
+import 'package:hollow/src/ui/call/call_theme.dart';
 import 'package:hollow/src/ui/settings/name_color_editor.dart';
 
 List<Color> _surfaces(HollowTheme t) =>
@@ -181,7 +182,16 @@ void main() {
         final worst = selectedNameSurfaces(t)
             .map((bg) => Contrast.ratio(selected.color, bg))
             .reduce((a, b) => a < b ? a : b);
-        expect(worst, inInclusiveRange(kChosenNameContrast, kChosenNameContrast + 0.1));
+        final plainWorst = selectedNameSurfaces(t)
+            .map((bg) => Contrast.ratio(plain.color, bg))
+            .reduce((a, b) => a < b ? a : b);
+        if (plainWorst >= kChosenNameContrast) {
+          expect(selected.color, plain.color,
+              reason: 'a red that reads on the fill is not moved');
+        } else {
+          expect(worst,
+              inInclusiveRange(kChosenNameContrast, kChosenNameContrast + 0.1));
+        }
         final hsl = HSLColor.fromColor(selected.color);
         expect(_hueGap(hsl.hue, 0), lessThan(1));
         expect((hsl.saturation - HSLColor.fromColor(red).saturation).abs(),
@@ -422,5 +432,91 @@ void main() {
           isFalse, reason: 'yours is cached apart');
     });
   });
-}
 
+  // #140, Rong-Yao on 0.14.2: the swatch, the name on light, the name on dark,
+  // the speaking ring and the share border were four different reds. A pick
+  // that reads is drawn as picked; only one below the floor moves.
+  group('a chosen colour shows as picked', () {
+    final themes = [
+      ('dark', HollowTheme.dark()),
+      ('light', HollowTheme.light()),
+    ];
+
+    bool clearsFloor(Color c, HollowTheme t) => _surfaces(t)
+        .every((bg) => Contrast.ratio(c, bg) >= kChosenNameContrast);
+
+    test('the floor is the 3:1 of large text and of indicators', () {
+      expect(kChosenNameContrast, 3.0);
+    });
+
+    for (final (label, t) in themes) {
+      test('the preset red is the same red everywhere ($label)', () {
+        final red = nameColorFromHue(0);
+        final field = nameColorField([red]);
+        expect(namePaintFor('x', t, field: field).color, red);
+        expect(namePaintFor('x', t, field: field, self: true).color, red);
+        expect(chosenNamePaint(t, field)!.color, red);
+        expect(callRingColor(t, isSelf: true, master: 'x', field: field), red,
+            reason: 'your speaking ring and share border');
+        expect(callRingColor(t, isSelf: false, master: 'x', field: field), red);
+        expect(
+            callRingColor(callMediaTheme(t),
+                isSelf: false, master: 'x', field: field),
+            red,
+            reason: 'a ring over video measures on the dark ladder');
+      });
+
+      test('every editor hue that reads is drawn untouched ($label)', () {
+        var untouched = 0;
+        for (var h = 0.0; h < 360; h += 5) {
+          final pick = nameColorFromHue(h);
+          final shown = namePaintFor('x', t,
+                  field: nameColorField([pick]), self: true)
+              .color;
+          if (clearsFloor(pick, t)) {
+            expect(shown, pick, reason: 'hue $h');
+            untouched++;
+          } else {
+            // Moved only as far as the worst surface needs.
+            final worst = _surfaces(t)
+                .map((bg) => Contrast.ratio(shown, bg))
+                .reduce((a, b) => a < b ? a : b);
+            expect(worst,
+                inInclusiveRange(kChosenNameContrast, kChosenNameContrast + 0.1),
+                reason: 'hue $h');
+            expect(_hueGap(HSLColor.fromColor(shown).hue, h), lessThan(2),
+                reason: 'hue $h');
+          }
+        }
+        expect(untouched, greaterThan(24),
+            reason: 'at least a third of the wheel needs no help on $label');
+      });
+
+      test('a gradient draws each stop as that colour alone does ($label)', () {
+        final picks = [nameColorFromHue(0), nameColorFromHue(250),
+          nameColorFromHue(40)];
+        final gradient =
+            namePaintFor('x', t, field: nameColorField(picks), self: true);
+        for (var i = 0; i < picks.length; i++) {
+          expect(gradient.stops[i],
+              namePaintFor('x', t, field: nameColorField([picks[i]]), self: true)
+                  .color,
+              reason: 'stop $i');
+        }
+      });
+    }
+
+    test('a pick below the floor is lifted on dark only as far as 3:1', () {
+      const blue = Color(0xff0000ff); // design-ignore: worst-case pick
+      final dark = HollowTheme.dark();
+      final shown =
+          namePaintFor('x', dark, field: nameColorField([blue]), self: true)
+              .color;
+      expect(shown, isNot(blue));
+      final worst = _surfaces(dark)
+          .map((bg) => Contrast.ratio(shown, bg))
+          .reduce((a, b) => a < b ? a : b);
+      expect(worst, inInclusiveRange(3.0, 3.1));
+    });
+  });
+}

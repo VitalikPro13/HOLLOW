@@ -207,10 +207,14 @@ Color _outsideAccentBand(Color c, double accentHue) {
 }
 
 /// The contrast a chosen name colour clears on every surface a name sits on,
-/// selected fills included: the design language's floor for all text. The
-/// hashed colours sit higher so they read as pastels; a chosen colour held
-/// that high loses its tone (red goes pink).
-const double kChosenNameContrast = 4.5;
+/// selected fills included. A pick that clears it is drawn exactly as picked,
+/// in both themes and on the speaking ring (#140): 4.5 moved the editor's own
+/// red on both themes, so swatch, name and ring were three reds. 3:1 is WCAG's
+/// floor for large text and for indicators (1.4.3, 1.4.11), enough for a short
+/// semibold name beside its avatar, and still lifts the picks that would
+/// vanish (pure blue or black on dark, yellow on light). Hashed colours sit
+/// far higher: nobody chose them.
+const double kChosenNameContrast = 3.0;
 
 List<Color> _surfaces(HollowTheme hollow) => [
       hollow.surface,
