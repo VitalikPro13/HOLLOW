@@ -112,10 +112,12 @@ impl ServerState {
     }
 
     /// A held retire names `op` (clock, content id) as written by its proving device.
+    /// The id is `op`'s own, never `content_of`'s: that reads the op held at the key, so a
+    /// variant there would pass as the op the retire named (HOL-SEC-224).
     fn is_endorsed(&self, op: &CrdtOp) -> bool {
         let Some(dev) = op.dev.as_deref() else { return false };
         let Some(named) = self.endorsed.0.get(&(op.author.clone(), op.hlc.physical_ms, op.hlc.counter)) else { return false };
-        let h = hex::encode(self.content_of(op));
+        let h = hex::encode(op.content_hash());
         named.iter().any(|(d, x)| *d == dev.device && *x == h)
     }
 
@@ -1041,6 +1043,35 @@ pub(crate) mod tests {
         assert!(folded(&r, &dr), "a counted device's retire is admitted");
         assert!(folded(&r, &nick), "the op it names counts as the phone wrote it");
         assert!(!folded(&r, &later) && parked(&r, &later), "an op it does not name stays refused");
+        assert_eq!(r.nicknames.get(&keys(MEMBER).1).map(|n| n.read().clone()).as_deref(), Some("mm"));
+    }
+
+    #[test]
+    fn a_variant_at_an_endorsed_ops_key_is_not_endorsed() {
+        let (mut owner, founding) = owner_on(true);
+        let (first, nick, _, mut laptop) = phone_then_laptop(&mut owner, &founding);
+        let dr = retire(&mut laptop, MEMBER_PHONE, &[&nick]);
+        let mut r = ServerState::skeleton(owner.server_id.clone());
+        r.authority = view_retired();
+        r.ingest_remote(&first);
+        r.ingest_remote(&[nick.clone(), dr.clone()]);
+        assert!(folded(&r, &nick) && r.verdict(&nick) == Verdict::Counted, "precondition: the retire endorses nick");
+        // The retired phone signs another op at nick's clock, with a lower content id.
+        let variant = (0..64)
+            .map(|i| {
+                let mut v = nick.clone();
+                v.payload = P::NicknameChanged { peer_id: keys(MEMBER).1, nickname: format!("v{i}") };
+                v.sign(&keys(MEMBER).0, &keys(MEMBER).2);
+                v.sign_device(&keys(MEMBER_PHONE).0);
+                v
+            })
+            .find(|v| v.content_hash() < nick.content_hash())
+            .expect("a variant with a lower content id");
+        assert_eq!(variant.proven_device(), Some(keys(MEMBER_PHONE).1.as_str()), "precondition: the phone's proof verifies");
+        r.ingest_remote(std::slice::from_ref(&variant));
+        let kept = r.op_log.iter().find(|o| o.author == nick.author && o.hlc == nick.hlc).expect("an op folds at the key");
+        assert_eq!(kept.content_hash(), nick.content_hash(), "the endorsed op keeps its key");
+        assert_ne!(r.verdict(&variant), Verdict::Counted, "the retire named nick's content, not the variant's");
         assert_eq!(r.nicknames.get(&keys(MEMBER).1).map(|n| n.read().clone()).as_deref(), Some("mm"));
     }
 
