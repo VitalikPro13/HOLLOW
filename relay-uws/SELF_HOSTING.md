@@ -1095,8 +1095,10 @@ On desktop, open Settings, then Network. Under Relay, choose **Change**, then
 **Add a relay**, type your relay's address and choose **Add**. Then choose
 **Switch and restart**. The app comes back connected to your relay.
 
-On a phone it is the same, except the button says **Switch and close**. Open
-Hollow again and it connects to your relay.
+On Android it is the same, except the button says **Switch and close**. Open
+Hollow again and it connects to your relay. On an iPhone the button says
+**Switch relay**, because iOS does not let an app close itself. Close Hollow
+from the app switcher, then open it again, and it connects to your relay.
 
 On a fresh install, before an identity exists, the welcome screen has a button
 showing the relay's address (`relay.anonlisten.com`). It opens a **Relay

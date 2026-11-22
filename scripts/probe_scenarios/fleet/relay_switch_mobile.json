@@ -1,0 +1,43 @@
+{
+  "_": [
+    "Settings > Network relay switch on a phone (iOS Simulator or Android emulator).",
+    "",
+    "The new relay is a name that never resolves (RFC 2606 .invalid), so the",
+    "switch is real but nothing ever connects anywhere else: no fleet peer may",
+    "reach the production relay. The relay guard refuses it unless the run names",
+    "it: -RelayAlso switchtest.invalid.",
+    "",
+    "iOS cannot quit itself: the switch saves the relay for the next launch, the",
+    "button stops loading and a note says to close Hollow ('Switch relay'; the",
+    "old build said 'Switch and close' and spun forever). Android closes",
+    "('Switch and close'); the harness reopens it and the log says which relay",
+    "the node dials. One of the two switch taps misses by design (soft).",
+    "",
+    "run (on the Mac mini): pwsh scripts/fleet.ps1 -Scenario relay_switch_mobile -Peers g -RelayAlso switchtest.invalid"
+  ],
+  "peers": ["g"],
+  "steps": [
+    { "peer": "all", "op": "wait_for", "provider": "connection", "equals": "connected", "timeout_ms": 120000 },
+    { "peer": "g", "op": "tap", "target": "semantics:Settings", "index": 0 },
+    { "peer": "g", "op": "wait", "ms": 800 },
+    { "peer": "g", "op": "scroll", "target": "text:Stream overlay", "dy": -500 },
+    { "peer": "g", "op": "wait", "ms": 500 },
+    { "peer": "g", "op": "tap", "target": "text:Network", "index": 0 },
+    { "peer": "g", "op": "wait", "ms": 800 },
+    { "peer": "g", "op": "tap", "target": "text:Change", "index": 0 },
+    { "peer": "g", "op": "wait", "ms": 500 },
+    { "peer": "g", "op": "tap", "target": "text:Add a relay", "index": 0 },
+    { "peer": "g", "op": "wait", "ms": 500 },
+    { "peer": "g", "op": "enter_text", "target": "hint:relay.example.com", "value": "switchtest.invalid" },
+    { "peer": "g", "op": "tap", "target": "text:Add", "index": 0 },
+    { "peer": "g", "op": "wait_for", "target": "text:switchtest.invalid", "timeout_ms": 5000 },
+    { "peer": "g", "op": "reveal", "target": "text:Friends and servers on another relay can't be reached from here.", "soft": true },
+    { "peer": "g", "op": "wait", "ms": 500 },
+    { "peer": "g", "op": "shot", "name": "rs-01-picked" },
+    { "peer": "g", "op": "tap", "target": "text:Switch and close", "index": 0, "soft": true },
+    { "peer": "g", "op": "tap", "target": "text:Switch relay", "index": 0, "soft": true },
+    { "peer": "g", "op": "wait", "ms": 8000 },
+    { "peer": "g", "op": "shot", "name": "rs-02-after-switch-8s" },
+    { "peer": "g", "op": "dump" }
+  ]
+}

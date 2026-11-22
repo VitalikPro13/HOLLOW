@@ -5,20 +5,54 @@ const kDefaultRelayDomain = 'relay.anonlisten.com';
 const _kSettingKey = 'relay_domain';
 const _kListKey = 'relay_domain_list';
 
+/// A relay switch waiting for the next launch. Kept apart from
+/// [_kSettingKey], which the push fetch (iOS extension, a cold Android
+/// process) dials, so a fetch reaches only the relay this install runs on,
+/// the one holding its push token and buffers (HOL-SEC-204).
+const kNextRelaySettingKey = 'relay_domain_next';
+
+/// Where an invite waits out the relaunch a relay switch needs.
+const String kPendingInviteAfterSwitchKey = 'pending_invite_after_switch';
+
 class RelayDomainNotifier extends Notifier<String> {
   @override
   String build() => kDefaultRelayDomain;
 
-  Future<void> loadCached() async {
+  /// Loads the relay this launch runs on, first taking a switch saved for it
+  /// by [saveForNextLaunch]. True when it took one.
+  Future<bool> loadCached() async {
+    final next = (await storage_api.loadSetting(key: kNextRelaySettingKey))
+        ?.trim();
+    if (next != null && next.isNotEmpty) {
+      await storage_api.saveSetting(key: _kSettingKey, value: next);
+      await storage_api.saveSetting(key: kNextRelaySettingKey, value: '');
+      state = next;
+      return true;
+    }
     final cached = await storage_api.loadSetting(key: _kSettingKey);
     if (cached != null && cached.isNotEmpty) {
       state = cached;
     }
+    return false;
   }
 
   Future<void> setDomain(String domain) async {
     state = domain;
     await storage_api.saveSetting(key: _kSettingKey, value: domain);
+  }
+
+  /// Saves [domain] for the next launch while this process, and the push
+  /// fetch, stay on [state]. Saving [state] takes a waiting switch back, and
+  /// the invite it parked with it.
+  Future<void> saveForNextLaunch(String domain) async {
+    final takeBack = domain == state;
+    await storage_api.saveSetting(
+        key: kNextRelaySettingKey, value: takeBack ? '' : domain);
+    if (takeBack) {
+      await storage_api.saveSetting(
+          key: kPendingInviteAfterSwitchKey, value: '');
+    }
+    ref.read(pendingRelayProvider.notifier)._set(takeBack ? null : domain);
   }
 }
 
@@ -59,3 +93,15 @@ class SavedRelayListNotifier extends Notifier<List<String>> {
 
 final savedRelayListProvider =
     NotifierProvider<SavedRelayListNotifier, List<String>>(SavedRelayListNotifier.new);
+
+/// The relay the next launch connects to when it is not the one this process
+/// runs on; null when no switch waits.
+class PendingRelayNotifier extends Notifier<String?> {
+  @override
+  String? build() => null;
+
+  void _set(String? domain) => state = domain;
+}
+
+final pendingRelayProvider =
+    NotifierProvider<PendingRelayNotifier, String?>(PendingRelayNotifier.new);

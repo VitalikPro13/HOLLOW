@@ -250,7 +250,10 @@ db_passphrase) -> Vec<FetchedDm>`.
   process) never heard Dart's `set_relay_url`, so callers pass "" and
   `fetch::fetch_relay_domain` dials the relay given, else this install's saved
   `relay_domain`; only a database that reads and holds no choice means the official
-  relay, and any read error refuses the fetch. Before this, a self-hosted install's
+  relay, and any read error refuses the fetch. A relay switch writes
+  `relay_domain_next`, never `relay_domain`: the app's next launch moves it over
+  (`RelayDomainNotifier.loadCached`, before `setRelayUrl`), so a wake between the
+  switch and that launch still fetches from the relay holding the push token. Before this, a self-hosted install's
   UnifiedPush wake with the app killed dialled the official relay with its device key.
 - **Age-restricted servers on a phone (0.14):** a wake for a server the phone hides
   fetches nothing (`wake_age_hidden`); `push_channel_meta_in` treats a hidden server as

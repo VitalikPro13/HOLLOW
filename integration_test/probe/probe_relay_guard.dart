@@ -331,9 +331,19 @@ class GuardedRelayDomainNotifier extends RelayDomainNotifier {
       guard.allowProduction ? kDefaultRelayDomain : kProbeUnstampedRelay;
 
   @override
-  Future<void> loadCached() async {
-    await super.loadCached();
+  Future<bool> loadCached() async {
+    final tookSwitch = await super.loadCached();
     if (state != kProbeUnstampedRelay) guard.check(state, 'relay setting');
+    return tookSwitch;
+  }
+
+  /// Stamped at the save, like [setDomain]: the tooling reads the stamp to
+  /// judge what the next launch may dial.
+  @override
+  Future<void> saveForNextLaunch(String domain) async {
+    guard.check(domain, 'relay change');
+    await super.saveForNextLaunch(domain);
+    guard.restamp(domain);
   }
 
   @override

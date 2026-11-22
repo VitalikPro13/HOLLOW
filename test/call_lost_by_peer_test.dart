@@ -291,7 +291,7 @@ void main() {
       for (final head in const [
         'Future<Never> exitApp(',
         'Future<Never> relaunchApp(',
-        'Future<void> exitForRelaySwitch(',
+        'Future<Never> exitForRelaySwitch(',
       ]) {
         final b = body(relaunch, head);
         expect(b.indexOf('await runBeforeAppExit();'), greaterThan(-1),

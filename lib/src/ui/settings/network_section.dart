@@ -1,5 +1,3 @@
-import 'dart:io';
-
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/age_gate.dart';
@@ -26,6 +24,7 @@ import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
 import 'package:hollow/src/ui/dialogs/age_gate_dialogs.dart';
+import 'package:hollow/src/ui/dialogs/relay_switch_dialog.dart';
 import 'package:hollow/src/ui/settings/relay_health_card.dart';
 import 'package:hollow/src/ui/settings/settings_kit.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -78,11 +77,9 @@ class RelaySettingsSection extends ConsumerStatefulWidget {
 }
 
 class _RelaySettingsSectionState extends ConsumerState<RelaySettingsSection> {
-  static bool get _phone => Platform.isAndroid || Platform.isIOS;
-
   /// The relay this process is connected to; a change needs a restart.
   late final String _activeRelay = ref.read(relayDomainProvider);
-  late String _selectedRelay = _activeRelay;
+  late String _selectedRelay = ref.read(pendingRelayProvider) ?? _activeRelay;
 
   /// Servers this identity owns: they stay on the relay they live on.
   late final int _ownedServers = () {
@@ -106,9 +103,9 @@ class _RelaySettingsSectionState extends ConsumerState<RelaySettingsSection> {
   Future<void> _switchAndRestart() async {
     setState(() => _switching = true);
     try {
-      await ref.read(relayDomainProvider.notifier).setDomain(_selectedRelay);
-      await ref.read(savedRelayListProvider.notifier).addRelay(_selectedRelay);
-      await exitForRelaySwitch();
+      // Returns only on iOS, where the relay waits for the next launch.
+      await switchRelay(ref.read, _selectedRelay);
+      if (mounted) setState(() => _switching = false);
     } catch (e) {
       if (!mounted) return;
       setState(() => _switching = false);
@@ -121,6 +118,12 @@ class _RelaySettingsSectionState extends ConsumerState<RelaySettingsSection> {
   Future<void> _remove(String domain) async {
     try {
       await ref.read(savedRelayListProvider.notifier).removeRelay(domain);
+      // A switch waiting for a relay that is no longer listed is taken back.
+      if (ref.read(pendingRelayProvider) == domain) {
+        await ref
+            .read(relayDomainProvider.notifier)
+            .saveForNextLaunch(_activeRelay);
+      }
       if (!mounted) return;
       if (_selectedRelay == domain) {
         setState(() => _selectedRelay = kDefaultRelayDomain);
@@ -170,6 +173,8 @@ class _RelaySettingsSectionState extends ConsumerState<RelaySettingsSection> {
   Widget build(BuildContext context) {
     final noTurn = ref.watch(relayStatusProvider)?.turn == false;
     final relays = ref.watch(savedRelayListProvider);
+    final pending = ref.watch(pendingRelayProvider);
+    final end = relaySwitchEnd;
     return SettingsSection(
       title: 'Relay',
       children: [
@@ -218,7 +223,12 @@ class _RelaySettingsSectionState extends ConsumerState<RelaySettingsSection> {
               ],
             ),
           ),
-        if (_selectedRelay != _activeRelay)
+        if (pending != null && _selectedRelay == pending)
+          Padding(
+            padding: const EdgeInsets.only(bottom: HollowSpacing.sm),
+            child: SettingsNote(closeByHandText(pending)),
+          ),
+        if (_selectedRelay != (pending ?? _activeRelay))
           Padding(
             padding: const EdgeInsets.only(bottom: HollowSpacing.sm),
             child: Column(
@@ -228,14 +238,24 @@ class _RelaySettingsSectionState extends ConsumerState<RelaySettingsSection> {
                 HollowButton.filled(
                   loading: _switching,
                   onPressed: _switchAndRestart,
-                  // A phone app cannot start itself again, so it closes.
-                  child: Text(_phone ? 'Switch and close' : 'Switch and restart'),
+                  // Back to the running relay: nothing waits for a launch.
+                  child: Text(switch (end) {
+                    _ when _selectedRelay == _activeRelay =>
+                      'Stay on this relay',
+                    RelaySwitchEnd.restart => 'Switch and restart',
+                    RelaySwitchEnd.close => 'Switch and close',
+                    RelaySwitchEnd.closeByHand => 'Switch relay',
+                  }),
                 ),
-                if (_ownedServers > 0)
+                if (_ownedServers > 0 && _selectedRelay != _activeRelay)
                   SettingsNote(ownedServersStayText(_activeRelay)),
-                if (_phone)
+                if (end == RelaySwitchEnd.close)
                   const SettingsNote(
                       'Open Hollow again to connect to the new relay.'),
+                if (end == RelaySwitchEnd.closeByHand &&
+                    _selectedRelay != _activeRelay)
+                  const SettingsNote('Hollow connects to the new relay after '
+                      'you close it from the app switcher and open it again.'),
               ],
             ),
           ),
