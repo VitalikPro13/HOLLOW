@@ -88,7 +88,7 @@ jobs:
           save-if: ${{ github.event_name != 'pull_request' }}
 
       - name: Install cargo-llvm-cov & cargo-nextest
-        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        uses: taiki-e/install-action@4a76afe23f9e08d2d9550fb56e556444e8611d21 # v2.90.4
         with:
           tool: cargo-llvm-cov,cargo-nextest
 
@@ -127,7 +127,7 @@ jobs:
           rustup default "$HOLLOW_RUST_TOOLCHAIN"
 
       - name: Install cargo-llvm-cov & cargo-nextest
-        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        uses: taiki-e/install-action@4a76afe23f9e08d2d9550fb56e556444e8611d21 # v2.90.4
         with:
           tool: cargo-llvm-cov,cargo-nextest
 
@@ -201,7 +201,7 @@ jobs:
           rustup default "$HOLLOW_RUST_TOOLCHAIN"
 
       - name: Install cargo-llvm-cov & cargo-nextest
-        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        uses: taiki-e/install-action@4a76afe23f9e08d2d9550fb56e556444e8611d21 # v2.90.4
         with:
           tool: cargo-llvm-cov,cargo-nextest
 
@@ -299,7 +299,7 @@ jobs:
           persist-credentials: false
 
       - name: Install cargo-deny, osv-scanner and zizmor
-        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        uses: taiki-e/install-action@4a76afe23f9e08d2d9550fb56e556444e8611d21 # v2.90.4
         with:
           tool: cargo-deny@0.20.2,osv-scanner@2.5.1,zizmor@1.30.1
 
@@ -474,6 +474,6 @@ jobs:
       # by the SonarQube Cloud GitHub App, not by GITHUB_TOKEN, so the job
       # stays on the workflow's read-only default.
       - name: SonarQube scan
-        uses: SonarSource/sonarqube-scan-action@e805d875275f728fac1885b413934be6d7c63f65 # v8.4.1
+        uses: SonarSource/sonarqube-scan-action@59202af334b4ba7b5db01b701b8e79f8b3bef0f4 # v8.5.0
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
