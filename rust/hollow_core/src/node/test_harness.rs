@@ -72961,3 +72961,42 @@ async fn pr222_a_not_sure_settling_keeps_the_home_relay() {
     assert_eq!(state.home_relay().as_deref(), Some(home), "the home reads missing after the settling");
     assert!(!home_ops(&state).contains(&d2_id), "precondition: D2 named no home of its own");
 }
+
+// pr-alert-baseline
+/// A Welcome admission into an empty store learns its identity's older base from the old
+/// device once that is back: the old device was there before it, so the restored device
+/// records no "added with your recovery phrase" alert about it (the fleet saw one).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pr_a_welcome_admission_learns_its_old_device_as_no_news() {
+    let _g = test_guard();
+    let (a, a1_tag, b_tag, f_tag) = (102u8, 103u8, 104u8, 105u8);
+    let PrWorld { relay, a1, b: _b, sid: _sid, _tmp } = pr_world([a, a1_tag, b_tag]).await;
+    let a_master = tag_kp(a).peer_id();
+    let a1_dev = a1.device_id.clone();
+    relay.set_online(&a1_dev, false);
+    assert!(wait_until(10, async || !relay.online_devices().contains(&a1_dev)).await);
+    let f = pr_restored(&relay, a, f_tag, &[], crate::api::roster::RestoreSign::Admit, super::roster_book::now_ms()).await;
+    let f_dev = f.device_id.clone();
+    assert!(wait_until(20, async || relay.inbox_owners(&a_master).contains(&f_dev)).await, "the relay never handed F the inbox");
+
+    relay.set_online(&a1_dev, true);
+    let knows_a1 = async || {
+        super::roster_book::load(&f.store(), &a_master)
+            .map(|r| r.verified(super::roster_book::now_ms()).fold(|_| None, super::roster_book::now_ms()))
+            .is_some_and(|s| s.is_member(&a1_dev) && s.is_member(&f_dev))
+    };
+    assert!(wait_until(30, knows_a1).await, "precondition: F never learned A's older base from A1");
+    let own: Vec<String> = f
+        .security_alerts()
+        .iter()
+        .filter(|r| r.kind == super::security_alerts::KIND_OWN_DEVICE_ADDED)
+        .map(|r| r.detail.clone())
+        .collect();
+    assert!(own.is_empty(), "F was told its old device was added: {own:?}");
+    let phrase_alert = format!("{f_dev}:{}", super::security_alerts::BY_PHRASE);
+    assert!(
+        wait_until(30, async || a1.security_alerts().iter().any(|r| r.kind == super::security_alerts::KIND_OWN_DEVICE_ADDED && r.detail == phrase_alert)).await,
+        "control: A1 is still warned that the phrase added F",
+    );
+}

@@ -1697,6 +1697,22 @@ fn added_by_another(
     if !prev.is_member(local_device) {
         return Vec::new();
     }
+    // The first base a phrase-admitted device learns, dated before its own admission, is
+    // the identity as it was before this device joined (a Welcome restore into an empty
+    // store): only a phrase admission after ours is news there.
+    let joined_at = roster.phrase_admits.iter().filter(|p| p.device == local_device).map(|p| p.at_ms).max();
+    if let (Some(joined), Some(base_at)) = (joined_at, roster.base_at())
+        && prev.base != now.base
+        && base_at < joined
+    {
+        return now
+            .members
+            .difference(&prev.members)
+            .filter(|d| !upgrade_admitted.contains(*d))
+            .filter(|d| roster.phrase_admits.iter().any(|p| p.device == **d && p.at_ms > joined))
+            .map(|d| (d.clone(), super::security_alerts::BY_PHRASE.to_string()))
+            .collect();
+    }
     now.members
         .difference(&prev.members)
         .filter(|d| !upgrade_admitted.contains(*d))
@@ -2951,6 +2967,63 @@ mod tests {
         });
         let before_f = RosterState { members: now.members.iter().filter(|d| **d != f.peer_id()).cloned().collect(), ..now.clone() };
         assert!(added_by_another(&r, &before_f, &now, &f.peer_id(), &BTreeSet::new()).is_empty());
+    }
+
+    /// A Welcome admission into an empty store (phrase restore, No branch): the first
+    /// roster it learns from its siblings brings an older base. The devices that base
+    /// keeps or vouched for were the identity before this device joined, never news; a
+    /// phrase admission after ours still is.
+    #[test]
+    fn a_base_older_than_our_own_admission_is_no_news() {
+        let (master, recovery, old, me) = (kp(0x11), kp(0x12), kp(0x13), kp(0x14));
+        let (linked, later) = (kp(0x15), kp(0x16));
+        let mut theirs = Roster::genesis(&master, &recovery, &old, now_ms() - 60_000);
+        let base = theirs.verified(now_ms()).fold(|_| None, now_ms()).base;
+        theirs.add_consent(sign_consent(&linked, &master.peer_id()));
+        theirs.add_vouch(sign_vouch(&old, &master.peer_id(), &base, &linked.peer_id()));
+        let mut ours = Roster::new(&master.peer_id());
+        ours.add_consent(sign_consent(&me, &master.peer_id()));
+        let pa = roster::sign_phrase_admit(&master, &recovery, now_ms() - 10_000, &me.peer_id());
+        ours.add_phrase_statement(&roster::r_pub_of(&recovery), None, Some(pa)).unwrap();
+        let prev = ours.verified(now_ms()).fold(|_| None, now_ms());
+        assert!(prev.is_member(&me.peer_id()), "precondition: the phrase admits this install");
+        let mut merged = ours.merged(&theirs);
+        let now = merged.verified(now_ms()).fold(|_| None, now_ms());
+        assert!(now.is_member(&old.peer_id()) && now.is_member(&linked.peer_id()) && now.is_member(&me.peer_id()), "precondition");
+        assert!(added_by_another(&merged, &prev, &now, &me.peer_id(), &BTreeSet::new()).is_empty());
+
+        merged.add_consent(sign_consent(&later, &master.peer_id()));
+        let pa = roster::sign_phrase_admit(&master, &recovery, now_ms() - 1_000, &later.peer_id());
+        merged.add_phrase_statement(&roster::r_pub_of(&recovery), None, Some(pa)).unwrap();
+        let after = merged.verified(now_ms()).fold(|_| None, now_ms());
+        assert!(after.is_member(&later.peer_id()), "precondition: a later admission");
+        assert_eq!(
+            added_by_another(&merged, &prev, &after, &me.peer_id(), &BTreeSet::new()),
+            vec![(later.peer_id(), "phrase".to_string())],
+            "a phrase admission after ours is news even in the base we first learn",
+        );
+
+        let fresh = kp(0x17);
+        merged.add_consent(sign_consent(&fresh, &master.peer_id()));
+        merged.add_vouch(sign_vouch(&old, &master.peer_id(), &base, &fresh.peer_id()));
+        let vouched = merged.verified(now_ms()).fold(|_| None, now_ms());
+        assert_eq!(
+            added_by_another(&merged, &after, &vouched, &me.peer_id(), &BTreeSet::new()),
+            vec![(fresh.peer_id(), old.peer_id())],
+            "once the base is known, a sibling's vouch is news again",
+        );
+
+        let kept = kp(0x18);
+        merged.add_consent(sign_consent(&kept, &master.peer_id()));
+        let rec = roster::sign_recovery(&master, &recovery, now_ms() - 500, &[me.peer_id(), kept.peer_id()], false);
+        merged.add_phrase_statement(&roster::r_pub_of(&recovery), Some(rec), None).unwrap();
+        let recovered = merged.verified(now_ms()).fold(|_| None, now_ms());
+        assert!(recovered.is_member(&kept.peer_id()) && recovered.base != vouched.base, "precondition: a newer base keeps it");
+        assert_eq!(
+            added_by_another(&merged, &vouched, &recovered, &me.peer_id(), &BTreeSet::new()),
+            vec![(kept.peer_id(), "phrase".to_string())],
+            "a recovery after our admission is news",
+        );
     }
 
     #[test]
