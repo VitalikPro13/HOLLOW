@@ -43483,6 +43483,29 @@ async fn a_resumed_ring_past_the_bucket_is_asked_for_again() {
     assert!(left == 0, "{left} of {POSTS} posts never reached J ({dropped} frames of O's dropped by J's rate limit)");
 }
 
+/// DM catch-up asks `a` and `b` carried to each other so far: (a to b, b to a).
+async fn dm_asks_between(a: &TestNode, b: &TestNode) -> (usize, usize) {
+    (sync_asks_to(a, &b.device_id).await.0, sync_asks_to(b, &a.device_id).await.0)
+}
+
+/// Wait until no DM catch-up ask between a friend pair is on its way: neither asked
+/// anything new over a round in which both handed the relay all they sent and handled
+/// all it delivered. A fresh pair is still trading asks and #152's ask-backs when
+/// `session_friend_pair` returns.
+async fn settle_dm_asks(relay: &MockRelay, a: &mut TestNode, b: &mut TestNode) {
+    for round in 0..10 {
+        let before = dm_asks_between(a, b).await;
+        drain_and_settle(relay, a, &format!("dm-asks-{round}")).await;
+        drain_and_settle(relay, b, &format!("dm-asks-{round}")).await;
+        flush_frames(relay, b).await;
+        flush_frames(relay, a).await;
+        if dm_asks_between(a, b).await == before {
+            return;
+        }
+    }
+    panic!("the pair kept asking each other for DMs: {:?}", dm_asks_between(a, b).await);
+}
+
 /// A peer that floods past the bucket keeps being limited, and costs one repair, asked
 /// only once its bucket is full again: never one per dropped frame, never mid-flood.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -43492,7 +43515,9 @@ async fn a_flood_past_the_bucket_costs_one_repair_after_it_stops() {
     let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
-    let (a, mut b) = session_friend_pair(&relay, 234, 236).await;
+    let (mut a, mut b) = session_friend_pair(&relay, 234, 236).await;
+    // Every ask B sends A from here on is a repair, not an answer to A's setup asks.
+    settle_dm_asks(&relay, &mut a, &mut b).await;
     let (a_dev, a_master, b_dev) = (a.device_id.clone(), a.master_id.clone(), b.device_id.clone());
     let room = super::types::dm_room_code(&a_master, &b.master_id);
     // A frame that costs a token and then dies at the lane rule: a plaintext copy of
