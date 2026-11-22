@@ -78,6 +78,14 @@ guard catches the breakage, this page says why. Mobile-only UI rules are in
 - Never construct `TextSelectionControls` in `build()` (identity churn = an app-wide
   selection-overlay crash); a raw-OverlayEntry teardown needs a `removed` guard.
   `feedback_textfield_overlay_selectioncontrols`.
+- A picker cell (sticker, GIF, emote, emoji) previews on HOLD through `ExpressionPreviewTarget`
+  (#159): a released hold never sends (the long press wins the arena and cancels the tap), the
+  cell's actions sit under a KEPT preview on a phone and in the right-click menu on desktop, and
+  the preview media go through the cell's own image paths. A new picker cell joins it, never a
+  local long-press menu. Wiki `ui_message_bubbles` "Hold to preview".
+- The chat scrollbar (`ChatScrollRail`) is sized from MEASURED row heights, never from the
+  count of visible rows, and a thumb drag scrolls by pixels (#158: a narrow voice-room chat's
+  thumb resized and the list flicked under a still pointer). Wiki `ui_chat_pane_shared`.
 - No long-press tooltips on touch: a control must be understandable from its icon/label; tooltips are hover-only (Vitalik 11-18; `HollowTooltip` is hover-only, the theme's Material `TooltipThemeData` is `triggerMode: manual`; `ui_polish_0141_test` "no long-press tooltips on touch").
 - Per-item opacity: `AnimatedOpacity` (GPU-composited), never the `Opacity` widget.
 - A card that returns `SizedBox.shrink()` once `!controller.isAnimating` must rebuild when its

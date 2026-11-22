@@ -1,0 +1,1073 @@
+{
+ "_": [
+  "#140/#158/#159 proof on one macOS desktop peer (throwaway identity): the editor red on dark and light,",
+  "your own name in chat, a voice room's chat wheeled up notch by notch (thumb size), and an emoji held",
+  "then right-clicked in the picker. Same file for the BEFORE tree (base ca9836bd) and the AFTER tree.",
+  "run (Mac mini): FLEET_BACKEND=macos pwsh scripts/fleet.ps1 -Scenario ui158_desktop -Peers x -NetProxy"
+ ],
+ "peers": [
+  "x"
+ ],
+ "steps": [
+  {
+   "peer": "all",
+   "op": "wait_for",
+   "provider": "connection",
+   "equals": "connected",
+   "timeout_ms": 120000
+  },
+  {
+   "peer": "x",
+   "op": "log",
+   "message": "#140: pick the editor's red, look at swatch and previews on dark and light"
+  },
+  {
+   "peer": "x",
+   "op": "tap",
+   "target": "semantics:Settings",
+   "index": 0
+  },
+  {
+   "peer": "x",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "x",
+   "op": "tap",
+   "target": "text:Profile",
+   "index": 0
+  },
+  {
+   "peer": "x",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "x",
+   "op": "reveal",
+   "target": "text:Name colour"
+  },
+  {
+   "peer": "x",
+   "op": "tap",
+   "target": "semantics:Use this colour",
+   "index": 0
+  },
+  {
+   "peer": "x",
+   "op": "wait",
+   "ms": 500
+  },
+  {
+   "peer": "x",
+   "op": "reveal",
+   "target": "text:Name colour"
+  },
+  {
+   "peer": "x",
+   "op": "shot",
+   "name": "u140-d-01-picker-dark"
+  },
+  {
+   "peer": "x",
+   "op": "theme",
+   "value": "light"
+  },
+  {
+   "peer": "x",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "x",
+   "op": "shot",
+   "name": "u140-d-02-picker-light"
+  },
+  {
+   "peer": "x",
+   "op": "theme",
+   "value": "dark"
+  },
+  {
+   "peer": "x",
+   "op": "tap",
+   "target": "text:Save",
+   "index": 0
+  },
+  {
+   "peer": "x",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "x",
+   "op": "key",
+   "value": "escape"
+  },
+  {
+   "peer": "x",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "x",
+   "op": "log",
+   "message": "a server with a voice room whose chat holds rows of very different heights"
+  },
+  {
+   "peer": "x",
+   "op": "tap",
+   "target": "semantics:Create a server"
+  },
+  {
+   "peer": "x",
+   "op": "enter_text",
+   "target": "hint:My Awesome Server",
+   "value": "ui158-${RUN}"
+  },
+  {
+   "peer": "x",
+   "op": "tap",
+   "target": "text:Create",
+   "index": 0
+  },
+  {
+   "peer": "x",
+   "op": "wait_for",
+   "target": "server:ui158-${RUN}",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "x",
+   "op": "open_server",
+   "name": "ui158-${RUN}"
+  },
+  {
+   "peer": "x",
+   "op": "wait_for",
+   "target": "channel:general",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "x",
+   "op": "tap",
+   "target": "semantics:Create channel",
+   "index": 0
+  },
+  {
+   "peer": "x",
+   "op": "tap",
+   "target": "dialog > text:Voice",
+   "index": 0
+  },
+  {
+   "peer": "x",
+   "op": "enter_text",
+   "target": "dialog > type:TextField",
+   "value": "lounge"
+  },
+  {
+   "peer": "x",
+   "op": "tap",
+   "target": "dialog > text:Create",
+   "index": 0
+  },
+  {
+   "peer": "x",
+   "op": "wait_for",
+   "target": "channel:lounge",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "x",
+   "op": "seed_channel",
+   "server": "ui158-${RUN}",
+   "channel": "lounge",
+   "text": "00 the bounce is up, check the low end on the second chorus because the sub drops out for half a bar right where the snare fill starts, and the reverb tail on the vocal runs into the next line, so either we shorten the decay or automate a duck under the first word of every verse"
+  },
+  {
+   "peer": "x",
+   "op": "wait",
+   "ms": 300
+  },
+  {
+   "peer": "x",
+   "op": "seed_channel",
+   "server": "ui158-${RUN}",
+   "channel": "lounge",
+   "text": "01 listening now"
+  },
+  {
+   "peer": "x",
+   "op": "wait",
+   "ms": 300
+  },
+  {
+   "peer": "x",
+   "op": "seed_channel",
+   "server": "ui158-${RUN}",
+   "channel": "lounge",
+   "text": "02 nice"
+  },
+  {
+   "peer": "x",
+   "op": "wait",
+   "ms": 300
+  },
+  {
+   "peer": "x",
+   "op": "seed_channel",
+   "server": "ui158-${RUN}",
+   "channel": "lounge",
+   "text": "03 sounds good to me"
+  },
+  {
+   "peer": "x",
+   "op": "wait",
+   "ms": 300
+  },
+  {
+   "peer": "x",
+   "op": "seed_channel",
+   "server": "ui158-${RUN}",
+   "channel": "lounge",
+   "text": "04 the bounce is up, check the low end on the second chorus because the sub drops out for half a bar right where the snare fill starts, and the reverb tail on the vocal runs into the next line, so either we shorten the decay or automate a duck under the first word of every verse"
+  },
+  {
+   "peer": "x",
+   "op": "wait",
+   "ms": 300
+  },
+  {
+   "peer": "x",
+   "op": "seed_channel",
+   "server": "ui158-${RUN}",
+   "channel": "lounge",
+   "text": "05 agreed"
+  },
+  {
+   "peer": "x",
+   "op": "wait",
+   "ms": 300
+  },
+  {
+   "peer": "x",
+   "op": "seed_channel",
+   "server": "ui158-${RUN}",
+   "channel": "lounge",
+   "text": "06 yes"
+  },
+  {
+   "peer": "x",
+   "op": "wait",
+   "ms": 300
+  },
+  {
+   "peer": "x",
+   "op": "seed_channel",
+   "server": "ui158-${RUN}",
+   "channel": "lounge",
+   "text": "07 on it"
+  },
+  {
+   "peer": "x",
+   "op": "wait",
+   "ms": 300
+  },
+  {
+   "peer": "x",
+   "op": "seed_channel",
+   "server": "ui158-${RUN}",
+   "channel": "lounge",
+   "text": "08 the bounce is up, check the low end on the second chorus because the sub drops out for half a bar right where the snare fill starts, and the reverb tail on the vocal runs into the next line, so either we shorten the decay or automate a duck under the first word of every verse"
+  },
+  {
+   "peer": "x",
+   "op": "wait",
+   "ms": 300
+  },
+  {
+   "peer": "x",
+   "op": "seed_channel",
+   "server": "ui158-${RUN}",
+   "channel": "lounge",
+   "text": "09 listening now"
+  },
+  {
+   "peer": "x",
+   "op": "wait",
+   "ms": 300
+  },
+  {
+   "peer": "x",
+   "op": "seed_channel",
+   "server": "ui158-${RUN}",
+   "channel": "lounge",
+   "text": "10 nice"
+  },
+  {
+   "peer": "x",
+   "op": "wait",
+   "ms": 300
+  },
+  {
+   "peer": "x",
+   "op": "seed_channel",
+   "server": "ui158-${RUN}",
+   "channel": "lounge",
+   "text": "11 sounds good to me"
+  },
+  {
+   "peer": "x",
+   "op": "wait",
+   "ms": 300
+  },
+  {
+   "peer": "x",
+   "op": "seed_channel",
+   "server": "ui158-${RUN}",
+   "channel": "lounge",
+   "text": "12 the bounce is up, check the low end on the second chorus because the sub drops out for half a bar right where the snare fill starts, and the reverb tail on the vocal runs into the next line, so either we shorten the decay or automate a duck under the first word of every verse"
+  },
+  {
+   "peer": "x",
+   "op": "wait",
+   "ms": 300
+  },
+  {
+   "peer": "x",
+   "op": "seed_channel",
+   "server": "ui158-${RUN}",
+   "channel": "lounge",
+   "text": "13 agreed"
+  },
+  {
+   "peer": "x",
+   "op": "wait",
+   "ms": 300
+  },
+  {
+   "peer": "x",
+   "op": "seed_channel",
+   "server": "ui158-${RUN}",
+   "channel": "lounge",
+   "text": "14 yes"
+  },
+  {
+   "peer": "x",
+   "op": "wait",
+   "ms": 300
+  },
+  {
+   "peer": "x",
+   "op": "seed_channel",
+   "server": "ui158-${RUN}",
+   "channel": "lounge",
+   "text": "15 on it"
+  },
+  {
+   "peer": "x",
+   "op": "wait",
+   "ms": 300
+  },
+  {
+   "peer": "x",
+   "op": "seed_channel",
+   "server": "ui158-${RUN}",
+   "channel": "lounge",
+   "text": "16 the bounce is up, check the low end on the second chorus because the sub drops out for half a bar right where the snare fill starts, and the reverb tail on the vocal runs into the next line, so either we shorten the decay or automate a duck under the first word of every verse"
+  },
+  {
+   "peer": "x",
+   "op": "wait",
+   "ms": 300
+  },
+  {
+   "peer": "x",
+   "op": "seed_channel",
+   "server": "ui158-${RUN}",
+   "channel": "lounge",
+   "text": "17 listening now"
+  },
+  {
+   "peer": "x",
+   "op": "wait",
+   "ms": 300
+  },
+  {
+   "peer": "x",
+   "op": "seed_channel",
+   "server": "ui158-${RUN}",
+   "channel": "lounge",
+   "text": "18 nice"
+  },
+  {
+   "peer": "x",
+   "op": "wait",
+   "ms": 300
+  },
+  {
+   "peer": "x",
+   "op": "seed_channel",
+   "server": "ui158-${RUN}",
+   "channel": "lounge",
+   "text": "19 sounds good to me"
+  },
+  {
+   "peer": "x",
+   "op": "wait",
+   "ms": 300
+  },
+  {
+   "peer": "x",
+   "op": "seed_channel",
+   "server": "ui158-${RUN}",
+   "channel": "lounge",
+   "text": "20 the bounce is up, check the low end on the second chorus because the sub drops out for half a bar right where the snare fill starts, and the reverb tail on the vocal runs into the next line, so either we shorten the decay or automate a duck under the first word of every verse"
+  },
+  {
+   "peer": "x",
+   "op": "wait",
+   "ms": 300
+  },
+  {
+   "peer": "x",
+   "op": "seed_channel",
+   "server": "ui158-${RUN}",
+   "channel": "lounge",
+   "text": "21 agreed"
+  },
+  {
+   "peer": "x",
+   "op": "wait",
+   "ms": 300
+  },
+  {
+   "peer": "x",
+   "op": "seed_channel",
+   "server": "ui158-${RUN}",
+   "channel": "lounge",
+   "text": "22 yes"
+  },
+  {
+   "peer": "x",
+   "op": "wait",
+   "ms": 300
+  },
+  {
+   "peer": "x",
+   "op": "seed_channel",
+   "server": "ui158-${RUN}",
+   "channel": "lounge",
+   "text": "23 on it"
+  },
+  {
+   "peer": "x",
+   "op": "wait",
+   "ms": 300
+  },
+  {
+   "peer": "x",
+   "op": "seed_channel",
+   "server": "ui158-${RUN}",
+   "channel": "lounge",
+   "text": "24 the bounce is up, check the low end on the second chorus because the sub drops out for half a bar right where the snare fill starts, and the reverb tail on the vocal runs into the next line, so either we shorten the decay or automate a duck under the first word of every verse"
+  },
+  {
+   "peer": "x",
+   "op": "wait",
+   "ms": 300
+  },
+  {
+   "peer": "x",
+   "op": "seed_channel",
+   "server": "ui158-${RUN}",
+   "channel": "lounge",
+   "text": "25 listening now"
+  },
+  {
+   "peer": "x",
+   "op": "wait",
+   "ms": 300
+  },
+  {
+   "peer": "x",
+   "op": "seed_channel",
+   "server": "ui158-${RUN}",
+   "channel": "lounge",
+   "text": "26 nice"
+  },
+  {
+   "peer": "x",
+   "op": "wait",
+   "ms": 300
+  },
+  {
+   "peer": "x",
+   "op": "seed_channel",
+   "server": "ui158-${RUN}",
+   "channel": "lounge",
+   "text": "27 sounds good to me"
+  },
+  {
+   "peer": "x",
+   "op": "wait",
+   "ms": 300
+  },
+  {
+   "peer": "x",
+   "op": "log",
+   "message": "#140: your own name in a chat, dark and light"
+  },
+  {
+   "peer": "x",
+   "op": "open_channel",
+   "name": "general"
+  },
+  {
+   "peer": "x",
+   "op": "wait",
+   "ms": 1000
+  },
+  {
+   "peer": "x",
+   "op": "enter_text",
+   "target": "field",
+   "value": "name colour check ${RUN}"
+  },
+  {
+   "peer": "x",
+   "op": "key",
+   "value": "enter"
+  },
+  {
+   "peer": "x",
+   "op": "wait_for",
+   "target": "text:name colour check ${RUN}",
+   "timeout_ms": 15000
+  },
+  {
+   "peer": "x",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "x",
+   "op": "shot",
+   "name": "u140-d-03-chat-dark"
+  },
+  {
+   "peer": "x",
+   "op": "theme",
+   "value": "light"
+  },
+  {
+   "peer": "x",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "x",
+   "op": "shot",
+   "name": "u140-d-04-chat-light"
+  },
+  {
+   "peer": "x",
+   "op": "theme",
+   "value": "dark"
+  },
+  {
+   "peer": "x",
+   "op": "wait",
+   "ms": 500
+  },
+  {
+   "peer": "x",
+   "op": "log",
+   "message": "#158: the voice room's chat, wheeled up one notch at a time; the thumb must hold its size"
+  },
+  {
+   "peer": "x",
+   "op": "open_channel",
+   "name": "lounge"
+  },
+  {
+   "peer": "x",
+   "op": "wait_for",
+   "target": "semantics:Leave the room",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "x",
+   "op": "wait_for",
+   "target": "text:27 nice",
+   "timeout_ms": 30000,
+   "soft": true
+  },
+  {
+   "peer": "x",
+   "op": "wait",
+   "ms": 2000
+  },
+  {
+   "peer": "x",
+   "op": "hover_at",
+   "x": 5,
+   "y": 400
+  },
+  {
+   "peer": "x",
+   "op": "shot",
+   "name": "u158-d-w00"
+  },
+  {
+   "peer": "x",
+   "op": "wheel",
+   "target": "type:ScrollablePositionedList",
+   "dy": -90,
+   "frames": 12
+  },
+  {
+   "peer": "x",
+   "op": "shot",
+   "name": "u158-d-w01"
+  },
+  {
+   "peer": "x",
+   "op": "wheel",
+   "target": "type:ScrollablePositionedList",
+   "dy": -90,
+   "frames": 12
+  },
+  {
+   "peer": "x",
+   "op": "shot",
+   "name": "u158-d-w02"
+  },
+  {
+   "peer": "x",
+   "op": "wheel",
+   "target": "type:ScrollablePositionedList",
+   "dy": -90,
+   "frames": 12
+  },
+  {
+   "peer": "x",
+   "op": "shot",
+   "name": "u158-d-w03"
+  },
+  {
+   "peer": "x",
+   "op": "wheel",
+   "target": "type:ScrollablePositionedList",
+   "dy": -90,
+   "frames": 12
+  },
+  {
+   "peer": "x",
+   "op": "shot",
+   "name": "u158-d-w04"
+  },
+  {
+   "peer": "x",
+   "op": "wheel",
+   "target": "type:ScrollablePositionedList",
+   "dy": -90,
+   "frames": 12
+  },
+  {
+   "peer": "x",
+   "op": "shot",
+   "name": "u158-d-w05"
+  },
+  {
+   "peer": "x",
+   "op": "wheel",
+   "target": "type:ScrollablePositionedList",
+   "dy": -90,
+   "frames": 12
+  },
+  {
+   "peer": "x",
+   "op": "shot",
+   "name": "u158-d-w06"
+  },
+  {
+   "peer": "x",
+   "op": "wheel",
+   "target": "type:ScrollablePositionedList",
+   "dy": -90,
+   "frames": 12
+  },
+  {
+   "peer": "x",
+   "op": "shot",
+   "name": "u158-d-w07"
+  },
+  {
+   "peer": "x",
+   "op": "wheel",
+   "target": "type:ScrollablePositionedList",
+   "dy": -90,
+   "frames": 12
+  },
+  {
+   "peer": "x",
+   "op": "shot",
+   "name": "u158-d-w08"
+  },
+  {
+   "peer": "x",
+   "op": "wheel",
+   "target": "type:ScrollablePositionedList",
+   "dy": -90,
+   "frames": 12
+  },
+  {
+   "peer": "x",
+   "op": "shot",
+   "name": "u158-d-w09"
+  },
+  {
+   "peer": "x",
+   "op": "wheel",
+   "target": "type:ScrollablePositionedList",
+   "dy": -90,
+   "frames": 12
+  },
+  {
+   "peer": "x",
+   "op": "shot",
+   "name": "u158-d-w10"
+  },
+  {
+   "peer": "x",
+   "op": "wheel",
+   "target": "type:ScrollablePositionedList",
+   "dy": -90,
+   "frames": 12
+  },
+  {
+   "peer": "x",
+   "op": "shot",
+   "name": "u158-d-w11"
+  },
+  {
+   "peer": "x",
+   "op": "wheel",
+   "target": "type:ScrollablePositionedList",
+   "dy": -90,
+   "frames": 12
+  },
+  {
+   "peer": "x",
+   "op": "shot",
+   "name": "u158-d-w12"
+  },
+  {
+   "peer": "x",
+   "op": "wheel",
+   "target": "type:ScrollablePositionedList",
+   "dy": -90,
+   "frames": 12
+  },
+  {
+   "peer": "x",
+   "op": "shot",
+   "name": "u158-d-w13"
+  },
+  {
+   "peer": "x",
+   "op": "wheel",
+   "target": "type:ScrollablePositionedList",
+   "dy": -90,
+   "frames": 12
+  },
+  {
+   "peer": "x",
+   "op": "shot",
+   "name": "u158-d-w14"
+  },
+  {
+   "peer": "x",
+   "op": "wheel",
+   "target": "type:ScrollablePositionedList",
+   "dy": -90,
+   "frames": 12
+  },
+  {
+   "peer": "x",
+   "op": "shot",
+   "name": "u158-d-w15"
+  },
+  {
+   "peer": "x",
+   "op": "wheel",
+   "target": "type:ScrollablePositionedList",
+   "dy": -90,
+   "frames": 12
+  },
+  {
+   "peer": "x",
+   "op": "shot",
+   "name": "u158-d-w16"
+  },
+  {
+   "peer": "x",
+   "op": "wheel",
+   "target": "type:ScrollablePositionedList",
+   "dy": -90,
+   "frames": 12
+  },
+  {
+   "peer": "x",
+   "op": "shot",
+   "name": "u158-d-w17"
+  },
+  {
+   "peer": "x",
+   "op": "wheel",
+   "target": "type:ScrollablePositionedList",
+   "dy": -90,
+   "frames": 12
+  },
+  {
+   "peer": "x",
+   "op": "shot",
+   "name": "u158-d-w18"
+  },
+  {
+   "peer": "x",
+   "op": "wheel",
+   "target": "type:ScrollablePositionedList",
+   "dy": -90,
+   "frames": 12
+  },
+  {
+   "peer": "x",
+   "op": "shot",
+   "name": "u158-d-w19"
+  },
+  {
+   "peer": "x",
+   "op": "wheel",
+   "target": "type:ScrollablePositionedList",
+   "dy": -90,
+   "frames": 12
+  },
+  {
+   "peer": "x",
+   "op": "shot",
+   "name": "u158-d-w20"
+  },
+  {
+   "peer": "x",
+   "op": "wheel",
+   "target": "type:ScrollablePositionedList",
+   "dy": -90,
+   "frames": 12
+  },
+  {
+   "peer": "x",
+   "op": "shot",
+   "name": "u158-d-w21"
+  },
+  {
+   "peer": "x",
+   "op": "wheel",
+   "target": "type:ScrollablePositionedList",
+   "dy": -90,
+   "frames": 12
+  },
+  {
+   "peer": "x",
+   "op": "shot",
+   "name": "u158-d-w22"
+  },
+  {
+   "peer": "x",
+   "op": "wheel",
+   "target": "type:ScrollablePositionedList",
+   "dy": -90,
+   "frames": 12
+  },
+  {
+   "peer": "x",
+   "op": "shot",
+   "name": "u158-d-w23"
+  },
+  {
+   "peer": "x",
+   "op": "wheel",
+   "target": "type:ScrollablePositionedList",
+   "dy": -90,
+   "frames": 12
+  },
+  {
+   "peer": "x",
+   "op": "shot",
+   "name": "u158-d-w24"
+  },
+  {
+   "peer": "x",
+   "op": "log",
+   "message": "#159: hold an emoji in the picker, then right-click it"
+  },
+  {
+   "peer": "x",
+   "op": "open_channel",
+   "name": "general"
+  },
+  {
+   "peer": "x",
+   "op": "wait",
+   "ms": 1000
+  },
+  {
+   "peer": "x",
+   "op": "tap",
+   "target": "semantics:Emoji, GIFs and stickers",
+   "index": 0
+  },
+  {
+   "peer": "x",
+   "op": "wait",
+   "ms": 1200
+  },
+  {
+   "peer": "x",
+   "op": "tap",
+   "target": "text:Emoji",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "x",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "x",
+   "op": "shot",
+   "name": "u159-d-00-picker"
+  },
+  {
+   "peer": "x",
+   "op": "hold",
+   "target": "semantics:winking face",
+   "index": 0,
+   "mouse": true,
+   "ms": 1000,
+   "shot": "u159-d-01-hold"
+  },
+  {
+   "peer": "x",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "x",
+   "op": "shot",
+   "name": "u159-d-02-released"
+  },
+  {
+   "peer": "x",
+   "op": "key",
+   "value": "escape",
+   "soft": true
+  },
+  {
+   "peer": "x",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "x",
+   "op": "tap",
+   "target": "semantics:Emoji, GIFs and stickers",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "x",
+   "op": "wait",
+   "ms": 1200
+  },
+  {
+   "peer": "x",
+   "op": "right_click",
+   "target": "semantics:winking face",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "x",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "x",
+   "op": "shot",
+   "name": "u159-d-03-menu"
+  },
+  {
+   "peer": "x",
+   "op": "tap",
+   "target": "text:Preview",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "x",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "x",
+   "op": "shot",
+   "name": "u159-d-04-kept"
+  },
+  {
+   "peer": "x",
+   "op": "theme",
+   "value": "light"
+  },
+  {
+   "peer": "x",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "x",
+   "op": "shot",
+   "name": "u159-d-05-kept-light"
+  },
+  {
+   "peer": "x",
+   "op": "theme",
+   "value": "dark"
+  },
+  {
+   "peer": "x",
+   "op": "key",
+   "value": "escape",
+   "soft": true
+  },
+  {
+   "peer": "x",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "x",
+   "op": "shot",
+   "name": "u159-d-06-closed"
+  },
+  {
+   "peer": "x",
+   "op": "dump",
+   "name": "end"
+  }
+ ]
+}

@@ -522,6 +522,23 @@ class ProbeRunner {
         await settle(frames: step['frames'] as int? ?? 25);
         return 'long-pressed ${step['target']}';
 
+      case 'hold':
+        // A press held for `ms` with a shot taken while still down, then let
+        // go: what a hold-to-preview shows only while held (#159). `mouse`
+        // presses the left button instead of a finger.
+        final finder = _finder(step);
+        _requireHittable(finder, step);
+        final gesture = await tester.startGesture(tester.getCenter(finder),
+            kind: step['mouse'] == true
+                ? PointerDeviceKind.mouse
+                : PointerDeviceKind.touch);
+        await settle(frames: (step['ms'] as int? ?? 900) ~/ 50);
+        final held = step['shot'] == null ? null : await shot('${step['shot']}');
+        if (held != null) extra['shot'] = held;
+        await gesture.up();
+        await settle(frames: step['frames'] as int? ?? 25);
+        return 'held ${step['target']}${held == null ? '' : ', wrote $held'}';
+
       case 'hover':
         final finder = _finder(step);
         await _hover(tester.getCenter(finder));

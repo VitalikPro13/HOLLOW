@@ -1,0 +1,287 @@
+{
+ "_": [
+  "#140/#159 proof on one phone (iOS Simulator, throwaway identity): the editor red on dark and light,",
+  "your own name in a server chat, and an emoji held in the picker sheet then let go.",
+  "Same file for the BEFORE tree (base ca9836bd) and the AFTER tree.",
+  "run (Mac mini): pwsh -NoProfile -File scripts/fleet.ps1 -Scenario ui158_mobile -Peers a=ios:<letter>"
+ ],
+ "peers": [
+  "a"
+ ],
+ "steps": [
+  {
+   "peer": "all",
+   "op": "wait_for",
+   "provider": "connection",
+   "equals": "connected",
+   "timeout_ms": 120000
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 2000
+  },
+  {
+   "peer": "a",
+   "op": "log",
+   "message": "#140 on a phone: the editor red, swatch and previews on dark and light"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Settings",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Profile",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1000
+  },
+  {
+   "peer": "a",
+   "op": "reveal",
+   "target": "text:Name colour"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Use this colour",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 500
+  },
+  {
+   "peer": "a",
+   "op": "reveal",
+   "target": "text:Name colour"
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "u140-m-01-picker-dark"
+  },
+  {
+   "peer": "a",
+   "op": "theme",
+   "value": "light"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "u140-m-02-picker-light"
+  },
+  {
+   "peer": "a",
+   "op": "theme",
+   "value": "dark"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Save",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Back",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "seed_server",
+   "name": "ui158m-${RUN}",
+   "as": "INVITE"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1000
+  },
+  {
+   "peer": "a",
+   "op": "seed_channel",
+   "server": "ui158m-${RUN}",
+   "channel": "general",
+   "text": "name colour check ${RUN}"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Chats",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "text:ui158m-${RUN}",
+   "timeout_ms": 30000
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:ui158m-${RUN}",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:general",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait_for",
+   "target": "field",
+   "timeout_ms": 15000
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "u140-m-03-chat-dark"
+  },
+  {
+   "peer": "a",
+   "op": "theme",
+   "value": "light"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "u140-m-04-chat-light"
+  },
+  {
+   "peer": "a",
+   "op": "theme",
+   "value": "dark"
+  },
+  {
+   "peer": "a",
+   "op": "log",
+   "message": "#159 on a phone: hold an emoji in the picker sheet, then let go"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Emoji, GIFs and stickers",
+   "index": 0
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1500
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Emoji",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "u159-m-00-picker"
+  },
+  {
+   "peer": "a",
+   "op": "hold",
+   "target": "semantics:winking face",
+   "index": 0,
+   "ms": 1000,
+   "shot": "u159-m-01-hold"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "u159-m-02-released"
+  },
+  {
+   "peer": "a",
+   "op": "theme",
+   "value": "light"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "u159-m-03-released-light"
+  },
+  {
+   "peer": "a",
+   "op": "theme",
+   "value": "dark"
+  },
+  {
+   "peer": "a",
+   "op": "dump",
+   "name": "end"
+  },
+  {
+   "peer": "a",
+   "op": "seed_delete_server",
+   "name": "ui158m-${RUN}",
+   "soft": true
+  }
+ ]
+}

@@ -249,6 +249,12 @@ sends two captioned albums with the slow GIF between stills and both sides must 
 strip order with the caption visible. It is the journey that found items reordering by conversion
 time (the send stamp was minted after the image encode).
 
+**`hold`** (#159, 2026-11-22): `target`, `ms` (default 900), `shot` (a name: shot taken while
+still pressed), `mouse` (true = the left mouse button, else a finger), `frames`. Presses, waits,
+shoots, then lets go: for what shows only while held (the picker's hold-to-preview), which
+`long_press` cannot catch because it releases before the next step. `ui158_desktop.json` and
+`ui158_mobile.json` use it.
+
 **`drag_at`** (2026-09-24): `x`, `y`, `dx`, `dy`, `duration_ms` (default 400), `frames`. A timed drag
 (`tester.timedDragFrom`) from a fixed POINT rather than a target's centre, for gestures that care
 where they start: the iOS back swipe must begin in the 20 px strip on the screen's left edge. Also

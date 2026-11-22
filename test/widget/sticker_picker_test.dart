@@ -1,5 +1,6 @@
 import 'dart:typed_data';
 
+import 'package:flutter/gestures.dart' show PointerDeviceKind, kSecondaryMouseButton;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -324,7 +325,9 @@ void main() {
     await tester.tap(find.text('Mine'));
     await tester.pump();
 
-    await tester.longPress(find.byType(ChatAssetImage).first);
+    // Right-click on desktop; a hold there is the preview (#159).
+    await tester.tap(find.byType(ChatAssetImage).first,
+        buttons: kSecondaryMouseButton, kind: PointerDeviceKind.mouse);
     await tester.pumpAndSettle();
     expect(find.text('Add to pack…'), findsOneWidget);
 
