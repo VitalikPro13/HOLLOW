@@ -7,7 +7,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../hidden_notification.dart';
 import '../models/call_record.dart';
+import '../providers/app_lock_provider.dart';
 import '../providers/call_provider.dart';
+import '../providers/conference_provider.dart';
+import '../providers/duress_provider.dart';
 import '../providers/os_call_provider.dart';
 import '../providers/settings_provider.dart';
 import '../providers/shell_tab.dart' show ProviderRead;
@@ -50,8 +53,16 @@ final osCallChannelProvider =
 final osCallServiceProvider = Provider<OsCallService?>((ref) {
   if (!osCallPlatform) return null;
   final service = OsCallService(ref.read, ref.watch(osCallChannelProvider));
-  ref.listen<OsSession?>(osSessionProvider, (_, _) => service.poke());
-  ref.listen<bool>(osContentAllowedProvider, (_, _) => service.poke());
+  // The SOURCES, never the derived providers: Riverpod refreshes a derived
+  // provider only on a Flutter frame and a locked phone draws none, so a
+  // remote hang-up would leave the OS call up until the app is opened. A
+  // read recomputes a derived provider at once.
+  void poke(_, _) => service.poke();
+  ref.listen(callProvider, poke);
+  ref.listen(voiceChannelProvider, poke);
+  ref.listen(conferenceProvider, poke);
+  ref.listen(appLockedProvider, poke);
+  ref.listen(identityProtectionProvider, poke);
   ref.onDispose(service.dispose);
   service.start();
   return service;

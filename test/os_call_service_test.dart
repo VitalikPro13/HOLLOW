@@ -876,6 +876,72 @@ void main() {
     });
   });
 
+  // A locked phone draws no frames, and Riverpod refreshes a derived provider
+  // only on one: the OS hears of a change with no frame pumped.
+  group('a locked phone', () {
+    Future<_Rig> mounted(WidgetTester tester,
+        {CallState call = const CallState(),
+        VoiceChannelState voice = const VoiceChannelState()}) async {
+      late _Rig r;
+      await tester.runAsync(() async {
+        r = await _rig(call: call, voice: voice);
+      });
+      await tester.pumpWidget(UncontrolledProviderScope(
+          container: r.c, child: const SizedBox.shrink()));
+      r.native.clear();
+      return r;
+    }
+
+    Future<void> unmount(WidgetTester tester) =>
+        tester.pumpWidget(const SizedBox.shrink());
+
+    /// [_Rig.settle] reads through the container, and a read refreshes the
+    /// derived providers the way a frame would.
+    Future<void> settleUnread(OsCallService service) async {
+      for (var i = 0; i < 5; i++) {
+        await pumpEventQueue();
+        await service.settled;
+      }
+    }
+
+    testWidgets('a remote hang-up ends the OS call', (tester) async {
+      final r = await mounted(tester,
+          call: _outgoing('c1').copyWith(status: CallStatus.active));
+      final service = r.service;
+      await tester.runAsync(() async {
+        r.call.cause = CallEndCause.remoteEnd;
+        r.call.set(const CallState());
+        await settleUnread(service);
+      });
+      expect(r.native.methods, ['end']);
+      expect(r.native.lastOf('end')['reason'], 'remote');
+      await unmount(tester);
+    });
+
+    testWidgets('leaving a room ends the OS call', (tester) async {
+      final r = await mounted(tester, voice: _room());
+      final service = r.service;
+      await tester.runAsync(() async {
+        r.voice.set(const VoiceChannelState());
+        await settleUnread(service);
+      });
+      expect(r.native.methods, ['end']);
+      await unmount(tester);
+    });
+
+    testWidgets('App Lock blanks the name', (tester) async {
+      final r = await mounted(tester, voice: _room());
+      final service = r.service;
+      await tester.runAsync(() async {
+        r.lock.set(true);
+        await settleUnread(service);
+      });
+      expect(r.native.methods, ['update']);
+      expect(r.native.lastOf('update')['title'], kHiddenNotificationTitle);
+      await unmount(tester);
+    });
+  });
+
   group('the in-call mute button', () {
     Future<int> tapMute(WidgetTester tester, {required bool held}) async {
       var presses = 0;
