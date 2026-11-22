@@ -3039,6 +3039,18 @@ mod tests {
         assert_eq!(r.name(), "Renamed", "the founding op does not reset the name");
     }
 
+    /// HOL-SEC-222's one founding op per id judges self-certifying ids only: a legacy id's
+    /// founding op, which no id proves, still founds a fresh replica.
+    #[test]
+    fn a_legacy_founding_op_still_founds_a_fresh_replica() {
+        let sid = "s-legacy";
+        let founding = op_at(1, sid, super::super::hlc::wall_clock_ms(), P::ServerCreated { name: "Old".into(), owner_peer_id: id(1), nonce: String::new() });
+        let mut r = joiner(sid, 9);
+        r.ingest_remote(std::slice::from_ref(&founding));
+        assert_eq!(r.current_owner(), Some(id(1)), "the legacy founding op founded nothing");
+        assert_eq!(r.name(), "Old");
+    }
+
     /// E1, E2: a self-certifying id is founded only by the key that hashes to it, so a
     /// founding op anyone else signs, backdated or not, never takes the server.
     #[test]

@@ -48,7 +48,8 @@ a fold from genesis there still orders by clock. The fix stops it spreading to r
 that hold the real one.
 
 Tests: `a_second_founding_op_from_a_removed_device_founds_nothing` (the founder's replica,
-a replica folding from genesis, a fresh replica handed both in one batch), harness
+a replica folding from genesis, a fresh replica handed both in one batch),
+`a_legacy_founding_op_still_founds_a_fresh_replica` (the rule leaves legacy ids alone), harness
 `pr222_a_lost_founders_second_founding_op_changes_nothing_on_a_replica_folding_from_genesis`
 (the lost founder's ops carried before and after its removal, through a "not sure" settling
 from genesis and a restart). Both failed before the fix (the replica kept the second op;

@@ -40099,7 +40099,7 @@ async fn a_waiting_backup_asks_again_when_the_wait_is_turned_off() {
         "the owner's device must be asked about the restored backup",
     );
 
-    super::roster_book::recover(&tag_kp(O_MASTER), &recovery_kp(O_MASTER), &tag_kp(O_DEV), &[o_dev.clone()], true, None, &o.db_path, &o.passphrase)
+    super::roster_book::recover(&tag_kp(O_MASTER), &recovery_kp(O_MASTER), &tag_kp(O_DEV), std::slice::from_ref(&o_dev), true, None, &o.db_path, &o.passphrase)
         .expect("the phrase turns the wait off");
     let new_base = super::roster_book::own(&o_master, &o.db_path, &o.passphrase).unwrap().0.base();
     drain_events(&mut o);
@@ -72616,14 +72616,19 @@ async fn pr216_a_not_sure_recovery_on_a_device_holding_the_server_settles_it() {
 }
 
 /// Review finding 1: a lost-or-stolen removal answered "Longer ago, or not sure"
-/// (T = 0) settles the server back from the oldest restore point the remover holds.
+/// (T = 0) settles the server. T reads as the first fold of the oldest restore point the
+/// remover holds, and the settling stands on a restore point only from before T, so it
+/// folds from the founding op (here the remover holds no restore point at all) and the
+/// lost device's rename drops (DEVICE_PROOF_DESIGN 8.1, decided Nov 22).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)]
-async fn pr216_a_not_sure_lost_removal_settles_from_the_oldest_restore_point() {
+async fn pr216_a_not_sure_lost_removal_settles_from_the_founding_op() {
     let _g = test_guard();
     let [m_tag, d1_tag, d2_tag, r_tag, j_tag] = [165u8, 166, 167, 168, 169];
     let W3c1Cut { relay, master, d1, d2, j, server_id, _tmp } = w3c1_cut_server([m_tag, d1_tag, d2_tag, r_tag, j_tag]).await;
     let (m_id, d2_id) = (master.peer_id(), tag_kp(d2_tag).peer_id());
+    let (_, oldest) = pr221_founding_seen(&d1, &server_id, &tag_kp(d1_tag).peer_id()).await;
+    assert!(oldest.is_none(), "precondition: the remover holds no restore point, so the settling folds from the founding op");
     let name_at = async |n: &TestNode| n.live_server_state(&server_id).await.map(|s| s.name.read().clone());
     let stolen = w3c1_device_op(&server_id, &master, &tag_kp(d2_tag), crate::crdt::operations::CrdtPayload::ServerRenamed { new_name: "stolen".into() }, 1000);
     for to in [&d1, &j] {

@@ -419,7 +419,7 @@ recovery branch `pr216_a_recovery_typed_on_a_device_that_joined_after_t_settles_
 the member branch `pr216_a_member_server_first_held_after_t_gets_no_retire_from_the_remover`;
 the restart is inside the first test; "not sure" (fix round)
 `pr216_a_not_sure_recovery_on_a_device_holding_the_server_settles_it`,
-`pr216_a_not_sure_lost_removal_settles_from_the_oldest_restore_point`; unit
+`pr216_a_not_sure_lost_removal_settles_from_the_founding_op`; unit
 `restore_flow::tests::held_before_judges_against_t_not_the_recovery` and
 `sync_handler::tests::a_rival_merge_never_runs_on_a_server_held_only_after_t`. Controls that
 stay green: `w3c1_a_lost_laptop_settles_back_to_what_it_did_before_t`,

@@ -739,6 +739,13 @@ T is the EARLIEST moment of the answer, so a vague answer undoes more, never les
 | Pick a date and time | that moment |
 | Longer ago, or not sure | the first-fold time of the oldest restore point held, per server; on a fresh install, which holds none, 0, and every server's outcome is "I don't know" without a chooser (R3-8; T = 0 for posts too, decided 2026-11-01, section 20) |
 
+- "Longer ago, or not sure" never stands on that oldest restore point: R must have
+  first folded before T (8.3), and none did, so the settling folds from the founding op.
+  On a server the lost device FOUNDED, with no restore point before T, everything that
+  device did there is undone, members it admitted included (decided by Vitalik,
+  2026-11-22: a vague answer undoes more). Standing on the oldest restore point instead
+  would keep those members but trust a checkpoint the lost device may have signed after
+  it was lost, on every server. HOL-SEC-221.
 - A phrase recovery asks the same question once for every device it does not keep
   ("When did you last have your other devices?"). It never asks retire or lost: every
   dropped device is lost or stolen.

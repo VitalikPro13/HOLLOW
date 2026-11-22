@@ -47,6 +47,12 @@ server with its oldest restore point the settling undoes everything that device 
 members it admitted included, as "a vague answer undoes more"
 (DEVICE_PROOF_DESIGN 8.1) says.
 
+Decided (Vitalik, 2026-11-22): this stays the rule. A "not sure" settling of a server the
+lost device founded, with no restore point before T, undoes everything that device did
+there, members it admitted included (DEVICE_PROOF_DESIGN 8.1). A not-sure T is the first
+fold of the oldest restore point held here and R must have folded before T, so such a
+settling always folds from the founding op; it never stands on that restore point.
+
 Alternatives not taken: reading the derived T as one millisecond later, or making the
 restore point search inclusive for it, leaves the case with no restore point (T = 0)
 failing. On every server, founded by the lost device or not, the first would count the
@@ -55,6 +61,10 @@ whole first batch), and the second would stand on that restore point, a checkpoi
 lost device may have written after it was lost.
 
 Tests: `a_not_sure_settling_stands_on_the_founding_op_the_lost_device_wrote`,
-`a_founding_op_the_lost_device_minted_later_never_founds_the_settling`, harness
+`a_founding_op_the_lost_device_minted_later_never_founds_the_settling` (two founding ops
+as an older build stored them; since HOL-SEC-222 a replica stores no second one), harness
 `pr216_a_not_sure_removal_of_the_founding_device_settles_from_the_joiners_oldest_point`,
-`pr216_a_not_sure_recovery_dropping_the_founding_device_settles_its_server`.
+`pr216_a_not_sure_recovery_dropping_the_founding_device_settles_its_server`,
+`pr216_a_not_sure_lost_removal_settles_from_the_founding_op` (renamed from
+`..._settles_from_the_oldest_restore_point`, which it never did: its remover holds no
+restore point, now a precondition).
