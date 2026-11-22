@@ -18,8 +18,12 @@ decisions in its section 11. Android's half is builder E's (`OsCallBridge.kt`,
   ring is ever a session, ours or theirs (ring in Hollow only; the ringback is a plain app
   sound). Rooms and meetings stay sessions in Dart because `begin` is what gives them audio on
   iOS; native sends every non-DM `kind` straight to the fallback (no CallKit). A DM goes first:
-  `acceptCall` sets connecting before it leaves the room. Desktops build nothing
-  (`osCallPlatform`).
+  `acceptCall` sets connecting before it leaves the room. Only iOS builds it
+  (`osCallPlatform`); Android joins when its native half lands.
+- The service LISTENS to the source notifiers (call, voice, conference, app lock, identity
+  protection) and READS the derived providers: Riverpod 2 refreshes a derived provider only on
+  a Flutter frame, a locked phone draws none, so a remote hang-up left the lock-screen call up
+  until the app opened (Nov 22). Tests mount an `UncontrolledProviderScope` and pump no frame.
 - `OsCallService` (mounted once by `_OsCallMount` in `app.dart`'s phone Stack) reconciles
   through ONE queue: one native call at a time, each step reading the session as it is THEN.
   So a room -> DM switch is always `end` (room) before `begin` (DM), and a ring answered

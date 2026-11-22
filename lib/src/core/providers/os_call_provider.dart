@@ -72,9 +72,9 @@ class OsSession {
 @visibleForTesting
 bool? debugOsCallPlatform;
 
-/// Phones and tablets mirror calls to the OS; desktops build nothing.
-bool get osCallPlatform =>
-    debugOsCallPlatform ?? (Platform.isIOS || Platform.isAndroid);
+/// iPhones and iPads mirror calls to the OS. Android has no native side yet,
+/// so every call there would fail each step and fall back.
+bool get osCallPlatform => debugOsCallPlatform ?? Platform.isIOS;
 
 /// The session, from provider state alone. A DM call goes first: accepting
 /// one from inside a room sets it connecting before the room is left, and the
