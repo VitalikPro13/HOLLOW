@@ -301,7 +301,10 @@ class _HomeAttentionState extends ConsumerState<HomeAttention> {
             id: 'own-device:${a.alertId}',
             leading: _GlyphTile(LucideIcons.keyRound, size: _leadingSize),
             title: 'A device was added with your recovery phrase',
-            body: "If that wasn't you, someone else has your recovery phrase. "
+            // One row per device: its name and time tell two restores apart.
+            body: '${name(added.device)} joined your identity '
+                '${_addedLabel(a.createdAt.toInt())}. '
+                "If that wasn't you, someone else has your recovery phrase. "
                 'Go to Settings, under Security, and use Remove devices with '
                 'your recovery phrase.',
             secondaryLabel: 'Dismiss',
