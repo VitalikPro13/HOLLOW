@@ -2650,11 +2650,13 @@ impl ServerState {
     /// B of a floor round (8.8 item 1): the previous view's pick by the base order over
     /// what this replica held at the trigger and the answered `floor_base`s. A
     /// checkpoint first held after the trigger by a writer the new view does not count
-    /// is no candidate unless an answer carried it (RC32-2).
+    /// is no candidate unless an answer carried it (RC32-2). Every op is matched by its
+    /// own content id: an answered one may share its key with a variant held here
+    /// (HOL-SEC-225).
     pub(super) fn floor_pick(&self, round: &super::hold::Round, answered: &[CrdtOp], now_ms: u64) -> Option<CrdtOp> {
         let carried: HashSet<[u8; 32]> = answered.iter().map(CrdtOp::content_hash).collect();
         let late = |o: &CrdtOp| {
-            let h = self.content_of(o);
+            let h = o.content_hash();
             matches!(o.payload, CrdtPayload::ServerCheckpoint { .. })
                 && !round.held_at_trigger.contains(&h)
                 && !carried.contains(&h)
@@ -2669,7 +2671,7 @@ impl ServerState {
             .chain(self.stored.iter().map(|(o, _)| o))
             .filter(|o| !late(o))
             .chain(answered.iter())
-            .find(|o| matches!(o.payload, CrdtPayload::ServerCheckpoint { .. }) && self.content_of(o) == b.hash)
+            .find(|o| matches!(o.payload, CrdtPayload::ServerCheckpoint { .. }) && o.content_hash() == b.hash)
             .cloned()
     }
 

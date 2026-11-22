@@ -369,7 +369,9 @@ impl ServerState {
         r.round = None;
         let mut fresh = Vec::new();
         if let Some(b) = b.filter(|_| self.can_author() && !self.base_holds_again(now_ms)) {
-            let cp = hex::encode(self.content_of(&b));
+            // B's own id: B may be an answer or a base no longer held, with a variant
+            // held at its key (HOL-SEC-225).
+            let cp = hex::encode(b.content_hash());
             fresh.push(self.create_op(CrdtPayload::FloorMark { cp: cp.clone() }));
             if super::authority::base_content_for(self, &cp).is_none() {
                 fresh.push(b.clone());
@@ -392,7 +394,7 @@ impl ServerState {
             return None;
         }
         let b = r.base_op.clone()?;
-        let cp = hex::encode(self.content_of(&b));
+        let cp = hex::encode(b.content_hash());
         let mut fresh = vec![self.create_op(CrdtPayload::FloorMark { cp: cp.clone() })];
         if super::authority::base_content_for(self, &cp).is_none() {
             fresh.push(b.clone());
@@ -1207,5 +1209,83 @@ mod tests {
         assert_eq!(judged(&m), (true, false), "(honest mark kept, the fabricated F0 is the base)");
         let _ = m.rebuild_now();
         assert_eq!(judged(&m), (true, false), "a rebuild from the kept marks and pins decides the same");
+    }
+
+    /// A rename the owner's phone signs at `cp`'s clock (its lane, so the proof verifies),
+    /// the first of a few for which `pick` holds.
+    fn variant_at(cp: &CrdtOp, pick: impl Fn(&CrdtOp) -> bool) -> CrdtOp {
+        (0..64)
+            .map(|i| {
+                let mut v = cp.clone();
+                v.payload = P::ServerRenamed { new_name: format!("v{i}") };
+                v.sign(&keys(OWNER).0, &keys(OWNER).2);
+                v.sign_device(&keys(PHONE).0);
+                v
+            })
+            .find(|v| pick(v))
+            .expect("a variant")
+    }
+
+    /// HOL-SEC-225: B is the answered checkpoint itself, found by its own content id, even
+    /// where this replica holds a variant at its key.
+    #[test]
+    fn a_floor_pick_matches_an_answered_checkpoint_by_its_own_content() {
+        let w = world();
+        let (before, _) = owner_rosters();
+        let cp1 = w.cp1.content_hash();
+        let variant = variant_at(&w.cp1, |v| v.content_hash() > cp1);
+        assert_eq!(variant.proven_device(), Some(keys(PHONE).1.as_str()), "precondition: the phone's proof verifies");
+        let stale_log: Vec<CrdtOp> = w
+            .log
+            .iter()
+            .filter(|o| o.content_hash() != cp1 && !matches!(&o.payload, P::MemberAdded { peer_id, .. } if *peer_id == keys(LATE).1))
+            .cloned()
+            .chain(std::iter::once(variant.clone()))
+            .collect();
+        let mut m = replica(&w.owner.server_id, MEMBER, MEMBER_PHONE, true);
+        m.authority = view(&before);
+        m.ingest_remote(&stale_log);
+        assert_eq!(base_of(&m), Some(w.cp0.content_hash()), "precondition: the stale member stands on cp0");
+        assert_eq!(m.content_of(&w.cp1), variant.content_hash(), "precondition: the variant is held at cp1's key");
+        hears_of_recovery_in_round(&mut m);
+        assert!(m.floor_round_open(), "precondition: the trigger opens the round");
+        m.end_floor_round(std::slice::from_ref(&w.cp1)).expect("the round ends");
+        assert_eq!(named_by_marks(&m), vec![hex::encode(cp1)], "the mark names the answered cp1, not the step back nor the variant");
+        assert_eq!(m.recovery.as_ref().and_then(|r| r.floor_b.as_ref()).map(|b| b.content_hash()), Some(cp1), "B recorded in floor_b");
+    }
+
+    /// HOL-SEC-225: a mark made after a restart names the recorded pre-trigger base by its
+    /// own content id, never a variant now held at its key.
+    #[test]
+    fn a_floor_mark_after_restart_names_the_recorded_base_by_its_own_content() {
+        let w = world();
+        let cp1 = w.cp1.content_hash();
+        let mut m = member_of(&w, MEMBER, MEMBER_PHONE, false);
+        hears_of_recovery(&mut m);
+        let recorded = m.recovery.as_ref().and_then(|r| r.base_op.as_ref()).map(|b| b.content_hash());
+        assert!(marks_of(&m).is_empty() && recorded == Some(cp1), "precondition: unsigned, cp1 recorded, no mark");
+        let at = |m: &ServerState| {
+            let is = |o: &CrdtOp| o.content_hash() == cp1;
+            (m.op_log.iter().any(is), m.stored.iter().any(|(o, _)| is(o)), m.held.iter().any(|(o, _)| is(o)))
+        };
+        assert_eq!(at(&m), (false, false, true), "precondition: the step back holds cp1 in RAM only");
+        // A restart keeps the stored rows and the recovery row, never what was held in RAM.
+        let rows: Vec<(CrdtOp, Option<u64>)> = m
+            .op_log
+            .iter()
+            .map(|o| (o.clone(), None))
+            .chain(m.stored.iter().map(|(o, k)| (o.clone(), if let RowKind::Parked(u) = k { Some(*u) } else { None })))
+            .collect();
+        let mut back = m.clone();
+        back.restore_op_log(rows);
+        assert_eq!(at(&back), (false, false, false), "precondition: the restart lost cp1");
+        let variant = variant_at(&w.cp1, |v| v.content_hash() > cp1);
+        back.ingest_remote(std::slice::from_ref(&variant));
+        assert_eq!(back.content_of(&w.cp1), variant.content_hash(), "precondition: the variant is held at cp1's key");
+        let (kp, _, pk) = keys(MEMBER);
+        back.set_signer(kp, pk);
+        back.set_device_signer(keys(MEMBER_PHONE).0);
+        back.mark_after_restart().expect("the mark goes out");
+        assert_eq!(named_by_marks(&back), vec![hex::encode(cp1)], "the recorded base, by its own content id");
     }
 }
