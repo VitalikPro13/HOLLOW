@@ -861,7 +861,9 @@ checkpoint. Order:
      counts only if its `seen_ms < T` here. The founding op of a server a dropped device
      founded is the exception (HOL-SEC-221): the one the fold founds on (HOL-SEC-222,
      `founding_kept`) always counts, since R stands on it or names its owner, and the
-     settling folds no other founding op.
+     settling folds no other founding op. So does the owner's op naming the relay this
+     device dials as the server's home (HOL-SEC-223): else the home reads missing until
+     the owner names it again; a home op naming another relay keeps the rule.
    - **Shape** = a child of our CURRENT base (generation plus one, `cp_parent` and
      `cp_lineage` from it, `cp_cut` from it), so it is the greatest eligible checkpoint and
      every checkpoint on its line stays eligible by descent.

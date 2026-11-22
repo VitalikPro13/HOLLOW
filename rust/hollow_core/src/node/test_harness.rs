@@ -72910,3 +72910,54 @@ async fn pr222_a_lost_founders_second_founding_op_changes_only_the_founding_name
     assert_eq!(founded_on(&d2).await, chosen, "a restart founded on another op");
     stands(&d2, "stolen before", "after a restart").await;
 }
+
+/// HOL-SEC-223: the lost founder D1 named the server's home relay. D2's "not sure"
+/// settling (T = 0, no restore point) keeps the owner's op naming the relay D2 dials, so
+/// the home never reads missing while no owner names it again.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pr222_a_not_sure_settling_keeps_the_home_relay() {
+    use crate::crdt::operations::CrdtPayload as P;
+    let _g = test_guard();
+    let [m_tag, d1_tag, d2_tag, r_tag, j_tag] = [232u8, 233, 234, 235, 236];
+    let W3c1Cut { relay, master, d1, d2, j, server_id, _tmp } = w3c1_cut_server_with([m_tag, d1_tag, d2_tag, r_tag, j_tag], None, true).await;
+    let m_id = master.peer_id();
+    let (d1_id, d2_id) = (tag_kp(d1_tag).peer_id(), tag_kp(d2_tag).peer_id());
+    let home = super::ws_client::HARNESS_RELAY_DOMAIN;
+    relay.set_online(&d2.device_id, true);
+    assert!(
+        wait_until(30, async || d2.live_server_state(&server_id).await.is_some_and(|s| s.is_member(&j.master_id) && s.home_relay().as_deref() == Some(home))).await,
+        "precondition: the sibling holds the server and its home",
+    );
+    let home_ops = |s: &ServerState| -> Vec<String> {
+        s.op_log
+            .iter()
+            .filter(|o| matches!(&o.payload, P::ServerSettingChanged { key, .. } if key == crate::crdt::server_state::HOME_RELAY_KEY))
+            .filter_map(|o| o.dev.as_ref().map(|d| d.device.clone()))
+            .collect()
+    };
+    let held = d2.live_server_state(&server_id).await.expect("the sibling holds the server");
+    assert_eq!(home_ops(&held), vec![d1_id.clone()], "precondition: the lost founder alone named the home");
+    let _no_stamp = NoHomeStamp::on();
+
+    relay.set_online(&d1.device_id, false);
+    drop(d1);
+    let roster = d2.store().load_roster(&m_id).ok().flatten().expect("the identity's roster");
+    let mut recovered = roster.clone();
+    recovered
+        .add_phrase_statement(
+            &crate::identity::roster::r_pub_of(&tag_kp(r_tag)),
+            Some(crate::identity::roster::sign_recovery(&master, &tag_kp(r_tag), super::roster_book::now_ms(), std::slice::from_ref(&d2_id), false)),
+            None,
+        )
+        .expect("the phrase signs the recovery");
+    assert!(super::authority_view::hold_own(&d2.store(), &m_id), "nothing held before this change");
+    super::roster_book::note_recovery_lost_since(&d2.store(), &recovered.base(), 0).unwrap();
+    super::roster_book::merge_for_test(&d2.store(), &recovered, &m_id, &d2_id);
+    d2.cmd_tx.send(NodeCommand::RosterChanged { newly_revoked: vec![d1_id.clone()] }).await.unwrap();
+    pr221_expect_settled(&d2, &server_id, &m_id, &d1_id, &j.master_id).await;
+    let state = d2.live_server_state(&server_id).await.expect("the sibling holds the server");
+    assert_eq!(state.base.as_ref().and_then(|b| b.state.home_relay()).as_deref(), Some(home), "the settling left the home out");
+    assert_eq!(state.home_relay().as_deref(), Some(home), "the home reads missing after the settling");
+    assert!(!home_ops(&state).contains(&d2_id), "precondition: D2 named no home of its own");
+}

@@ -332,7 +332,7 @@ fn settle(
     };
     let dropped = dropped_devices(state, x.as_ref(), local_master);
     let seen = store.op_seen_ms(server_id).unwrap_or_default();
-    let s = crate::crdt::settle::Settling { before: state.authority.clone(), dropped: &dropped, t_ms: t_ms.max(0) as u64, seen: &seen, roster };
+    let s = crate::crdt::settle::Settling { before: state.authority.clone(), dropped: &dropped, t_ms: t_ms.max(0) as u64, seen: &seen, roster, home: super::ws_client::relay_home() };
     let counted = super::floor::counted_members(state);
     let Some((ops, ingested)) = state.author_settling_on(local_master, &s, device, &on) else {
         hollow_log!("[HOLLOW-CRDT] Could not write the restore of {server_id}: choose again");

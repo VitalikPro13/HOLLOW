@@ -26,6 +26,8 @@ pub(crate) struct Settling<'a> {
     pub(crate) seen: &'a SeenAt,
     /// Our compacted roster, holding the removal.
     pub(crate) roster: Roster,
+    /// The relay this device dials (`ws_client::relay_home`), HOL-SEC-223.
+    pub(crate) home: Option<String>,
 }
 
 /// Where a settling stands and which checkpoint's state it folds.
@@ -96,15 +98,32 @@ impl ServerState {
         self.founding_kept(&held).first().map(|o| o.content_hash())
     }
 
+    /// HOL-SEC-223: the owner's op naming the relay this device dials as the server's
+    /// home, which a settling keeps whoever wrote it: else the home reads missing until
+    /// the owner names it again. Never one naming another relay, since a dropped device
+    /// may have written it. Of several, as `founding_kept` ranks.
+    fn home_stand(&self, home: Option<&str>) -> Option<[u8; 32]> {
+        let home = home?;
+        let owner = self.anchor_owner()?;
+        self.op_log
+            .iter()
+            .chain(self.stored.iter().map(|(o, _)| o))
+            .filter(|o| o.author == owner)
+            .filter(|o| matches!(&o.payload, CrdtPayload::ServerSettingChanged { key, value } if key == super::server_state::HOME_RELAY_KEY && value == home))
+            .min_by_key(|o| (self.verdict(o) != super::authority::Verdict::Counted, o.hlc.clone(), o.content_hash()))
+            .map(CrdtOp::content_hash)
+    }
+
     /// The ops a settling folds on R: what counted before the removal, a dropped device's
-    /// only when stored here before T (its founding op aside); no checkpoint
+    /// only when stored here before T (its founding op and home op aside); no checkpoint
     /// but R, no founding op but the one the fold founds on.
     fn settling_input(&mut self, r: Option<&CrdtOp>, s: &Settling<'_>) -> Vec<CrdtOp> {
         let stand = self.founding_stand();
+        let home = self.home_stand(s.home.as_deref());
         let now_view = std::mem::replace(&mut self.authority, s.before.clone());
         let before_t = |o: &CrdtOp| s.seen.get(&(o.author.clone(), o.hlc.physical_ms, o.hlc.counter)).is_some_and(|ms| *ms < s.t_ms);
         let dropped = |o: &CrdtOp| o.dev.as_deref().is_some_and(|d| s.dropped.contains(&d.device));
-        let kept = |o: &CrdtOp| stand == Some(o.content_hash());
+        let kept = |o: &CrdtOp| [stand, home].contains(&Some(o.content_hash()));
         let mut ops: Vec<CrdtOp> = self
             .op_log
             .iter()
@@ -439,7 +458,7 @@ pub(crate) mod tests {
 
     fn settle(w: &mut World) -> (CrdtOp, CrdtOp) {
         let (before, after) = rosters();
-        let s = Settling { before: view_of(&[&before]), dropped: &[keys(LAPTOP).1], t_ms: 3_000, seen: &w.seen, roster: after.clone() };
+        let s = Settling { before: view_of(&[&before]), dropped: &[keys(LAPTOP).1], t_ms: 3_000, seen: &w.seen, roster: after.clone(), home: None };
         judged_by(&mut w.owner, after);
         let (mut ops, _) = w.owner.author_settling(&keys(OWNER).1, &s, &keys(PHONE).0).expect("the settling is written");
         let settling = ops.pop().unwrap();
@@ -465,7 +484,7 @@ pub(crate) mod tests {
         assert_eq!((devices.clone(), t_ms), (both.clone(), 2_000));
 
         let generation = phone.base.as_ref().map(|b| b.generation).unwrap();
-        let st = Settling { before: phone.view_counting(&m_id, &devices), dropped: &devices, t_ms, seen: &seen, roster: after.clone() };
+        let st = Settling { before: phone.view_counting(&m_id, &devices), dropped: &devices, t_ms, seen: &seen, roster: after.clone(), home: None };
         phone.author_settling(&m_id, &st, &phone_kp).expect("the merged settling");
         let base = phone.base.as_ref().expect("a base");
         assert_eq!(base.generation, generation + 1, "a child of the winner");
@@ -512,7 +531,7 @@ pub(crate) mod tests {
         let seen: SeenAt = [((early.author.clone(), early.hlc.physical_ms, early.hlc.counter), 1_500)].into_iter().collect();
         let lost = |s: &mut ServerState, gone: u8, t_ms: u64, signer: u8| {
             let dropped = [keys(gone).1];
-            let st = Settling { before: view_of(&[&before]), dropped: &dropped, t_ms, seen: &seen, roster: after.clone() };
+            let st = Settling { before: view_of(&[&before]), dropped: &dropped, t_ms, seen: &seen, roster: after.clone(), home: None };
             judged_by(s, after.clone());
             s.author_settling(&m_id, &st, &keys(signer).0).expect("a settling").0
         };
@@ -661,7 +680,7 @@ pub(crate) mod tests {
         }
         let seen = SeenAt::default();
         let lost = |s: &mut ServerState, gone: &[String], signer: u8, roster: &Roster| {
-            let st = Settling { before: view_of(&[&before]), dropped: gone, t_ms: 2_000, seen: &seen, roster: roster.clone() };
+            let st = Settling { before: view_of(&[&before]), dropped: gone, t_ms: 2_000, seen: &seen, roster: roster.clone(), home: None };
             judged_by(s, roster.clone());
             s.author_settling(&m_id, &st, &keys(signer).0).expect("a settling").0
         };
@@ -700,9 +719,9 @@ pub(crate) mod tests {
         assert_eq!(ServerState::skeleton("s".into()).lost_t(0), 0, "no restore point: 0");
     }
 
-    /// HOL-SEC-221: the laptop founds, checkpoints (cp1) and renames twice; the phone first
-    /// stores all of it at 3,000 (cp1's first fold, so "not sure" reads T = 3,000), the
-    /// second rename at 4,000.
+    /// HOL-SEC-221: the laptop founds, checkpoints (cp1), names two homes (another relay,
+    /// then "relay.a.test") and renames twice; the phone first stores all of it at 3,000
+    /// (cp1's first fold, so "not sure" reads T = 3,000), the second rename at 4,000.
     /// With `forged`, the laptop also mints a second founding op of the same id, clocked
     /// before the first and named "stolen", first stored here at the time it names (none:
     /// no record of it).
@@ -715,14 +734,21 @@ pub(crate) mod tests {
             ServerState::found_on("s".into(), m_id, Founder { device_peer_id: &laptop_id, device: Some(&laptop_kp), r_pub: Some(&r_pub) }, master.clone(), pk.clone());
         judged_by(&mut laptop, before.clone());
         let cp1 = checkpoint(&mut laptop);
+        let home = |s: &mut ServerState, to: &str| {
+            s.author_checked(P::ServerSettingChanged { key: crate::crdt::server_state::HOME_RELAY_KEY.into(), value: to.into() }).expect("the owner names a home")
+        };
+        let elsewhere = home(&mut laptop, "relay.elsewhere.test");
+        let here = home(&mut laptop, "relay.a.test");
         let at_t = rename(&mut laptop, "at T");
         let after_t = rename(&mut laptop, "after T");
         let mut phone = device_replica(&laptop.server_id, PHONE);
         judged_by(&mut phone, before);
-        phone.ingest_remote(&[founding.clone(), cp1.clone(), at_t.clone(), after_t.clone()]);
+        phone.ingest_remote(&[founding.clone(), cp1.clone(), elsewhere.clone(), here.clone(), at_t.clone(), after_t.clone()]);
+        assert_eq!(phone.home_relay().as_deref(), Some("relay.a.test"), "precondition: the later home stands");
         Arc::make_mut(&mut phone.first_folds).insert(hex::encode(cp1.content_hash()), 3_000);
         let key = |o: &CrdtOp| (o.author.clone(), o.hlc.physical_ms, o.hlc.counter);
-        let mut seen: SeenAt = [(key(&founding), 3_000), (key(&at_t), 3_000), (key(&after_t), 4_000)].into_iter().collect();
+        let mut seen: SeenAt =
+            [(key(&founding), 3_000), (key(&elsewhere), 3_000), (key(&here), 3_000), (key(&at_t), 3_000), (key(&after_t), 4_000)].into_iter().collect();
         if let Some(stored_at) = forged {
             let mut second = founding.clone();
             let P::ServerCreated { name, .. } = &mut second.payload else { unreachable!() };
@@ -754,10 +780,15 @@ pub(crate) mod tests {
     }
 
     fn settle_the_laptops_server(phone: &mut ServerState, seen: &SeenAt) -> Option<CrdtOp> {
+        settle_the_laptops_server_from(phone, seen, None)
+    }
+
+    /// As `settle_the_laptops_server`, the phone dialing `home`.
+    fn settle_the_laptops_server_from(phone: &mut ServerState, seen: &SeenAt, home: Option<&str>) -> Option<CrdtOp> {
         let (before, after) = rosters();
         let t_ms = phone.lost_t(0);
         assert_eq!(t_ms, 3_000, "precondition: \"not sure\" reads T as the first fold of the phone's oldest restore point");
-        let s = Settling { before: view_of(&[&before]), dropped: &[keys(LAPTOP).1], t_ms, seen, roster: after.clone() };
+        let s = Settling { before: view_of(&[&before]), dropped: &[keys(LAPTOP).1], t_ms, seen, roster: after.clone(), home: home.map(str::to_string) };
         judged_by(phone, after);
         phone.author_settling(&keys(OWNER).1, &s, &keys(PHONE).0).map(|(mut ops, _)| ops.pop().unwrap())
     }
@@ -788,6 +819,20 @@ pub(crate) mod tests {
             assert_eq!(authority::founding_op(&phone).map(CrdtOp::content_hash), chosen, "the settling founded on another op ({stored_at:?})");
             assert_eq!(phone.name.read().as_str(), "stolen", "the settling named the server other than its founding op ({stored_at:?})");
             assert_eq!(phone.current_owner().as_deref(), Some(keys(OWNER).1.as_str()), "the owner's seat ({stored_at:?})");
+        }
+    }
+
+    /// HOL-SEC-223: a settling dropping the laptop, which named the home, keeps the
+    /// owner's op naming the relay the phone dials; never another relay the laptop named,
+    /// earlier or later, and none when the phone dials none of them.
+    #[test]
+    fn a_settling_keeps_only_the_home_op_naming_the_relay_this_device_dials() {
+        for (dials, kept) in [(Some("relay.a.test"), Some("relay.a.test")), (Some("relay.b.test"), None), (None, None)] {
+            let (mut phone, seen) = founded_by_the_laptop(None);
+            assert!(settle_the_laptops_server_from(&mut phone, &seen, dials).is_some(), "the settling is written ({dials:?})");
+            assert!(phone.base.as_ref().is_some_and(|b| b.state.cp_settles.is_some()), "the settling is the base ({dials:?})");
+            assert_eq!(phone.home_relay().as_deref(), kept, "the home after the settling ({dials:?})");
+            assert_eq!(phone.name.read().as_str(), "s", "the founder's renames stored here at T and after drop ({dials:?})");
         }
     }
 
@@ -1318,7 +1363,7 @@ pub(crate) mod tests {
         judged_by(&mut w.owner, after.clone());
         let seen = SeenAt::new();
         let dropped = [keys(LAPTOP).1];
-        let s = Settling { before: w.owner.authority.clone(), dropped: &dropped, t_ms: 3_000, seen: &seen, roster: after };
+        let s = Settling { before: w.owner.authority.clone(), dropped: &dropped, t_ms: 3_000, seen: &seen, roster: after, home: None };
         let on = SettleOn::Witnessed(Box::new(w.cp1.clone()));
         let (ops, _) = w.owner.author_settling_on(&keys(OWNER).1, &s, &keys(PHONE).0, &on).expect("the settling is written");
         let settling = ops.last().unwrap();
@@ -1348,7 +1393,7 @@ pub(crate) mod tests {
         judged_by(&mut w.owner, after.clone());
         let seen = SeenAt::new();
         let dropped = [keys(LAPTOP).1];
-        let s = Settling { before: w.owner.authority.clone(), dropped: &dropped, t_ms: 0, seen: &seen, roster: after };
+        let s = Settling { before: w.owner.authority.clone(), dropped: &dropped, t_ms: 0, seen: &seen, roster: after, home: None };
         assert_eq!(w.owner.rollback_point(&keys(OWNER).1).map(|o| o.hlc), Some(w.cp1.hlc.clone()), "R is the phone's checkpoint");
         let parent = w.owner.base.as_ref().map(|b| b.hash_hex());
         let (ops, _) = w.owner.author_settling_on(&keys(OWNER).1, &s, &keys(PHONE).0, &SettleOn::Rollback).expect("the rollback is written");
