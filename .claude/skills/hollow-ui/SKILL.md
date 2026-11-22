@@ -97,11 +97,17 @@ times for chips alone. Do not invent a 47th. Reach for the component.
 - Never colour alone: pair it with shape, an icon or a word.
 - **Name colours.** A colour a person chose is drawn EXACTLY as picked
   (name, gradient stop, speaking ring, share border, both themes) unless it
-  falls under 3:1 on a surface their name sits on, a selected row's or
-  chip's accent-muted fill included (`namePaintOnSelected` lifts it there,
-  and only there); then its lightness moves only as far as that surface
-  needs, hue and saturation kept (`kChosenNameContrast`, #140). The hashed
-  colours clear 7:1 on dark and 5:1 on light (`test/name_colors_test.dart`).
+  falls under 3:1 on a surface names sit on (`chosenNameSurfaces`: chrome,
+  canvas, elevated; not overlay or hover), or on a selected row's or chip's
+  accent-muted fill (`namePaintOnSelected` lifts it there, and only there);
+  then its lightness moves only as far as that surface needs, hue and
+  saturation kept (`kChosenNameContrast`, #140). 3:1 for a chosen name is a
+  deliberate product choice BELOW WCAG AA for small text (names are 14/16 px
+  semibold, not large text), so the pick shows true; the ring and share
+  border are indicators, where 3:1 meets 1.4.11. The editor says when the
+  floor moved a pick (`nameColorShiftNote`, read off `chosenNameShifts`).
+  The hashed colours clear 7:1 on dark and 5:1 on light
+  (`test/name_colors_test.dart`).
 
 ## Spacing and gaps
 

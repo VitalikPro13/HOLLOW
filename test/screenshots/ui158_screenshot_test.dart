@@ -8,6 +8,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hollow/src/core/color_utils.dart';
+import 'package:hollow/src/core/providers/profile_draft_provider.dart';
 import 'package:hollow/src/theme/contrast.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -43,6 +44,10 @@ void main() {
       onest.addFont(rootBundle.load('assets/fonts/Onest-$w.ttf'));
     }
     await onest.load();
+    await (FontLoader('packages/lucide_icons_flutter/Lucide')
+          ..addFont(rootBundle
+              .load('packages/lucide_icons_flutter/assets/lucide.ttf')))
+        .load();
     final mono = FontLoader('Geist Mono');
     mono.addFont(rootBundle.load('assets/fonts/GeistMono-400.ttf'));
     try {
@@ -255,6 +260,72 @@ void main() {
     ));
     await tester.pumpAndSettle();
     await save(tester, 'ui158_140_colours');
+  });
+
+  // #140 review: the editor says when the floor moved a pick, and which way.
+  testWidgets('#140 the editor and its readability note, dark and light',
+      (tester) async {
+    tester.view.physicalSize = const Size(2020, 3300);
+    tester.view.devicePixelRatio = 2.0;
+    addTearDown(tester.view.reset);
+    const picks = [
+      ('Editor red', '1:f42525'),
+      ('Reported #C92222', '1:c92222'),
+      ('Indigo #4B0082', '1:4b0082'),
+      ('Yellow #FFFF00', '1:ffff00'),
+      ('Gradient red to indigo', '1:f42525,4b0082'),
+    ];
+    final containers = <ProviderContainer>[];
+    Widget editor(String field, bool dark) {
+      final c = ProviderContainer(overrides: hollowTestOverrides());
+      containers.add(c);
+      c.read(profileDraftProvider.notifier).setNameColor(field);
+      final theme = dark ? HollowThemeData.dark() : HollowThemeData.light();
+      final hollow = dark ? HollowTheme.dark() : HollowTheme.light();
+      return UncontrolledProviderScope(
+        container: c,
+        child: Theme(
+          data: theme,
+          child: Container(
+            width: 480,
+            color: hollow.background,
+            padding: const EdgeInsets.all(HollowSpacing.md),
+            child: const NameColorEditor(peerId: 'x'),
+          ),
+        ),
+      );
+    }
+
+    await tester.pumpWidget(RepaintBoundary(
+      key: shotKey,
+      child: MaterialApp(
+        debugShowCheckedModeBanner: false,
+        theme: HollowThemeData.dark(),
+        home: Material(
+          type: MaterialType.transparency,
+          child: Container(
+            color: HollowTheme.dark().surface,
+            padding: const EdgeInsets.all(HollowSpacing.sm),
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+            for (final (label, field) in picks) ...[
+              Text(label,
+                  style: HollowTypography.label
+                      .copyWith(color: HollowTheme.dark().textPrimary)),
+              Row(mainAxisSize: MainAxisSize.min, children: [
+                editor(field, true),
+                editor(field, false),
+              ]),
+            ],
+          ]),
+          ),
+        ),
+      ),
+    ));
+    await tester.pumpAndSettle();
+    await save(tester, 'ui158_140_editor_note', ratio: 1.5);
+    for (final c in containers) {
+      c.dispose();
+    }
   });
 
   // ---------------------------------------------------------------- #158
