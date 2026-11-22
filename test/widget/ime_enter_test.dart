@@ -52,6 +52,7 @@ void main() {
     // Files whose handlers sit on no text field, with the reason.
     const noTextField = {
       'annotation/annotation_overlay.dart': 'drawing canvas',
+      'chat/expression_preview.dart': 'a kept preview holds focus, no field',
       'components/hollow_chip_tabs.dart': 'its own focus node, a tab row',
       'components/hollow_focus_ring.dart': 'buttons and pressables',
       'components/hollow_tab_bar.dart': 'its own focus node, a tab row',

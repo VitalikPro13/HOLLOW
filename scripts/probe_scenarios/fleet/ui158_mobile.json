@@ -1,9 +1,10 @@
 {
  "_": [
-  "#140/#159 proof on one phone (iOS Simulator, throwaway identity): the editor red on dark and light,",
-  "your own name in a server chat, and an emoji held in the picker sheet then let go.",
-  "Same file for the BEFORE tree (base ca9836bd) and the AFTER tree.",
-  "run (Mac mini): pwsh -NoProfile -File scripts/fleet.ps1 -Scenario ui158_mobile -Peers a=ios:<letter>"
+  "#140/#159 proof on one phone (iOS Simulator, throwaway identity, test relay): the editor",
+  "with the editor red, #C92222 and picks the floor moves; your own name in a server chat; a",
+  "sticker, a GIF, a server emote and an emoji long-pressed and released (kept with actions),",
+  "light theme, and once at 320 px wide. Same file for the BEFORE and AFTER trees.",
+  "run (Mac mini): pwsh -NoProfile -File scripts/fleet.ps1 -Scenario ui158_mobile -Peers a=ios:<letter> -Relay <test relay>"
  ],
  "peers": [
   "a"
@@ -23,8 +24,25 @@
   },
   {
    "peer": "a",
-   "op": "log",
-   "message": "#140 on a phone: the editor red, swatch and previews on dark and light"
+   "op": "seed_server",
+   "name": "ui158m-${RUN}",
+   "as": "INVITE"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 1000
+  },
+  {
+   "peer": "a",
+   "op": "seed_emote",
+   "server": "ui158m-${RUN}",
+   "name": "ui158cat"
+  },
+  {
+   "peer": "a",
+   "op": "seed_sticker",
+   "seed": "m1"
   },
   {
    "peer": "a",
@@ -55,6 +73,11 @@
   },
   {
    "peer": "a",
+   "op": "log",
+   "message": "#140: the editor with the editor red, the reporter's #C92222 and picks the floor moves (the note under the previews)"
+  },
+  {
+   "peer": "a",
    "op": "tap",
    "target": "semantics:Use this colour",
    "index": 0
@@ -67,12 +90,12 @@
   {
    "peer": "a",
    "op": "reveal",
-   "target": "text:Name colour"
+   "target": "text:On light"
   },
   {
    "peer": "a",
    "op": "shot",
-   "name": "u140-m-01-picker-dark"
+   "name": "u140-m-01-red-dark"
   },
   {
    "peer": "a",
@@ -87,12 +110,252 @@
   {
    "peer": "a",
    "op": "shot",
-   "name": "u140-m-02-picker-light"
+   "name": "u140-m-01-red-light"
   },
   {
    "peer": "a",
    "op": "theme",
    "value": "dark"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 400
+  },
+  {
+   "peer": "a",
+   "op": "name_color",
+   "field": "1:c92222"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 400
+  },
+  {
+   "peer": "a",
+   "op": "reveal",
+   "target": "text:On light"
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "u140-m-02-c92222-dark"
+  },
+  {
+   "peer": "a",
+   "op": "theme",
+   "value": "light"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "u140-m-02-c92222-light"
+  },
+  {
+   "peer": "a",
+   "op": "theme",
+   "value": "dark"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 400
+  },
+  {
+   "peer": "a",
+   "op": "name_color",
+   "field": "1:4b0082"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 400
+  },
+  {
+   "peer": "a",
+   "op": "reveal",
+   "target": "text:On light"
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "u140-m-03-indigo-dark"
+  },
+  {
+   "peer": "a",
+   "op": "theme",
+   "value": "light"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "u140-m-03-indigo-light"
+  },
+  {
+   "peer": "a",
+   "op": "theme",
+   "value": "dark"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 400
+  },
+  {
+   "peer": "a",
+   "op": "name_color",
+   "field": "1:141414"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 400
+  },
+  {
+   "peer": "a",
+   "op": "reveal",
+   "target": "text:On light"
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "u140-m-04-nearblack-dark"
+  },
+  {
+   "peer": "a",
+   "op": "theme",
+   "value": "light"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "u140-m-04-nearblack-light"
+  },
+  {
+   "peer": "a",
+   "op": "theme",
+   "value": "dark"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 400
+  },
+  {
+   "peer": "a",
+   "op": "name_color",
+   "field": "1:ffff00"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 400
+  },
+  {
+   "peer": "a",
+   "op": "reveal",
+   "target": "text:On light"
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "u140-m-05-yellow-dark"
+  },
+  {
+   "peer": "a",
+   "op": "theme",
+   "value": "light"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "u140-m-05-yellow-light"
+  },
+  {
+   "peer": "a",
+   "op": "theme",
+   "value": "dark"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 400
+  },
+  {
+   "peer": "a",
+   "op": "name_color",
+   "field": "1:f42525,4b0082"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 400
+  },
+  {
+   "peer": "a",
+   "op": "reveal",
+   "target": "text:On light"
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "u140-m-06-gradient-dark"
+  },
+  {
+   "peer": "a",
+   "op": "theme",
+   "value": "light"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "u140-m-06-gradient-light"
+  },
+  {
+   "peer": "a",
+   "op": "theme",
+   "value": "dark"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 400
+  },
+  {
+   "peer": "a",
+   "op": "name_color",
+   "field": "1:c92222"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 300
   },
   {
    "peer": "a",
@@ -116,17 +379,6 @@
    "peer": "a",
    "op": "wait",
    "ms": 800
-  },
-  {
-   "peer": "a",
-   "op": "seed_server",
-   "name": "ui158m-${RUN}",
-   "as": "INVITE"
-  },
-  {
-   "peer": "a",
-   "op": "wait",
-   "ms": 1000
   },
   {
    "peer": "a",
@@ -179,7 +431,7 @@
   {
    "peer": "a",
    "op": "shot",
-   "name": "u140-m-03-chat-dark"
+   "name": "u140-m-10-chat-c92222-dark"
   },
   {
    "peer": "a",
@@ -194,7 +446,7 @@
   {
    "peer": "a",
    "op": "shot",
-   "name": "u140-m-04-chat-light"
+   "name": "u140-m-10-chat-c92222-light"
   },
   {
    "peer": "a",
@@ -203,8 +455,13 @@
   },
   {
    "peer": "a",
+   "op": "wait",
+   "ms": 400
+  },
+  {
+   "peer": "a",
    "op": "log",
-   "message": "#159 on a phone: hold an emoji in the picker sheet, then let go"
+   "message": "#159 on a phone: long press, release keeps the preview with its actions"
   },
   {
    "peer": "a",
@@ -220,8 +477,34 @@
   {
    "peer": "a",
    "op": "tap",
-   "target": "text:Emoji",
+   "target": "text:Stickers",
    "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 900
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "u159-m-sticker-0-tab"
+  },
+  {
+   "peer": "a",
+   "op": "reveal",
+   "target": "type:_StickerCell",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "hold",
+   "target": "type:_StickerCell",
+   "index": 0,
+   "ms": 1000,
+   "shot": "u159-m-sticker-1-hold",
    "soft": true
   },
   {
@@ -232,25 +515,7 @@
   {
    "peer": "a",
    "op": "shot",
-   "name": "u159-m-00-picker"
-  },
-  {
-   "peer": "a",
-   "op": "hold",
-   "target": "semantics:winking face",
-   "index": 0,
-   "ms": 1000,
-   "shot": "u159-m-01-hold"
-  },
-  {
-   "peer": "a",
-   "op": "wait",
-   "ms": 800
-  },
-  {
-   "peer": "a",
-   "op": "shot",
-   "name": "u159-m-02-released"
+   "name": "u159-m-sticker-2-kept-dark"
   },
   {
    "peer": "a",
@@ -265,7 +530,7 @@
   {
    "peer": "a",
    "op": "shot",
-   "name": "u159-m-03-released-light"
+   "name": "u159-m-sticker-2-kept-light"
   },
   {
    "peer": "a",
@@ -274,8 +539,274 @@
   },
   {
    "peer": "a",
+   "op": "wait",
+   "ms": 400
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Close preview",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 700
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:GIFs",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 900
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 3000
+  },
+  {
+   "peer": "a",
+   "op": "reveal",
+   "target": "type:_GifCell",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "hold",
+   "target": "type:_GifCell",
+   "index": 0,
+   "ms": 1000,
+   "shot": "u159-m-gif-1-hold",
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "u159-m-gif-2-kept"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Close preview",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 700
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Emoji",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 900
+  },
+  {
+   "peer": "a",
+   "op": "reveal",
+   "target": "semantics:Emote ui158cat",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "hold",
+   "target": "semantics:Emote ui158cat",
+   "index": 0,
+   "ms": 1000,
+   "shot": "u159-m-emote-1-hold",
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "u159-m-emote-2-kept"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Close preview",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 700
+  },
+  {
+   "peer": "a",
+   "op": "reveal",
+   "target": "semantics:winking face",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "hold",
+   "target": "semantics:winking face",
+   "index": 0,
+   "ms": 1000,
+   "shot": "u159-m-emoji-1-hold",
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "u159-m-emoji-2-kept-dark"
+  },
+  {
+   "peer": "a",
+   "op": "theme",
+   "value": "light"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "u159-m-emoji-2-kept-light"
+  },
+  {
+   "peer": "a",
+   "op": "theme",
+   "value": "dark"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 400
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Close preview",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 700
+  },
+  {
+   "peer": "a",
+   "op": "log",
+   "message": "#159 at 320 px wide: interface zoom shrinks the viewport"
+  },
+  {
+   "peer": "a",
+   "op": "zoom",
+   "value": 1.23
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "text:Stickers",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 900
+  },
+  {
+   "peer": "a",
+   "op": "reveal",
+   "target": "type:_StickerCell",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "hold",
+   "target": "type:_StickerCell",
+   "index": 0,
+   "ms": 1000,
+   "shot": "u159-m-sticker320-1-hold",
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 800
+  },
+  {
+   "peer": "a",
+   "op": "shot",
+   "name": "u159-m-sticker320-2-kept"
+  },
+  {
+   "peer": "a",
+   "op": "tap",
+   "target": "semantics:Close preview",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 700
+  },
+  {
+   "peer": "a",
+   "op": "zoom"
+  },
+  {
+   "peer": "a",
+   "op": "wait",
+   "ms": 500
+  },
+  {
+   "peer": "a",
    "op": "dump",
    "name": "end"
+  }
+ ],
+ "cleanup": [
+  {
+   "peer": "a",
+   "op": "zoom",
+   "soft": true
   },
   {
    "peer": "a",

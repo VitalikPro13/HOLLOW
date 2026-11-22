@@ -20,6 +20,7 @@ import 'package:hollow/src/core/services/attachment_export.dart'
     show exportAttachmentTo;
 import 'package:hollow/src/core/providers/display_scale_provider.dart';
 import 'package:hollow/src/core/providers/overlay_mic_provider.dart';
+import 'package:hollow/src/core/providers/profile_draft_provider.dart';
 import 'package:hollow/src/core/providers/overlay_runtime_provider.dart';
 import 'package:hollow/src/core/providers/overlay_settings_provider.dart';
 import 'package:hollow/src/core/models/overlay_look.dart';
@@ -539,6 +540,20 @@ class ProbeRunner {
         await settle(frames: step['frames'] as int? ?? 25);
         return 'held ${step['target']}${held == null ? '' : ', wrote $held'}';
 
+      case 'name_color':
+        // Sets the profile draft's name colour field as if picked (#140): the
+        // editor offers swatches and a hue bar only, and a reported colour
+        // such as #C92222 is neither. Settings > Profile's Save then saves it.
+        final host = _consumerElement();
+        if (host == null) {
+          throw _ProbeFailure('no ConsumerWidget is mounted to set it through');
+        }
+        (host as WidgetRef)
+            .read(profileDraftProvider.notifier)
+            .setNameColor('${step['field'] ?? ''}');
+        await settle(frames: step['frames'] as int? ?? 20);
+        return 'name colour ${step['field']}';
+
       case 'hover':
         final finder = _finder(step);
         await _hover(tester.getCenter(finder));
@@ -562,6 +577,32 @@ class ProbeRunner {
         await settle(frames: step['frames'] as int? ?? 25);
         return 'dragged from ${from.dx.round()},${from.dy.round()} by '
             '${delta.dx.round()},${delta.dy.round()}';
+
+      case 'drag_shots':
+        // A mouse drag from a point (`of` + `align` + `dx`/`dy`, or `x`/`y`)
+        // in `steps` moves of `move_dx`/`move_dy`, a shot named `shot`-NN
+        // after each, then let go: a scrollbar thumb drag frame by frame
+        // (#158), where the list must follow the pointer one way.
+        final from = _point(step);
+        final move = Offset((step['move_dx'] as num?)?.toDouble() ?? 0,
+            (step['move_dy'] as num?)?.toDouble() ?? 0);
+        final steps = step['steps'] as int? ?? 10;
+        final name = '${step['shot'] ?? 'drag'}';
+        final drag = await tester.startGesture(from,
+            kind: PointerDeviceKind.mouse);
+        await settle(frames: 4);
+        final shots = <String>[];
+        for (var i = 0; i < steps; i++) {
+          await drag.moveBy(move);
+          await settle(frames: step['frames'] as int? ?? 6);
+          final taken = await shot('$name-${'$i'.padLeft(2, '0')}');
+          if (taken != null) shots.add(taken);
+        }
+        await drag.up();
+        await settle(frames: 10);
+        extra['shots'] = shots;
+        return 'dragged from ${from.dx.round()},${from.dy.round()} in $steps '
+            'moves of ${move.dx.round()},${move.dy.round()}';
 
       case 'tap_at':
       case 'right_click_at':

@@ -21,6 +21,7 @@ import 'package:hollow/src/core/services/window_fullscreen.dart';
 import 'package:hollow/src/theme/hollow_theme_data.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/components/overlay_hosts.dart';
 import 'package:hollow/src/ui/media/media_item.dart';
 import 'package:hollow/src/ui/media/media_playback_session.dart';
 import 'package:hollow/src/ui/media/media_strip.dart';
@@ -233,6 +234,24 @@ void main() {
     await open(tester, opened);
     expect(find.byType(MediaViewerView), findsOneWidget);
 
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    await tester.pumpAndSettle();
+    expect(find.byType(MediaViewerView), findsNothing);
+  });
+
+  // #159 review: a kept sticker preview in the viewer's reaction picker
+  // closes on Escape; the viewer's own handler must not close the viewer too.
+  testWidgets('escape stays with a host that holds the keyboard',
+      (tester) async {
+    await open(tester, itemNamed('a', 1000));
+    final token = Object();
+    OverlayHosts.register(token, () {}, holdsKeys: true);
+    addTearDown(() => OverlayHosts.unregister(token));
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    await tester.pumpAndSettle();
+    expect(find.byType(MediaViewerView), findsOneWidget);
+
+    OverlayHosts.unregister(token);
     await tester.sendKeyEvent(LogicalKeyboardKey.escape);
     await tester.pumpAndSettle();
     expect(find.byType(MediaViewerView), findsNothing);

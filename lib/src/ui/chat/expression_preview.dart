@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart'
-    show HapticFeedback, HardwareKeyboard, KeyDownEvent, KeyEvent, KeyEventCallback, LogicalKeyboardKey;
+    show HapticFeedback, KeyDownEvent, LogicalKeyboardKey;
 import 'package:hollow/src/theme/hollow_shadows.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -8,7 +8,6 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/chat/gif_picker.dart' show GifMenuItem, GifMenuRow, showGifMenu;
 import 'package:hollow/src/ui/chat/message_text_parser.dart' show isTouchForm;
 import 'package:hollow/src/ui/components/hollow_divider.dart';
-import 'package:hollow/src/ui/components/ime_keys.dart';
 import 'package:hollow/src/ui/components/overlay_hosts.dart';
 import 'package:hollow/src/ui/components/popup_animator.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
@@ -144,6 +143,10 @@ class _ExpressionPreviewTargetState extends State<ExpressionPreviewTarget> {
   void dispose() {
     _area?._targets.remove(this);
     _ExpressionPreview.hideOwnedBy(this);
+    // A held cell rebuilt away (search results landing, a wheel scroll in a
+    // lazy grid) sends no end, so the peek of it, or of the cell it slid
+    // onto, leaves with it.
+    _ExpressionPreview.dropPeekOf(this);
     super.dispose();
   }
 
@@ -158,6 +161,7 @@ class _ExpressionPreviewTargetState extends State<ExpressionPreviewTarget> {
       area: _area,
       data: () => (_shown ?? this).widget.data,
       kept: false,
+      holder: this,
     );
   }
 
@@ -172,7 +176,9 @@ class _ExpressionPreviewTargetState extends State<ExpressionPreviewTarget> {
   void _release() {
     final shown = _shown ?? this;
     _shown = null;
-    if (!_touch) {
+    // Its cell left the grid and took the peek along: nothing to keep.
+    if (!_ExpressionPreview.peekHeldBy(this)) return;
+    if (!_touch || !shown.mounted) {
       _ExpressionPreview.hide();
       return;
     }
@@ -225,7 +231,7 @@ class _ExpressionPreviewTargetState extends State<ExpressionPreviewTarget> {
       onLongPressMoveUpdate: (d) => _slide(d.globalPosition),
       onLongPressEnd: (_) => _release(),
       onLongPressCancel: () {
-        if (_shown != null) _release();
+        if (_ExpressionPreview.peekHeldBy(this)) _release();
       },
       child: widget.child,
     );
@@ -239,6 +245,12 @@ abstract final class _ExpressionPreview {
   static PopupAnimationController? _anim;
   static Object? _owner;
 
+  /// The cell whose held pointer drives the peek on screen; null once kept.
+  static _ExpressionPreviewTargetState? _holder;
+
+  /// Where the keyboard was before a kept preview took it.
+  static FocusNode? _returnFocus;
+
   /// Centre of the card last shown, for anchoring a kept preview's submenus.
   static Offset? lastCentre;
 
@@ -249,6 +261,7 @@ abstract final class _ExpressionPreview {
     required ExpressionPreviewData Function() data,
     required bool kept,
     List<GifMenuItem> items = const [],
+    _ExpressionPreviewTargetState? holder,
   }) {
     final overlay = Overlay.maybeOf(context);
     if (overlay == null) return;
@@ -264,7 +277,12 @@ abstract final class _ExpressionPreview {
     // Replacing a preview with a kept one keeps it on screen: no exit, no
     // entrance in between.
     final again = _entry != null;
-    _removeNow();
+    final returnFocus = _returnFocus;
+    _removeNow(giveFocusBack: false);
+    _returnFocus = kept && !_touch
+        ? returnFocus ?? FocusManager.instance.primaryFocus
+        : null;
+    if (!kept) _giveFocusBack(returnFocus);
     final anim = PopupAnimationController();
     late final OverlayEntry entry;
     void dismiss() {
@@ -287,35 +305,30 @@ abstract final class _ExpressionPreview {
     _entry = entry;
     _anim = anim;
     _owner = owner;
+    _holder = kept ? null : holder;
     overlay.insert(entry);
-    if (kept) {
-      OverlayHosts.register(entry, dismiss);
-      // The entry sits outside every route's focus scope, so Escape is
-      // caught before focus decides where keys go.
-      bool onKey(KeyEvent event) {
-        if (event is! KeyDownEvent ||
-            event.logicalKey != LogicalKeyboardKey.escape ||
-            keyBelongsToFocusedIme(event)) {
-          return false;
-        }
-        dismiss();
-        return true;
-      }
-
-      HardwareKeyboard.instance.addHandler(onKey);
-      _keyHandler = onKey;
-    }
-  }
-
-  static KeyEventCallback? _keyHandler;
-
-  static void _dropKeys() {
-    final handler = _keyHandler;
-    if (handler != null) HardwareKeyboard.instance.removeHandler(handler);
-    _keyHandler = null;
+    // The app lock clears every raw host before it covers the screen, a peek
+    // included, and at once: an exit animation would play over the cover.
+    OverlayHosts.register(entry, () {
+      if (identical(_entry, entry)) _removeNow();
+    }, holdsKeys: kept && !_touch);
   }
 
   static bool get showing => _entry != null;
+
+  /// True while [cell]'s held pointer drives the peek on screen.
+  static bool peekHeldBy(_ExpressionPreviewTargetState cell) =>
+      _entry != null && identical(_holder, cell);
+
+  /// Removes the peek when [cell] holds it or is the one it shows.
+  static void dropPeekOf(_ExpressionPreviewTargetState cell) {
+    final holder = _holder;
+    if (_entry == null || holder == null) return;
+    if (identical(holder, cell) || identical(holder._shown, cell)) {
+      holder._shown = null;
+      _removeNow();
+    }
+  }
 
   static void refresh() => _entry?.markNeedsBuild();
 
@@ -326,8 +339,10 @@ abstract final class _ExpressionPreview {
     _entry = null;
     _anim = null;
     _owner = null;
-    _dropKeys();
+    _holder = null;
     OverlayHosts.unregister(entry);
+    _giveFocusBack(_returnFocus);
+    _returnFocus = null;
     void remove() {
       entry.remove();
       entry.dispose();
@@ -344,16 +359,26 @@ abstract final class _ExpressionPreview {
     if (identical(_owner, owner)) _removeNow();
   }
 
-  static void _removeNow() {
+  static void _removeNow({bool giveFocusBack = true}) {
     final entry = _entry;
     if (entry == null) return;
     _entry = null;
     _anim = null;
     _owner = null;
-    _dropKeys();
+    _holder = null;
     OverlayHosts.unregister(entry);
+    if (giveFocusBack) {
+      _giveFocusBack(_returnFocus);
+      _returnFocus = null;
+    }
     entry.remove();
     entry.dispose();
+  }
+
+  static void _giveFocusBack(FocusNode? node) {
+    if (node != null && node.context != null && node.canRequestFocus) {
+      node.requestFocus();
+    }
   }
 }
 
@@ -399,17 +424,42 @@ class _PreviewLayer extends StatelessWidget {
       // A peek is only a picture: the held pointer stays with the cell.
       return IgnorePointer(child: placed);
     }
-    return Stack(
+    final layer = Stack(
       children: [
         Positioned.fill(
-          child: GestureDetector(
-            behavior: HitTestBehavior.opaque,
+          child: Semantics(
+            label: 'Close preview',
             onTap: onDismiss,
-            onSecondaryTap: onDismiss,
+            onDismiss: onDismiss,
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              excludeFromSemantics: true,
+              onTap: onDismiss,
+              onSecondaryTap: onDismiss,
+            ),
           ),
         ),
         Positioned.fill(child: placed),
       ],
+    );
+    // A phone has no Escape to catch, and focus handed back to the composer
+    // would raise the keyboard over the picker sheet.
+    if (_touch) return layer;
+    // On desktop a kept preview takes focus, so its Escape reaches neither the
+    // edit box under it nor anything else focus would hand the key to.
+    return FocusScope(
+      child: Focus(
+        autofocus: true,
+        onKeyEvent: (_, event) {
+          if (event is! KeyDownEvent ||
+              event.logicalKey != LogicalKeyboardKey.escape) {
+            return KeyEventResult.ignored;
+          }
+          onDismiss();
+          return KeyEventResult.handled;
+        },
+        child: layer,
+      ),
     );
   }
 }

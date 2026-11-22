@@ -255,6 +255,21 @@ shoots, then lets go: for what shows only while held (the picker's hold-to-previ
 `long_press` cannot catch because it releases before the next step. `ui158_desktop.json` and
 `ui158_mobile.json` use it.
 
+**`drag_shots`** (#158 review, 2026-11-22): a start point (`of` + `align` + `dx`/`dy`, or `x`/`y`),
+`move_dx`/`move_dy`, `steps` (default 10), `shot` (name prefix: `<shot>-NN` after each move),
+`frames`. One MOUSE drag in steps with a shot after every move, then let go: a scrollbar thumb drag
+frame by frame. `drag_at` cannot do it: its `dx`/`dy` are both the start offset and the delta, and it
+shoots only at the end.
+
+**`name_color`** (#140 review): `field` (`1:rrggbb[,rrggbb...]`) set on the profile draft as if
+picked; Settings > Profile's `text:Save` then saves it. The editor offers only its swatches and hue
+bar, so a reported colour such as #C92222 is reachable only this way.
+
+**`seed_sticker`** (`seed`) and **`seed_emote`** (`server`, `name`, a server we own) save a
+generated picture as Upload in the sticker tab and Server settings' Add emote do
+(`probe_link_seed.dart`), so a picker has a sticker and a server emote to hold without a file
+picker.
+
 **`drag_at`** (2026-09-24): `x`, `y`, `dx`, `dy`, `duration_ms` (default 400), `frames`. A timed drag
 (`tester.timedDragFrom`) from a fixed POINT rather than a target's centre, for gestures that care
 where they start: the iOS back swipe must begin in the 20 px strip on the screen's left edge. Also

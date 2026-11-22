@@ -539,6 +539,8 @@ class _MediaViewerViewState extends ConsumerState<MediaViewerView>
     if (event is! KeyDownEvent) return false;
     if (!mounted || ModalRoute.of(context)?.isCurrent != true) return false;
     if (ref.read(keybindCaptureActiveProvider)) return false;
+    // A kept sticker preview over the viewer's reaction picker owns Escape.
+    if (OverlayHosts.keysHeld) return false;
     final hk = HardwareKeyboard.instance;
     final key = event.logicalKey;
 

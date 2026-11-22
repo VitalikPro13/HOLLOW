@@ -144,6 +144,8 @@ class _CallStageState extends ConsumerState<CallStage> {
     if (event is! KeyDownEvent) return false;
     if (!mounted || ModalRoute.of(context)?.isCurrent != true) return false;
     if (ref.read(keybindCaptureActiveProvider)) return false;
+    // A raw host that owns the keyboard (a kept preview) takes Escape first.
+    if (OverlayHosts.keysHeld) return false;
     if (event.logicalKey == LogicalKeyboardKey.escape &&
         !keyBelongsToFocusedIme(event)) {
       _close();

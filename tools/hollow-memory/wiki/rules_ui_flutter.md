@@ -83,6 +83,13 @@ guard catches the breakage, this page says why. Mobile-only UI rules are in
   cell's actions sit under a KEPT preview on a phone and in the right-click menu on desktop, and
   the preview media go through the cell's own image paths. A new picker cell joins it, never a
   local long-press menu. Wiki `ui_message_bubbles` "Hold to preview".
+- A raw host that takes keys (a kept preview) takes FOCUS and handles them in its own
+  `Focus`, never through a `HardwareKeyboard` handler (Flutter runs every handler beside
+  focus, so the edit box under it got the Escape too), and registers with
+  `OverlayHosts.register(..., holdsKeys: true)`. A screen-level `HardwareKeyboard` handler
+  (media viewer, call stage) returns false while `OverlayHosts.keysHeld`; a new one does the
+  same. `expression_preview_test` "Escape on a kept preview does not also reach the focused
+  widget", `media_viewer_test` "escape stays with a host that holds the keyboard".
 - The chat scrollbar (`ChatScrollRail`) is sized from MEASURED row heights, never from the
   count of visible rows, and a thumb drag scrolls by pixels (#158: a narrow voice-room chat's
   thumb resized and the list flicked under a still pointer). Wiki `ui_chat_pane_shared`.
