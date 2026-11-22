@@ -253,7 +253,7 @@ class _HomeGreetingState extends ConsumerState<HomeGreeting> {
 
   /// One wake-up at the next block boundary, never a periodic clock.
   void _schedule() {
-    final now = DateTime.now();
+    final now = greetingNow();
     _timer = Timer(nextGreetingChange(now).difference(now), () {
       if (!mounted) return;
       setState(() {});
@@ -277,7 +277,7 @@ class _HomeGreetingState extends ConsumerState<HomeGreeting> {
                 .select((p) => chosenNameForPeer(p[localId], localId)))) ??
         kNamelessGreeting;
     final opening =
-        widget.firstRun ? 'Welcome to Hollow' : greetingFor(DateTime.now());
+        widget.firstRun ? 'Welcome to Hollow' : greetingFor(greetingNow());
     final full = '$opening, $name';
     final style = HollowTypography.heading.copyWith(color: hollow.textPrimary);
     Widget line(String text) => Semantics(

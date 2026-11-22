@@ -1,3 +1,12 @@
+import 'package:flutter/foundation.dart';
+
+/// Pins Home's clock in tests, so every greeting is reached at any hour.
+@visibleForTesting
+DateTime Function()? debugGreetingClock;
+
+/// The time Home's greeting reads.
+DateTime greetingNow() => (debugGreetingClock ?? DateTime.now)();
+
 /// Home's title, by the local clock: night until 6, morning until 12,
 /// afternoon until 18, evening after.
 String greetingFor(DateTime now) {

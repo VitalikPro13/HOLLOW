@@ -142,20 +142,27 @@ void main() {
     });
 
     // Review L1: the phone header sheds the name before it cuts the
-    // greeting; a wide window keeps the whole line.
-    for (final (width, full) in [(320.0, false), (700.0, true)]) {
-      testWidgets('the greeting at $width wide ${full ? 'keeps' : 'sheds'} '
-          'the name', (tester) async {
-        await pumpHollowMobile(tester, viewportSize: Size(width, 800));
-        final text = tester.widget<Text>(find.descendant(
-            of: find.byType(HomeGreeting), matching: find.byType(Text)));
-        final greeting = greetingFor(DateTime.now());
-        if (full) {
-          expect(text.data, startsWith('$greeting, '));
-        } else {
-          expect(text.data, greeting);
-        }
-      });
+    // greeting; a wide window keeps the whole line. Every greeting at a pinned
+    // hour: the test font draws each glyph as a fontSize square, so "Good
+    // afternoon, Kind Stranger" needs 580 px and only fits from about 740 px.
+    for (final hour in [3, 9, 15, 21]) {
+      for (final (width, full) in [(320.0, false), (800.0, true)]) {
+        testWidgets('the greeting at $hour:00, $width wide, '
+            '${full ? 'keeps' : 'sheds'} the name', (tester) async {
+          final at = DateTime(2026, 11, 22, hour);
+          debugGreetingClock = () => at;
+          addTearDown(() => debugGreetingClock = null);
+          await pumpHollowMobile(tester, viewportSize: Size(width, 800));
+          final text = tester.widget<Text>(find.descendant(
+              of: find.byType(HomeGreeting), matching: find.byType(Text)));
+          final greeting = greetingFor(at);
+          if (full) {
+            expect(text.data, startsWith('$greeting, '));
+          } else {
+            expect(text.data, greeting);
+          }
+        });
+      }
     }
 
     testWidgets('can cycle through all tabs and return to Chats',
