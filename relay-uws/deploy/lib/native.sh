@@ -41,8 +41,9 @@ SYS_MODULE=/sys/module
 RUNTIME_PACKAGES="openssl ca-certificates curl jq"
 
 # The libraries the ready-made programs link to (scripts/build_relay_binaries.sh
-# refuses a build whose programs link to any other set).
-PREBUILT_NEEDS="libssl.so.3 libcrypto.so.3 libsodium.so.23 libz.so.1 libstdc++.so.6 libm.so.6
+# refuses a build whose programs link to any other set). Since 0.14.3 the
+# relay carries libsodium inside it, so no libsodium soname is named here.
+PREBUILT_NEEDS="libssl.so.3 libcrypto.so.3 libz.so.1 libstdc++.so.6 libm.so.6
 libgcc_s.so.1 libc.so.6"
 # The ready-made forwarder's own share of them. Where only the relay's are
 # missing, the signed forwarder is installed and the relay is built here.
@@ -50,7 +51,8 @@ FORWARDER_NEEDS="libcrypto.so.3 libgcc_s.so.1 libm.so.6 libc.so.6"
 
 # Each library by its exact soname, with the packages that hold that version on
 # Ubuntu and Debian. Never a newer soname's package: a program built for
-# libsodium.so.23 cannot load libsodium.so.26 (#153).
+# libsodium.so.23 cannot load libsodium.so.26 (#153). The libsodium names stay
+# for relays built here and for the ready-made ones up to 0.14.2.
 LIB_PACKAGES="libsodium.so.23=libsodium23 libsodium.so.26=libsodium26
 libssl.so.3=libssl3t64,libssl3 libcrypto.so.3=libssl3t64,libssl3 libssl.so.4=libssl4
 libcrypto.so.4=libssl4 libz.so.1=zlib1g libzstd.so.1=libzstd1 libstdc++.so.6=libstdc++6

@@ -7,10 +7,14 @@
 #   bash scripts/build_relay_binaries.sh --check-only    (only the tree checks below)
 #   bash scripts/build_relay_binaries.sh --stage-setup <repo> <dir> | --pack <dir> <out.tar.gz>
 #                                                        (the two packing steps alone, for tests)
+#   bash scripts/build_relay_binaries.sh --check-needed <native.sh> [--list NAME] <soname...> | --check-notices <dir>
+#                                        | --check-sodium <libsodium-dev version>
+#                                                        (the build's library, notices and libsodium checks alone, for tests)
 #
-# Builds hollow-relay (relay-uws, C++) and hollow-forwarder (rust/hollow_core
-# --features forwarder) in an Ubuntu 22.04 container (scripts/relay_binaries.Dockerfile),
-# so they need nothing newer than glibc 2.35; aarch64 is cross-compiled. Packs
+# Builds hollow-relay (relay-uws, C++, libsodium linked in) and hollow-forwarder
+# (rust/hollow_core --features forwarder) in an Ubuntu 22.04 container
+# (scripts/relay_binaries.Dockerfile), so they need nothing newer than glibc
+# 2.35; aarch64 is cross-compiled. Packs
 #   DIR/hollow-relay-<version>[-b<N>]-linux-<arch>.tar.gz
 # each holding hollow-relay, hollow-forwarder, VERSION and the setup's own copy
 # under setup/ (install.sh, deploy/ and the push sender's files, what
@@ -92,7 +96,26 @@ needed_known() {
   done
 }
 
+# <stage>: the release carries the license notices of what is linked into its
+# programs (libsodium, uWebSockets, uSockets, JSON for Modern C++), as a file
+# of the setup's copy: the tarball's root holds only the programs and VERSION.
+NOTICES=setup/deploy/THIRD_PARTY_NOTICES.txt
+notices_ok() {
+  local f=$1/$NOTICES part
+  [ -f "$f" ] || { echo "$f is missing" >&2; return 1; }
+  for part in "libsodium" "License: ISC" "Colin Percival" "uWebSockets" "uSockets" "Apache License" "JSON for Modern C++"; do
+    grep -qF -- "$part" "$f" || { echo "$f does not name $part" >&2; return 1; }
+  done
+}
+
+# Ubuntu 22.04's libsodium with the crypto_core_ed25519_is_valid_point fix (CVE-2025-69277).
+SODIUM_FLOOR=1.0.18-1ubuntu0.22.04.1
+# <version>: a libsodium-dev the relay may link in.
+sodium_ok() { [ -n "$1" ] && dpkg --compare-versions "$1" ge "$SODIUM_FLOOR"; }
+
 case "${1:-}" in
+  --check-sodium) sodium_ok "${2:-}"; exit $? ;;
+  --check-notices) notices_ok "${2:?stage dir}"; exit $? ;;
   --stage-setup) stage_setup "${2:?repo}" "${3:?dir}"; exit $? ;;
   --check-needed) shift; needed_known "$@"; exit $? ;;
   --pack) pack_tarball "${2:?dir}" "${3:?out}"; exit $? ;;
@@ -166,8 +189,19 @@ build_one() {
 
   echo "==> [$a] hollow-relay"
   rm -rf "$relay_dir"
-  cmake -S /src/relay-uws -B "$relay_dir" -DCMAKE_BUILD_TYPE=Release "${cmake_cross[@]}" >/dev/null
+  # libsodium linked in, so the relay starts on systems with another libsodium
+  # soname (Ubuntu 26.10, #153); needed_known below refuses a relay that still
+  # links it as a shared library.
+  cmake -S /src/relay-uws -B "$relay_dir" -DCMAKE_BUILD_TYPE=Release -DHOLLOW_STATIC_SODIUM=ON "${cmake_cross[@]}" >/dev/null
   cmake --build "$relay_dir" -j"${jobs:-$(nproc)}" >/dev/null
+  # The archive's fixes reach a self-hoster only through a release, so a builder
+  # image older than the last libsodium security update is refused.
+  local deb_arch=amd64 sodium_version
+  [ "$a" = aarch64 ] && deb_arch=arm64
+  sodium_version=$(dpkg-query -W -f='${Version}' "libsodium-dev:$deb_arch")
+  sodium_ok "$sodium_version" ||
+    { echo "ERROR: the builder image has libsodium-dev $sodium_version ($a), older than $SODIUM_FLOOR. Run with --clean once, then build again." >&2; exit 1; }
+  echo "    libsodium linked in: $(sed -n 's/^HOLLOW_SODIUM_ARCHIVE:FILEPATH=//p' "$relay_dir/CMakeCache.txt"), libsodium-dev $sodium_version"
 
   echo "==> [$a] hollow-forwarder"
   CARGO_TARGET_DIR=/work/cargo-target CARGO_PROFILE_RELEASE_DEBUG=0 CARGO_PROFILE_RELEASE_STRIP=symbols \
@@ -182,6 +216,7 @@ build_one() {
   printf 'version=%s\nbuild=%s\ncommit=%s\n' "$VERSION" "$build" "$RELAY_COMMIT" > "$stage/VERSION"
   chmod 0644 "$stage/VERSION"
   stage_setup /src "$stage/setup"
+  notices_ok "$stage" || { echo "ERROR: the setup copy ($a) lacks the notices of what the programs link in" >&2; exit 1; }
 
   # Built on 22.04, so nothing should need a newer glibc; this catches a base
   # image change before a self-hoster's box does.

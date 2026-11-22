@@ -137,15 +137,14 @@ security updates from the base's security archive, which one of the system's
 software sources has to serve (the check says when none does). Removing the
 relay takes that update setting back out.
 
-On Ubuntu 26.10 the ready-made relay can't run. It is built for libsodium
-1.0.18 (`libsodium.so.23`), and 26.10 only offers a newer one. The setup checks
-the download before it installs anything. It installs the ready-made media
-forwarder, which runs there, and builds only the relay from your copy of the
-repository, which takes a few minutes. It does that only when the relay's
-sources in your copy are exactly the release's, with no changes of your own.
-Otherwise it builds both programs here, and the forwarder takes up to an hour
-or two. Updates on 26.10 come from your copy too, as in [Updates](#updates).
-Until a release newer than 0.14.2 is out, use the main branch on 26.10, as in
+From the release after 0.14.2, the ready-made relay and media forwarder both
+run on Ubuntu 26.10. That relay has libsodium built in, so it no longer asks for
+`libsodium.so.23`, which 26.10 doesn't offer. The relay in 0.14.2 and older
+does ask for it and can't run there. With 0.14.2 the setup installs the
+ready-made forwarder and builds only the relay from your copy of the
+repository, and only when the relay's sources in your copy are exactly the
+release's. The setup checks every download before it installs anything. Until
+a release newer than 0.14.2 is out, use the main branch on 26.10, as in
 [On Ubuntu 26.10](#on-ubuntu-2610).
 
 We recommend Debian 12 or 13, because it is lighter. On the same small test
@@ -1236,10 +1235,13 @@ release tag, not on a branch, so `git pull` stops there with an error.
 release newer than 0.14.2 is out, update from main as in
 [On Ubuntu 26.10](#on-ubuntu-2610).
 
-Where the setup builds only the relay, as on Ubuntu 26.10, run updates from your
-copy with the commands above. **Update to version …** in
-`sudo hollow-relay-setup` has no relay sources to build from, so it stops
-without installing anything and says so.
+Where the setup built only the relay beside the ready-made forwarder, as on
+Ubuntu 26.10 with 0.14.2, **Update to version …** in `sudo hollow-relay-setup`
+installs the next release's ready-made relay and forwarder together, since that
+relay runs on 26.10. From then on updates work as they do everywhere else. An
+update to a release whose relay still can't run here has to come from your copy
+with the commands above. The menu's copy has no relay sources to build from, so
+it stops without installing anything and says so.
 
 The status screen then offers the rebuild. A Docker rebuild restarts the relay
 container, which drops what it holds in memory.
@@ -1434,6 +1436,7 @@ own firewall in front of the server, open them there too.
 |---|---|
 | The programs | `/usr/local/bin/hollow-relay`, `/usr/local/bin/hollow-forwarder` |
 | The setup's own copy | `/usr/local/lib/hollow-relay/installer`, run as `sudo hollow-relay-setup` |
+| Notices for what the ready-made relay has built in | `/usr/local/lib/hollow-relay/installer/deploy/THIRD_PARTY_NOTICES.txt` |
 | Your answers, no secrets | `/etc/hollow-relay/install.conf` |
 | Relay settings, keys, the denylist and secrets | `/etc/hollow-relay/` |
 | TURN, push, forwarder, DuckDNS settings | `/etc/hollow-turn/`, `/etc/hollow-push/`, `/etc/hollow-forwarder/`, `/etc/hollow-duckdns/` |
@@ -1578,9 +1581,14 @@ Notes for people who already run a relay, newest first.
 
 ### 0.14
 
-- The setup runs on Ubuntu 25.10, 26.04 and 26.10. On 26.10 it installs the
-  ready-made forwarder and builds only the relay, because the ready-made relay
-  can't load its libsodium.
+- The setup runs on Ubuntu 25.10, 26.04 and 26.10. In 0.14.2 the ready-made
+  relay can't load its libsodium on 26.10, so there the setup installs the
+  ready-made forwarder and builds only the relay.
+- From the release after 0.14.2 the ready-made relay has libsodium built in, so
+  it runs on 26.10 too. A relay the setup built beside the ready-made forwarder
+  turns into the ready-made pair at the next update from the menu. The
+  libsodium license notice ships with the setup's copy, in
+  `deploy/THIRD_PARTY_NOTICES.txt`.
 - A forwarder built from source installs again. The setup in 0.14.2 stopped at
   the end of that build.
 - check-host says when the relay or the forwarder is missing a library, and the

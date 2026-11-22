@@ -32,11 +32,26 @@ target_include_directories(hollow-relay PRIVATE
     uSockets/src
     src
 )
+# The signed release links libsodium's archive, so one relay built on Ubuntu
+# 22.04 also runs where only a newer libsodium soname exists (26.10 has only
+# libsodium.so.26, #153). A build here keeps the system's shared libsodium.
+option(HOLLOW_STATIC_SODIUM "Link libsodium statically (the signed release build)" OFF)
+if(HOLLOW_STATIC_SODIUM)
+    find_library(HOLLOW_SODIUM_ARCHIVE NAMES libsodium.a)
+    if(NOT HOLLOW_SODIUM_ARCHIVE)
+        message(FATAL_ERROR "HOLLOW_STATIC_SODIUM is on, but no libsodium.a was found (install libsodium-dev)")
+    endif()
+    message(STATUS "libsodium: ${HOLLOW_SODIUM_ARCHIVE} (static)")
+    set(HOLLOW_SODIUM ${HOLLOW_SODIUM_ARCHIVE})
+else()
+    set(HOLLOW_SODIUM sodium)
+endif()
+
 target_link_libraries(hollow-relay PRIVATE
     uSockets
     ssl
     crypto
-    sodium
+    ${HOLLOW_SODIUM}
     z
     pthread
 )

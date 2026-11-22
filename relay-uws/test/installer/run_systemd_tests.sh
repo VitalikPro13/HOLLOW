@@ -25,7 +25,10 @@
 # the official signed forwarder is fetched and kept and only the relay is built
 # (BOX_MIXED=0 skips it, BOX_ONLY_MIXED=1 runs nothing else). BOX_ONLY_FWDSRC=1 runs only that first install with the
 # forwarder built from source as well, which takes an hour or two and is in
-# no other run. BOX_TAG names the images.
+# no other run. BOX_OFFICIAL=<folder> holds a release build's tarballs
+# (scripts/build_relay_binaries.sh --out): the stock boxes get its programs for
+# their machine, the mixed run's last update installs them, and a first install
+# takes them whole (BOX_ONLY_OFFICIAL=1 runs nothing else). BOX_TAG names the images.
 set -uo pipefail
 
 T=$(cd "$(dirname "$0")" && pwd)
@@ -128,6 +131,15 @@ stock_box() {
     echo "--- fresh_box_test.sh in a stock $img box"
     start_box "$name" "$stag" || { echo "FAIL  the stock $img box did not start"; total_fail=1; return 0; }
     docker run --rm --entrypoint cat "$rtag" /opt/hollow-test-relay/hollow-relay | docker exec -i "$name" sh -c 'cat >/root/relay.bin && chmod 755 /root/relay.bin'
+    if [ -n "${BOX_OFFICIAL:-}" ]; then
+        local tb
+        tb=$(ls "$BOX_OFFICIAL"/hollow-relay-*-linux-"$(docker exec "$name" uname -m)".tar.gz 2>/dev/null | head -n 1)
+        if [ -z "$tb" ]; then
+            echo "FAIL  $BOX_OFFICIAL has no release build for this box's machine"; total_fail=1
+        else
+            docker exec -i "$name" sh -c 'mkdir -p /root/official && tar -C /root/official -xzf - hollow-relay hollow-forwarder' <"$tb"
+        fi
+    fi
     docker exec -e HOLLOW_INSTALLER_TEST_BOX=1 -e FRESH_ONLY="${FRESH_ONLY:-}" "$name" bash /src/relay-uws/test/installer/fresh_box_test.sh || total_fail=1
     [ "${KEEP:-0}" = 1 ] || docker rm -fv "$name" >/dev/null
 }
@@ -145,6 +157,13 @@ mixed_box() {
     [ "${BOX_MIXED:-1}" = 0 ] && return 0
     echo "--- the same, with a release whose forwarder runs here and whose relay does not"
     FRESH_ONLY=mixed BOX_STOCK=1 stock_box "$@"
+}
+
+# official_box <image> <box tag> <slug>: a first install of the release build's programs.
+official_box() {
+    [ -n "${BOX_OFFICIAL:-}" ] || return 0
+    echo "--- the same, with the release build's programs"
+    FRESH_ONLY=official BOX_STOCK=1 stock_box "$@"
 }
 
 # fwdsrc_box <image> <box tag> <slug>: the same with the forwarder, built from
@@ -173,6 +192,7 @@ EOF
     [ "${BOX_ONLY_LIBS:-0}" = 1 ] && { libs_box "$img" "$tag" "$slug"; continue; }
     [ "${BOX_ONLY_FWDSRC:-0}" = 1 ] && { fwdsrc_box "$img" "$tag" "$slug"; continue; }
     [ "${BOX_ONLY_MIXED:-0}" = 1 ] && { mixed_box "$img" "$tag" "$slug"; continue; }
+    [ "${BOX_ONLY_OFFICIAL:-0}" = 1 ] && { official_box "$img" "$tag" "$slug"; continue; }
     dns=()
     [ -n "${BOX_DNS:-}" ] && dns=(--dns "$BOX_DNS")
     docker run -d --name "$name" --privileged --cgroupns=private --tmpfs /run --tmpfs /run/lock \
@@ -216,6 +236,7 @@ EOF
     stock_box "$img" "$tag" "$slug"
     libs_box "$img" "$tag" "$slug"
     mixed_box "$img" "$tag" "$slug"
+    official_box "$img" "$tag" "$slug"
 done
 
 echo ""

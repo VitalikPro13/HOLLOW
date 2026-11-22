@@ -6,6 +6,7 @@
 #                                 the live tests also zlib and the uWebSockets submodules)
 #   SANITIZE=1 bash run_tests.sh
 #   RELAY_TESTS_KEEP=<dir>   build and log there and keep it (the live clients' logs too)
+#   RELAY_SODIUM=static      link libsodium.a, as the signed release relay does
 cd "$(dirname "$0")" || exit 1
 out=${RELAY_TESTS_KEEP:-$(mktemp -d)}
 mkdir -p "$out"
@@ -34,7 +35,10 @@ run() {
         fail=1
     fi
 }
-LIBS="-lsodium -lcrypto"
+SODIUM_LIB=-lsodium
+[ "${RELAY_SODIUM:-}" = static ] && SODIUM_LIB=-l:libsodium.a
+export SODIUM_LIB
+LIBS="$SODIUM_LIB -lcrypto"
 run test_auth_frame
 run test_binary_frame
 run test_breaker
