@@ -500,25 +500,36 @@ pub(crate) fn own_room(local_master: &str) -> String {
     super::dm_room::dm_room_code(local_master, local_master)
 }
 
-/// `peer` just appeared to us in `room`: if our own roster removed it, hand it that roster
-/// there. The notice of the removal or of its first sighting is lost when it left before
-/// we saw the device in a room, or went into our inbox just as the relay took it away.
+/// `peer` just appeared to us in `room`: if our own roster removed it, or it is in our
+/// own room and our roster does not count it (a recovery left it out, it waits to join,
+/// or it is newer than what we hold), hand it that roster there. The notice of a removal
+/// or a recovery is lost when the device was away, left before we saw it in a room, or
+/// went into our inbox just as the relay took it away, and the mailbox replays only to
+/// members. Only holders of our master key can name our own room, and a device we place
+/// with another identity, or another identity removed, hears nothing there.
 pub(crate) fn tell_removed_device_in_room(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     local_master: &str,
+    local_device: &str,
     peer: &str,
     room: &str,
     db_path: &str,
     db_passphrase: &str,
 ) {
-    if !super::resolver::is_revoked(peer) || super::resolver::is_bare_master(peer) {
+    let in_own_room = room == own_room(local_master);
+    if peer == local_device || super::resolver::is_bare_master(peer) || !(in_own_room || super::resolver::is_revoked(peer)) {
         return;
     }
     let Some((roster, state)) = own(local_master, db_path, db_passphrase) else { return };
-    if !state.removed.contains_key(peer) {
+    let theirs = super::resolver::resolve(peer);
+    // Another identity's device, its single-device master id, or a device it removed.
+    let elsewhere = (theirs != peer && theirs != local_master)
+        || super::resolver::holds_roster_of(peer)
+        || super::resolver::is_revoked(peer);
+    if !state.removed.contains_key(peer) && !(in_own_room && !state.is_member(peer) && !elsewhere) {
         return;
     }
-    hollow_log!("[HOLLOW-ROSTER] Removed device {peer} appeared in {room}: handing it our roster");
+    hollow_log!("[HOLLOW-ROSTER] Device {peer} our roster does not count appeared in {room}: handing it our roster");
     super::crypto_handler::send_message_to_peer_in_room(
         ws_cmd_tx, room, peer, super::types::HavenMessage::RosterNotice { roster },
     );

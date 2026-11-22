@@ -4335,7 +4335,7 @@ async fn run_event_loop(
                         let is_fwd_room = is_forwarder_room(&room);
                         if arrived_here && !is_fwd_room && peer_id != device_peer_id {
                             super::roster_book::tell_removed_device_in_room(
-                                &ws_cmd_tx, &local_peer_str, &peer_id, &room, &db_path, &db_passphrase,
+                                &ws_cmd_tx, &local_peer_str, &device_peer_id, &peer_id, &room, &db_path, &db_passphrase,
                             );
                         }
                         if is_fwd_room && peer_id != local_peer_str && peer_id != device_peer_id {
@@ -4960,7 +4960,7 @@ async fn run_event_loop(
                             }
                             for peer in &arrived {
                                 super::roster_book::tell_removed_device_in_room(
-                                    &ws_cmd_tx, &local_peer_str, peer, &room, &db_path, &db_passphrase,
+                                    &ws_cmd_tx, &local_peer_str, &device_peer_id, peer, &room, &db_path, &db_passphrase,
                                 );
                             }
                         }
@@ -14321,8 +14321,12 @@ async fn handle_incoming_request_inner(
                     anchored: server_states.get(&server_id).is_some_and(|s| s.anchor() != crate::crdt::server_state::Anchor::Legacy),
                 };
                 let mut welcome_leaf: Option<crate::crypto::LeafIdentity> = None;
+                let mut seats_unplaced_own = false;
                 let judged = mls_mgr.join_from_welcome_judged(&group_key, &welcome_bytes, |facts| {
                     welcome_leaf = facts.sender.bound().cloned();
+                    seats_unplaced_own = facts.leaves.iter().filter_map(|l| l.bound()).any(|l| {
+                        l.master == master_peer_str && l.device != device_peer_id && super::mls_authority::refused(l)
+                    });
                     let asked = super::mls_authority::asked_for_leaf(
                         &group_key, &server_id, welcome_leaf.as_ref().map(|s| s.master.as_str()), &requests,
                     );
@@ -14341,6 +14345,13 @@ async fn handle_incoming_request_inner(
                         // catches up; its KeyPackage is ours again meanwhile.
                         persist_mls_state(mls_mgr, crypto_store);
                         hollow_log!("[HOLLOW-MLS] Holding Welcome for {group_key} from {peer_str}: {reason}");
+                        if seats_unplaced_own {
+                            super::roster_reach::ask_own_roster(
+                                ws_cmd_tx, master_peer_str, device_peer_id, peer_str,
+                                &|to| social::profile_audience(server_states, master_peer_str, to, db_path, db_passphrase),
+                                db_path, db_passphrase,
+                            );
+                        }
                         return;
                     }
                     Ok(crate::crypto::Verdict::Refuse(reason)) => {
