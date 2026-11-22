@@ -1197,6 +1197,14 @@ t_prebuilt_needs_build_check() {
     # The signed build asks for the archive, a build here keeps the shared library.
     has "the release build links libsodium in" "$(cat "$b")" "-DHOLLOW_STATIC_SODIUM=ON"
     has "a build here does not" "$(cat "$RELAY/CMakeLists.txt")" 'option(HOLLOW_STATIC_SODIUM "Link libsodium statically (the signed release build)" OFF)'
+    # the_release_links_a_patched_libsodium: its fixes reach boxes only through a release.
+    no_ bash "$b" --check-sodium 1.0.18-1build2
+    no_ bash "$b" --check-sodium ""
+    yes_ bash "$b" --check-sodium 1.0.18-1ubuntu0.22.04.1
+    yes_ bash "$b" --check-sodium 1.0.18-1ubuntu0.22.04.2
+    # Each machine's build runs both checks.
+    has "the build judges the libsodium it links in" "$(cat "$b")" 'sodium_ok "$sodium_version" ||'
+    has "and the notices it ships" "$(cat "$b")" 'notices_ok "$stage" ||'
     # the_release_carries_the_notices_of_what_it_links_in (#153)
     rm -rf "$TMP/notices_stage"
     yes_ bash "$b" --stage-setup "$REPO" "$TMP/notices_stage/setup"

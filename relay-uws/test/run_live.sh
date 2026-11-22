@@ -103,13 +103,13 @@ if wanted breaker_shadow; then
     shadow_built=1
 fi
 g++ -std=c++17 $flags -I../src test_relay_live.cpp ../src/crypto.cpp \
-    -o "$dir/client" -lssl -lcrypto -lsodium > "$dir/client.build" 2>&1 &
+    -o "$dir/client" -lssl -lcrypto "${SODIUM_LIB:--lsodium}" > "$dir/client.build" 2>&1 &
 pids+=($!)
 names+=(client)
 wait_all
 for v in main shadow; do
     [ $v = shadow ] && [ $shadow_built = 0 ] && continue
-    g++ $flags "${objects[@]}" "$obj/ws_handler_$v.o" -o "$dir/relay_$v" -lssl -lcrypto -lsodium -lz -pthread \
+    g++ $flags "${objects[@]}" "$obj/ws_handler_$v.o" -o "$dir/relay_$v" -lssl -lcrypto "${SODIUM_LIB:--lsodium}" -lz -pthread \
         > "$dir/link_$v.build" 2>&1 || build_fail "link $v" "$dir/link_$v.build"
 done
 openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj /CN=relay.live.test \
@@ -117,6 +117,14 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj /CN=relay.live.test \
 
 domain=relay.live.test
 fail=0
+if [ "${SODIUM_LIB:-}" = -l:libsodium.a ]; then
+    if readelf -d "$dir/relay_main" | grep -q 'libsodium'; then
+        echo "FAIL the live relay links libsodium as a shared library"
+        fail=1
+    else
+        echo "pass the live relay links libsodium in, as the release relay does"
+    fi
+fi
 # The repaired TLS layer over real TLS sessions, on the relay's own uSockets objects.
 us_objects=()
 for f in bsd context loop socket eventing_epoll_kqueue eventing_gcd eventing_libuv sni_tree; do us_objects+=("$obj/us_$f.o"); done

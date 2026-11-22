@@ -8,7 +8,8 @@
 #   bash scripts/build_relay_binaries.sh --stage-setup <repo> <dir> | --pack <dir> <out.tar.gz>
 #                                                        (the two packing steps alone, for tests)
 #   bash scripts/build_relay_binaries.sh --check-needed <native.sh> [--list NAME] <soname...> | --check-notices <dir>
-#                                                        (the build's library and notices checks alone, for tests)
+#                                        | --check-sodium <libsodium-dev version>
+#                                                        (the build's library, notices and libsodium checks alone, for tests)
 #
 # Builds hollow-relay (relay-uws, C++, libsodium linked in) and hollow-forwarder
 # (rust/hollow_core --features forwarder) in an Ubuntu 22.04 container
@@ -107,7 +108,13 @@ notices_ok() {
   done
 }
 
+# Ubuntu 22.04's libsodium with the crypto_core_ed25519_is_valid_point fix (CVE-2025-69277).
+SODIUM_FLOOR=1.0.18-1ubuntu0.22.04.1
+# <version>: a libsodium-dev the relay may link in.
+sodium_ok() { [ -n "$1" ] && dpkg --compare-versions "$1" ge "$SODIUM_FLOOR"; }
+
 case "${1:-}" in
+  --check-sodium) sodium_ok "${2:-}"; exit $? ;;
   --check-notices) notices_ok "${2:?stage dir}"; exit $? ;;
   --stage-setup) stage_setup "${2:?repo}" "${3:?dir}"; exit $? ;;
   --check-needed) shift; needed_known "$@"; exit $? ;;
@@ -117,8 +124,6 @@ RUST_VERSION=1.95.0
 # Named after the Dockerfile's hash, so an edited Dockerfile never reuses an old image.
 IMAGE="hollow-relay-builder:jammy-rust$RUST_VERSION-$(sha256sum "$SCRIPT_DIR/relay_binaries.Dockerfile" | cut -c1-12)"
 GLIBC_FLOOR=2.35
-# Ubuntu 22.04's libsodium with the crypto_core_ed25519_is_valid_point fix (CVE-2025-69277).
-SODIUM_FLOOR=1.0.18-1ubuntu0.22.04.1
 
 arch=all
 build=0
@@ -194,7 +199,7 @@ build_one() {
   local deb_arch=amd64 sodium_version
   [ "$a" = aarch64 ] && deb_arch=arm64
   sodium_version=$(dpkg-query -W -f='${Version}' "libsodium-dev:$deb_arch")
-  dpkg --compare-versions "$sodium_version" ge "$SODIUM_FLOOR" ||
+  sodium_ok "$sodium_version" ||
     { echo "ERROR: the builder image has libsodium-dev $sodium_version ($a), older than $SODIUM_FLOOR. Run with --clean once, then build again." >&2; exit 1; }
   echo "    libsodium linked in: $(sed -n 's/^HOLLOW_SODIUM_ARCHIVE:FILEPATH=//p' "$relay_dir/CMakeCache.txt"), libsodium-dev $sodium_version"
 
