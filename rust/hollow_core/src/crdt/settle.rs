@@ -711,7 +711,7 @@ pub(crate) mod tests {
     /// stores all of it at 3,000 (cp1's first fold, so "not sure" reads T = 3,000), the
     /// second rename at 4,000. With `forged`, the laptop also mints a second founding op
     /// of the same id, clocked before the first and named "stolen", first stored here at
-    /// the time it names (none: no record of it).
+    /// the time it names (none: no record of it), as a build before HOL-SEC-222 kept it.
     fn founded_by_the_laptop(forged: Option<Option<u64>>) -> (ServerState, SeenAt) {
         let (before, _) = rosters();
         let r_pub = before.r_pub.clone();
@@ -737,7 +737,10 @@ pub(crate) mod tests {
             second.sign(&master, &pk);
             second.sign_device(&laptop_kp);
             phone.ingest_remote(std::slice::from_ref(&second));
-            assert!(phone.op_log.iter().chain(phone.stored.iter().map(|(o, _)| o)).any(|o| o.hlc == second.hlc), "precondition: the phone holds the second founding op");
+            let holds = |s: &ServerState| s.op_log.iter().chain(s.stored.iter().map(|(o, _)| o)).any(|o| o.hlc == second.hlc);
+            assert!(!holds(&phone), "HOL-SEC-222: the door refuses a second founding op");
+            // As a replica that stored it before HOL-SEC-222 still holds it.
+            phone.stored.push((second.clone(), RowKind::Dormant));
             if let Some(at) = stored_at {
                 seen.insert(key(&second), at);
             }
@@ -787,6 +790,55 @@ pub(crate) mod tests {
             assert!(settle_the_laptops_server(&mut phone, &seen).is_some(), "the settling is written ({stored_at:?})");
             assert_eq!(phone.name.read().as_str(), "s", "the later founding op stayed out ({stored_at:?})");
         }
+    }
+
+    /// HOL-SEC-222: the laptop, removed, still holds the master key and mints a second
+    /// founding op of the server the phone founded (clocked before the first, so a fold
+    /// from genesis would take it first, or at the first's own clock). No replica stores
+    /// it: not the founder's, not one folding the log again from genesis, not a fresh one
+    /// handed both in one batch; each stays founded on the first.
+    #[test]
+    fn a_second_founding_op_from_a_removed_device_founds_nothing() {
+        let (before, after) = rosters();
+        let (master, m_id, pk) = keys(OWNER);
+        let (phone, phone_id, _) = keys(PHONE);
+        let (mut owner, founding) =
+            ServerState::found_on("s".into(), m_id, Founder { device_peer_id: &phone_id, device: Some(&phone), r_pub: Some(&before.r_pub) }, master.clone(), pk.clone());
+        judged_by(&mut owner, after.clone());
+        let second = |ms_back: u64| {
+            let mut op = founding.clone();
+            let P::ServerCreated { name, .. } = &mut op.payload else { unreachable!() };
+            *name = "stolen".into();
+            op.hlc.physical_ms -= ms_back;
+            op.sign(&master, &pk);
+            op.sign_device(&keys(LAPTOP).0);
+            op
+        };
+        let holds = |s: &ServerState, op: &CrdtOp| {
+            s.op_log.iter().chain(s.stored.iter().map(|(o, _)| o)).chain(s.held.iter().map(|(o, _)| o)).any(|o| o.content_hash() == op.content_hash())
+        };
+        let founded_on_the_first = |s: &ServerState, what: &str| {
+            assert_eq!(authority::founding_op(s).map(CrdtOp::content_hash), Some(founding.content_hash()), "{what}: founded on another op");
+            assert_eq!(s.name.read().as_str(), "s", "{what}: named by the second founding op");
+        };
+        for ms_back in [10, 0] {
+            let forged = second(ms_back);
+            let out = owner.ingest_remote(std::slice::from_ref(&forged));
+            assert!(!holds(&owner, &forged) && out.rows.is_empty(), "the founder's replica kept a second founding op ({ms_back} ms back)");
+            founded_on_the_first(&owner, "the founder's replica");
+        }
+        let mut replica = device_replica(&owner.server_id, OTHER);
+        judged_by(&mut replica, after.clone());
+        replica.ingest_remote(std::slice::from_ref(&founding));
+        let forged = second(10);
+        replica.ingest_remote(std::slice::from_ref(&forged));
+        assert!(!holds(&replica, &forged), "a replica folding from genesis kept a second founding op");
+        founded_on_the_first(&replica, "a replica folding from genesis");
+        let mut fresh = device_replica(&owner.server_id, OTHER);
+        judged_by(&mut fresh, after);
+        fresh.ingest_remote(&[forged.clone(), founding.clone()]);
+        assert!(!holds(&fresh, &forged), "a fresh replica handed both kept the removed device's");
+        founded_on_the_first(&fresh, "a fresh replica handed both");
     }
 
     #[test]

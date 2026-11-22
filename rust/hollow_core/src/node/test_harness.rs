@@ -72807,3 +72807,84 @@ async fn pr221_expect_settled(settler: &TestNode, server_id: &str, m_id: &str, l
     assert_eq!(state.current_owner().as_deref(), Some(m_id), "the founding op stands");
     assert!(!state.is_member(j_master), "an admission the lost founder made that the settler cannot date before T stayed");
 }
+
+// pr-hol-sec-222
+
+/// HOL-SEC-222: the lost founder D1 ("not sure", T = 0) still holds the master key and
+/// mints second founding ops of its server, clocked before the first; J carries one to
+/// D2 before the removal and one after it. D2 holds no restore point, so its settling
+/// folds from genesis: it stores neither and stays founded on the first, after a restart
+/// too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pr222_a_lost_founders_second_founding_op_changes_nothing_on_a_replica_folding_from_genesis() {
+    use crate::crdt::operations::CrdtPayload as P;
+    use base64::Engine as _;
+    let _g = test_guard();
+    let [m_tag, d1_tag, d2_tag, r_tag, j_tag] = [216u8, 217, 218, 219, 220];
+    let W3c1Cut { relay, master, d1, d2, j, server_id, _tmp } = w3c1_cut_server_with([m_tag, d1_tag, d2_tag, r_tag, j_tag], None, true).await;
+    let m_id = master.peer_id();
+    let (d1_id, d2_id) = (tag_kp(d1_tag).peer_id(), tag_kp(d2_tag).peer_id());
+    relay.set_online(&d2.device_id, true);
+    assert!(wait_until(30, async || d2.live_server_state(&server_id).await.is_some_and(|s| s.is_member(&j.master_id))).await, "precondition: the sibling holds the server");
+    let held = d2.live_server_state(&server_id).await.expect("the sibling holds the server");
+    let founding = held.op_log.iter().find(|o| matches!(o.payload, P::ServerCreated { .. })).cloned().expect("the founding op");
+    let pk = base64::engine::general_purpose::STANDARD.encode(master.public_key_protobuf());
+    let second = |to: &str, ms_back: u64| {
+        let mut op = founding.clone();
+        let P::ServerCreated { name, .. } = &mut op.payload else { unreachable!() };
+        *name = to.into();
+        op.hlc.physical_ms -= ms_back;
+        op.sign(&master, &pk);
+        op.sign_device(&tag_kp(d1_tag));
+        op
+    };
+    // J carries the forged op, then a probe of D2's own: once the probe folds, D2 judged the op.
+    let carry_then_probe = async |forged: &crate::crdt::operations::CrdtOp, probe: &str| {
+        let probe = w3c1_device_op(&server_id, &master, &tag_kp(d2_tag), P::NicknameChanged { peer_id: m_id.clone(), nickname: probe.into() }, 0);
+        carry_as(&j, &d2, crdt_broadcast(&server_id, forged)).await;
+        carry_as(&j, &d2, crdt_broadcast(&server_id, &probe)).await;
+        assert!(
+            wait_until(15, async || d2.live_server_state(&server_id).await.is_some_and(|s| s.op_log.iter().any(|o| o.hlc == probe.hlc))).await,
+            "precondition: the probe after the forged op folded",
+        );
+    };
+    let founded_on_the_first = async |n: &TestNode, forged: &[&crate::crdt::operations::CrdtOp], what: &str| {
+        let s = n.live_server_state(&server_id).await.expect("the node holds the server");
+        assert_eq!(crate::crdt::authority::founding_op(&s).map(|o| o.content_hash()), Some(founding.content_hash()), "{what}: founded on another op");
+        assert_eq!(s.name.read().as_str(), "Cut", "{what}: named by a second founding op");
+        let seen = n.store().op_seen_ms(&server_id).unwrap();
+        for op in forged {
+            assert!(!seen.contains_key(&(op.author.clone(), op.hlc.physical_ms, op.hlc.counter)), "{what}: a second founding op was stored");
+        }
+    };
+
+    let before = second("stolen before", 10);
+    carry_then_probe(&before, "probe 1").await;
+    founded_on_the_first(&d2, &[&before], "before the removal").await;
+
+    relay.set_online(&d1.device_id, false);
+    drop(d1);
+    let roster = d2.store().load_roster(&m_id).ok().flatten().expect("the identity's roster");
+    let mut recovered = roster.clone();
+    recovered
+        .add_phrase_statement(
+            &crate::identity::roster::r_pub_of(&tag_kp(r_tag)),
+            Some(crate::identity::roster::sign_recovery(&master, &tag_kp(r_tag), super::roster_book::now_ms(), std::slice::from_ref(&d2_id), false)),
+            None,
+        )
+        .expect("the phrase signs the recovery");
+    assert!(super::authority_view::hold_own(&d2.store(), &m_id), "nothing held before this change");
+    super::roster_book::note_recovery_lost_since(&d2.store(), &recovered.base(), 0).unwrap();
+    super::roster_book::merge_for_test(&d2.store(), &recovered, &m_id, &d2_id);
+    d2.cmd_tx.send(NodeCommand::RosterChanged { newly_revoked: vec![d1_id.clone()] }).await.unwrap();
+    pr221_expect_settled(&d2, &server_id, &m_id, &d1_id, &j.master_id).await;
+    founded_on_the_first(&d2, &[&before], "the settling").await;
+
+    let after = second("stolen after", 20);
+    carry_then_probe(&after, "probe 2").await;
+    founded_on_the_first(&d2, &[&before, &after], "after the removal").await;
+    let d2 = restart_node(&relay, d2, m_tag, d2_tag).await;
+    assert!(wait_until(30, async || d2.live_server_state(&server_id).await.is_some()).await, "the sibling loads the server again");
+    founded_on_the_first(&d2, &[&before, &after], "after a restart").await;
+}

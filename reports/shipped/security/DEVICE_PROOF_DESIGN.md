@@ -247,7 +247,10 @@ prove the door, and post as the identity through backfill. AR-02 closed the rost
    the key that judges this author) or `ProofLess`.
 4. The CUT is in force once the replica holds any owner-signed `cp_stamped` checkpoint,
    eligible or not, or a founding op that commits to a key. From then on `op_allowed`
-   admits only `Counted` ops; the core drops dominated ops before `op_allowed`.
+   admits only `Counted` ops; the core drops dominated ops before `op_allowed`. The
+   founding op and checkpoints are judged by their own rules instead (a removed founder's
+   founding op still anchors its server), so a replica takes ONE founding op per id: the
+   one it holds, else a counted device's from the batch, never a second (HOL-SEC-222).
 5. Evaluation is stratified (section 10): owner key, owner view, owner endorsements and
    settlings, checkpoint eligibility, base, member views, fold.
 6. Removing a device (section 8):
@@ -843,6 +846,8 @@ checkpoint. Order:
      counts only if its `seen_ms < T` here. The founding op of a server a dropped device
      founded is the exception (HOL-SEC-221): the one first stored here always counts, since
      R stands on it or names its owner; any other founding op of the id keeps the rule.
+     Since HOL-SEC-222 a replica stores no second founding op of an id it holds one of
+     (`fold_remote`, `founded_once`), so only data an older build kept reaches this rule.
    - **Shape** = a child of our CURRENT base (generation plus one, `cp_parent` and
      `cp_lineage` from it, `cp_cut` from it), so it is the greatest eligible checkpoint and
      every checkpoint on its line stays eligible by descent.

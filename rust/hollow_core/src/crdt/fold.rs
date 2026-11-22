@@ -1037,6 +1037,7 @@ impl ServerState {
         // a stranger's op costs no store read and no entry (section 14).
         let judged = self.judged_authors(&passed);
         self.fill_view(judged.iter().map(|&i| &passed[i]));
+        let passed = self.founded_once(passed, &mut out);
         let mut batch: HashMap<OpKey, (CrdtOp, [u8; 32])> = HashMap::new();
         let mut rival = false;
         let mut refold = false;
@@ -1207,6 +1208,42 @@ impl ServerState {
             })
             .collect();
         (0..ops.len()).filter(|&i| admitted.contains(ops[i].author.as_str()) || self.known_author(&ops[i])).collect()
+    }
+
+    /// HOL-SEC-222: a self-certifying server is founded once. The founding op is exempt
+    /// from the device clause (a removed founder's still anchors its server), so a device
+    /// removed since, holding the master key, can mint another of the same id. Only the
+    /// founding op held here passes, else the batch's best (a counted device's, then fold
+    /// order); every other `ServerCreated` drops unstored.
+    fn founded_once(&self, ops: Vec<CrdtOp>, out: &mut Ingested) -> Vec<CrdtOp> {
+        if !super::anchor::is_genesis_id(&self.server_id) || !ops.iter().any(|o| matches!(o.payload, CrdtPayload::ServerCreated { .. })) {
+            return ops;
+        }
+        let founds = |o: &CrdtOp| {
+            matches!(&o.payload, CrdtPayload::ServerCreated { owner_peer_id, nonce, .. }
+                if o.author == *owner_peer_id && super::anchor::derive_server_id(owner_peer_id, nonce) == self.server_id)
+        };
+        let held = self.op_log.iter().chain(self.stored.iter().map(|(o, _)| o)).chain(self.held.iter().map(|(o, _)| o)).find(|o| founds(o));
+        let best = || {
+            ops.iter()
+                .filter(|o| founds(o))
+                .min_by(|a, b| {
+                    let rank = |o: &CrdtOp| std::cmp::Reverse(self.verdict(o).rank());
+                    rank(a).cmp(&rank(b)).then_with(|| fold_order(a, b)).then_with(|| a.content_hash().cmp(&b.content_hash()))
+                })
+                .map(CrdtOp::content_hash)
+        };
+        let stands = held.map(CrdtOp::content_hash).or_else(best);
+        ops.into_iter()
+            .filter(|o| {
+                let passes = !matches!(o.payload, CrdtPayload::ServerCreated { .. }) || Some(o.content_hash()) == stands;
+                if !passes {
+                    out.rejected += 1;
+                    log_refusal(o, &OpReject::NotAllowed);
+                }
+                passes
+            })
+            .collect()
     }
 
     pub(super) fn known_author(&self, op: &CrdtOp) -> bool {
