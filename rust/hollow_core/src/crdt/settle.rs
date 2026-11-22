@@ -87,9 +87,29 @@ impl ServerState {
             .cloned()
     }
 
+    /// HOL-SEC-221: the founding op a settling keeps even when a dropped device wrote it
+    /// and this device first stored it at or after T: it is R when no checkpoint precedes
+    /// T, and names the owner a checkpoint R must come from. Of the held ops founding this
+    /// self-certifying id, only the one first stored here; another one a lost device
+    /// minted with the master key passes only the dropped devices' rule.
+    fn founding_stand(&self, seen: &SeenAt) -> Option<[u8; 32]> {
+        let founds = |o: &CrdtOp| {
+            matches!(&o.payload, CrdtPayload::ServerCreated { owner_peer_id, nonce, .. }
+                if o.author == *owner_peer_id && super::anchor::derive_server_id(owner_peer_id, nonce) == self.server_id)
+        };
+        let first_seen = |o: &CrdtOp| seen.get(&(o.author.clone(), o.hlc.physical_ms, o.hlc.counter)).copied().unwrap_or(u64::MAX);
+        self.op_log
+            .iter()
+            .chain(self.stored.iter().map(|(o, _)| o))
+            .filter(|o| founds(o))
+            .min_by(|a, b| first_seen(a).cmp(&first_seen(b)).then_with(|| super::server_state::fold_order(a, b)))
+            .map(CrdtOp::content_hash)
+    }
+
     /// The ops a settling folds on R: what counted before the removal, a dropped device's
-    /// only when stored here before T; no checkpoint but R.
+    /// only when stored here before T (its founding op aside); no checkpoint but R.
     fn settling_input(&mut self, r: Option<&CrdtOp>, s: &Settling<'_>) -> Vec<CrdtOp> {
+        let stand = self.founding_stand(s.seen);
         let now_view = std::mem::replace(&mut self.authority, s.before.clone());
         let before_t = |o: &CrdtOp| s.seen.get(&(o.author.clone(), o.hlc.physical_ms, o.hlc.counter)).is_some_and(|ms| *ms < s.t_ms);
         let dropped = |o: &CrdtOp| o.dev.as_deref().is_some_and(|d| s.dropped.contains(&d.device));
@@ -99,7 +119,7 @@ impl ServerState {
             .chain(self.stored.iter().map(|(o, _)| o))
             .chain(self.held.iter().map(|(o, _)| o))
             .filter(|o| !is_checkpoint(o) && !matches!(o.payload, CrdtPayload::SettleSign { .. }))
-            .filter(|o| self.device_counts_here(o) && (!dropped(o) || before_t(o)))
+            .filter(|o| self.device_counts_here(o) && (!dropped(o) || before_t(o) || stand == Some(o.content_hash())))
             .cloned()
             .collect();
         self.authority = now_view;
@@ -685,6 +705,88 @@ pub(crate) mod tests {
         assert_eq!(w.owner.lost_t(3_000), 3_000, "an answered T stands");
         assert_eq!(w.owner.lost_t(0), 1_000, "\"not sure\" = cp1's first fold, the oldest held");
         assert_eq!(ServerState::skeleton("s".into()).lost_t(0), 0, "no restore point: 0");
+    }
+
+    /// HOL-SEC-221: the laptop founds, checkpoints (cp1) and renames twice; the phone first
+    /// stores all of it at 3,000 (cp1's first fold, so "not sure" reads T = 3,000), the
+    /// second rename at 4,000. With `forged`, the laptop also mints a second founding op
+    /// of the same id, clocked before the first and named "stolen", first stored here at
+    /// the time it names (none: no record of it).
+    fn founded_by_the_laptop(forged: Option<Option<u64>>) -> (ServerState, SeenAt) {
+        let (before, _) = rosters();
+        let r_pub = before.r_pub.clone();
+        let (master, m_id, pk) = keys(OWNER);
+        let (laptop_kp, laptop_id, _) = keys(LAPTOP);
+        let (mut laptop, founding) =
+            ServerState::found_on("s".into(), m_id, Founder { device_peer_id: &laptop_id, device: Some(&laptop_kp), r_pub: Some(&r_pub) }, master.clone(), pk.clone());
+        judged_by(&mut laptop, before.clone());
+        let cp1 = checkpoint(&mut laptop);
+        let at_t = rename(&mut laptop, "at T");
+        let after_t = rename(&mut laptop, "after T");
+        let mut phone = device_replica(&laptop.server_id, PHONE);
+        judged_by(&mut phone, before);
+        phone.ingest_remote(&[founding.clone(), cp1.clone(), at_t.clone(), after_t.clone()]);
+        Arc::make_mut(&mut phone.first_folds).insert(hex::encode(cp1.content_hash()), 3_000);
+        let key = |o: &CrdtOp| (o.author.clone(), o.hlc.physical_ms, o.hlc.counter);
+        let mut seen: SeenAt = [(key(&founding), 3_000), (key(&at_t), 3_000), (key(&after_t), 4_000)].into_iter().collect();
+        if let Some(stored_at) = forged {
+            let mut second = founding.clone();
+            let P::ServerCreated { name, .. } = &mut second.payload else { unreachable!() };
+            *name = "stolen".into();
+            second.hlc.physical_ms -= 10;
+            second.sign(&master, &pk);
+            second.sign_device(&laptop_kp);
+            phone.ingest_remote(std::slice::from_ref(&second));
+            assert!(phone.op_log.iter().chain(phone.stored.iter().map(|(o, _)| o)).any(|o| o.hlc == second.hlc), "precondition: the phone holds the second founding op");
+            if let Some(at) = stored_at {
+                seen.insert(key(&second), at);
+            }
+            // One naming another nonce founds no server of this id, whenever stored.
+            let mut other = founding.clone();
+            let P::ServerCreated { nonce, .. } = &mut other.payload else { unreachable!() };
+            nonce.push('0');
+            other.hlc.physical_ms -= 20;
+            other.sign(&master, &pk);
+            other.sign_device(&laptop_kp);
+            phone.ingest_remote(std::slice::from_ref(&other));
+            seen.insert(key(&other), 1_000);
+            // So `founding_stand`'s own id check is a second layer, never reached from here.
+            assert!(!phone.op_log.iter().chain(phone.stored.iter().map(|(o, _)| o)).any(|o| o.hlc == other.hlc), "the door keeps a founding op of another id");
+        }
+        (phone, seen)
+    }
+
+    fn settle_the_laptops_server(phone: &mut ServerState, seen: &SeenAt) -> Option<CrdtOp> {
+        let (before, after) = rosters();
+        let t_ms = phone.lost_t(0);
+        assert_eq!(t_ms, 3_000, "precondition: \"not sure\" reads T as the first fold of the phone's oldest restore point");
+        let s = Settling { before: view_of(&[&before]), dropped: &[keys(LAPTOP).1], t_ms, seen, roster: after.clone() };
+        judged_by(phone, after);
+        phone.author_settling(&keys(OWNER).1, &s, &keys(PHONE).0).map(|(mut ops, _)| ops.pop().unwrap())
+    }
+
+    /// HOL-SEC-221: a "not sure" settling of a server the lost device founded, on a device
+    /// that first stored the founding op no earlier than its oldest restore point, stands
+    /// on that founding op; the lost founder's ops stored here at T or after still drop.
+    #[test]
+    fn a_not_sure_settling_stands_on_the_founding_op_the_lost_device_wrote() {
+        let (mut phone, seen) = founded_by_the_laptop(None);
+        assert!(settle_the_laptops_server(&mut phone, &seen).is_some(), "the settling is written");
+        let base = phone.base.as_ref().expect("a base");
+        assert_eq!(base.state.cp_settles.as_ref().map(|st| st.devices.clone()), Some(vec![keys(LAPTOP).1]), "dropping the laptop");
+        assert_eq!(phone.name.read().as_str(), "s", "the founder's renames stored here at T and after drop");
+    }
+
+    /// HOL-SEC-221: of two founding ops of one id, the settling keeps only the one first
+    /// stored here; the other, by the lost device and stored after T (or with no record of
+    /// when), drops.
+    #[test]
+    fn a_founding_op_the_lost_device_minted_later_never_founds_the_settling() {
+        for stored_at in [Some(4_500), None] {
+            let (mut phone, seen) = founded_by_the_laptop(Some(stored_at));
+            assert!(settle_the_laptops_server(&mut phone, &seen).is_some(), "the settling is written ({stored_at:?})");
+            assert_eq!(phone.name.read().as_str(), "s", "the later founding op stayed out ({stored_at:?})");
+        }
     }
 
     #[test]

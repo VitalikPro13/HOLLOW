@@ -62903,6 +62903,12 @@ async fn w3c1_cut_server(tags: [u8; 5]) -> W3c1Cut {
 /// As `w3c1_cut_server`, but with `j_owner` = (J's device, J's recovery) tags J is
 /// phrase-rooted, founds the server, and both devices join it.
 async fn w3c1_cut_server_by(tags: [u8; 5], j_owner: Option<(u8, u8)>) -> W3c1Cut {
+    w3c1_cut_server_with(tags, j_owner, false).await
+}
+
+/// As `w3c1_cut_server_by`; with `d2_away`, d2 is offline from before the founding and
+/// stays so (back with `relay.set_online`).
+async fn w3c1_cut_server_with(tags: [u8; 5], j_owner: Option<(u8, u8)>, d2_away: bool) -> W3c1Cut {
     let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
     let relay = MockRelay::new();
@@ -62931,6 +62937,9 @@ async fn w3c1_cut_server_by(tags: [u8; 5], j_owner: Option<(u8, u8)>) -> W3c1Cut
     expect_siblings_ready(&relay, &d1, &d2, 15).await;
     expect_dm_pair_ready(&relay, &d1, &j, 15).await;
     expect_dm_pair_ready(&relay, &d2, &j, 15).await;
+    if d2_away {
+        relay.set_online(&d2.device_id, false);
+    }
 
     let (founder, joiners) = if j_owner.is_some() { (&mut j, vec![&d1, &d2]) } else { (&mut d1, vec![&j]) };
     let server_id = create_server_and_wait(founder, "Cut").await;
@@ -72692,4 +72701,109 @@ async fn pr_a_replayed_request_is_answered_once_per_device_and_connection() {
     assert_eq!(count(true), 1, "a friend's device stepping its request drew an accept each time");
     assert_eq!(count(false), 1, "a declined requester stepping its request drew a decline each time");
     drop((a, c));
+}
+
+// pr-hol-sec-221
+
+/// HOL-SEC-221: the lost device D1 founded the server, admitted J and checkpointed it (cp)
+/// while its sibling D2 was away, so D2 first stores the founding op together with cp,
+/// its oldest restore point. A "not sure" lost removal on D2 (T = cp's first fold here)
+/// settles the server on that founding op; D1's rename after T drops.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pr216_a_not_sure_removal_of_the_founding_device_settles_from_the_joiners_oldest_point() {
+    let _g = test_guard();
+    let [m_tag, d1_tag, d2_tag, r_tag, j_tag] = [196u8, 197, 198, 199, 200];
+    let W3c1Cut { relay, master, d1, d2, j, server_id, _tmp } = w3c1_cut_server_with([m_tag, d1_tag, d2_tag, r_tag, j_tag], None, true).await;
+    let d1_id = tag_kp(d1_tag).peer_id();
+    let base_at = async |n: &TestNode| n.live_server_state(&server_id).await.and_then(|s| s.base.as_ref().map(|b| b.hash));
+    let pre = j.live_server_state(&server_id).await.expect("J holds the server");
+    let cp = w3c1e_checkpoint(&server_id, &master, d1_tag, &pre, crate::crdt::hlc::wall_clock_ms());
+    carry_as(&d1, &j, crdt_broadcast(&server_id, &cp)).await;
+    carry_as(&j, &d1, crdt_broadcast(&server_id, &cp)).await;
+    assert!(wait_until(15, async || base_at(&d1).await == Some(cp.content_hash()) && base_at(&j).await == Some(cp.content_hash())).await, "precondition: cp is the base");
+    relay.set_online(&d2.device_id, true);
+    assert!(wait_until(30, async || base_at(&d2).await == Some(cp.content_hash())).await, "precondition: the sibling took the server on cp");
+    let (founding_seen, oldest) = pr221_founding_seen(&d2, &server_id, &d1_id).await;
+    assert!(oldest.is_some() && founding_seen >= oldest, "precondition: the founding op first stored here no earlier than the oldest restore point: {founding_seen:?} vs {oldest:?}");
+
+    pr221_rename_and_lose(&relay, d1, &d2, &j, &master, d1_tag, &server_id).await;
+    d2.cmd_tx
+        .send(NodeCommand::RevokeDevice { device_peer_id: d1_id.clone(), mode: super::roster_book::RemoveMode::Lost { t_ms: 0 }, with_dependents: false })
+        .await
+        .unwrap();
+    pr221_expect_settled(&d2, &server_id, &master.peer_id(), &d1_id, &j.master_id).await;
+    let lost_restore = format!("{}{server_id}", super::restore_flow::LOST_RESTORE);
+    assert!(d2.store().load_setting(&lost_restore).unwrap().is_none(), "a server the remover settled went to the witnesses as well");
+}
+
+/// HOL-SEC-221, the recovery path: as above with no checkpoint, so D2 holds no restore
+/// point (T = 0); the phrase typed on D2 keeps only D2, dropping D1 as lost since "not
+/// sure", and still settles the server on its founding op; D1's rename drops.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pr216_a_not_sure_recovery_dropping_the_founding_device_settles_its_server() {
+    let _g = test_guard();
+    let [m_tag, d1_tag, d2_tag, r_tag, j_tag] = [201u8, 202, 203, 204, 205];
+    let W3c1Cut { relay, master, d1, d2, j, server_id, _tmp } = w3c1_cut_server_with([m_tag, d1_tag, d2_tag, r_tag, j_tag], None, true).await;
+    let m_id = master.peer_id();
+    let (d1_id, d2_id) = (tag_kp(d1_tag).peer_id(), tag_kp(d2_tag).peer_id());
+    relay.set_online(&d2.device_id, true);
+    assert!(wait_until(30, async || d2.live_server_state(&server_id).await.is_some_and(|s| s.is_member(&j.master_id))).await, "precondition: the sibling holds the server");
+    let (founding_seen, oldest) = pr221_founding_seen(&d2, &server_id, &d1_id).await;
+    assert!(oldest.is_none() && founding_seen.is_some(), "precondition: the sibling holds no restore point");
+
+    pr221_rename_and_lose(&relay, d1, &d2, &j, &master, d1_tag, &server_id).await;
+    let roster = d2.store().load_roster(&m_id).ok().flatten().expect("the identity's roster");
+    let mut recovered = roster.clone();
+    recovered
+        .add_phrase_statement(
+            &crate::identity::roster::r_pub_of(&tag_kp(r_tag)),
+            Some(crate::identity::roster::sign_recovery(&master, &tag_kp(r_tag), super::roster_book::now_ms(), std::slice::from_ref(&d2_id), false)),
+            None,
+        )
+        .expect("the phrase signs the recovery");
+    assert!(super::authority_view::hold_own(&d2.store(), &m_id), "nothing held before this change");
+    super::roster_book::note_recovery_lost_since(&d2.store(), &recovered.base(), 0).unwrap();
+    super::roster_book::merge_for_test(&d2.store(), &recovered, &m_id, &d2_id);
+    d2.cmd_tx.send(NodeCommand::RosterChanged { newly_revoked: vec![d1_id.clone()] }).await.unwrap();
+    pr221_expect_settled(&d2, &server_id, &m_id, &d1_id, &j.master_id).await;
+}
+
+/// At `node`: when it first stored the founding op (which `founder` proves) and the
+/// first fold of its oldest restore point.
+async fn pr221_founding_seen(node: &TestNode, server_id: &str, founder: &str) -> (Option<u64>, Option<u64>) {
+    let held = node.live_server_state(server_id).await.expect("the node holds the server");
+    let seen = node.store().op_seen_ms(server_id).unwrap();
+    let founding = held.op_log.iter().find(|o| matches!(o.payload, crate::crdt::operations::CrdtPayload::ServerCreated { .. })).cloned().expect("the founding op");
+    assert_eq!(founding.proven_device(), Some(founder), "precondition: the lost device founded it");
+    (seen.get(&(founding.author.clone(), founding.hlc.physical_ms, founding.hlc.counter)).copied(), held.first_folds.values().copied().min())
+}
+
+/// The lost founder renames the server at the settler and at J, then goes away for good.
+async fn pr221_rename_and_lose(relay: &MockRelay, d1: TestNode, settler: &TestNode, j: &TestNode, master: &NativeKeypair, d1_tag: u8, server_id: &str) {
+    let name_at = async |n: &TestNode| n.live_server_state(server_id).await.map(|s| s.name.read().clone());
+    let stolen = w3c1_device_op(server_id, master, &tag_kp(d1_tag), crate::crdt::operations::CrdtPayload::ServerRenamed { new_name: "stolen".into() }, 1000);
+    for to in [settler, j] {
+        carry_as(&d1, to, crdt_broadcast(server_id, &stolen)).await;
+    }
+    assert!(wait_until(15, async || name_at(settler).await.as_deref() == Some("stolen") && name_at(j).await.as_deref() == Some("stolen")).await, "precondition: the thief renamed it everywhere");
+    relay.set_online(&d1.device_id, false);
+    drop(d1);
+}
+
+/// `settler` stands on a settling dropping `lost`, founded by our identity and named as
+/// founded: the lost founder's rename after T stayed out. Everything else that device did
+/// and the settler cannot date before T is undone too, J's admission included (a vague
+/// answer undoes more, DEVICE_PROOF_DESIGN 8.1).
+async fn pr221_expect_settled(settler: &TestNode, server_id: &str, m_id: &str, lost: &str, j_master: &str) {
+    let settled = |s: &ServerState| s.base.as_ref().is_some_and(|b| b.state.cp_settles.as_ref().is_some_and(|st| st.devices.iter().any(|d| d == lost)));
+    assert!(
+        wait_until(30, async || settler.live_server_state(server_id).await.is_some_and(|s| settled(&s))).await,
+        "a not-sure settling dropping the founding device was never written",
+    );
+    let state = settler.live_server_state(server_id).await.expect("the settler holds the server");
+    assert_eq!(state.name.read().as_str(), "Cut", "the lost founder's rename after T stayed");
+    assert_eq!(state.current_owner().as_deref(), Some(m_id), "the founding op stands");
+    assert!(!state.is_member(j_master), "an admission the lost founder made that the settler cannot date before T stayed");
 }

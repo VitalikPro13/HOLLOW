@@ -840,7 +840,9 @@ checkpoint. Order:
      rows) with `first_fold_ms < T`, else the founding op or generation 0.
    - **State** = the core's fold of R as the base plus every op this device holds or got in
      step 1, judged by the ordinary rules, except that an op proofed by a dropped device
-     counts only if its `seen_ms < T` here.
+     counts only if its `seen_ms < T` here. The founding op of a server a dropped device
+     founded is the exception (HOL-SEC-221): the one first stored here always counts, since
+     R stands on it or names its owner; any other founding op of the id keeps the rule.
    - **Shape** = a child of our CURRENT base (generation plus one, `cp_parent` and
      `cp_lineage` from it, `cp_cut` from it), so it is the greatest eligible checkpoint and
      every checkpoint on its line stays eligible by descent.
