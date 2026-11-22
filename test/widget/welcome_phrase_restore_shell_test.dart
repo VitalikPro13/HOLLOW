@@ -9,6 +9,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hollow/src/core/providers/device_proof_provider.dart';
+import 'package:hollow/src/core/providers/home_setup_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/services/phrase_restore.dart';
 import 'package:hollow/src/rust/api/identity.dart';
@@ -229,6 +230,8 @@ void main() {
       await _restoreWithNo(tester);
       expect(_api.restores, [const WelcomeRestoreMode.admit()]);
       expect(_api.saved[kProtectionOfferDueKey], '1');
+      expect(_api.saved[kRecoveryPhraseSavedKey], '1',
+          reason: 'the person just typed the words: Home asks for no backup');
       expect(find.byType(MobileShell), findsOneWidget);
       expect(_api.setAsideCleared, 0, reason: 'nothing was set aside');
     });
@@ -311,19 +314,21 @@ void main() {
     test('only a phrase restore owes anything', () {
       for (final r in [null, result('create_new'), result('restored_backup'),
           result('link_device')]) {
-        expect(phraseRestoreFollowUps(r), (offerLock: false, askChooser: false));
+        expect(phraseRestoreFollowUps(r),
+            (offerLock: false, askChooser: false, phraseSaved: false));
       }
     });
 
-    test('No owes the lock offer, Yes the restore chooser too', () {
+    test('No owes the lock offer, Yes the restore chooser too, and both '
+        'count the typed phrase as saved', () {
       expect(
           phraseRestoreFollowUps(
               result('restored_phrase', PhraseRestoreBranch.admit)),
-          (offerLock: true, askChooser: false));
+          (offerLock: true, askChooser: false, phraseSaved: true));
       expect(
           phraseRestoreFollowUps(
               result('restored_phrase', PhraseRestoreBranch.recover)),
-          (offerLock: true, askChooser: true));
+          (offerLock: true, askChooser: true, phraseSaved: true));
     });
   });
 }

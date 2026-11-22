@@ -1269,7 +1269,14 @@ class _HollowShellState extends ConsumerState<HollowShell>
       if (_unlocking && mounted) setState(() => _unlocking = false);
       return;
     }
-    if (phraseRestoreFollowUps(welcomeResult).offerLock) {
+    final followUps = phraseRestoreFollowUps(welcomeResult);
+    if (followUps.phraseSaved) {
+      // Before Home reads its flags in _afterIdentity.
+      await storage_api
+          .saveSetting(key: kRecoveryPhraseSavedKey, value: '1')
+          .catchError((_) {});
+    }
+    if (followUps.offerLock) {
       await _offerLockAfterPhraseRestore();
     }
     await _afterIdentity(
@@ -3058,16 +3065,18 @@ class _ShellScaffold extends StatelessWidget {
 }
 
 /// What a launch owes a Welcome phrase restore: a lock offer after either
-/// branch, and on a recovery the chooser for the servers it owned
-/// (PHRASE_RESTORE_DESIGN 1.1 step 4).
+/// branch, on a recovery the chooser for the servers it owned
+/// (PHRASE_RESTORE_DESIGN 1.1 step 4), and the phrase counted as saved, since
+/// the person just typed it and Rust checked it.
 @visibleForTesting
-({bool offerLock, bool askChooser}) phraseRestoreFollowUps(
+({bool offerLock, bool askChooser, bool phraseSaved}) phraseRestoreFollowUps(
     WelcomeResult? result) {
   if (result?.action != 'restored_phrase') {
-    return (offerLock: false, askChooser: false);
+    return (offerLock: false, askChooser: false, phraseSaved: false);
   }
   return (
     offerLock: true,
     askChooser: result!.branch == PhraseRestoreBranch.recover,
+    phraseSaved: true,
   );
 }

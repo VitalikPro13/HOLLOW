@@ -1,6 +1,9 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 
+/// The settings key saying the person has the recovery phrase written down.
+const kRecoveryPhraseSavedKey = 'recovery_phrase_saved';
+
 /// What Home needs that no other provider knows: whether the recovery phrase
 /// was confirmed saved, whether the first-run checklist was hidden, and which
 /// version's changelog was last opened. All live in the settings KV.
@@ -34,7 +37,7 @@ class HomeSetupState {
 }
 
 class HomeSetupNotifier extends Notifier<HomeSetupState> {
-  static const _phraseKey = 'recovery_phrase_saved';
+  static const _phraseKey = kRecoveryPhraseSavedKey;
   static const _hiddenKey = 'home_setup_hidden';
   static const _changelogKey = 'changelog_seen_version';
 
