@@ -302,6 +302,16 @@ class ScrollOffsetController {
     );
   }
 
+  /// HOLLOW PATCH: moves the list by [offset] pixels at once, held to its
+  /// ends the way a mouse wheel is (a scrollbar drag, #158).
+  void jumpScroll(double offset) {
+    final state = _scrollableListState;
+    if (state == null || offset == 0) return;
+    final controller = state.primary.scrollController;
+    if (!controller.hasClients) return;
+    controller.position.pointerScroll(offset);
+  }
+
   _ScrollablePositionedListState? _scrollableListState;
 
   void _attach(_ScrollablePositionedListState scrollableListState) {

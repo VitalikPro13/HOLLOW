@@ -7,6 +7,7 @@
 // a thumb that slides the wrong way and jump buttons that appear at the wrong
 // end. That is invisible in a screenshot of a full-height list and obvious
 // here.
+import 'package:flutter/gestures.dart' show PointerDeviceKind;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -22,15 +23,20 @@ const _kNewest = 'Jump to the newest message';
 
 late ItemScrollController _controller;
 late ItemPositionsListener _positions;
+late ScrollOffsetController _offsets;
 
 Future<void> _pumpList(WidgetTester tester,
-    {required int itemCount, int? unreadRevIndex}) async {
-  tester.view.physicalSize = const Size(600, 800);
+    {required int itemCount,
+    int? unreadRevIndex,
+    double Function(int i)? heightOf,
+    Size size = const Size(600, 800)}) async {
+  tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1.0;
   addTearDown(tester.view.reset);
 
   _controller = ItemScrollController();
   _positions = ItemPositionsListener.create();
+  _offsets = ScrollOffsetController();
 
   await tester.pumpWidget(
     ProviderScope(
@@ -44,6 +50,7 @@ Future<void> _pumpList(WidgetTester tester,
               context: context,
               itemScrollController: _controller,
               itemPositionsListener: _positions,
+              scrollOffsetController: _offsets,
               itemCount: itemCount,
               unreadRevIndex: unreadRevIndex,
               indexByMessageId: {
@@ -53,7 +60,7 @@ Future<void> _pumpList(WidgetTester tester,
                 final i = itemCount - 1 - revIndex;
                 return SizedBox(
                   key: ValueKey('m$i'),
-                  height: 60,
+                  height: heightOf?.call(i) ?? 60,
                   child: Text('message $i'),
                 );
               },
@@ -439,4 +446,98 @@ void main() {
             'cannot have that argument with anything.');
     expect(railRect.width, kChatRailWidth);
   });
+
+// #158: a voice room's chat is a narrow side panel, where one link card or
+// sticker is many text lines tall. A thumb sized by the COUNT of visible rows
+// grew and shrank with whatever happened to be on screen, and dragging it fed
+// that size back into where the pointer pointed, so the list flicked between
+// two places under a still pointer.
+group('rows of very different heights (#158)', () {
+  // Every fourth message is a card ten times the height of a text line.
+  double mixed(int i) => i % 4 == 0 ? 400 : 40;
+  Rect thumbRect(WidgetTester tester) => tester.getRect(find.descendant(
+        of: find.bySemanticsLabel('Message list scrollbar'),
+        matching: find.byType(AnimatedContainer),
+      ));
+  Future<void> wheel(WidgetTester tester, double dy) async {
+    final list = tester.getCenter(find.byType(ScrollablePositionedList));
+    final mouse = TestPointer(1, PointerDeviceKind.mouse);
+    await tester.sendEventToBinding(mouse.hover(list));
+    await tester.sendEventToBinding(mouse.scroll(Offset(0, dy)));
+    await tester.pumpAndSettle();
+  }
+
+  testWidgets('the thumb keeps its size while the wheel scrolls',
+      (tester) async {
+    await _pumpList(tester,
+        itemCount: 24, heightOf: mixed, size: const Size(400, 700));
+    // One pass up and back measures every row once.
+    for (var i = 0; i < 40; i++) {
+      await wheel(tester, -120);
+    }
+    for (var i = 0; i < 40; i++) {
+      await wheel(tester, 120);
+    }
+    final heights = <double>[];
+    for (var i = 0; i < 40; i++) {
+      await wheel(tester, -120);
+      heights.add(thumbRect(tester).height);
+    }
+    final spread = heights.reduce((a, b) => a > b ? a : b) -
+        heights.reduce((a, b) => a < b ? a : b);
+    expect(spread, lessThan(2),
+        reason: 'the conversation does not change length while you scroll '
+            'it, so neither may the thumb: $heights');
+  });
+
+  testWidgets('dragging the thumb moves the list one way only',
+      (tester) async {
+    await _pumpList(tester,
+        itemCount: 24, heightOf: mixed, size: const Size(400, 700));
+    final track =
+        tester.getRect(find.bySemanticsLabel('Message list scrollbar'));
+    final start = thumbRect(tester).center;
+    final gesture = await tester.startGesture(start, kind: PointerDeviceKind.mouse);
+    await tester.pump();
+    final tops = <int>[];
+    final thumbs = <double>[];
+    for (var dy = 0.0; start.dy - dy > track.top; dy += 6) {
+      await gesture.moveTo(Offset(start.dx, start.dy - dy));
+      await tester.pump();
+      await tester.pump();
+      tops.add(_positions.itemPositions.value
+          .where((p) => p.itemTrailingEdge > 0 && p.itemLeadingEdge < 1)
+          .map((p) => p.index)
+          .reduce((a, b) => a > b ? a : b));
+      thumbs.add(thumbRect(tester).height);
+    }
+    await gesture.up();
+    await tester.pumpAndSettle();
+    for (var i = 1; i < tops.length; i++) {
+      expect(tops[i], greaterThanOrEqualTo(tops[i - 1]),
+          reason: 'pulling the thumb up only ever shows older messages: $tops');
+    }
+    expect(
+        thumbs.reduce((a, b) => a > b ? a : b) -
+            thumbs.reduce((a, b) => a < b ? a : b),
+        lessThan(0.01),
+        reason: 'the thumb under the pointer keeps its size for the drag');
+    expect(find.text('message 0'), findsOneWidget,
+        reason: 'the top of the track is the oldest message');
+  });
+
+  testWidgets('"jump to top" leaves no empty space above the oldest message',
+      (tester) async {
+    await _pumpList(tester,
+        itemCount: 24, heightOf: mixed, size: const Size(400, 700));
+    await tester.tap(find.bySemanticsLabel(_kOldest));
+    await tester.pumpAndSettle();
+    final oldest =
+        _positions.itemPositions.value.firstWhere((p) => p.index == 23);
+    expect(oldest.itemTrailingEdge, greaterThanOrEqualTo(0.97),
+        reason: 'the oldest message starts at the top of the list, not '
+            'somewhere down it with blank space over it');
+    expect(find.bySemanticsLabel(_kOldest), findsNothing);
+  });
+});
 }
