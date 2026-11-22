@@ -199,7 +199,10 @@ pub(crate) fn carry_to_every_own_device(
     let mut sent = 0;
     for device in &present {
         if device != local_device && super::resolver::is_own_unrevoked_device(device, local_master) {
-            carry_json(ws_cmd_tx, device, None, json.clone(), NoSession::Queue);
+            // The route is fixed now, as the away ones' is: a device gone by delivery
+            // would else be parked in our memory, lost if we quit before it returns.
+            let room = super::crypto_handler::send_room_for_peer(ws_room_peers, device).unwrap_or_else(|| own_inbox.clone());
+            carry_json(ws_cmd_tx, device, Some(&room), json.clone(), NoSession::Queue);
             sent += 1;
         }
     }
@@ -572,6 +575,38 @@ mod tests {
         assert_eq!(carried_devices(&mut rx), vec![sib.to_string()], "carry_to_own_siblings reached a device that is not ours");
         carry_to_every_own_device(&tx, &peers, master, us, &msg);
         assert_eq!(carried_devices(&mut rx), vec![sib.to_string()], "carry_to_every_own_device reached a device that is not ours");
+        crate::node::resolver::clear_for_test();
+    }
+
+    /// A device of ours seen present at the fan-out that leaves before the node delivers
+    /// the carry is still sent it, for the relay to hold: parked, it would wait in our
+    /// memory for a return we may quit before (a phone going away misses the age gate's OFF).
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // the resolver is process-global
+    async fn an_own_device_that_leaves_before_delivery_still_gets_the_carry() {
+        let _g = crate::node::resolver::test_lock();
+        crate::node::resolver::clear_for_test();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let path = tmp.path().join("lane.db").to_string_lossy().into_owned();
+        let store = CryptoStore::open(path, "6d".repeat(32)).unwrap();
+        let (master, us, sib) = ("m-master", "alice", "bob");
+        crate::node::resolver::seed_self(master, &[us.into(), sib.into()]);
+        with_carry_book(async {
+            let (mut alice, _bob) = established();
+            let keypair = NativeKeypair::from_secret_bytes(&[9; 32]);
+            let present: WsRoomPeers = [("inbox:m-master".to_string(), [us, sib].iter().map(|s| s.to_string()).collect())].into();
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            carry_to_every_own_device(&tx, &present, master, us, &HavenMessage::StatusUpdate { status: "x".into() });
+            let Ok(WsCommand::Carry { device, room, json, no_session, ticket }) = rx.try_recv() else {
+                panic!("precondition: the present sibling is carried to");
+            };
+            let (gone, mut pending, mut asked) = (WsRoomPeers::new(), HashMap::new(), HashMap::new());
+            let mut lane = OlmLane::new(&mut alice, &store, &gone, &mut pending, &mut asked, &keypair, us);
+            let frames = lane.deliver(&device, room.as_deref(), &json, no_session, ticket);
+            assert_eq!(frames.len(), 1, "a sibling that left before delivery was sent nothing");
+            assert!(pending.is_empty(), "a sibling that left before delivery waits in our memory");
+        })
+        .await;
         crate::node::resolver::clear_for_test();
     }
 
