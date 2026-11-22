@@ -27,6 +27,7 @@ pub(crate) fn test_guard() -> std::sync::MutexGuard<'static, ()> {
     super::resolver::clear_for_test();
     super::member_cap::set_cap_for_test(None);
     super::roster_reach::clear_for_test();
+    super::roster_book::clear_hand_offs_for_test();
     g
 }
 
@@ -28225,7 +28226,7 @@ fn harness_fixed_sleep_budget_does_not_grow() {
     // 2026-11-21: the phrase-restore fix round added two absences, no witness hand-over
     // after a not-sure settling (one register tick) and no second answer to stepped
     // replays, and one spawn stagger (9.5 s; scan 1280.35 s).
-    const BUDGET_MS: u64 = 1_280_350;
+    const BUDGET_MS: u64 = 1_282_850;
 
     let src = include_str!("test_harness.rs");
     // Built from pieces so this scan does not count its own source text.
@@ -73039,6 +73040,10 @@ async fn pr_b_old_devices_learn_a_welcome_recovery_online_and_on_their_return() 
     // Away past its session's grace: no ring replays what went out meanwhile.
     relay.expire_session(&w_dev);
 
+    // Z is an empty install: the shared resolver must not lend it the old devices.
+    let z_id = tag_kp(z_tag).peer_id();
+    super::resolver::blind_for_test(&z_id, &l_dev);
+    super::resolver::blind_for_test(&z_id, &w_dev);
     let t_ms = super::roster_book::now_ms();
     let sign = crate::api::roster::RestoreSign::Recover { lost_since_ms: t_ms, no_wait: true };
     let z = pr_restored(&relay, m_tag, z_tag, &[], sign, t_ms).await;
@@ -73122,8 +73127,8 @@ async fn pr_a_no_restore_with_its_old_device_away_takes_the_server_welcome() {
 
 /// An in-app recovery on D keeps only D while W is away past its session's grace: the
 /// live notice reaches nobody away and the mailbox replays only to members, so W learns
-/// the phrase left it out once it is back beside D (the own-room hand-off, besides the
-/// sibling catch-up W still starts with D, which it counts until it learns).
+/// the phrase left it out once it is back beside D, from the own-room hand-off (D's live
+/// fan-out is out and lost before W returns).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)]
 async fn pr_b_a_device_offline_at_an_in_app_recovery_learns_it_on_its_return() {
@@ -73131,6 +73136,7 @@ async fn pr_b_a_device_offline_at_an_in_app_recovery_learns_it_on_its_return() {
     let tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", tmp.path()); }
     let relay = MockRelay::new();
+    relay.start_wiretap();
     let [m_tag, d_tag, w_tag] = [196u8, 197, 198];
     let m_id = tag_kp(m_tag).peer_id();
     let first = protected_roster(m_tag, &[d_tag, w_tag], super::roster_book::now_ms() - 3_600_000);
@@ -73152,6 +73158,13 @@ async fn pr_b_a_device_offline_at_an_in_app_recovery_learns_it_on_its_return() {
         "precondition: the relay hands D alone the inbox: {:?}",
         relay.inbox_owners(&m_id),
     );
+    // The live fan-out must be out before W returns, or W hears it live (review 2).
+    let own = super::roster_book::own_room(&m_id);
+    assert!(
+        wait_until(20, async || relay.wiretap().frames.iter().any(|fr| fr.from == d_dev && fr.room == own && fr.to.is_none() && fr.kind() == "roster_notice")).await,
+        "precondition: D's live fan-out of the recovery went out",
+    );
+    sleep_ms(500).await;
     assert!(!pr_left_out_by_recovery(&w, &m_id), "precondition: W heard nothing while away");
     // The resolver is shared and W's own node still links W to M: D alone must not place it.
     super::resolver::blind_for_test(&d_dev, &w_dev);
@@ -73197,5 +73210,138 @@ fn pr_b_the_own_room_hand_off_skips_another_identitys_device() {
     assert_eq!(notices_to(&old, "room"), 0, "a device nobody removed heard our roster outside our own room");
     assert_eq!(notices_to(&x_dev, &own), 0, "another identity's device heard our roster");
     assert_eq!(notices_to(&device, &own), 0, "we handed ourselves our roster");
+    let elsewhere_removed = tag_kp(180).peer_id();
+    super::resolver::mark_revoked_by(&x_master, std::slice::from_ref(&elsewhere_removed));
+    assert_eq!(notices_to(&elsewhere_removed, &own), 0, "a device another identity removed heard our roster");
+    super::resolver::clear_all();
+}
+
+// pr-review-fix
+/// HOL-SEC-227: an in-app recovery on D (node up) keeps only D while W is away past its
+/// session's grace. D no longer places W from the recovery on, its live fan-out goes out
+/// while W is away, and the relay demotes W from the inbox without a word. Once W is back
+/// beside D, D hands it the roster in our own room and W learns the phrase left it out,
+/// and again on D's next relay session. 0.14.2's hand-off told only removed devices,
+/// which a recovery leaves none of.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn hol_sec_227_an_inapp_recovery_reaches_a_device_away_past_its_grace_on_return() {
+    let _g = test_guard();
+    let tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", tmp.path()); }
+    let relay = MockRelay::new();
+    relay.start_wiretap();
+    let [m_tag, d_tag, w_tag] = [231u8, 232, 233];
+    let m_id = tag_kp(m_tag).peer_id();
+    let first = protected_roster(m_tag, &[d_tag, w_tag], super::roster_book::now_ms() - 3_600_000);
+    let mut d = spawn_node_seeded(&relay, m_tag, d_tag, &[], Some(first.clone())).await;
+    let w = spawn_node_seeded(&relay, m_tag, w_tag, &[], Some(first)).await;
+    let (d_dev, w_dev) = (d.device_id.clone(), w.device_id.clone());
+    expect_siblings_ready(&relay, &d, &w, 30).await;
+    relay.set_online(&w_dev, false);
+    assert!(wait_until(10, async || !relay.online_devices().contains(&w_dev)).await);
+    relay.expire_session(&w_dev);
+
+    super::roster_book::recover(&tag_kp(m_tag), &recovery_kp(m_tag), &tag_kp(d_tag), &[], true, Some(super::roster_book::now_ms()), &d.db_path, &d.passphrase)
+        .expect("the phrase recovers");
+    // The resolver is shared and W's own node still links W to M: D alone must not place it.
+    super::resolver::blind_for_test(&d_dev, &w_dev);
+    drain_events(&mut d);
+    d.cmd_tx.send(NodeCommand::RosterChanged { newly_revoked: vec![w_dev.clone()] }).await.unwrap();
+    assert!(
+        wait_until(20, async || relay.inbox_owners(&m_id) == std::collections::HashSet::from([d_dev.clone()])).await,
+        "precondition: the relay hands D alone the inbox: {:?}",
+        relay.inbox_owners(&m_id),
+    );
+    let own = super::roster_book::own_room(&m_id);
+    assert!(
+        wait_until(20, async || relay.wiretap().frames.iter().any(|fr| fr.from == d_dev && fr.room == own && fr.to.is_none() && fr.kind() == "roster_notice")).await,
+        "precondition: D's live fan-out of the recovery went out",
+    );
+    sleep_ms(500).await;
+    assert!(!pr_left_out_by_recovery(&w, &m_id), "precondition: W heard nothing while away");
+    let before = relay.wiretap().frames.len();
+
+    relay.set_online(&w_dev, true);
+    assert!(wait_until(10, async || relay.online_devices().contains(&w_dev)).await);
+    assert!(wait_until(25, async || pr_left_out_by_recovery(&w, &m_id)).await, "the device away at the in-app recovery never learned it");
+    assert!(
+        relay.wiretap().frames.iter().skip(before).any(|fr| fr.from == d_dev && fr.room == own && fr.to.as_deref() == Some(w_dev.as_str()) && fr.kind() == "roster_notice"),
+        "D never handed W the roster in our own room",
+    );
+    assert!(!relay.inbox_owners(&m_id).contains(&w_dev), "the old device took the inbox back");
+
+    // A lost relay session may have taken the notice with it: W is told again on D's next one.
+    let handed = || relay.wiretap().frames.iter().filter(|fr| fr.from == d_dev && fr.room == own && fr.to.as_deref() == Some(w_dev.as_str()) && fr.kind() == "roster_notice").count();
+    // Harness nodes share the revision counter: let W's own saves settle first.
+    let mut rev = super::roster_book::revision(&m_id);
+    for _ in 0..20 {
+        sleep_ms(1_000).await;
+        let now = super::roster_book::revision(&m_id);
+        if now == rev {
+            break;
+        }
+        rev = now;
+    }
+    // W comes and goes at this revision: told once more, then D's next session tells it again.
+    let first = handed();
+    relay.set_online(&w_dev, false);
+    assert!(wait_until(10, async || !relay.online_devices().contains(&w_dev)).await);
+    relay.set_online(&w_dev, true);
+    assert!(wait_until(20, async || handed() > first).await, "W back again was never told at the settled revision");
+    sleep_ms(500).await;
+    let once = handed();
+    relay.set_online(&d_dev, false);
+    assert!(wait_until(10, async || !relay.online_devices().contains(&d_dev)).await);
+    relay.expire_session(&d_dev);
+    relay.set_online(&d_dev, true);
+    assert!(wait_until(20, async || handed() > once).await, "D's fresh session never handed W the roster again");
+    assert_eq!(super::roster_book::revision(&m_id), rev, "precondition: the roster did not move meanwhile");
+    drop((d, w));
+}
+
+/// The own-room hand-off is bounded: a master-key holder minting fresh device ids draws
+/// at most the node's budget, one churning id draws our roster once per revision, and
+/// neither a sibling we count nor another identity's device draws it or spends any.
+#[test]
+fn pr_b_the_own_room_hand_off_is_bounded_for_fresh_and_churning_ids() {
+    let _g = test_guard();
+    let tmp = crate::test_tmp::tempdir().expect("tmp");
+    let db = tmp.path().join("messages.db").to_string_lossy().into_owned();
+    let pass = "ab".repeat(32);
+    let [m_tag, d_tag, s_tag] = [234u8, 235, 236];
+    let (master, device, sib) = (tag_kp(m_tag).peer_id(), tag_kp(d_tag).peer_id(), tag_kp(s_tag).peer_id());
+    let store = crate::storage::MessageStore::open(&db, &pass).expect("store");
+    super::roster_book::merge_for_test(&store, &protected_roster(m_tag, &[d_tag, s_tag], super::roster_book::now_ms() - 60_000), &master, &device);
+    drop(store);
+    super::resolver::seed_self(&master, &[device.clone(), sib.clone()]);
+    super::resolver::note_roster(&master);
+    let (x_master, x_dev) = (tag_kp(237).peer_id(), tag_kp(238).peer_id());
+    super::resolver::update_many(&x_master, [x_dev.as_str()]);
+    let own = super::roster_book::own_room(&master);
+    let notices = |peers: &mut dyn Iterator<Item = String>| {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<WsCommand>();
+        for peer in peers {
+            super::roster_book::tell_removed_device_in_room(&tx, &master, &device, &peer, &own, &db, &pass);
+        }
+        let (mut sent, mut bytes) = (0usize, 0usize);
+        while let Ok(cmd) = rx.try_recv() {
+            if let WsCommand::SendDirect { ref data, .. } = cmd {
+                sent += 1;
+                bytes += data.len();
+            }
+        }
+        (sent, bytes)
+    };
+    let fresh = |i: u32| {
+        let mut seed = [7u8; 32];
+        seed[..4].copy_from_slice(&i.to_le_bytes());
+        NativeKeypair::from_secret_bytes(&seed).peer_id()
+    };
+    assert_eq!(notices(&mut std::iter::repeat_n(sib.clone(), 50)).0, 0, "a sibling we count drew our roster");
+    assert_eq!(notices(&mut std::iter::repeat_n(x_dev.clone(), 50)).0, 0, "another identity's device drew our roster");
+    assert_eq!(notices(&mut std::iter::repeat_n(fresh(0), 50)).0, 1, "a churning id drew our roster more than once");
+    let (sent, bytes) = notices(&mut (1..200).map(fresh));
+    assert_eq!(sent, super::roster_book::HAND_OFF_BUDGET - 1, "fresh ids drew {sent} notices, {bytes} bytes");
     super::resolver::clear_all();
 }

@@ -1212,9 +1212,10 @@ mod tests {
     }
 
     /// A rename the owner's phone signs at `cp`'s clock (its lane, so the proof verifies),
-    /// the first of a few for which `pick` holds.
+    /// the first of a few for which `pick` holds. Wide enough that a `cp` whose content id
+    /// sorts near the top still finds one (64 tries failed about one run in 65).
     fn variant_at(cp: &CrdtOp, pick: impl Fn(&CrdtOp) -> bool) -> CrdtOp {
-        (0..64)
+        (0..4096)
             .map(|i| {
                 let mut v = cp.clone();
                 v.payload = P::ServerRenamed { new_name: format!("v{i}") };

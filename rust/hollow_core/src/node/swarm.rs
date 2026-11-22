@@ -4208,6 +4208,7 @@ async fn run_event_loop(
                         mls_turn.on_session(false);
                         turn_book.on_session();
                         super::roster_reach::on_session_down(&device_peer_id, true);
+                        super::roster_book::on_session_lost(&device_peer_id);
                         pending_nickname_resolve = None;
                         nick_hold.on_disconnected();
                         let _ = event_tx.send(NetworkEvent::RelayDisconnected).await;

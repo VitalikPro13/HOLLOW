@@ -500,13 +500,73 @@ pub(crate) fn own_room(local_master: &str) -> String {
     super::dm_room::dm_room_code(local_master, local_master)
 }
 
+/// Own-room hand-offs to devices our roster does not count, per minute of this node:
+/// any master-key holder can mint device ids and join our own room, each arrival
+/// drawing our whole roster.
+pub(crate) const HAND_OFF_BUDGET: usize = 8;
+const HAND_OFF_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+/// A device told our roster is told again only once the roster moves, our relay
+/// session is lost, or this much later (its notice may have died with its socket).
+const HAND_OFF_AGAIN: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// One node's own-room hand-offs. `told` holds at most BUDGET per WINDOW over AGAIN
+/// entries: each is admitted by the budget and pruned once AGAIN has passed.
+#[derive(Default)]
+struct HandOffs {
+    spent: std::collections::VecDeque<std::time::Instant>,
+    told: std::collections::HashMap<String, (u64, std::time::Instant)>,
+}
+
+/// Per local device id (harness nodes share the process).
+fn hand_offs() -> std::sync::MutexGuard<'static, std::collections::HashMap<String, HandOffs>> {
+    static BOOK: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, HandOffs>>> = std::sync::OnceLock::new();
+    BOOK.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Whether we may hand `peer` our roster at `revision` now; a yes is charged.
+fn may_hand_off(local_device: &str, peer: &str, revision: u64, now: std::time::Instant) -> bool {
+    let mut book = hand_offs();
+    let h = book.entry(local_device.to_string()).or_default();
+    h.told.retain(|_, (_, at)| now.duration_since(*at) < HAND_OFF_AGAIN);
+    if h.told.get(peer).is_some_and(|(rev, _)| *rev == revision) {
+        return false;
+    }
+    h.spent.retain(|t| now.duration_since(*t) < HAND_OFF_WINDOW);
+    if h.spent.len() >= HAND_OFF_BUDGET {
+        return false;
+    }
+    h.spent.push_back(now);
+    h.told.insert(peer.to_string(), (revision, now));
+    true
+}
+
+/// Our relay session was lost: every device we told may have missed it.
+pub(crate) fn on_session_lost(local_device: &str) {
+    if let Some(h) = hand_offs().get_mut(local_device) {
+        h.told.clear();
+    }
+}
+
+/// Forget every node's hand-offs.
+#[cfg(test)]
+pub(crate) fn clear_hand_offs_for_test() {
+    hand_offs().clear();
+}
+
+/// Another identity's device, or its single-device master id.
+fn placed_elsewhere(peer: &str, local_master: &str) -> bool {
+    let theirs = super::resolver::resolve(peer);
+    (theirs != peer && theirs != local_master) || super::resolver::holds_roster_of(peer)
+}
+
 /// `peer` just appeared to us in `room`: if our own roster removed it, or it is in our
 /// own room and our roster does not count it (a recovery left it out, it waits to join,
 /// or it is newer than what we hold), hand it that roster there. The notice of a removal
 /// or a recovery is lost when the device was away, left before we saw it in a room, or
 /// went into our inbox just as the relay took it away, and the mailbox replays only to
 /// members. Only holders of our master key can name our own room, and a device we place
-/// with another identity, or another identity removed, hears nothing there.
+/// with another identity, or another identity removed, hears nothing there; one our
+/// roster does not count is told within [`may_hand_off`]'s bound.
 pub(crate) fn tell_removed_device_in_room(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     local_master: &str,
@@ -520,13 +580,18 @@ pub(crate) fn tell_removed_device_in_room(
     if peer == local_device || super::resolver::is_bare_master(peer) || !(in_own_room || super::resolver::is_revoked(peer)) {
         return;
     }
+    // Not removed anywhere: only the own-room branch can send, judged before the store.
+    if !super::resolver::is_revoked(peer)
+        && (super::resolver::is_device_of(peer, local_master)
+            || placed_elsewhere(peer, local_master)
+            || !may_hand_off(local_device, peer, revision(local_master), std::time::Instant::now()))
+    {
+        return;
+    }
     let Some((roster, state)) = own(local_master, db_path, db_passphrase) else { return };
-    let theirs = super::resolver::resolve(peer);
-    // Another identity's device, its single-device master id, or a device it removed.
-    let elsewhere = (theirs != peer && theirs != local_master)
-        || super::resolver::holds_roster_of(peer)
-        || super::resolver::is_revoked(peer);
-    if !state.removed.contains_key(peer) && !(in_own_room && !state.is_member(peer) && !elsewhere) {
+    // Another identity's removal is its own to tell.
+    let left_out = in_own_room && !state.is_member(peer) && !super::resolver::is_revoked(peer);
+    if !state.removed.contains_key(peer) && !left_out {
         return;
     }
     hollow_log!("[HOLLOW-ROSTER] Device {peer} our roster does not count appeared in {room}: handing it our roster");
@@ -4616,5 +4681,28 @@ mod tests {
             load(&me.store(), &bob.peer_id()).is_some_and(|r| r.r_pub.is_empty()),
             "the relay's copy picked the recovery key of a roster we hold keyless"
         );
+    }
+
+    /// The hand-off budget alone: once per peer and revision, again after the roster
+    /// moves, our session is lost or AGAIN passes, and at most BUDGET per WINDOW.
+    #[test]
+    fn the_hand_off_budget_tells_once_per_revision_and_refills_by_the_minute() {
+        let _g = super::super::resolver::test_lock();
+        let me = "hand-off-unit-device";
+        hand_offs().remove(me);
+        let t0 = std::time::Instant::now();
+        assert!(may_hand_off(me, "p", 1, t0), "control: a first hand-off runs");
+        assert!(!may_hand_off(me, "p", 1, t0), "the same revision was handed twice");
+        assert!(may_hand_off(me, "p", 2, t0), "a moved roster was not handed");
+        on_session_lost(me);
+        assert!(may_hand_off(me, "p", 2, t0), "a lost session kept the old hand-off");
+        assert!(may_hand_off(me, "p", 2, t0 + HAND_OFF_AGAIN), "a hand-off AGAIN ago still counted");
+        // The three at t0 left the window: one spent so far.
+        for i in 1..HAND_OFF_BUDGET {
+            assert!(may_hand_off(me, &format!("q{i}"), 1, t0 + HAND_OFF_AGAIN), "within the budget");
+        }
+        assert!(!may_hand_off(me, "over", 1, t0 + HAND_OFF_AGAIN), "past the budget");
+        assert!(may_hand_off(me, "over", 1, t0 + HAND_OFF_AGAIN + HAND_OFF_WINDOW), "the window never refilled");
+        hand_offs().remove(me);
     }
 }
