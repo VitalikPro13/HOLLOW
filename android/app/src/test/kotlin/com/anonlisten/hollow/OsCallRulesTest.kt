@@ -130,6 +130,13 @@ class OsCallRulesTest {
         assertFalse(r.off(sessionHeld = true))
     }
 
+    // A call ringing out is no call to the system (Nov 22): no CallStyle, no call chip.
+    @Test
+    fun onlyABegunSessionShowsAsACall() {
+        assertFalse(OsCallRules.showsAsCall(CallLook("Ada", muted = false, connectedAt = null, ringing = true)))
+        assertTrue(OsCallRules.showsAsCall(CallLook("Ada", muted = false, connectedAt = null)))
+    }
+
     @Test
     fun aRingOutDuringASessionStartsNothing() {
         val r = RingOut()

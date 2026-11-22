@@ -24,8 +24,12 @@ decisions in its section 11. Android: `OsCallBridge.kt`, `HollowCallService.kt` 
   taken while the app is in front and an answer that finds the app in the background still has
   a mic (Android refuses a mic foreground service from the background). Sent after the
   session's own steps, so an answered call's `begin` takes the service over before the ring lets
-  it go. The ring-out notification's hang-up sends `osRingOutEnd`: `endCall()` only while the
-  call still rings out. Probe key `osRingOut`.
+  it go. The ring-out shows a PLAIN notification (a foreground service must show one): title,
+  "Calling", Hang up; never a CallStyle or `CATEGORY_CALL` (no call chip), since ringing out is
+  no call to the system (`OsCallRules.showsAsCall`). Its Hang up sends `osRingOutEnd`:
+  `endCall()` only while the call still rings out. Any end of the ring (declined, busy, timeout,
+  cancelled, answered elsewhere) leaves `ringing` and sends `ringOut {on: false}`, which stops
+  the service unless a session holds it. Probe key `osRingOut`.
 - The service LISTENS to the source notifiers (call, voice, conference, app lock, identity
   protection) and READS the derived providers: Riverpod 2 refreshes a derived provider only on
   a Flutter frame, a locked phone draws none, so a remote hang-up left the lock-screen call up
@@ -194,7 +198,8 @@ decisions in its section 11. Android: `OsCallBridge.kt`, `HollowCallService.kt` 
   (`CallNotification`, channel `hollow_ongoing_call`, DEFAULT importance, no sound or vibration:
   LOW may hide the status-bar call chip): Person = the title, Hang up + Mute/Unmute through
   `CallActionReceiver` (not exported, explicit immutable PendingIntents) -> `osEnd` / `osMute`
-  (a ring-out shows Hang up only -> `osRingOutEnd`); a chronometer from `connected`. A stop that
+  (a ring-out's plain notification has Hang up only -> `osRingOutEnd`); a chronometer from
+  `connected`. A stop that
   lands before `startForeground` still calls it first, then stops.
 - The fork's `CallForegroundService` stands down once the bridge hears `available`
   (`appOwnsCallService`, cleared on detach), so a build without the Dart service keeps it.

@@ -16,7 +16,7 @@ import androidx.core.graphics.drawable.IconCompat
  */
 data class CallLook(val title: String, val muted: Boolean, val connectedAt: Long?, val ringing: Boolean = false)
 
-/** The CallStyle notification of the OS call session (#154), posted by [HollowCallService]. */
+/** The call service's notification (#154): a CallStyle for a session, plain while ringing out. */
 object CallNotification {
     // DEFAULT importance, silent: LOW may hide the status-bar call chip (spike D5). A channel's
     // importance cannot change once created, so a new importance needs a new id.
@@ -41,12 +41,25 @@ object CallNotification {
         ).build()
         val builder = NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_stat_hollow)
-            .setStyle(NotificationCompat.CallStyle.forOngoingCall(person, hangUp))
             .setOngoing(true)
             .setOnlyAlertOnce(true)
-            .setCategory(NotificationCompat.CATEGORY_CALL)
             .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
-        if (!look.ringing) builder.addAction(mute)
+        if (OsCallRules.showsAsCall(look)) {
+            builder.setStyle(NotificationCompat.CallStyle.forOngoingCall(person, hangUp))
+                .setCategory(NotificationCompat.CATEGORY_CALL)
+                .addAction(mute)
+        } else {
+            // Ringing out is no call to the system (Nov 22): a plain notification, only there
+            // because a foreground service must show one.
+            builder.setContentTitle(look.title.ifBlank { "Hollow" })
+                .setContentText("Calling")
+                .addAction(
+                    NotificationCompat.Action.Builder(
+                        IconCompat.createWithResource(context, android.R.drawable.ic_menu_close_clear_cancel),
+                        "Hang up",
+                        hangUp,
+                    ).build())
+        }
         open?.let { builder.setContentIntent(it) }
         look.connectedAt?.let { builder.setWhen(it).setShowWhen(true).setUsesChronometer(true) }
         return builder.build()

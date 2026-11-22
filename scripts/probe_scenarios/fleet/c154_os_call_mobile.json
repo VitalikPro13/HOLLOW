@@ -451,12 +451,6 @@
   },
   {
    "peer": "j",
-   "op": "wait_for",
-   "target": "text:room-${RUN}",
-   "timeout_ms": 30000
-  },
-  {
-   "peer": "j",
    "op": "long_press",
    "target": "text:osc-${RUN}",
    "index": 0
@@ -516,13 +510,13 @@
   {
    "peer": "k",
    "op": "wait_for",
-   "target": "text:room-${RUN}",
+   "target": "text:osc-${RUN}",
    "timeout_ms": 120000
   },
   {
    "peer": "j",
    "op": "tap",
-   "target": "semantics:Chats",
+   "target": "semantics:Servers",
    "index": 0,
    "soft": true
   },
@@ -541,6 +535,12 @@
    "peer": "j",
    "op": "wait",
    "ms": 1000
+  },
+  {
+   "peer": "j",
+   "op": "wait_for",
+   "target": "text:room-${RUN}",
+   "timeout_ms": 30000
   },
   {
    "peer": "j",
@@ -562,7 +562,14 @@
   {
    "peer": "k",
    "op": "tap",
-   "target": "semantics:Chats",
+   "target": "semantics:Back",
+   "index": 0,
+   "soft": true
+  },
+  {
+   "peer": "k",
+   "op": "tap",
+   "target": "semantics:Servers",
    "index": 0,
    "soft": true
   },
@@ -581,6 +588,12 @@
    "peer": "k",
    "op": "wait",
    "ms": 1000
+  },
+  {
+   "peer": "k",
+   "op": "wait_for",
+   "target": "text:room-${RUN}",
+   "timeout_ms": 30000
   },
   {
    "peer": "k",

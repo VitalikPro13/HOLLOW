@@ -23,6 +23,9 @@ object OsCallRules {
      */
     fun endAtBegin(held: List<String>, beginning: String): List<String> =
         held.filter { it != beginning }
+
+    /** Only a begun session's notification is a CallStyle call; a ring-out's is a plain one. */
+    fun showsAsCall(look: CallLook): Boolean = !look.ringing
 }
 
 /**
