@@ -16,6 +16,9 @@ import com.cloudwebrtc.webrtc.audio.AudioSwitchManager;
 import com.cloudwebrtc.webrtc.utils.AnyThreadSink;
 import com.cloudwebrtc.webrtc.utils.ConstraintsMap;
 
+import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
+
 import org.webrtc.ExternalAudioProcessingFactory;
 import org.webrtc.MediaStreamTrack;
 
@@ -42,10 +45,13 @@ public class FlutterWebRTCPlugin implements FlutterPlugin, ActivityAware, EventC
     private Lifecycle lifecycle;
     private EventChannel eventChannel;
 
-    // eventSink is static because FlutterWebRTCPlugin can be instantiated multiple times
-    // but the onListen(Object, EventChannel.EventSink) event only fires once for the first
-    // FlutterWebRTCPlugin instance, so for the next instances eventSink will be == null
-    public static EventChannel.EventSink eventSink;
+    // Hollow fork (#154, N5): each engine keeps its OWN sink. A static one was overwritten by
+    // every engine that listened (the FCM background engine too) and nulled by any engine's
+    // cancel, so a later call's route picker stopped hearing hotplugs.
+    private EventChannel.EventSink eventSink;
+
+    // Every engine attached right now; the shared audio manager reports device changes to all.
+    private static final List<FlutterWebRTCPlugin> liveEngines = new CopyOnWriteArrayList<>();
 
     public FlutterWebRTCPlugin() {
         sharedSingleton = this;
@@ -112,27 +118,40 @@ public class FlutterWebRTCPlugin implements FlutterPlugin, ActivityAware, EventC
 
     private void startListening(final Context context, BinaryMessenger messenger,
                                 TextureRegistry textureRegistry) {
-        AudioSwitchManager.instance = new AudioSwitchManager(context);
+        // Hollow fork (#154, N5): ONE audio manager per process, made by the first engine and never
+        // replaced: a second engine (an FCM wake) replacing it mid-call orphaned the live call's
+        // audioswitch and its device listener.
+        if (AudioSwitchManager.instance == null) {
+            AudioSwitchManager.instance = new AudioSwitchManager(context);
+            AudioSwitchManager.instance.audioDeviceChangeListener = (devices, currentDevice) -> {
+                Log.w(TAG, "audioFocusChangeListener " + devices+ " " + currentDevice);
+                for (FlutterWebRTCPlugin engine : liveEngines) {
+                    ConstraintsMap params = new ConstraintsMap();
+                    params.putString("event", "onDeviceChange");
+                    engine.sendEvent(params.toMap());
+                }
+                return null;
+            };
+        }
+        liveEngines.add(this);
         methodCallHandler = new MethodCallHandlerImpl(context, messenger, textureRegistry);
         methodChannel = new MethodChannel(messenger, "FlutterWebRTC.Method");
         methodChannel.setMethodCallHandler(methodCallHandler);
         eventChannel = new EventChannel( messenger,"FlutterWebRTC.Event");
         eventChannel.setStreamHandler(this);
-        AudioSwitchManager.instance.audioDeviceChangeListener = (devices, currentDevice) -> {
-            Log.w(TAG, "audioFocusChangeListener " + devices+ " " + currentDevice);
-            ConstraintsMap params = new ConstraintsMap();
-            params.putString("event", "onDeviceChange");
-            sendEvent(params.toMap());
-            return null;
-        };
     }
 
     private void stopListening() {
+        liveEngines.remove(this);
         methodCallHandler.dispose();
         methodCallHandler = null;
         methodChannel.setMethodCallHandler(null);
         eventChannel.setStreamHandler(null);
-        if (AudioSwitchManager.instance != null) {
+        eventSink = null;
+        // Hollow fork (#154, N5): the leaving engine gave back only its own call-audio holds
+        // (dispose); the shared audio stops at once only with the last engine. A secondary
+        // engine's detach stopping it mid-call deactivated audioswitch under the live call.
+        if (AudioSwitchManager.instance != null && liveEngines.isEmpty()) {
             Log.d(TAG, "Stopping the audio manager...");
             AudioSwitchManager.instance.stop();
         }

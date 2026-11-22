@@ -72,9 +72,26 @@ class OsSession {
 @visibleForTesting
 bool? debugOsCallPlatform;
 
-/// iPhones and iPads mirror calls to the OS. Android has no native side yet,
-/// so every call there would fail each step and fall back.
-bool get osCallPlatform => debugOsCallPlatform ?? Platform.isIOS;
+/// Phones and tablets mirror calls to the OS (CallKit, Telecom); desktops
+/// build nothing.
+bool get osCallPlatform =>
+    debugOsCallPlatform ?? (Platform.isIOS || Platform.isAndroid);
+
+/// Lets host tests stand in for an Android phone.
+@visibleForTesting
+bool? debugOsCallRingOutService;
+
+/// Android runs its call service (no OS call) while a call we place rings:
+/// the microphone foreground type cannot be taken once the app is in the
+/// background, and the answer can arrive after the person left the app.
+bool get osCallRingOutService =>
+    debugOsCallRingOutService ?? Platform.isAndroid;
+
+/// A call we placed that still rings out (never an OS call, decision Q2).
+bool ringsOut(CallState call) =>
+    call.callId != null &&
+    call.status == CallStatus.ringing &&
+    call.direction == CallDirection.outgoing;
 
 /// The session, from provider state alone. A DM call goes first: accepting
 /// one from inside a room sets it connecting before the room is left, and the
@@ -169,6 +186,17 @@ String osCallTitle(ProviderRead read, OsSession session) {
     return kHiddenNotificationTitle;
   }
 }
+
+/// The ring-out notification's name, by the same rule as a DM call's title.
+String osRingOutTitle(ProviderRead read) => osCallTitle(
+    read,
+    const OsSession(
+        key: 'ring',
+        kind: OsCallKind.dm,
+        live: false,
+        muted: false,
+        video: false,
+        outgoing: true));
 
 String? _dmName(ProviderRead read) {
   final peer = read(callProvider).peerId;

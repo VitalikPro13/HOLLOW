@@ -55,6 +55,9 @@ dependencies {
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
     implementation(platform("com.google.firebase:firebase-bom:33.7.0"))
     implementation("com.google.firebase:firebase-messaging")
+    // The OS call session (#154): Telecom's VoIP calls, CallStyle via androidx.core.
+    implementation("androidx.core:core-telecom:1.1.0")
+    testImplementation("junit:junit:4.13.2")
 }
 
 flutter {

@@ -789,6 +789,85 @@ void main() {
     });
   });
 
+  // Android keeps its call service (never an OS call) up while a call we place
+  // rings, so the mic works when the answer finds the app in the background.
+  group('Android ring-out', () {
+    setUp(() => debugOsCallRingOutService = true);
+    tearDown(() => debugOsCallRingOutService = null);
+
+    test('a call ringing out holds the service and begins no OS call',
+        () async {
+      final r = await _rig();
+      r.call.set(_outgoing('c1'));
+      await r.settle();
+      expect(r.native.methods, ['ringOut']);
+      expect(r.native.lastOf('ringOut'), {'on': true, 'title': 'Ada'});
+      expect(r.service.probe['osRingOut'], isTrue);
+    });
+
+    test('an answer begins the call before the ring lets the service go',
+        () async {
+      final r = await _rig(call: _outgoing('c1'));
+      r.native.clear();
+      r.call.set(_placed('c1'));
+      await r.settle();
+      expect(r.native.methods, ['begin', 'ringOut']);
+      expect(r.native.lastOf('ringOut'), {'on': false});
+      expect(r.service.probe['osRingOut'], isFalse);
+    });
+
+    test('a ring that ends unanswered lets the service go', () async {
+      final r = await _rig(call: _outgoing('c1'));
+      r.native.clear();
+      r.call.set(const CallState());
+      await r.settle();
+      expect(r.native.methods, ['ringOut']);
+      expect(r.native.lastOf('ringOut'), {'on': false});
+    });
+
+    test('an incoming ring and a ring from inside a room send nothing',
+        () async {
+      final r = await _rig();
+      r.call.set(_incoming('c1'));
+      await r.settle();
+      expect(r.native.methods, isEmpty);
+      final inRoom = await _rig(voice: _room());
+      inRoom.native.clear();
+      inRoom.call.set(_outgoing('c2'));
+      await inRoom.settle();
+      expect(inRoom.native.methods, isNot(contains('ringOut')));
+    });
+
+    test('hang up on the ring-out notification cancels only a ringing call',
+        () async {
+      final r = await _rig(call: _outgoing('c1'));
+      await r.native.send('osRingOutEnd');
+      await r.settle();
+      expect(r.call.ends, 1);
+      r.call.set(_placed('c2'));
+      await r.settle();
+      await r.native.send('osRingOutEnd');
+      await r.settle();
+      expect(r.call.ends, 1, reason: 'an answered call is not cancelled');
+    });
+
+    test('a launch password hides the name on the ring-out too', () async {
+      final r = await _rig(protection: _withPassword);
+      r.call.set(_outgoing('c1'));
+      await r.settle();
+      expect(r.native.lastOf('ringOut')['title'], kHiddenNotificationTitle);
+    });
+
+    test('iPhones never hear of a ring-out', () async {
+      debugOsCallRingOutService = false;
+      final r = await _rig();
+      r.call.set(_outgoing('c1'));
+      await r.settle();
+      expect(r.native.methods, isEmpty);
+      expect(r.service.probe.containsKey('osRingOut'), isFalse);
+    });
+  });
+
   group('title', () {
     test('a launch password hides the name from the start', () async {
       final r = await _rig(protection: _withPassword);

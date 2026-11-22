@@ -31,6 +31,7 @@ class MainActivity : FlutterFragmentActivity() {
         registerPrivacyChannel(flutterEngine)
         VideoPoster.register(flutterEngine.dartExecutor.binaryMessenger)
         HollowSfx.register(this, flutterEngine.dartExecutor.binaryMessenger)
+        OsCallBridge.attach(this, flutterEngine.dartExecutor.binaryMessenger)
 
         val relayTriggers =
             MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "hollow/relay_triggers")
@@ -196,7 +197,16 @@ class MainActivity : FlutterFragmentActivity() {
     private fun clipboard(): ClipboardManager =
         getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
 
+    // N7: a call's microphone foreground type can only be taken in the foreground, so it is
+    // added when the app comes back; the mic permission dialog pauses us and closing it resumes
+    // us, so this is also the permission-result callback whichever plugin asked.
+    override fun onResume() {
+        super.onResume()
+        OsCallBridge.onForeground()
+    }
+
     override fun onDestroy() {
+        OsCallBridge.detach()
         relayNetworkWatch?.stop()
         relayNetworkWatch = null
         super.onDestroy()

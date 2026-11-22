@@ -31,6 +31,10 @@ import android.util.Log;
  * ({@code AudioSwitchManager.release}) or the plugin detaches. The service does no
  * work; it only holds the foreground state and the "Ongoing call"
  * notification, which taps back into the app.
+ *
+ * Hollow (#154): an app that runs its own call service for the whole OS call
+ * session (Hollow's HollowCallService, begin to end) sets
+ * {@link #appOwnsCallService} and this one stands down.
  */
 public class CallForegroundService extends Service {
     private static final String TAG = FlutterWebRTCPlugin.TAG;
@@ -39,8 +43,11 @@ public class CallForegroundService extends Service {
 
     private static volatile boolean running;
 
+    /** Hollow fork (#154): set by the app while its own call service covers every call. */
+    public static volatile boolean appOwnsCallService;
+
     public static void start(Context context) {
-        if (running) return;
+        if (running || appOwnsCallService) return;
         Intent intent = new Intent(context, CallForegroundService.class);
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -56,6 +63,7 @@ public class CallForegroundService extends Service {
         }
     }
 
+    // Never gated on appOwnsCallService: a service started before the app took over must still end.
     public static void stop(Context context) {
         if (!running) return;
         context.stopService(new Intent(context, CallForegroundService.class));

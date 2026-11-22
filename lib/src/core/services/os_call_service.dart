@@ -132,11 +132,22 @@ class OsCallService {
       (debugForceFallback ??
           const String.fromEnvironment('HOLLOW_OS_CALL_FALLBACK') == '1');
 
+  /// Android: native keeps its call service up while a call we place rings
+  /// (`ringOut`), so the mic still works if the answer finds the app in the
+  /// background.
+  final bool ringOutService;
+
   OsCallService(this._read, this._channel,
-      {Random? random, this.nativeTimeout = const Duration(seconds: 5)})
-      : _random = random ?? Random.secure();
+      {Random? random,
+      this.nativeTimeout = const Duration(seconds: 5),
+      bool? ringOutService})
+      : _random = random ?? Random.secure(),
+        ringOutService = ringOutService ?? osCallRingOutService;
 
   _Mirror? _live;
+
+  /// Whether native was last told a call we placed rings out.
+  bool _ringOut = false;
 
   /// Every uuid begun and not yet ended, oldest first: `begin` hands native the
   /// set so it can drop anything it still holds outside it (N2).
@@ -155,12 +166,17 @@ class OsCallService {
   /// it, and the mute the OS was last told.
   Map<String, Object> get probe {
     final mirror = _live;
-    if (mirror == null) return const {'osCall': 'none'};
     return {
-      'osCall': '${mirror.kind.name} ${mirror.connected ? 'live' : 'placing'}',
-      'osCallMirrored': !mirror.unmirrored,
-      'osCallMuted': mirror.sentMuted,
-      'osCallHeld': mirror.held,
+      if (ringOutService) 'osRingOut': _ringOut,
+      if (mirror == null)
+        'osCall': 'none'
+      else ...{
+        'osCall':
+            '${mirror.kind.name} ${mirror.connected ? 'live' : 'placing'}',
+        'osCallMirrored': !mirror.unmirrored,
+        'osCallMuted': mirror.sentMuted,
+        'osCallHeld': mirror.held,
+      },
     };
   }
 
@@ -199,6 +215,24 @@ class OsCallService {
 
   Future<void> _reconcile() async {
     final want = _read(osSessionProvider);
+    await _reconcileSession(want);
+    // After the session: an answered call's `begin` takes the service over
+    // before the ring lets it go.
+    await _reconcileRingOut(want);
+  }
+
+  Future<void> _reconcileRingOut(OsSession? want) async {
+    if (!ringOutService) return;
+    final ringing = want == null && ringsOut(_read(callProvider));
+    if (ringing == _ringOut) return;
+    _ringOut = ringing;
+    await _send('ringOut', {
+      'on': ringing,
+      if (ringing) 'title': osRingOutTitle(_read),
+    });
+  }
+
+  Future<void> _reconcileSession(OsSession? want) async {
     var mirror = _live;
     if (mirror != null && (want == null || want.key != mirror.key)) {
       _live = null;
@@ -314,6 +348,16 @@ class OsCallService {
     final uuid = args['uuid'];
     if (method == 'osReset') {
       _enqueue(_rebeginAfterReset);
+      return null;
+    }
+    if (method == 'osRingOutEnd') {
+      // Hang up on the ring-out notification: cancel only a call still
+      // ringing out, never one answered meanwhile.
+      if (ringsOut(_read(callProvider))) {
+        unawaited(_read(callProvider.notifier).endCall().catchError((Object e) {
+          log('[HOLLOW-OSCALL] ring-out hang-up failed: $e');
+        }));
+      }
       return null;
     }
     final mirror = _live;

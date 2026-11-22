@@ -245,7 +245,25 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
     Log.d(TAG, errorMsg);
   }
 
+  /**
+   * Hollow fork (#154): gives back every call-audio hold this engine took, so an engine that goes
+   * away (an FCM wake's) never ends another engine's call and never leaves its own holds behind.
+   */
+  void releaseCallAudio() {
+    AudioSwitchManager manager = AudioSwitchManager.instance;
+    if (manager == null) return;
+    synchronized (localTracks) {
+      for (String trackId : localTracks.keySet()) {
+        manager.release(CallAudioHolders.mic(trackId));
+      }
+    }
+    for (String id : mPeerConnectionObservers.keySet()) {
+      manager.release(CallAudioHolders.peerConnection(id));
+    }
+  }
+
   void dispose() {
+    releaseCallAudio();
     for (final MediaStream mediaStream : localStreams.values()) {
       try {
         streamDispose(mediaStream);
@@ -1817,8 +1835,8 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
     if (screenAudioPlayer == null) return;
     boolean speakerOn = false;
     try {
-      speakerOn = AudioSwitchManager.instance
-          .selectedAudioDevice() instanceof AudioDevice.Speakerphone;
+      // The live route by name: while Telecom owns the call (#154) audioswitch's own pick is stale.
+      speakerOn = "speaker".equals(AudioSwitchManager.instance.selectedAudioOutputTypeName());
     } catch (Exception e) {
       // audioSwitch not started yet — default to non-speaker (default routing).
     }

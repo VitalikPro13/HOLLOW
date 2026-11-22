@@ -181,6 +181,24 @@ release pipeline is the `release` skill.
   `GeneratedPluginRegistrant.java: cannot find symbol DesktopDropPlugin` (11-15). The
   `hollowKotlinFullBuild` input in `android/build.gradle.kts` made every tree rebuild its Kotlin
   once; bump it to force that again. Never fix it by hand-editing the registrant (regenerated).
+- The OS call session (#154) needs `androidx.core:core-telecom` (1.1.0, minSdk 24),
+  `MANAGE_OWN_CALLS`, `FOREGROUND_SERVICE_PHONE_CALL` + `_MICROPHONE` and `HollowCallService`
+  typed `phoneCall|microphone` (not exported; Play needs the `phoneCall` FGS declaration with a
+  video of a person starting a call). `OsCallBridge` registers ONLY from
+  `MainActivity.configureFlutterEngine` (a background engine never gets the channel) and ends
+  every OS call on the activity's `onDestroy` and on `onTaskRemoved` (no ghost call).
+- Pure Kotlin rules live in plain files with no Android imports (`AudioEndpointMapping.kt`,
+  `OsCallRules.kt`) and are pinned by JVM tests in `android/app/src/test/kotlin/`:
+  `cd android && ./gradlew :app:testDebugUnitTest --tests 'com.anonlisten.hollow.*'` (needs a
+  JDK 17+ as `JAVA_HOME`, e.g. Homebrew openjdk@21 on the mini; results under
+  `build/app/test-results/`; the fork's own: `:flutter_webrtc:testDebugUnitTest`). A fresh
+  worktree first needs `flutter pub get` and the gitignored `android/gradlew`,
+  `gradle/wrapper/gradle-wrapper.jar` and `android/app/google-services.json` copied in.
+- The fork's `AudioSwitchManager` is ONE per process, made by the first engine and never
+  replaced; an engine's detach gives back only that engine's call-audio holds (`releaseCallAudio`)
+  and stops it at once only when it was the last engine, and device changes reach every live
+  engine's own sink (#154 N5; an FCM wake engine used to orphan the
+  live call's manager and steal its events).
 - cargokit's Gradle plugin adds the emulator ABIs (x86, x64) to a DEBUG build only when the
   build names no `--target-platform` (`plugin.gradle`); before session 44 it always did, so the
   fleet's arm64 APK ran three Rust builds (a cold mini build: 19:36 for both phone apps).

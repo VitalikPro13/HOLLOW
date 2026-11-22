@@ -66,7 +66,7 @@ the signal whitelist's four touches, the stream overlay consent detail, share ba
 - Only a DM call becomes a system call, and only once ANSWERED (placed or accepted; never a
   ring, ours or theirs): a call ringing out under CallKit plays the ringback as call audio at
   the ear. Rooms and meetings still `begin` (it gives them iOS audio) but native routes every
-  non-DM kind to the fallback, never CallKit (Vitalik, Nov 22). `OsCallService` keeps ONE queue;
+  non-DM kind to the fallback, never CallKit or Telecom (Vitalik, Nov 22). `OsCallService` keeps ONE queue;
   OS hang-up and mute run the app's own paths (`endCall`), and the OS is told the mute truth
   after every OS mute. Wiki `os_calls`.
 - When no call holds the iOS session, `HollowCallAudio restoreSoundsCategoryIfIdle` puts it
@@ -83,6 +83,13 @@ the signal whitelist's four touches, the stream overlay consent detail, share ba
   call resumes only through the OS. Opening a call screen while held only shows it.
 - The OS title follows the phone notification rule (HOL-SEC-155) and is fixed at begin;
   the OS call uuid is random, never an id.
+- Android audio belongs to Telecom while a core-telecom call lives (it is the mode owner): the
+  fork's `AudioSwitchManager` does not activate and its route calls go to `OsCallBridge`
+  (`requestEndpointChange`, headset-wins `AudioEndpointMapping`); a fallback (not added in 2 s,
+  addCall failed, no telecom) gives the audio back to audioswitch as before. Rooms and meetings
+  never reach Telecom (`OsCallRules.offersTelecom`). The global mic mute IS Telecom's mute:
+  written with the app's mute, never while held (it would mute the carrier call). Wiki
+  `os_calls`.
 
 ## WebRTC plumbing
 
@@ -174,17 +181,23 @@ the signal whitelist's four touches, the stream overlay consent detail, share ba
   NS auto-disabled; its VAD gates upward boost; `frames>0` or the test didn't happen;
   capture buffers ALWAYS fullband mono. `project_dfn3_noise_suppression`,
   `project_voice_enhance_chain`.
-- Call audio: the Android mic survives backgrounding ONLY via `CallForegroundService`
-  (mic FGS; never remove it). It and AudioSwitch (MODE_IN_COMMUNICATION, focus) live while
-  `CallAudioHolders` holds anything: each live gUM mic track and each peer connection that
-  received an audio track, released 4 s after the last one goes (a rebuild, mic switch or room
-  handing over to a DM call keeps it; a mic FGS cannot restart from the background). NEVER tie
-  it to "no peer connections left": data-channel lanes outlive every call, and the shipped rule
-  kept a lying "Ongoing call" FGS and call mode up after every call, so `HollowSfx` played cues
-  as call signalling (#154). A new path that captures or receives call audio holds; one that
-  ends it releases. Adaptive capture respects
+- Call audio: the Android mic survives backgrounding ONLY via a foreground service whose
+  type includes `microphone` (`phoneCall` alone is silenced, #154 spike), started while the app
+  is in front (a mic FGS cannot start from the background). Since #154 that is the app's
+  `HollowCallService`, held from a call's ring-out or the OS call session's `begin` to its
+  `end` (Telecom or not; the mic type at start when RECORD_AUDIO is granted, else added on the
+  next `onResume`, never from the background); the fork's `CallForegroundService` stands down
+  while `appOwnsCallService` is set (by the bridge's `available`) and is the only one without
+  the Dart OS call service. Never remove either. AudioSwitch (MODE_IN_COMMUNICATION, focus) and
+  the fork's FGS live while `CallAudioHolders` holds anything: each live gUM mic track and each
+  peer connection that received an audio track, released 4 s after the last one goes (a
+  rebuild, mic switch or room handing over to a DM call keeps it). NEVER tie it to "no peer
+  connections left": data-channel lanes outlive every call, and the shipped rule kept a lying
+  "Ongoing call" FGS and call mode up after every call, so `HollowSfx` played cues as call
+  signalling (#154). A new path that captures or receives call audio holds; one that ends it
+  releases; an engine's detach releases what that engine held. Adaptive capture respects
   `setCaptureMuted` + `setCaptureServoHold`; voice-QUALITY bugs only count from a REMOTE
-  peer. `feedback_capture_servo_mute_freeze`.
+  peer. `feedback_capture_servo_mute_freeze`, wiki `os_calls`.
 - Audio-track ops (`setEnabled`/`setVolume`/dispose) are blocking signaling-thread hops:
   ONLY via `runAudioTrackOp`/`HollowRunAudioTrackOp`/`HollowAudioOpQueue`; the FRB TRACE
   loggers are capped at Warn, NEVER remove the cap. `feedback_android_audio_track_proxy_ui_freeze`,

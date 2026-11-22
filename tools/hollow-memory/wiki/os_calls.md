@@ -7,8 +7,7 @@ nothing in call core decides anything new. Vitalik, Nov 22 (device checks): ONLY
 system calls (iOS has no call screen for a room; rooms and meetings stay in the app, like
 Discord), and a call we place reaches the OS once ANSWERED (ringing out under CallKit, the
 ringback played as call audio, at the ear, whatever the route said). Design: c154-calls `.team/DESIGN_OS_CALLS.md` (revision 4),
-decisions in its section 11. Android's half is builder E's (`OsCallBridge.kt`,
-`HollowCallService.kt`).
+decisions in its section 11. Android: `OsCallBridge.kt`, `HollowCallService.kt` (below).
 
 ## Dart (`os_call_provider.dart`, `os_call_service.dart`)
 
@@ -18,8 +17,15 @@ decisions in its section 11. Android's half is builder E's (`OsCallBridge.kt`,
   ring is ever a session, ours or theirs (ring in Hollow only; the ringback is a plain app
   sound). Rooms and meetings stay sessions in Dart because `begin` is what gives them audio on
   iOS; native sends every non-DM `kind` straight to the fallback (no CallKit). A DM goes first:
-  `acceptCall` sets connecting before it leaves the room. Only iOS builds it
-  (`osCallPlatform`); Android joins when its native half lands.
+  `acceptCall` sets connecting before it leaves the room. Phones build it (`osCallPlatform`),
+  desktops nothing.
+- Android only (`osCallRingOutService`): while a call we place rings out (`ringsOut`, no session),
+  `ringOut {on, title}` keeps `HollowCallService` up with NO OS call, so the microphone type is
+  taken while the app is in front and an answer that finds the app in the background still has
+  a mic (Android refuses a mic foreground service from the background). Sent after the
+  session's own steps, so an answered call's `begin` takes the service over before the ring lets
+  it go. The ring-out notification's hang-up sends `osRingOutEnd`: `endCall()` only while the
+  call still rings out. Probe key `osRingOut`.
 - The service LISTENS to the source notifiers (call, voice, conference, app lock, identity
   protection) and READS the derived providers: Riverpod 2 refreshes a derived provider only on
   a Flutter frame, a locked phone draws none, so a remote hang-up left the lock-screen call up
@@ -127,6 +133,85 @@ decisions in its section 11. Android's half is builder E's (`OsCallBridge.kt`,
   `requesttransaction error 1` (unentitled) on a real iPhone too (iOS 18.7.8, Nov 22). No PushKit,
   no VoIP push: `voip` only lets CallKit show calls the app is in.
 
+## Android (`OsCallBridge.kt`, `HollowCallService.kt`, fork `AudioSwitchManager`)
+
+- `OsCallBridge` (an object, main thread) owns the `hollow/os_call` channel, registered ONLY from
+  `MainActivity.configureFlutterEngine`, so an FCM or UnifiedPush engine never gets one. One
+  Jetpack core-telecom call at a time (`CallsManager.addCall`, registered once per process with
+  baseline + video capabilities), and ONLY for `kind == "dm"` (`OsCallRules.offersTelecom`: dm,
+  registered, `FEATURE_TELECOM` / `FEATURE_CONNECTION_SERVICE`, not forced). A room, a meeting or
+  an unknown kind answers `{ok: false}` and runs on the call service and its CallStyle alone.
+  Every Telecom call is OUTGOING (`outgoing` is informational), `isLogExcluded = true` (no call
+  log), address `hollow:<uuid>`, display name = the title Dart sent, `SUPPORTS_SET_INACTIVE` (a
+  carrier call holds us instead of ending us).
+- Every `begin` starts `HollowCallService` (below) first, Telecom or not (a service the ring-out
+  started is only re-posted). FALLBACK when the call is not ADDED 2 s after `begin`
+  (`ADD_DEADLINE_MS`), `addCall` throws, or the Telecom call ends while the session lives
+  (after an OS hang-up it waits 3 s for Dart's `end` first): `osFailed`, audioswitch takes the
+  audio as before Telecom, the service and CallStyle stay. A call added after the deadline is
+  disconnected (`OsCallSession`).
+- `begin` ends any other call the bridge holds (one at a time covers `live`); `end` for an
+  unknown or ended uuid is a no-op; `connected`/`setMuted`/`update` before the add are stored
+  and applied at the add (`setActive` at `connected`).
+- Audio owner while a Telecom call lives = Telecom (it is the MODE OWNER and applies its own
+  route; R3 spike): before `addCall` the bridge calls `AudioSwitchManager.takeAudioForTelecom`,
+  so `start()` does not activate audioswitch (no focus, no mode; it only remembers it was
+  wanted) and `enableSpeakerphone` / `enableSpeakerButPreferBluetooth` / `selectAudioOutput`
+  go to the bridge's `requestRoute`, mapped by `AudioEndpointMapping.forRequest` (headset wins:
+  "loud" = Bluetooth, else wired, else speaker; speaker off = the headset, else the earpiece;
+  an exact pick only if it exists) and sent with `requestEndpointChange`. A request before the
+  add waits for the endpoint list. `hollowSelectedAudioOutput` reads Telecom's
+  `currentCallEndpoint`; every endpoint change fires the fork's `onDeviceChange` for every
+  engine. The start route goes in as `preferredStartingCallEndpoint` (`loud` -> speaker, else
+  earpiece, nothing while a headset is attached) because core-telecom otherwise may move a call
+  off the speaker at start. `releaseAudioFromTelecom(callGoesOn)`: a fallback activates
+  audioswitch if it was wanted and re-applies the last route request; an end activates nothing,
+  and Telecom puts the mode back to normal, so app sounds play as media again. An audioswitch
+  already active before `begin` (a room handing over to a DM) stays active under Telecom until
+  its own release (spike: no audio gap).
+- Mute (`MuteMirror`, spike D2): Telecom's mute IS the global mic mute. While the Telecom call
+  is live and NOT held, `setMuted(m)` also writes `AudioManager.setMicrophoneMute(m)` (only when
+  it differs), the app's mute is written once at the add, Telecom's `isMuted` reaches Dart as
+  `osMute` only when it differs from the app's mute (our own write echoes back equal and is
+  dropped), and within 1 s of the add a difference re-writes the app's mute instead (Telecom's
+  first value can predate our write). `end` and a fallback clear a global mute our call or its
+  Telecom side set. HELD = nothing written or mirrored: the global mute also mutes the carrier
+  call. The CallStyle's Mute button sends `osMute(!appMuted)`; Dart answers with `setMuted`.
+- Hold (spike D3): `onSetInactive` -> `osHold(true)`; Telecom NEVER resumes a call it put on
+  hold for a carrier call and raises `onSetActive` only for its own requests, so
+  `requestUnhold` = `setActive()` and on Success the bridge sends `osHold(false)` itself; a
+  failure sends nothing (Dart stays held). Resume re-aligns the global mute. A fallback while
+  held sends `osHold(false)` (nothing could resume it).
+- `update` re-posts the CallStyle with the new title. core-telecom 1.1.0 cannot rename a live
+  call, so a headset, watch or car keeps the begin title (reachable only if the title rule
+  flips mid-call, which App Lock cannot do during a call).
+- `HollowCallService` (not exported, `phoneCall|microphone`): THE call foreground service from
+  `ringOut` or `begin` to `end` (or the ring-out's end). `phoneCall` alone does NOT keep a
+  backgrounded mic (spike Q1), so the `microphone` type is taken at start when RECORD_AUDIO is
+  granted, else added from `MainActivity.onResume` (the permission dialog closing resumes us),
+  never from the background (refused on API 34+). A refused start retries with the mic type
+  alone, then the call goes on without a service. Its notification is the CallStyle
+  (`CallNotification`, channel `hollow_ongoing_call`, DEFAULT importance, no sound or vibration:
+  LOW may hide the status-bar call chip): Person = the title, Hang up + Mute/Unmute through
+  `CallActionReceiver` (not exported, explicit immutable PendingIntents) -> `osEnd` / `osMute`
+  (a ring-out shows Hang up only -> `osRingOutEnd`); a chronometer from `connected`. A stop that
+  lands before `startForeground` still calls it first, then stops.
+- The fork's `CallForegroundService` stands down once the bridge hears `available`
+  (`appOwnsCallService`, cleared on detach), so a build without the Dart service keeps it.
+- Engine detach (`MainActivity.onDestroy`) and `onTaskRemoved` (swipe-away) end every call and
+  ring-out, Telecom included: no ghost call on the status bar, a headset or a car.
+- Forced fallback in debug builds: Dart's `available {forceFallback: true}` (the
+  `HOLLOW_OS_CALL_FALLBACK` define), or `adb shell setprop debug.hollow.os_call_fallback 1` (read
+  at each `begin`, no rebuild; `0` to undo). Release builds ignore both. Debug builds log one
+  `HollowOsCall STATUS <event> mode= micMute= path= route= held= fgs= telecomAudio= recs=` line per
+  transition (no names).
+- N5 in the fork: ONE `AudioSwitchManager` per process (first engine makes it, never replaced),
+  each engine its own event sink, device changes fan to every live engine, and an engine's detach
+  releases only its own `CallAudioHolders` holds (the last engine's also stops the manager). The
+  idle release (4 s after the last hold) also forgets a start remembered under Telecom.
+- Pure rules (`OsCallRules.kt`: the Telecom offer, `OsCallSession`, `MuteMirror`, `RingOut`;
+  `AudioEndpointMapping.kt`) are pinned by JVM tests in `android/app/src/test/kotlin/`.
+
 ## Traps
 
 - A new call surface or a new way into one needs nothing here as long as it lands in the
@@ -143,4 +228,14 @@ decisions in its section 11. Android's half is builder E's (`OsCallBridge.kt`,
 - The iOS Simulator refuses every CallKit start (`requesttransaction error 1`): a simulator run
   always proves the FALLBACK path (`osCallMirrored` false), never CallKit itself. A device without
   `voip` refuses the same way, so never blame that error on the simulator alone.
+- Android: never write the global mic mute while Telecom holds our call: it mutes the carrier
+  call too.
+- Android: a route call (`Helper.setSpeakerphoneOn`, `selectAudioOutput`) during a Telecom call
+  goes to Telecom; reading audioswitch's own selected device then is stale
+  (`repinScreenAudioToRoute` reads `selectedAudioOutputTypeName()`).
+- Android: a new way to place a call needs nothing here as long as it lands in `callProvider`
+  as an outgoing `ringing` call; a foreground service started only once the app is in the
+  background gets no microphone.
+- The Android emulator has only the speaker endpoint and a silent mic: earpiece, wired,
+  Bluetooth and audibility are Pixel proofs (design section 7, R3).
 - What only a phone settles is the design's section 7 (R1-R17).

@@ -64,7 +64,11 @@ public class AudioSwitchManager {
 
     // Re-checks at run time: a hold that landed meanwhile keeps call audio.
     private void releaseIfIdle() {
-        if (isActive && audioSwitch != null && callAudioHolders.isIdle()) {
+        if (!callAudioHolders.isIdle()) return;
+        // A start remembered while Telecom owned the audio is over too: a later fallback must
+        // not activate call audio for nobody.
+        wantsActive = false;
+        if (isActive && audioSwitch != null) {
             audioSwitch.deactivate();
             isActive = false;
             CallForegroundService.stop(context);
@@ -138,6 +142,81 @@ public class AudioSwitchManager {
      */
     private boolean forceHandleAudioRouting = false;
 
+    /**
+     * Hollow fork (#154): the OS call that owns call audio while a Telecom call lives. Telecom is
+     * then the audio MODE OWNER and applies its own route, so audioswitch's route would not be the
+     * one applied (R3 spike): focus, mode and routing go to Telecom and audioswitch only lists
+     * devices.
+     */
+    public interface TelecomAudio {
+        /** "loud", "earpiece" or a route type name ({@link AudioDeviceKind#typeName}). */
+        void requestRoute(@NonNull String request);
+
+        /** The route type name Telecom has the call on, or null while unknown. */
+        @Nullable
+        String currentRoute();
+    }
+
+    @Nullable
+    private static volatile TelecomAudio telecomAudio;
+
+    /** start() was asked while Telecom owned the audio; a fallback activates audioswitch then. */
+    private boolean wantsActive = false;
+
+    /** The last route asked for while Telecom owned the audio, re-applied on a fallback. */
+    @Nullable
+    private String telecomRouteRequest;
+
+    /** Main thread. Set by the app before Telecom adds the call, so audioswitch never activates. */
+    public static void takeAudioForTelecom(@NonNull TelecomAudio owner) {
+        telecomAudio = owner;
+    }
+
+    /**
+     * Main thread. [callGoesOn] = the session continues without Telecom (a fallback): audioswitch
+     * then activates as it would have and the last route request is applied through it. Otherwise
+     * the session ended and nothing activates.
+     */
+    public static void releaseAudioFromTelecom(boolean callGoesOn) {
+        telecomAudio = null;
+        AudioSwitchManager manager = instance;
+        if (manager != null) manager.afterTelecom(callGoesOn);
+    }
+
+    public static boolean telecomOwnsAudio() {
+        return telecomAudio != null;
+    }
+
+    private void afterTelecom(boolean callGoesOn) {
+        String route = telecomRouteRequest;
+        telecomRouteRequest = null;
+        if (!callGoesOn) {
+            wantsActive = false;
+            return;
+        }
+        if (wantsActive) {
+            wantsActive = false;
+            start();
+        }
+        if (route == null) return;
+        if ("loud".equals(route)) {
+            enableSpeakerphone(true);
+        } else if ("earpiece".equals(route)) {
+            enableSpeakerphone(false);
+        } else {
+            selectAudioOutput(AudioDeviceKind.fromTypeName(route));
+        }
+    }
+
+    /** Tells every engine the route moved (Telecom changed it), as a hotplug does. */
+    public void notifyRouteChanged() {
+        handler.post(() -> {
+            if (audioSwitch == null) return;
+            audioDeviceChangeListener.invoke(
+                    audioSwitch.getAvailableAudioDevices(), audioSwitch.getSelectedAudioDevice());
+        });
+    }
+
     public AudioSwitchManager(@NonNull Context context) {
         this.context = context;
         this.audioManager = (AudioManager) context.getSystemService(Context.AUDIO_SERVICE);
@@ -200,6 +279,10 @@ public class AudioSwitchManager {
             handler.removeCallbacksAndMessages(null);
             handler.postAtFrontOfQueue(() -> {
                 if (!isActive) {
+                    if (telecomAudio != null) {
+                        wantsActive = true;
+                        return;
+                    }
                     Objects.requireNonNull(audioSwitch).activate();
                     isActive = true;
                     // Hollow fork: hold a microphone-typed FGS for the call's
@@ -217,6 +300,7 @@ public class AudioSwitchManager {
         if (audioSwitch != null) {
             handler.removeCallbacksAndMessages(null);
             handler.postAtFrontOfQueue(() -> {
+                wantsActive = false;
                 if (isActive) {
                     Objects.requireNonNull(audioSwitch).deactivate();
                     isActive = false;
@@ -298,6 +382,7 @@ public class AudioSwitchManager {
 
     public void enableSpeakerphone(boolean enable) {
         updatePreferredDeviceList(enable);
+        if (routeThroughTelecom(enable ? "loud" : "earpiece")) return;
         if (enable) {
             // Hollow fork: "speaker on" means "the loud route", never "the
             // phone's own speaker at all costs". selectDevice() PINS its
@@ -337,6 +422,7 @@ public class AudioSwitchManager {
     }
 
     public void enableSpeakerButPreferBluetooth() {
+        if (routeThroughTelecom("loud")) return;
         // Hollow fork: was a single loop that broke on the first bluetooth OR
         // wired match, so list order decided the winner when both were
         // connected. firstExternalDevice() prefers bluetooth deterministically.
@@ -357,6 +443,10 @@ public class AudioSwitchManager {
      */
     @Nullable
     public String selectedAudioOutputTypeName() {
+        TelecomAudio telecom = telecomAudio;
+        if (telecom != null) {
+            return telecom.currentRoute();
+        }
         if (audioSwitch == null) {
             return null;
         }
@@ -369,9 +459,18 @@ public class AudioSwitchManager {
     }
 
     public void selectAudioOutput(@Nullable AudioDeviceKind kind) {
+        if (kind != null && routeThroughTelecom(kind.typeName)) return;
         if (kind != null) {
             selectAudioOutput(kind.audioDeviceClass);
         }
+    }
+
+    private boolean routeThroughTelecom(@NonNull String request) {
+        TelecomAudio telecom = telecomAudio;
+        if (telecom == null) return false;
+        telecomRouteRequest = request;
+        telecom.requestRoute(request);
+        return true;
     }
 
     public void setAudioConfiguration(Map<String, Object> configuration) {
