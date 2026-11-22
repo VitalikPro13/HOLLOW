@@ -85,6 +85,44 @@ class OsCallRulesTest {
         assertEquals(OsCallSession.Path.FALLBACK, live.path)
     }
 
+    // #154 review MED-3: after a hang-up from the lock screen, a headset or a car the call never
+    // carries on with no OS surface; it waits for Dart's end.
+    @Test
+    fun anOsHangUpNeverFallsBack() {
+        val s = OsCallSession("u", telecomOffered = true)
+        s.onAdded()
+        assertTrue(s.onOsHangUp())
+        assertFalse(s.onOsHangUp())
+        assertFalse(s.onTelecomLost())
+        assertEquals(OsCallSession.Path.HUNG_UP, s.path)
+        assertTrue(s.end())
+    }
+
+    @Test
+    fun onlyALiveTelecomCallCanBeHungUpFromTheOs() {
+        assertFalse(OsCallSession("p", telecomOffered = true).onOsHangUp())
+        assertFalse(OsCallSession("f", telecomOffered = false).onOsHangUp())
+    }
+
+    @Test
+    fun telecomCallsStayOutOfTheCallHistory() {
+        assertTrue(OsCallRules.LOG_EXCLUDED)
+    }
+
+    @Test
+    fun theForegroundTriesPhoneCallAloneBeforeTheMicrophoneAlone() {
+        val phone = 0x4
+        val mic = 0x80
+        assertEquals(listOf(phone or mic, phone, mic), OsCallRules.foregroundAttempts(phone, mic, micAllowed = true))
+        assertEquals(listOf(phone), OsCallRules.foregroundAttempts(phone, mic, micAllowed = false))
+    }
+
+    @Test
+    fun aRefusedMicrophoneUpgradeKeepsTheRunningForeground() {
+        assertFalse(OsCallRules.finishWhenRefused(upgrade = true))
+        assertTrue(OsCallRules.finishWhenRefused(upgrade = false))
+    }
+
     @Test
     fun endIsIdempotentAndStopsEveryLaterTransition() {
         val s = OsCallSession("u", telecomOffered = true)
@@ -210,11 +248,39 @@ class OsCallRulesTest {
         assertFalse(m.telecomSaid(true))
     }
 
+    // The global mic mute also mutes the carrier call that holds ours: the hold lifts the mute our
+    // call set, and a Hollow call ending during the carrier call leaves that call unmuted.
     @Test
-    fun anEndWhileHeldLeavesTheGlobalMuteAlone() {
+    fun holdingForACarrierCallLiftsTheMuteOurCallSet() {
+        val m = MuteMirror()
+        assertEquals(true, m.fromApp(true, telecomLive = true, globalNow = false))
+        assertEquals(false, m.onHold(true, telecomLive = true, globalNow = true))
+        // The resume puts the app's mute back.
+        assertEquals(true, m.onHold(false, telecomLive = true, globalNow = false))
+    }
+
+    @Test
+    fun aHeadsetMuteIsLiftedForTheCarrierCallToo() {
+        val m = MuteMirror()
+        m.fromApp(false, telecomLive = true, globalNow = false)
+        assertTrue(m.telecomSaid(true))
+        assertEquals(false, m.onHold(true, telecomLive = true, globalNow = true))
+    }
+
+    @Test
+    fun aHoldNeverTouchesAMuteOurCallDidNotSet() {
+        val m = MuteMirror()
+        m.fromApp(false, telecomLive = true, globalNow = false)
+        assertNull(m.onHold(true, telecomLive = true, globalNow = true))
+    }
+
+    @Test
+    fun anEndWhileHeldLeavesNoMuteOfOursOnTheCarrierCall() {
         val m = MuteMirror()
         m.fromApp(true, telecomLive = true, globalNow = false)
-        m.onHold(true, telecomLive = true, globalNow = true)
+        assertEquals(false, m.onHold(true, telecomLive = true, globalNow = true))
+        // Global mute is off now; a mute the carrier call sets itself is not ours to clear.
+        assertFalse(m.clearAtEnd(globalNow = false))
         assertFalse(m.clearAtEnd(globalNow = true))
     }
 

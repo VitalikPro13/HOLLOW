@@ -150,10 +150,12 @@ decisions in its section 11. Android: `OsCallBridge.kt`, `HollowCallService.kt` 
   carrier call holds us instead of ending us).
 - Every `begin` starts `HollowCallService` (below) first, Telecom or not (a service the ring-out
   started is only re-posted). FALLBACK when the call is not ADDED 2 s after `begin`
-  (`ADD_DEADLINE_MS`), `addCall` throws, or the Telecom call ends while the session lives
-  (after an OS hang-up it waits 3 s for Dart's `end` first): `osFailed`, audioswitch takes the
-  audio as before Telecom, the service and CallStyle stay. A call added after the deadline is
-  disconnected (`OsCallSession`).
+  (`ADD_DEADLINE_MS`), `addCall` throws, or the Telecom call is lost while the session lives:
+  `osFailed`, audioswitch takes the audio as before Telecom, the service and CallStyle stay. A
+  call added after the deadline is disconnected (`OsCallSession`). An OS hang-up (lock screen,
+  headset, car) is NEVER a fallback (`HUNG_UP`): it sends `osEnd`, and a session Dart has not
+  ended 3 s later (`OS_HANG_UP_WAIT_MS`) gets `osEnd` again and loses its Telecom audio
+  (`releaseAudioFromTelecom(false)`), never carries on with no OS surface.
 - `begin` ends any other call the bridge holds (one at a time covers `live`); `end` for an
   unknown or ended uuid is a no-op; `connected`/`setMuted`/`update` before the add are stored
   and applied at the add (`setActive` at `connected`).
@@ -169,19 +171,23 @@ decisions in its section 11. Android: `OsCallBridge.kt`, `HollowCallService.kt` 
   engine. The start route goes in as `preferredStartingCallEndpoint` (`loud` -> speaker, else
   earpiece, nothing while a headset is attached) because core-telecom otherwise may move a call
   off the speaker at start. `releaseAudioFromTelecom(callGoesOn)`: a fallback activates
-  audioswitch if it was wanted and re-applies the last route request; an end activates nothing,
-  and Telecom puts the mode back to normal, so app sounds play as media again. Dart's `dm-call`
-  hold (from `startCall`/`acceptCall`) never activates audioswitch, so the ring stays out of call
-  mode and Telecom is the only owner; an audioswitch already active before `begin` (a room
-  handing over to a DM) stays active under Telecom until its own release (spike: no audio gap).
+  audioswitch only while a mic track or audio connection still holds (`hasActivating`) and
+  re-applies the last route request; an end activates nothing, and Telecom puts the mode back to
+  normal, so app sounds play as media again. Telecom is the ONLY owner: Dart's `dm-call` hold
+  never activates audioswitch, call mode ends 4 s after the last real audio even while an app
+  key holds (a call placed from inside a room rings out of call mode once the room's audio is
+  gone), and `takeAudioForTelecom` makes an audioswitch still active (a room handing over to a
+  DM) step down, remembered as wanted.
 - Mute (`MuteMirror`, spike D2): Telecom's mute IS the global mic mute. While the Telecom call
   is live and NOT held, `setMuted(m)` also writes `AudioManager.setMicrophoneMute(m)` (only when
   it differs), the app's mute is written once at the add, Telecom's `isMuted` reaches Dart as
   `osMute` only when it differs from the app's mute (our own write echoes back equal and is
   dropped), and within 1 s of the add a difference re-writes the app's mute instead (Telecom's
   first value can predate our write). `end` and a fallback clear a global mute our call or its
-  Telecom side set. HELD = nothing written or mirrored: the global mute also mutes the carrier
-  call. The CallStyle's Mute button sends `osMute(!appMuted)`; Dart answers with `setMuted`.
+  Telecom side set. HELD: the global mute also mutes the carrier call, so the hold LIFTS a mute
+  our call set, nothing is written or mirrored while held, and the resume writes the app's mute
+  back; a Hollow call ending during the carrier call leaves that call unmuted. The CallStyle's
+  Mute button sends `osMute(!appMuted)`; Dart answers with `setMuted`.
 - Hold (spike D3): `onSetInactive` -> `osHold(true)`; Telecom NEVER resumes a call it put on
   hold for a carrier call and raises `onSetActive` only for its own requests, so
   `requestUnhold` = `setActive()` and on Success the bridge sends `osHold(false)` itself; a
@@ -194,8 +200,10 @@ decisions in its section 11. Android: `OsCallBridge.kt`, `HollowCallService.kt` 
   `ringOut` or `begin` to `end` (or the ring-out's end). `phoneCall` alone does NOT keep a
   backgrounded mic (spike Q1), so the `microphone` type is taken at start when RECORD_AUDIO is
   granted, else added from `MainActivity.onResume` (the permission dialog closing resumes us),
-  never from the background (refused on API 34+). A refused start retries with the mic type
-  alone, then the call goes on without a service. Its notification is the CallStyle
+  never from the background (refused on API 34+). Types are tried phoneCall + microphone, then
+  phoneCall alone, then microphone alone (`foregroundAttempts`); a start refused every way ends
+  the service and the call goes on without one, a refused microphone upgrade keeps the running
+  phoneCall foreground. Its notification is the CallStyle
   (`CallNotification`, channel `hollow_ongoing_call`, DEFAULT importance, no sound or vibration:
   LOW may hide the status-bar call chip): Person = the title, Hang up + Mute/Unmute through
   `CallActionReceiver` (not exported, explicit immutable PendingIntents) -> `osEnd` / `osMute`

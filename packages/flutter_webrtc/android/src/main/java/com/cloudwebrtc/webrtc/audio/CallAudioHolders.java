@@ -25,13 +25,24 @@ public final class CallAudioHolders {
     private final Scheduler scheduler;
     private final long graceMs;
     private final Runnable onIdle;
+    private final Runnable onAudioIdle;
     private final Runnable idleCheck = this::runIdleCheck;
+    private final Runnable audioIdleCheck = this::runAudioIdleCheck;
 
     /** [onIdle] runs [graceMs] after the last release, unless a hold came meanwhile. */
     public CallAudioHolders(Scheduler scheduler, long graceMs, Runnable onIdle) {
+        this(scheduler, graceMs, onIdle, () -> {});
+    }
+
+    /**
+     * Also [onAudioIdle]: [graceMs] after the last ACTIVATING holder went while app keys still
+     * hold, unless real audio came back meanwhile. Call mode ends there; the service stays.
+     */
+    public CallAudioHolders(Scheduler scheduler, long graceMs, Runnable onIdle, Runnable onAudioIdle) {
         this.scheduler = scheduler;
         this.graceMs = graceMs;
         this.onIdle = onIdle;
+        this.onAudioIdle = onAudioIdle;
     }
 
     public static String mic(String trackId) {
@@ -64,11 +75,20 @@ public final class CallAudioHolders {
     /** True only when this release let go of the last holder. */
     public boolean release(String holder) {
         boolean idle;
+        boolean audioIdle;
         synchronized (this) {
-            idle = holders.remove(holder) && holders.isEmpty();
+            boolean removed = holders.remove(holder);
+            idle = removed && holders.isEmpty();
+            audioIdle = removed && !idle && activates(holder) && !hasActivatingLocked();
         }
         // Never pending here: the hold that ended the last idle spell cancelled it.
-        if (idle) scheduler.schedule(idleCheck, graceMs);
+        if (idle) {
+            scheduler.cancel(audioIdleCheck);
+            scheduler.schedule(idleCheck, graceMs);
+        } else if (audioIdle) {
+            scheduler.cancel(audioIdleCheck);
+            scheduler.schedule(audioIdleCheck, graceMs);
+        }
         return idle;
     }
 
@@ -77,8 +97,25 @@ public final class CallAudioHolders {
         if (isIdle()) onIdle.run();
     }
 
+    // Real audio back by now keeps call mode: a hold never cancels this check, this test does.
+    private void runAudioIdleCheck() {
+        if (!isIdle() && !hasActivating()) onAudioIdle.run();
+    }
+
     public synchronized boolean isIdle() {
         return holders.isEmpty();
+    }
+
+    /** Whether a mic track or an audio connection still holds (what call mode follows). */
+    public synchronized boolean hasActivating() {
+        return hasActivatingLocked();
+    }
+
+    private boolean hasActivatingLocked() {
+        for (String h : holders) {
+            if (activates(h)) return true;
+        }
+        return false;
     }
 
     public void clear() {
@@ -86,5 +123,6 @@ public final class CallAudioHolders {
             holders.clear();
         }
         scheduler.cancel(idleCheck);
+        scheduler.cancel(audioIdleCheck);
     }
 }

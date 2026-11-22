@@ -68,7 +68,6 @@ object OsCallBridge {
         var pendingRoute: String? = null
         var wantActive = false
         var held = false
-        var osEnded = false
         var connectedAt: Long? = null
         var addedAt = 0L
 
@@ -192,7 +191,7 @@ object OsCallBridge {
         return offersTelecom(OsCallRules.DM)
     }
 
-    // No OS call while a call we place rings (Nov 22): only the call service, so the mic can be
+    // No OS call while a call we place rings: only the call service, so the mic can be
     // taken while the app is still in front.
     private fun ringOut(on: Boolean, title: String) {
         val ctx = app ?: return
@@ -247,26 +246,28 @@ object OsCallBridge {
                 if (c.video) CallAttributesCompat.CALL_TYPE_VIDEO_CALL else CallAttributesCompat.CALL_TYPE_AUDIO_CALL,
                 CallAttributesCompat.SUPPORTS_SET_INACTIVE,
                 startingEndpoint(manager, c.loud),
-                true, // isLogExcluded: no call-log entry
+                OsCallRules.LOG_EXCLUDED,
             )
             manager.addCall(
                 attributes,
                 onAnswer = { },
                 onDisconnect = { cause ->
                     Log.i(TAG, "Telecom ended ${c.uuid} (${cause.code})")
-                    if (call === c && c.session.path == OsCallSession.Path.TELECOM) {
-                        c.osEnded = true
-                        send("osEnd", mapOf("uuid" to c.uuid))
-                    }
+                    if (call === c && c.session.onOsHangUp()) send("osEnd", mapOf("uuid" to c.uuid))
                 },
                 onSetActive = { if (call === c) setHeld(c, false) },
                 onSetInactive = { if (call === c) setHeld(c, true) },
             ) { onAdded(c, this) }
-            // The Telecom call is over. A session that still lives runs on the fallback; after an
-            // OS hang-up Dart is ending it, so that waits a moment first.
+            // The Telecom call is over. After an OS hang-up Dart ends the session; one it has not
+            // ended in time is asked again and loses its Telecom audio, never falls back (it would
+            // carry on with no OS surface). Any other loss runs on the fallback.
             if (call === c) {
-                if (c.osEnded) delay(3_000)
-                if (call === c && c.session.onTelecomLost()) fallBack(c, "Telecom call ended")
+                if (c.session.path == OsCallSession.Path.HUNG_UP) {
+                    delay(OsCallRules.OS_HANG_UP_WAIT_MS)
+                    if (call === c) afterUnansweredHangUp(c)
+                } else if (c.session.onTelecomLost()) {
+                    fallBack(c, "Telecom call ended")
+                }
             }
         } catch (e: CancellationException) {
             throw e
@@ -353,6 +354,16 @@ object OsCallBridge {
         debugStatus("fallback")
     }
 
+    private fun afterUnansweredHangUp(c: Call) {
+        Log.w(TAG, "${c.uuid} hung up from the OS, Dart has not ended it: asking again")
+        c.job?.cancel()
+        clearGlobalMute(c)
+        c.control = null
+        AudioSwitchManager.releaseAudioFromTelecom(false)
+        send("osEnd", mapOf("uuid" to c.uuid))
+        debugStatus("hang-up again")
+    }
+
     private fun connected(uuid: String?) {
         val c = callFor(uuid) ?: return
         if (c.connectedAt == null) c.connectedAt = System.currentTimeMillis()
@@ -393,7 +404,7 @@ object OsCallBridge {
         val c = call ?: return
         if (c.uuid != uuid) return
         val wasTelecom = c.session.path == OsCallSession.Path.TELECOM_PENDING ||
-            c.session.path == OsCallSession.Path.TELECOM
+            c.session.path == OsCallSession.Path.TELECOM || c.session.path == OsCallSession.Path.HUNG_UP
         if (!c.session.end()) return
         call = null
         clearGlobalMute(c)

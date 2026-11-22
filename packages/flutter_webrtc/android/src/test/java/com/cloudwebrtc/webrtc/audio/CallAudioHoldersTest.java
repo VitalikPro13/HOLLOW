@@ -47,8 +47,71 @@ public class CallAudioHoldersTest {
 
     private final FakeScheduler clock = new FakeScheduler();
     private int deactivations;
+    private int audioIdles;
     private final CallAudioHolders holders =
-            new CallAudioHolders(clock, GRACE, () -> deactivations++);
+            new CallAudioHolders(clock, GRACE, () -> deactivations++, () -> audioIdles++);
+
+    // Call mode follows real audio, never an app key alone: a call placed from inside a room
+    // holds its key across the room's leave, and must not ring out (or meet Telecom) with the
+    // room's AudioSwitch still active (#154 review MED-1).
+    @Test
+    public void anAppHoldAloneKeepsTheServiceButNotCallMode() {
+        holders.hold(CallAudioHolders.app("voice-channel"));
+        holders.hold(CallAudioHolders.mic("room-mic"));
+        holders.hold(CallAudioHolders.peerConnection("room-leg"));
+        holders.hold(CallAudioHolders.app("dm-call"));
+        holders.release(CallAudioHolders.app("voice-channel"));
+        holders.release(CallAudioHolders.mic("room-mic"));
+        assertFalse(holders.release(CallAudioHolders.peerConnection("room-leg")));
+        assertFalse(holders.hasActivating());
+        clock.advance(GRACE - 1);
+        assertEquals(0, audioIdles);
+        clock.advance(1);
+        assertEquals("call mode ends with the last real audio", 1, audioIdles);
+        assertEquals("the app key keeps the service", 0, deactivations);
+    }
+
+    @Test
+    public void realAudioReturningInsideTheGraceKeepsCallMode() {
+        holders.hold(CallAudioHolders.app("dm-call"));
+        holders.hold(CallAudioHolders.mic("old-mic"));
+        holders.release(CallAudioHolders.mic("old-mic"));
+        clock.advance(GRACE - 1);
+        holders.hold(CallAudioHolders.mic("new-mic"));
+        clock.advance(GRACE * 3);
+        assertEquals(0, audioIdles);
+        assertTrue(holders.hasActivating());
+    }
+
+    @Test
+    public void aMicSwitchWhileAConnectionCarriesAudioKeepsCallMode() {
+        holders.hold(CallAudioHolders.app("dm-call"));
+        holders.hold(CallAudioHolders.mic("m"));
+        holders.hold(CallAudioHolders.peerConnection("pc"));
+        holders.release(CallAudioHolders.mic("m"));
+        clock.advance(GRACE * 3);
+        assertEquals(0, audioIdles);
+    }
+
+    @Test
+    public void anAudioIdleCheckAlreadyRunningWhenRealAudioLandsKeepsCallMode() {
+        holders.hold(CallAudioHolders.app("dm-call"));
+        holders.hold(CallAudioHolders.mic("m"));
+        holders.release(CallAudioHolders.mic("m"));
+        Runnable check = clock.lastScheduled;
+        holders.hold(CallAudioHolders.peerConnection("pc"));
+        check.run();
+        assertEquals(0, audioIdles);
+    }
+
+    @Test
+    public void theLastReleaseOfAllRunsOnlyTheFullIdle() {
+        holders.hold(CallAudioHolders.mic("m"));
+        assertTrue(holders.release(CallAudioHolders.mic("m")));
+        clock.advance(GRACE);
+        assertEquals(1, deactivations);
+        assertEquals(0, audioIdles);
+    }
 
     // A ringing call (an app hold, no audio yet) must not put the phone in call mode, and an
     // answered DM call's audio belongs to Telecom (#154): only real audio activates.

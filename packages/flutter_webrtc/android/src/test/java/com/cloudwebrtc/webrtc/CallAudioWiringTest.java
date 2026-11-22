@@ -95,16 +95,46 @@ public class CallAudioWiringTest {
     public void anIdleReleaseStopsTheServiceEvenWhenCallAudioNeverActivated() throws IOException {
         // A placed call that rang out held only its app key: the service started,
         // AudioSwitch never activated, and the service must still end.
-        String release = body("audio/AudioSwitchManager.java", "private void releaseIfIdle()");
+        String f = "audio/AudioSwitchManager.java";
+        String release = body(f, "private void releaseIfIdle()");
+        assertTrue(release.contains("deactivateLive();"));
         assertTrue(release.contains("CallForegroundService.stop(context)"));
-        int guard = release.indexOf("if (isActive");
-        String activeOnly = release.substring(guard, release.indexOf('}', guard) + 1);
-        assertFalse(activeOnly.contains("CallForegroundService.stop"));
+        assertFalse(body(f, "private void deactivateLive()").contains("CallForegroundService.stop"));
+    }
+
+    // #154 review MED-1: call mode follows real audio; app keys keep only the service.
+    @Test
+    public void theEndOfRealAudioEndsCallModeButKeepsTheService() throws IOException {
+        String f = "audio/AudioSwitchManager.java";
+        assertTrue(source(f).contains("this::releaseIfIdle,\n            this::endCallModeOnly)"));
+        String only = body(f, "private void endCallModeOnly()");
+        assertTrue(only.contains("deactivateLive();"));
+        assertFalse(only.contains("CallForegroundService.stop"));
+    }
+
+    // #154 review MED-1: a room's live AudioSwitch steps down when Telecom takes the call.
+    @Test
+    public void telecomTakingTheAudioStepsDownALiveAudioSwitch() throws IOException {
+        String f = "audio/AudioSwitchManager.java";
+        has(f, "public static void takeAudioForTelecom(", "stepDownForTelecom");
+        String down = body(f, "private void stepDownForTelecom()");
+        assertTrue(down.contains("deactivateLive();"));
+        assertTrue(down.contains("wantsActive = true;"));
+    }
+
+    // #154 review MED-3: a fallback starts call audio only for real audio, and start/stop never
+    // wipe the handler (that deleted the holders' idle check and left call mode on).
+    @Test
+    public void aFallbackStartsOnlyForRealAudioAndNothingWipesTheIdleCheck() throws IOException {
+        String f = "audio/AudioSwitchManager.java";
+        has(f, "private void afterTelecom(", "if (callAudioHolders.hasActivating()) start();");
+        assertFalse(body(f, "public void start()").contains("removeCallbacksAndMessages"));
+        assertFalse(body(f, "public void stop()").contains("removeCallbacksAndMessages"));
     }
 
     @Test
     public void everyHoldRetriesTheForegroundService() throws IOException {
-        String start = body("audio/AudioSwitchManager.java", "public void start()");
+        String start = body("audio/AudioSwitchManager.java", "private void startNow()");
         assertTrue(start.contains("CallForegroundService.start(context)"));
         int guard = start.indexOf("if (!isActive) {");
         String activateOnly = start.substring(guard, start.indexOf('}', guard) + 1);

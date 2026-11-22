@@ -9,10 +9,16 @@ object OsCallRules {
     /** The `kind` of the one session that may become a system call. */
     const val DM = "dm"
 
+    /** Every Telecom call stays out of the phone's call history (R-AR-04). */
+    const val LOG_EXCLUDED = true
+
+    /** How long an OS hang-up waits for Dart's `end` before it asks again. */
+    const val OS_HANG_UP_WAIT_MS = 3_000L
+
     /**
-     * Only an answered DM call becomes a Telecom call (Vitalik, Nov 22): a voice room or meeting
-     * runs in the app, on the call service and its CallStyle alone. An unknown kind stays in the
-     * app too.
+     * Only an answered DM call becomes a Telecom call: the system has no call screen for a room,
+     * so a voice room or meeting runs in the app, on the call service and its CallStyle alone. An
+     * unknown kind stays in the app too.
      */
     fun offersTelecom(kind: String?, registered: Boolean, hasFeature: Boolean, forcedFallback: Boolean): Boolean =
         kind == DM && registered && hasFeature && !forcedFallback
@@ -26,6 +32,21 @@ object OsCallRules {
 
     /** Only a begun session's notification is a CallStyle call; a ring-out's is a plain one. */
     fun showsAsCall(look: CallLook): Boolean = !look.ringing
+
+    /**
+     * The foreground types to try, in order: phoneCall + microphone, then phoneCall alone (the
+     * microphone type is the one Android refuses from the background), then microphone alone.
+     */
+    fun foregroundAttempts(phoneCall: Int, microphone: Int, micAllowed: Boolean): List<Int> {
+        val mic = if (micAllowed) microphone else 0
+        return listOf(phoneCall or mic, phoneCall, mic).filter { it != 0 }.distinct()
+    }
+
+    /**
+     * Whether every refused type ends the service: only on its first start. A refused microphone
+     * upgrade keeps the phoneCall foreground the call already runs on.
+     */
+    fun finishWhenRefused(upgrade: Boolean): Boolean = !upgrade
 }
 
 /**
@@ -59,7 +80,7 @@ class RingOut {
 
 /** One begun uuid's path: Telecom (pending, then added), the fallback, or ended. */
 class OsCallSession(val uuid: String, telecomOffered: Boolean) {
-    enum class Path { TELECOM_PENDING, TELECOM, FALLBACK, ENDED }
+    enum class Path { TELECOM_PENDING, TELECOM, HUNG_UP, FALLBACK, ENDED }
 
     var path = if (telecomOffered) Path.TELECOM_PENDING else Path.FALLBACK
         private set
@@ -75,6 +96,16 @@ class OsCallSession(val uuid: String, telecomOffered: Boolean) {
     fun onDeadline(): Boolean {
         if (path != Path.TELECOM_PENDING) return false
         path = Path.FALLBACK
+        return true
+    }
+
+    /**
+     * The person hung up from the OS (lock screen, headset, car). True = tell Dart. Such a call
+     * never falls back: it ends with Dart's `end`, never carries on with no OS surface.
+     */
+    fun onOsHangUp(): Boolean {
+        if (path != Path.TELECOM) return false
+        path = Path.HUNG_UP
         return true
     }
 
@@ -128,10 +159,18 @@ class MuteMirror {
         return Telecom.TELL
     }
 
-    /** Telecom held or resumed our call. On resume, returns the global mute to write, as fromApp. */
+    /**
+     * Telecom held or resumed our call; returns the global mute to write, or null. A hold for a
+     * carrier call lifts a global mute our call set (it would mute that call too); the resume puts
+     * the app's mute back, as fromApp.
+     */
     fun onHold(held: Boolean, telecomLive: Boolean, globalNow: Boolean): Boolean? {
-        this.held = held
-        return if (held) null else fromApp(appMuted, telecomLive, globalNow)
+        if (held) {
+            this.held = true
+            return if (globalNow && (wroteMute || telecomMuted)) false else null
+        }
+        this.held = false
+        return fromApp(appMuted, telecomLive, globalNow)
     }
 
     /** At the end: true = clear the global mute, when our call (or its Telecom side) set it. */

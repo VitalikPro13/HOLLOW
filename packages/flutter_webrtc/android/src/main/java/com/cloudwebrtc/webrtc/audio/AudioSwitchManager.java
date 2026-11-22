@@ -71,7 +71,8 @@ public class AudioSwitchManager {
                 }
             },
             RELEASE_GRACE_MS,
-            this::releaseIfIdle);
+            this::releaseIfIdle,
+            this::endCallModeOnly);
 
     // Main thread, once the holders stayed empty for the whole grace. The service
     // stops even if call audio never activated: an app hold starts it alone.
@@ -79,11 +80,23 @@ public class AudioSwitchManager {
         // A start remembered while Telecom owned the audio is over too: a later fallback must
         // not activate call audio for nobody.
         wantsActive = false;
+        deactivateLive();
+        CallForegroundService.stop(context);
+    }
+
+    // Main thread: real audio is gone for the whole grace while an app key still holds (a call
+    // placed from a room, ringing; a media rebuild's gap). Call mode ends, the service stays, and
+    // the next mic track or audio connection activates again.
+    private void endCallModeOnly() {
+        wantsActive = false;
+        deactivateLive();
+    }
+
+    private void deactivateLive() {
         if (isActive && audioSwitch != null) {
             audioSwitch.deactivate();
             isActive = false;
         }
-        CallForegroundService.stop(context);
     }
 
     /**
@@ -178,9 +191,21 @@ public class AudioSwitchManager {
     @Nullable
     private String telecomRouteRequest;
 
-    /** Main thread. Set by the app before Telecom adds the call, so audioswitch never activates. */
+    /**
+     * Main thread. Set by the app before Telecom adds the call, so audioswitch never activates.
+     * An audioswitch already active (a room handing over to a DM call) steps down and is
+     * remembered as wanted, so Telecom is the only owner of the call's audio.
+     */
     public static void takeAudioForTelecom(@NonNull TelecomAudio owner) {
         telecomAudio = owner;
+        AudioSwitchManager manager = instance;
+        if (manager != null) manager.handler.post(manager::stepDownForTelecom);
+    }
+
+    private void stepDownForTelecom() {
+        if (telecomAudio == null || !isActive) return;
+        deactivateLive();
+        wantsActive = true;
     }
 
     /**
@@ -205,9 +230,11 @@ public class AudioSwitchManager {
             wantsActive = false;
             return;
         }
+        // Only for real audio still running: a start for nobody would hold call mode with no
+        // idle check left to end it.
         if (wantsActive) {
             wantsActive = false;
-            start();
+            if (callAudioHolders.hasActivating()) start();
         }
         if (route == null) return;
         if ("loud".equals(route)) {
@@ -291,39 +318,50 @@ public class AudioSwitchManager {
         }
     }
 
+    // Hollow fork: start and stop cancel only each other, never every message on the handler:
+    // that also deleted the holders' pending idle check, and call mode then never ended.
+    private final Runnable startTask = this::startNow;
+    private final Runnable stopTask = this::stopNow;
+
     public void start() {
         if (audioSwitch != null) {
-            handler.removeCallbacksAndMessages(null);
-            handler.postAtFrontOfQueue(() -> {
-                if (!isActive) {
-                    if (telecomAudio != null) {
-                        wantsActive = true;
-                        return;
-                    }
-                    Objects.requireNonNull(audioSwitch).activate();
-                    isActive = true;
-                }
-                // Hollow fork: hold a microphone-typed FGS for the call's
-                // lifetime so the mic survives backgrounding. It can only start
-                // while the app is foregrounded, so every hold asks again: one
-                // refused in the background is retried by the next hold.
-                CallForegroundService.start(context);
-            });
+            handler.removeCallbacks(startTask);
+            handler.removeCallbacks(stopTask);
+            handler.postAtFrontOfQueue(startTask);
         }
+    }
+
+    private void startNow() {
+        if (!isActive) {
+            if (telecomAudio != null) {
+                wantsActive = true;
+                return;
+            }
+            Objects.requireNonNull(audioSwitch).activate();
+            isActive = true;
+        }
+        // Hollow fork: hold a microphone-typed FGS for the call's
+        // lifetime so the mic survives backgrounding. It can only start
+        // while the app is foregrounded, so every hold asks again: one
+        // refused in the background is retried by the next hold.
+        CallForegroundService.start(context);
     }
 
     public void stop() {
         callAudioHolders.clear();
         if (audioSwitch != null) {
-            handler.removeCallbacksAndMessages(null);
-            handler.postAtFrontOfQueue(() -> {
-                wantsActive = false;
-                if (isActive) {
-                    Objects.requireNonNull(audioSwitch).deactivate();
-                    isActive = false;
-                    CallForegroundService.stop(context);
-                }
-            });
+            handler.removeCallbacks(startTask);
+            handler.removeCallbacks(stopTask);
+            handler.postAtFrontOfQueue(stopTask);
+        }
+    }
+
+    private void stopNow() {
+        wantsActive = false;
+        if (isActive) {
+            Objects.requireNonNull(audioSwitch).deactivate();
+            isActive = false;
+            CallForegroundService.stop(context);
         }
     }
 

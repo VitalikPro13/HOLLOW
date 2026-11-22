@@ -49,7 +49,7 @@ object CallNotification {
                 .setCategory(NotificationCompat.CATEGORY_CALL)
                 .addAction(mute)
         } else {
-            // Ringing out is no call to the system (Nov 22): a plain notification, only there
+            // Ringing out is no call to the system: a plain notification, only there
             // because a foreground service must show one.
             builder.setContentTitle(look.title.ifBlank { "Hollow" })
                 .setContentText("Calling")

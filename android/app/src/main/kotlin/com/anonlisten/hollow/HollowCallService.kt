@@ -75,7 +75,7 @@ class HollowCallService : Service() {
             val service = current ?: return
             if (look == null || !micAllowed(service)) return
             if (grantedTypes and micType() != 0) return
-            service.goForeground()
+            service.goForeground(upgrade = true)
         }
 
         /** Main thread. */
@@ -111,18 +111,17 @@ class HollowCallService : Service() {
         return START_NOT_STICKY
     }
 
-    // phoneCall first (+ microphone when allowed); a refusal retries with the microphone alone; a
-    // second refusal leaves the call running as it did before this service existed.
-    private fun goForeground() {
+    // The types in OsCallRules.foregroundAttempts order. Every refusal on the first start ends the
+    // service (the call goes on as before it existed); a refused microphone upgrade keeps the
+    // phoneCall foreground the call already runs on.
+    private fun goForeground(upgrade: Boolean = false) {
         val notification = CallNotification.build(this, look ?: lastLook)
-        val wanted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL or (if (micAllowed(this)) micType() else 0)
+        val attempts = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            OsCallRules.foregroundAttempts(
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL, micType(), micAllowed(this))
         } else {
-            0
+            listOf(0)
         }
-        val attempts = listOf(wanted, wanted and ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL.inv())
-            .distinct()
-            .filter { it != 0 || Build.VERSION.SDK_INT < Build.VERSION_CODES.Q }
         for (types in attempts) {
             try {
                 ServiceCompat.startForeground(this, CallNotification.NOTIFICATION_ID, notification, types)
@@ -133,7 +132,7 @@ class HollowCallService : Service() {
                 Log.w(TAG, "startForeground types=$types refused: $e")
             }
         }
-        finish()
+        if (OsCallRules.finishWhenRefused(upgrade)) finish()
     }
 
     private fun post(next: CallLook) {
