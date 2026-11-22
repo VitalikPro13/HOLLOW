@@ -85,6 +85,13 @@ public class CallAudioWiringTest {
     }
 
     @Test
+    public void anAppHoldNeverActivatesCallAudio() throws IOException {
+        String hold = body("audio/AudioSwitchManager.java", "public void hold(");
+        assertTrue(hold.contains("if (CallAudioHolders.activates(holder))"));
+        assertTrue(hold.contains("CallForegroundService.start(context)"));
+    }
+
+    @Test
     public void everyHoldRetriesTheForegroundService() throws IOException {
         String start = body("audio/AudioSwitchManager.java", "public void start()");
         assertTrue(start.contains("CallForegroundService.start(context)"));

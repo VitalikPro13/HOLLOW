@@ -46,6 +46,14 @@ public final class CallAudioHolders {
         return "app:" + key;
     }
 
+    /**
+     * Whether a hold by [holder] activates call audio: a mic track or a connection carrying
+     * audio does; an app hold (Dart's call or room key) only keeps it from ending.
+     */
+    public static boolean activates(String holder) {
+        return !holder.startsWith("app:");
+    }
+
     public void hold(String holder) {
         synchronized (this) {
             holders.add(holder);

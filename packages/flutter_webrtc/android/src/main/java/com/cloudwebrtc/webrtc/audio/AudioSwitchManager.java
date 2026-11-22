@@ -267,7 +267,15 @@ public class AudioSwitchManager {
      */
     public void hold(@NonNull String holder) {
         callAudioHolders.hold(holder);
-        start();
+        if (CallAudioHolders.activates(holder)) {
+            start();
+        } else {
+            // An app hold (a call or room that has no audio yet) only keeps call
+            // audio from ending, and still asks for the service. Activating here
+            // put a ringing call in call mode, and an answered DM call then had
+            // two audio owners, AudioSwitch and Telecom (#154).
+            handler.post(() -> CallForegroundService.start(context));
+        }
     }
 
     /**

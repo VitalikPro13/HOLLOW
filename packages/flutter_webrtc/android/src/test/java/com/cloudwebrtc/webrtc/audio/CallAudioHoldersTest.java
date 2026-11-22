@@ -50,6 +50,16 @@ public class CallAudioHoldersTest {
     private final CallAudioHolders holders =
             new CallAudioHolders(clock, GRACE, () -> deactivations++);
 
+    // A ringing call (an app hold, no audio yet) must not put the phone in call mode, and an
+    // answered DM call's audio belongs to Telecom (#154): only real audio activates.
+    @Test
+    public void onlyMicTracksAndAudioConnectionsActivateCallAudio() {
+        assertTrue(CallAudioHolders.activates(CallAudioHolders.mic("m")));
+        assertTrue(CallAudioHolders.activates(CallAudioHolders.peerConnection("p")));
+        assertFalse(CallAudioHolders.activates(CallAudioHolders.app("dm-call")));
+        assertFalse(CallAudioHolders.activates(CallAudioHolders.app("voice-channel")));
+    }
+
     @Test
     public void dmCallEndsCallAudioWhileDataChannelLanesStayOpen() {
         holders.hold(CallAudioHolders.mic("mic1"));

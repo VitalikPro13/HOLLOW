@@ -195,8 +195,11 @@ the signal whitelist's four touches, the stream overlay consent detail, share ba
   track until the peer's new offer; a call answered inside a room has none between the room's
   leave and the offer). `dm-call` is held from `startCall`/`acceptCall` (before the room's
   leave) to `_cleanup()`; `voice-channel` sits on every `RealtimeSessionFlag` edge of a room;
-  every hold asks for the fork's FGS again. While Telecom owns the audio, a hold only remembers
-  the start (`wantsActive`), and the idle release forgets it. NEVER tie call audio to "no peer
+  every hold asks for the fork's FGS again. An app hold only keeps call audio from ending; only a
+  mic track or an audio connection activates it (`CallAudioHolders.activates`), so a ringing call
+  stays out of call mode and Telecom stays the only owner of an answered DM call. While Telecom
+  owns the audio, an activating hold only remembers the start (`wantsActive`), and the idle
+  release forgets it. NEVER tie call audio to "no peer
   connections left": data-channel lanes outlive every call, and the shipped rule kept a lying
   "Ongoing call" FGS and call mode up after every call, so `HollowSfx` played cues as call
   signalling (#154). ONE audio manager per process; an engine's detach gives back only its own

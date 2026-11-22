@@ -170,9 +170,10 @@ decisions in its section 11. Android: `OsCallBridge.kt`, `HollowCallService.kt` 
   earpiece, nothing while a headset is attached) because core-telecom otherwise may move a call
   off the speaker at start. `releaseAudioFromTelecom(callGoesOn)`: a fallback activates
   audioswitch if it was wanted and re-applies the last route request; an end activates nothing,
-  and Telecom puts the mode back to normal, so app sounds play as media again. An audioswitch
-  already active before `begin` (a room handing over to a DM) stays active under Telecom until
-  its own release (spike: no audio gap).
+  and Telecom puts the mode back to normal, so app sounds play as media again. Dart's `dm-call`
+  hold (from `startCall`/`acceptCall`) never activates audioswitch, so the ring stays out of call
+  mode and Telecom is the only owner; an audioswitch already active before `begin` (a room
+  handing over to a DM) stays active under Telecom until its own release (spike: no audio gap).
 - Mute (`MuteMirror`, spike D2): Telecom's mute IS the global mic mute. While the Telecom call
   is live and NOT held, `setMuted(m)` also writes `AudioManager.setMicrophoneMute(m)` (only when
   it differs), the app's mute is written once at the add, Telecom's `isMuted` reaches Dart as
