@@ -60,6 +60,7 @@ enum _KeptChoice { restoreAnyway, checkWords }
 
 class _WelcomePhraseStepState extends State<WelcomePhraseStep> {
   final _phrase = TextEditingController();
+  final _phraseFocus = FocusNode();
   PhraseRestoreBranch? _branch;
   LastHadAnswer? _lastHad;
   int? _lostSinceMs;
@@ -69,6 +70,7 @@ class _WelcomePhraseStepState extends State<WelcomePhraseStep> {
   @override
   void dispose() {
     _phrase.dispose();
+    _phraseFocus.dispose();
     super.dispose();
   }
 
@@ -126,15 +128,22 @@ class _WelcomePhraseStepState extends State<WelcomePhraseStep> {
         // the kept folder stays for a later destroy.
         if (!keptMatchOffersSwitch()) return _restore(checkKept: false);
         final again = await _askKeptMatch(path, profileName);
-        if (again == _KeptChoice.restoreAnyway) await _restore(checkKept: false);
+        if (again == _KeptChoice.restoreAnyway) return _restore(checkKept: false);
+        _backToTheWords();
       case identity_api.RestoreOutcome_KeptNoneOpens():
         setState(() => _busy = false);
         final again = await showHollowDialog<_KeptChoice>(
           context: context,
           builder: (_) => const _KeptNoneOpensDialog(),
         );
-        if (again == _KeptChoice.restoreAnyway) await _restore(checkKept: false);
+        if (again == _KeptChoice.restoreAnyway) return _restore(checkKept: false);
+        _backToTheWords();
     }
+  }
+
+  /// The field sat out of focus while the check ran; the person is back to fix a word.
+  void _backToTheWords() {
+    if (mounted) _phraseFocus.requestFocus();
   }
 
   Future<_KeptChoice?> _askKeptMatch(String path, String? profileName) {
@@ -246,6 +255,7 @@ class _WelcomePhraseStepState extends State<WelcomePhraseStep> {
             child: RecoveryPhraseField(
               key: const ValueKey('welcome-phrase-field'),
               controller: _phrase,
+              focusNode: _phraseFocus,
               errorText: _error,
               onChanged: (_) => setState(() => _error = null),
             ),

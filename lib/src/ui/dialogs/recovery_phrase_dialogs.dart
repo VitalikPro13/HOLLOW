@@ -26,6 +26,7 @@ class RecoveryPhraseField extends StatelessWidget {
   final String? errorText;
   final ValueChanged<String>? onChanged;
   final bool autofocus;
+  final FocusNode? focusNode;
 
   const RecoveryPhraseField({
     super.key,
@@ -33,6 +34,7 @@ class RecoveryPhraseField extends StatelessWidget {
     this.errorText,
     this.onChanged,
     this.autofocus = false,
+    this.focusNode,
   });
 
   @override
@@ -44,6 +46,7 @@ class RecoveryPhraseField extends StatelessWidget {
         minLines: 2,
         maxLines: 4,
         autofocus: autofocus,
+        focusNode: focusNode,
         errorText: errorText,
         onChanged: onChanged,
         keyboardType: TextInputType.visiblePassword,

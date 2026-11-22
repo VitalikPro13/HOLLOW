@@ -441,6 +441,25 @@ void main() {
     expect(popped?.action, 'restored_phrase');
   });
 
+  testWidgets('Check the words puts the cursor back in the phrase field',
+      (tester) async {
+    // A real check takes a while: the field sits out of focus meanwhile.
+    _api.answers = [
+      () => Future.delayed(const Duration(milliseconds: 200),
+          () => const RestoreOutcome.keptNoneOpens()),
+    ];
+    await openStep(tester);
+    await pick(tester, PhraseRestoreBranch.admit);
+    await type(tester, _phrase);
+    await restore(tester);
+    await tester.tap(find.text('Check the words'));
+    await tester.pumpAndSettle();
+    final field = tester.widget<EditableText>(find.descendant(
+        of: find.byKey(const ValueKey('welcome-phrase-field')),
+        matching: find.byType(EditableText)));
+    expect(field.focusNode.hasFocus, isTrue);
+  });
+
   testWidgets('after a set-aside Welcome opens on the step and says why',
       (tester) async {
     await open(tester, afterSetAside: true);
