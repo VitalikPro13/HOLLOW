@@ -50,8 +50,8 @@ Every release since 0.14.0 has a signed Git tag, named `vX.Y.Z-beta`. Older tags
 ```bash
 git clone --recurse-submodules https://github.com/VitalikPro13/HOLLOW.git
 cd HOLLOW
-git checkout v0.14.0-beta
 git -c gpg.ssh.allowedSignersFile=.github/allowed_signers verify-tag v0.14.0-beta
+git checkout v0.14.0-beta
 ```
 
 A good tag prints a line starting with `Good "git" signature` and the release tag key's fingerprint. The command trusts the keys in `.github/allowed_signers` from the same checkout, so compare the fingerprint it prints with the list below.

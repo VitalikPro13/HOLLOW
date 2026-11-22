@@ -227,7 +227,7 @@ if [[ " ${units[*]} " == *" hollow-relay "* ]] || [[ " ${units[*]} " == *" hollo
         missing=$(LC_ALL=C ldd "$exe" 2>/dev/null | sed -n 's/^[[:space:]]*\([^[:space:]]*\) => not found.*/\1/p' |
             LC_ALL=C sort -u | paste -sd' ' -)
         if [ -n "$missing" ]; then
-            bad "$u cannot start: $exe needs $missing, which this system does not have. To build the programs here, run the setup from your copy of the repository (sudo bash relay-uws/install.sh) and choose Rebuild from this copy"
+            bad "$u cannot start, because $exe needs $missing, which this system does not have. To build the programs here, run the setup from your copy of the repository (sudo bash relay-uws/install.sh) and choose Rebuild from this copy"
         else
             ok "$u's program $exe finds every library it needs"
         fi
@@ -868,8 +868,19 @@ fi
 echo "SSH"
 # Keywords in lower case: OpenSSH 10.5 (Ubuntu 26.10) prints them as written in sshd_config.
 sshd_t=$(sshd -T 2>/dev/null | awk 'NF { $1 = tolower($1); print }')
-if echo "$sshd_t" | grep -qx "passwordauthentication no"; then ok "password logins off"; else bad "SSH password logins are on"; fi
-if echo "$sshd_t" | grep -qx "permitrootlogin yes"; then bad "root may log in over SSH with a password"; else ok "no root password login"; fi
+if [ -z "$sshd_t" ]; then
+    bad "sshd -T printed no settings, so password and root logins cannot be checked"
+else
+    if echo "$sshd_t" | grep -qx "passwordauthentication no"; then ok "password logins off"; else bad "SSH password logins are on"; fi
+    # Only a setting sshd printed counts as off.
+    root_login=$(echo "$sshd_t" | awk '$1 == "permitrootlogin" { v = $2 } END { print v }')
+    case "$root_login" in
+    yes) bad "root may log in over SSH with a password" ;;
+    no | prohibit-password | without-password | forced-commands-only) ok "no root password login" ;;
+    "") bad "sshd -T printed no PermitRootLogin setting, so root's login cannot be checked" ;;
+    *) bad "sshd -T gives PermitRootLogin $root_login, which this check does not know, so root's login cannot be checked" ;;
+    esac
+fi
 
 echo ""
 if [ "$fail" = 0 ]; then echo "All checks passed."; else echo "Some checks FAILED."; fi

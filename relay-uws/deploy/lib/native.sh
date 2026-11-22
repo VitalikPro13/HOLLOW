@@ -123,15 +123,39 @@ restore_previous_programs() {
     return 0
 }
 
-# Installed, and able to start: a release upgrade can take away a library
-# the programs were built for, and a re-run then installs them again.
+PROGRAMS_DIR=/usr/local/bin
 programs_present() {
-    local bins=(/usr/local/bin/hollow-relay)
-    [ "$CFG_FORWARDER" = yes ] && bins+=(/usr/local/bin/hollow-forwarder)
-    [ -x /usr/local/bin/hollow-relay ] || return 1
-    [ "$CFG_FORWARDER" != yes ] || [ -x /usr/local/bin/hollow-forwarder ] || return 1
-    [ -r "$VERSION_FILE" ] || return 1
-    [ -z "$(libs_missing "${bins[@]}")" ]
+    [ -x "$PROGRAMS_DIR/hollow-relay" ] || return 1
+    [ "$CFG_FORWARDER" != yes ] || [ -x "$PROGRAMS_DIR/hollow-forwarder" ] || return 1
+    [ -r "$VERSION_FILE" ]
+}
+
+# programs_libs_heal: the installed programs find every library they link to.
+# A release upgrade of the system can take one away; it goes back only as the
+# package holding that exact soname. Programs that still cannot start stop the
+# run: replacing them is an update's or a rebuild's job, which keep the pair
+# for a rollback.
+programs_libs_heal() {
+    local bins=("$PROGRAMS_DIR/hollow-relay") missing lib p pkgs=() none=0
+    [ "$CFG_FORWARDER" = yes ] && bins+=("$PROGRAMS_DIR/hollow-forwarder")
+    missing=$(libs_missing "${bins[@]}")
+    [ -n "$missing" ] || return 0
+    if [ "$DRY_RUN" = 1 ]; then
+        say "  would install the libraries the installed programs lack: $(printf '%s' "$missing" | paste -sd' ' -)"
+        return 0
+    fi
+    hollow_apt_wait 2>"$WORK_DIR/apt.wait" || die "$(cat "$WORK_DIR/apt.wait")"
+    apt_refresh || die "the package lists could not be fetched, so the libraries the installed programs lack were not installed."
+    while read -r lib; do
+        if p=$(lib_package "$lib"); then pkgs+=("$p"); else none=1; fi
+    done <<<"$missing"
+    if [ "$none" = 0 ]; then
+        say "  the installed programs lack $(printf '%s' "$missing" | paste -sd' ' -), so I install ${pkgs[*]}"
+        apt_install "${pkgs[@]}" || die "apt could not install ${pkgs[*]}, which the installed programs need."
+        missing=$(libs_missing "${bins[@]}")
+        [ -n "$missing" ] || return 0
+    fi
+    die "the installed programs cannot start, because they need $(printf '%s' "$missing" | paste -sd' ' -), which this system does not have. The programs were not changed. To build the programs here, run the setup from your copy of the repository (sudo bash relay-uws/install.sh) and choose Rebuild from this copy."
 }
 
 # ---------------------------------------------------------------- libraries
@@ -242,21 +266,79 @@ prebuilt_libs_ready() {
     return 1
 }
 
-# mixed_possible: this copy of the repository holds the relay sources of the
-# release the feed names, so the relay can be built here beside the signed
-# forwarder. Sets MIXED_WHY when it cannot.
+# What a relay build reads from the copy of the repository.
+RELAY_SOURCE_PARTS="relay-uws/CMakeLists.txt relay-uws/src relay-uws/uWebSockets relay-uws/uSockets"
+
+# repo_git <args>: git on the copy of the repository, reading only: nothing is
+# written to it as root and no hook of it runs. Its owner chose to run the
+# setup from it, so who owns it and its relay submodules does not matter here.
+repo_git() {
+    git -c safe.directory="$REPO" -c safe.directory="$REPO/relay-uws/uWebSockets" \
+        -c safe.directory="$REPO/relay-uws/uSockets" -c safe.directory="$REPO/relay-uws/uWebSockets/uSockets" \
+        -c core.fsmonitor=false --no-optional-locks -C "$REPO" "$@"
+}
+
+# mixed_possible: this copy of the repository holds exactly the relay sources
+# of the release the feed names, so a relay built here beside the signed
+# forwarder is that release's and its VERSION marker stays true. The feed names
+# the release commit, which the tag only follows, so the trees are compared,
+# never the commits. Sets MIXED_WHY when it cannot, and MIXED_NO_SOURCES when
+# there is nothing here to build from at all.
 mixed_possible() {
-    local sv
-    MIXED_WHY=""
+    local sv p here rel changed
+    MIXED_WHY="" MIXED_NO_SOURCES=0
     if [ ! -f "$REPO/relay-uws/src/main.cpp" ] || [ ! -f "$REPO/relay-uws/uWebSockets/src/App.h" ] ||
        [ ! -f "$REPO/relay-uws/uSockets/Makefile" ]; then
         MIXED_WHY="this copy of the setup has no relay sources next to it"
+        MIXED_NO_SOURCES=1
         return 1
     fi
     sv=$(relay_source_version "$REPO")
-    [ -n "$sv" ] && [ "$sv" = "$FEED_VERSION" ] && return 0
-    MIXED_WHY="this copy of the repository holds version ${sv:-unknown}, and the release is $FEED_VERSION"
-    return 1
+    if [ -z "$sv" ] || [ "$sv" != "$FEED_VERSION" ]; then
+        MIXED_WHY="this copy of the repository holds version ${sv:-unknown}, and the release is $FEED_VERSION"
+        return 1
+    fi
+    if ! have git; then
+        MIXED_WHY="git is not installed, so I cannot tell whether this copy holds the release's relay sources"
+        return 1
+    fi
+    if ! [[ "${FEED_COMMIT:-}" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]]; then
+        MIXED_WHY="the release list names no commit to compare this copy with"
+        return 1
+    fi
+    if [ -z "$(source_commit "$REPO")" ]; then
+        MIXED_WHY="this copy of the repository is not a git clone I can read, so I cannot tell whether it holds the release's relay sources"
+        return 1
+    fi
+    if ! repo_git cat-file -e "$FEED_COMMIT^{commit}" 2>/dev/null; then
+        MIXED_WHY="this copy of the repository does not have the release's commit ${FEED_COMMIT:0:12}, which git fetch --tags brings in"
+        return 1
+    fi
+    for p in $RELAY_SOURCE_PARTS; do
+        here=$(repo_git rev-parse -q --verify "HEAD:$p" 2>/dev/null) || here=""
+        rel=$(repo_git rev-parse -q --verify "$FEED_COMMIT:$p" 2>/dev/null) || rel=""
+        # A submodule is a commit id here: the one checked out must be it,
+        # and a folder that is not a checkout is never the release's.
+        if [ -n "$here" ] && [ "$(repo_git ls-tree HEAD -- "$p" 2>/dev/null | awk '{print $1}')" = 160000 ] &&
+           [ "$(repo_git -C "$p" rev-parse -q --verify HEAD 2>/dev/null)" != "$here" ]; then
+            here=""
+        fi
+        if [ -z "$here" ] || [ "$here" != "$rel" ]; then
+            MIXED_WHY="the relay sources in this copy differ from those of the release's commit ${FEED_COMMIT:0:12}"
+            return 1
+        fi
+    done
+    # Untracked and ignored files too: the build copies the folders whole.
+    # shellcheck disable=SC2086 # one word per path
+    if ! changed=$(repo_git status --porcelain --untracked-files=all --ignored=matching --ignore-submodules=none -- $RELAY_SOURCE_PARTS 2>/dev/null); then
+        MIXED_WHY="git could not read the state of this copy's relay sources, so I cannot tell whether they are the release's"
+        return 1
+    fi
+    if [ -n "$changed" ]; then
+        MIXED_WHY="this copy has changes of its own in the relay sources, which git status shows"
+        return 1
+    fi
+    return 0
 }
 
 # programs_mixed <download dir>: the signed forwarder stays, and the relay
@@ -282,6 +364,9 @@ programs_mixed() {
 # would run without the snapshot its rollback needs.
 prebuilt_to_source() {
     [ "${UPDATE_RUNNING:-0}" = 1 ] && die "the release list has no programs for this machine now ($1). Nothing was installed. To build the relay here, run the setup from your copy of the repository and choose Rebuild from this copy."
+    # Going back to signed releases never turns into a rebuild nobody asked for.
+    [ "${SIGNED_ONLY:-0}" = 1 ] && die "the signed release's programs cannot run on this machine ($1). Nothing was installed, and the relay keeps the programs built here."
+    [ -f "$REPO/relay-uws/src/main.cpp" ] || die "there are no ready-made programs for this machine ($1), and this copy of the setup has no relay sources to build them from. Nothing was installed. Run sudo bash relay-uws/install.sh from your clone of the repository."
     say "  there are no ready-made programs for this machine ($1), so I build them from source instead"
     CFG_BINARIES=source
     programs_source
@@ -311,9 +396,8 @@ programs_prebuilt() {
     [ -n "${EXPECT_VERSION:-}" ] && check=("$VERSION_FILE")
     if [ "${DOWNGRADE:-0}" = 1 ] || [ "${FINISH_PENDING:-0}" = 1 ]; then check=("$VERSION_FILE" allow-downgrade); fi
     if ! prebuilt_available "${check[@]}"; then
-        # No build for this machine (a 32-bit system, no aarch64 build yet, or
-        # libraries this release does not have): the sources can still make one.
-        [ "${PREBUILT_NO_LIBS:-0}" = 1 ] && { prebuilt_to_source "$PREBUILT_WHY"; return 0; }
+        # No build for this machine (a 32-bit system or no aarch64 build yet):
+        # the sources can still make one.
         case "$PREBUILT_WHY" in
         *"no prebuilt relay"*|*"no relay build for"*|*"build it from source"*)
             prebuilt_to_source "$PREBUILT_WHY"
@@ -348,7 +432,8 @@ programs_prebuilt() {
             rm -rf "$dl"
             if [ "$PREBUILT_RELAY_CANNOT" = 1 ]; then
                 [ "${UPDATE_RUNNING:-0}" = 1 ] && die "the relay of version $FEED_VERSION cannot run here ($PREBUILT_LIBS_WHY), and it cannot be built here either, because $MIXED_WHY. Nothing was installed. To update, check out the release's tag in your copy of the repository and run sudo bash relay-uws/install.sh from it. It installs the signed forwarder and builds only the relay."
-                say "  the release's forwarder could run here, but the relay cannot be built beside it, because $MIXED_WHY. So I build both from this copy."
+                [ "$MIXED_NO_SOURCES" = 1 ] || [ "${SIGNED_ONLY:-0}" = 1 ] ||
+                    say "  the release's forwarder could run here, but the relay cannot be built beside it, because $MIXED_WHY. So I build both from this copy."
             fi
             prebuilt_to_source "$PREBUILT_LIBS_WHY"
             return 0
@@ -649,7 +734,8 @@ source_build_into() {
     builder_idle
     rm -rf "$BUILD_DIR/src" "$BUILD_DIR/out" "$BUILD_DIR/relay-build"
     install -d -m 0750 -o root -g root "$BUILD_DIR/src"
-    local parts=(relay-uws/CMakeLists.txt relay-uws/src relay-uws/uWebSockets relay-uws/uSockets)
+    local parts
+    read -r -a parts <<<"$RELAY_SOURCE_PARTS"
     [ "$with_fwd" = yes ] && parts+=(rust/hollow_core rust/hollow_dfn)
     tar -C "$src" "${SOURCE_EXCLUDES[@]}" -cf - "${parts[@]}" | tar -C "$BUILD_DIR/src" -xf -
     chown -R "$BUILD_USER:$BUILD_USER" "$BUILD_DIR/src"
@@ -694,6 +780,7 @@ ensure_programs() {
     # choice gives on this system.
     [ "$have" = mixed ] && have=prebuilt
     if [ "${FORCE_PROGRAMS:-0}" = 0 ] && programs_present && [ "$have" = "$CFG_BINARIES" ]; then
+        programs_libs_heal
         say "  the relay programs are already installed, version $(installed_version)"
         return 0
     fi
@@ -715,13 +802,15 @@ feed_show_warnings() {
 }
 
 # Whether the signed feed has programs for this machine. Sets PREBUILT_WHY to
-# the reason when it has none, and PREBUILT_NO_LIBS when the reason is a
-# library this system does not offer.
-PREBUILT_WHY="" PREBUILT_NO_LIBS=0
+# the reason when it has none. PREBUILT_LIBS_DOUBT says this setup's list of the
+# official programs' libraries names one this system does not offer: only a
+# warning, since a later release may link to others, and only the check of the
+# download (prebuilt_libs_ready) decides.
+PREBUILT_WHY="" PREBUILT_LIBS_DOUBT=0
 # prebuilt_available [<installed VERSION file> [allow-downgrade]]
 prebuilt_available() {
     local vfile=${1:-} force=${2:-} err
-    PREBUILT_WHY="" PREBUILT_RC=0 FEED_CHECKED=0 PREBUILT_NO_LIBS=0 PREBUILT_RELAY_ONLY=0
+    PREBUILT_WHY="" PREBUILT_RC=0 FEED_CHECKED=0 PREBUILT_LIBS_DOUBT=0 PREBUILT_RELAY_ONLY=0
     if ! feed_lib_present; then
         PREBUILT_WHY="this copy of the installer has no release feed helper"
         return 1
@@ -731,10 +820,7 @@ prebuilt_available() {
         PREBUILT_WHY=${err#Hollow relay update: }
         return 1
     fi
-    if ! prebuilt_libs_offered; then
-        PREBUILT_WHY=$PREBUILT_LIBS_WHY PREBUILT_NO_LIBS=1
-        return 1
-    fi
+    prebuilt_libs_offered || PREBUILT_LIBS_DOUBT=1
     # A fresh machine may not have the check's tools yet; the install step
     # checks again once it has them.
     if ! have jq || ! have curl || ! have openssl; then return 0; fi

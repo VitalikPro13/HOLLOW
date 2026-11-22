@@ -251,6 +251,10 @@ update_check() {
        hollow_feed_newer "$INSTALLED_VERSION" "$INSTALLED_BUILD"; then
         UPDATE_AVAILABLE=1
         UPDATE_TEXT="${UPDATE_TEXT:-}version $FEED_VERSION (build $FEED_BUILD) is available, signed and ready to install."
+        # An if, not &&: under set -e a false test at the end fails the caller.
+        if [ "${PREBUILT_LIBS_DOUBT:-0}" = 1 ]; then
+            UPDATE_TEXT="$UPDATE_TEXT It may not run here, because $PREBUILT_LIBS_WHY. The update checks the download first and installs nothing that cannot start."
+        fi
     else
         UPDATE_TEXT="${UPDATE_TEXT:-}up to date, the signed release list has nothing newer."
     fi
@@ -509,10 +513,16 @@ manage_signed_again() {
 Version $FEED_VERSION is older than the version $iv built here, so we recommend no unless you know why you want it. $SNAPSHOT_LOSS"
         def=no
     fi
+    if [ "${PREBUILT_LIBS_DOUBT:-0}" = 1 ]; then
+        older="$older
+
+They may not run here, because $PREBUILT_LIBS_WHY. I check the download before I install anything, and if they cannot start, the relay keeps the programs built here."
+    fi
     ui_yesno confirm "Go back to signed releases" \
 "I will download version ${FEED_VERSION:-the newest} from the signed release list, check it and install it in place of the programs built here, then restart the relay$( [ "$CFG_FORWARDER" = yes ] && echo " and the forwarder"). Updates then come from the status screen again.$older" "$def" || return 1
     CFG_BINARIES=prebuilt
     FORCE_PROGRAMS=1
+    SIGNED_ONLY=1
 }
 
 manage_keys() {

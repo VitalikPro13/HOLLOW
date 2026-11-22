@@ -153,7 +153,7 @@ t_host_libs() {
     has "and the forwarder" "$out" "ok hollow-forwarder's program $F/fwdbin finds every library it needs"
     lacks "nothing fails" "$out" FAIL
     out=$(MISSING_LIBS="libsodium.so.23" host_libs hollow-relay)
-    has "a missing library fails by name" "$out" "FAIL hollow-relay cannot start: $F/relaybin needs libsodium.so.23, which this system does not have"
+    has "a missing library fails by name" "$out" "FAIL hollow-relay cannot start, because $F/relaybin needs libsodium.so.23, which this system does not have"
     has "and says how to build the programs here" "$out" "sudo bash relay-uws/install.sh"
     out=$(MISSING_LIBS="libsodium.so.23 libssl.so.3" host_libs hollow-relay)
     has "every missing one is named" "$out" "needs libsodium.so.23 libssl.so.3,"
@@ -170,7 +170,7 @@ in_sub t_host_libs
 echo "check-host: SSH settings"
 t_host_ssh() {
     local block out
-    block=$(sed -n '/^echo "SSH"$/,/permitrootlogin yes/p' "$DEPLOY/check-host.sh")
+    block=$(sed -n '/^echo "SSH"$/,/^echo ""$/p' "$DEPLOY/check-host.sh")
     has "check-host has the SSH section" "$block" "sshd -T"
     run_ssh() {
         ok() { echo "ok $*"; }
@@ -187,5 +187,16 @@ t_host_ssh() {
     has "and so does root's password login" "$out" "FAIL root may log in over SSH with a password"
     out=$(SSHD_OUT=$'permitrootlogin no\npasswordauthentication no' run_ssh)
     lacks "older OpenSSH's lower case still passes" "$out" FAIL
+    out=$(SSHD_OUT=$'permitrootlogin prohibit-password\npasswordauthentication no' run_ssh)
+    has "a key-only root login passes" "$out" "ok no root password login"
+    # an_sshd_that_cannot_say_fails_closed: no settings vouch for nothing.
+    out=$(SSHD_OUT="" run_ssh)
+    has "sshd -T failing fails the check" "$out" "FAIL sshd -T printed no settings"
+    lacks "and never passes root's login" "$out" "ok no root password login"
+    out=$(SSHD_OUT=$'passwordauthentication no' run_ssh)
+    has "a missing PermitRootLogin fails" "$out" "FAIL sshd -T printed no PermitRootLogin setting"
+    lacks "and passes nothing for root" "$out" "ok no root password login"
+    out=$(SSHD_OUT=$'permitrootlogin maybe\npasswordauthentication no' run_ssh)
+    has "a value this check does not know fails" "$out" "FAIL sshd -T gives PermitRootLogin maybe, which this check does not know"
 }
 in_sub t_host_ssh

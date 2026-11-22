@@ -155,7 +155,7 @@ publish() {
     [ "$kind" = nolib ] && relay=$W/relay99.bin
     install -m 0755 "$relay" "$s/hollow-relay"
     install -m 0755 "${FWD_BIN:-/root/relay.bin}" "$s/hollow-forwarder"
-    printf 'version=%s\nbuild=%s\ncommit=%s\n' "$REL" "$b" "$(printf '%040d' 0)" >"$s/VERSION"
+    printf 'version=%s\nbuild=%s\ncommit=%s\n' "$REL" "$b" "${PUB_COMMIT:-$(printf '%040d' 0)}" >"$s/VERSION"
     chmod 0644 "$s/VERSION"
     [ "$kind" = old ] || setup_tree "$s/setup" "b$b"
     case "$kind" in
@@ -179,7 +179,7 @@ publish() {
     size=$(stat -c %s "$FEED/$name")
     ISSUED=$((ISSUED + 1))
     printf '{"feed":"relay","version":"%s","build":%s,"issued":%s,"commit":"%s","artifacts":{"%s":{"url":"https://anonlisten.com/hollow/releases/%s","sha256":"%s","size":%s}}}\n' \
-        "$REL" "$b" "$ISSUED" "$(printf '%040d' 0)" "$ARCH" "$name" "$sha" "$size" >"$FEED/relay.json"
+        "$REL" "$b" "$ISSUED" "${PUB_COMMIT:-$(printf '%040d' 0)}" "$ARCH" "$name" "$sha" "$size" >"$FEED/relay.json"
     { printf 'hollow-feed-sig-v1\0relay\0'; cat "$FEED/relay.json"; } >"$W/msg"
     openssl pkeyutl -sign -inkey "$W/feed.pem" -rawin -in "$W/msg" -out "$W/sig.bin"
     { base64 -w0 "$W/sig.bin"; echo; } >"$FEED/relay.json.sig"
@@ -240,7 +240,7 @@ EOF
         # Out of the library folder: ldconfig links any lib*.so* file it finds there.
         mv "$real" /root/hidden-libsodium && ldconfig
         has "check-host names the missing library" "$(bash "$LIB/installer/deploy/check-host.sh" 2>&1)" \
-            "FAIL  hollow-relay cannot start: /usr/local/bin/hollow-relay needs $so, which this system does not have"
+            "FAIL  hollow-relay cannot start, because /usr/local/bin/hollow-relay needs $so, which this system does not have"
         mv /root/hidden-libsodium "$real" && ldconfig
         has "and passes once it is back" "$(bash "$LIB/installer/deploy/check-host.sh" 2>&1)" \
             "ok    hollow-relay's program /usr/local/bin/hollow-relay finds every library it needs"
@@ -278,6 +278,13 @@ PY
     yes_ "the official forwarder is a program for this machine" test -x "$FWD_BIN"
     # The release is this clone's version: only then is the relay built beside it.
     REL=$(sed -n 's/^#define HOLLOW_RELAY_VERSION "\(.*\)"/\1/p' "$SRC/relay-uws/src/version.h")
+    # And this clone's relay trees are the release commit's: a clone means git.
+    { apt-get -o Acquire::Retries=5 update -q && DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=5 install -y -q git; } >/dev/null 2>&1
+    yes_ "git is there for the clone" command -v git
+    git -C "$SRC" init -q
+    git -C "$SRC" add relay-uws/CMakeLists.txt relay-uws/src relay-uws/uWebSockets relay-uws/uSockets
+    git -C "$SRC" -c user.email=box@x -c user.name=box -c commit.gpgsign=false commit -qm release
+    PUB_COMMIT=$(git -C "$SRC" rev-parse HEAD)
     publish 1 nolib
     cat >"$W/ans_mixed" <<EOF
 mode=native
@@ -307,6 +314,7 @@ EOF
     eq "BUILT_FROM says mixed" "$(head -n 1 "$LIB/BUILT_FROM")" mixed
     has "and what the relay was built from" "$(sed -n 2p "$LIB/BUILT_FROM")" "the copy of the repository at $SRC"
     eq "VERSION is the release's" "$(sed -n 's/^build=//p' "$LIB/VERSION")" 1
+    eq "naming the release's commit, whose relay sources were built" "$(sed -n 's/^commit=//p' "$LIB/VERSION")" "$PUB_COMMIT"
     eq "the choice stays the ready-made programs" "$(sed -n 's/^binaries=//p' /etc/hollow-relay/install.conf)" prebuilt
     yes_ "the relay runs" relay_up
     fwd_up() { for _ in $(seq 1 30); do systemctl is-active --quiet hollow-forwarder && return 0; sleep 1; done; return 1; }
@@ -854,7 +862,8 @@ sodium=$(dpkg-query -S "$(readlink -f "$sofile")" 2>/dev/null | cut -d: -f1)
 if [ -n "$sodium" ]; then
     DEBIAN_FRONTEND=noninteractive apt-get remove -y -q "$sodium" >/dev/null 2>&1
     has "check-host names it" "$(bash "$LIB/installer/deploy/check-host.sh" 2>&1)" \
-        "FAIL  hollow-relay cannot start: /usr/local/bin/hollow-relay needs libsodium"
+        "FAIL  hollow-relay cannot start, because /usr/local/bin/hollow-relay needs libsodium"
+    # A newer release is out: a settings run must not install it on the side.
     publish 9 setup
     printf 'action=change\nchange=grace\ngrace_secs=160\nconfirm=yes\n' >"$W/ans_heal"
     PATH="$SAFE:$PATH" hollow-relay-setup --answers "$W/ans_heal" >"$W/heal.out" 2>&1
@@ -862,6 +871,9 @@ if [ -n "$sodium" ]; then
     eq "the next run finishes" "$rc" 0
     [ "$rc" = 0 ] || tail -n 30 "$W/heal.out"
     eq "with $sodium back" "$(dpkg-query -W -f='${Status}' "$sodium" 2>/dev/null)" "install ok installed"
+    has "saying so" "$(flat "$W/heal.out")" "the installed programs lack libsodium"
+    eq "the programs stay build 5" "$(installed_build)" 5
+    lacks "and no release is fetched outside an update" "$(flat "$W/heal.out")" "downloading version"
     has "check-host passes again" "$(bash "$LIB/installer/deploy/check-host.sh" 2>&1)" \
         "ok    hollow-relay's program /usr/local/bin/hollow-relay finds every library it needs"
     yes_ "the relay runs" relay_up
