@@ -261,6 +261,14 @@ shoots, then lets go: for what shows only while held (the picker's hold-to-previ
 frame by frame. `drag_at` cannot do it: its `dx`/`dy` are both the start offset and the delta, and it
 shoots only at the end.
 
+**`shot` crops** (#159 proof, 2026-11-22): `ratio` (pixel ratio, default 1) and `crops`, a map of
+region name to a list of targets (or `{targets, pad}`, pad default 12). Each region is the union of
+every on-stage match of its targets, padded and clamped, written in LOGICAL px of the shot to
+`<name>.crops.json` beside the PNG (null when nothing matched); `hold` and `drag_shots` pass both
+through to their own shots. A before|after sheet then cuts the part that matters from each frame
+(`type:NameColorEditor`, `type:ExpressionPanel` plus `type:_PreviewCard`, the rail's semantics)
+instead of shrinking whole windows to thumbnails. Copy the json files off with the PNGs.
+
 **`name_color`** (#140 review): `field` (`1:rrggbb[,rrggbb...]`) set on the profile draft as if
 picked; Settings > Profile's `text:Save` then saves it. The editor offers only its swatches and hue
 bar, so a reported colour such as #C92222 is reachable only this way.
@@ -371,6 +379,11 @@ scrim, which also works).
    the receiving peer never holds the label long enough for a `shot`. The label's placement is
    shot by `test/screenshots/typing_label_screenshot_test.dart` instead; a fleet scenario can only
    prove the idle case (nothing above the composer).
+11. **`open_channel` on a voice room only JOINS it (2026-11-22).** The sidebar's voice row joins on
+   the first tap and opens the room's stage (and its chat panel) only on a tap while joined, so the
+   main pane stays on the text channel and every wait for the room's chat times out. Open it twice
+   (`wait_for semantics:Leave the room` between, `type:CallStage` after), and again after Settings
+   closes: the shell goes back to the text channel it showed before.
 
 ## What the dump adds for a fleet
 
@@ -673,6 +686,10 @@ pwsh scripts/fleet.ps1 -Stop
 
 **What differs, and only this:**
 
+- **A simulator keeps whatever app was installed last, from ANY tree.** A BEFORE run on Nov 22
+  drove the AFTER build that way (two trees, one `hollow-r`). `Test-PeerStaged` now compares the
+  installed app's `kernel_blob.bin` and `hollow_core` with this tree's build
+  (`$SimStampFiles`) and reinstalls a stale one, as the macOS backend restages a stale copy.
 - **One simulator per peer**, named `hollow-<peer>`, created on first use from the newest iOS
   runtime (`FLEET_SIM_DEVICE` picks the type, default iPhone 17 Pro). `Stop-Fleet` terminates
   the app in every `hollow-*` device and nothing else.

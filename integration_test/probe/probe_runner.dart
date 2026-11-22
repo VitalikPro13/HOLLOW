@@ -173,15 +173,20 @@ class ProbeRunner {
   /// Painting the root RepaintBoundary works everywhere and needs no driver
   /// support. Platform views (WebRTC video surfaces) do not appear in the
   /// result, which is fine for chrome, menus and dialogs.
-  Future<String?> shot(String name) async {
+  /// [crops] names regions (`name` -> targets, or `{targets, pad}`) whose
+  /// rects, in logical px of the shot, go to `<name>.crops.json` beside it,
+  /// so a before|after sheet can cut the part that matters from each frame.
+  Future<String?> shot(String name,
+      {Map<String, dynamic>? crops, double ratio = 1.0}) async {
     final boundary =
         shotKey.currentContext?.findRenderObject() as RenderRepaintBoundary?;
     if (boundary == null) return null;
+    final regions = crops == null ? null : _cropRects(boundary, crops);
     String? path;
     final trace = probeEnv['UI_PROBE_TRACE'] == '1';
     if (trace) debugPrint('[ui-probe] trace: shot $name -> toImage');
     await tester.runAsync(() async {
-      final image = await boundary.toImage(pixelRatio: 1.0);
+      final image = await boundary.toImage(pixelRatio: ratio);
       if (trace) debugPrint('[ui-probe] trace: shot $name <- toImage');
       final data = await image.toByteData(format: ui.ImageByteFormat.png);
       image.dispose();
@@ -190,11 +195,56 @@ class ProbeRunner {
       if (!dir.existsSync()) dir.createSync(recursive: true);
       final file = File('$outDir/$name.png');
       file.writeAsBytesSync(data.buffer.asUint8List());
+      if (regions != null) {
+        File('$outDir/$name.crops.json').writeAsStringSync(jsonEncode({
+          'ratio': ratio,
+          'width': boundary.size.width,
+          'height': boundary.size.height,
+          'crops': regions,
+        }));
+      }
       path = file.path;
       debugPrint('[ui-probe] screenshot -> ${file.absolute.path}');
     });
     return path;
   }
+
+  /// Each crop is the union of every on-stage match of its targets, padded
+  /// and clamped to the shot; null when none of them is on screen.
+  Map<String, List<double>?> _cropRects(
+      RenderRepaintBoundary boundary, Map<String, dynamic> crops) {
+    final out = <String, List<double>?>{};
+    for (final entry in crops.entries) {
+      final spec = entry.value;
+      final targets = spec is Map ? spec['targets'] : spec;
+      final pad = spec is Map ? (spec['pad'] as num?)?.toDouble() ?? 12 : 12.0;
+      Rect? union;
+      for (final target in (targets as List? ?? const [])) {
+        for (final element in ProbeTargets.resolve('$target').evaluate()) {
+          final box = element.renderObject;
+          if (box is! RenderBox || !box.attached || !box.hasSize) continue;
+          final global = MatrixUtils.transformRect(
+              box.getTransformTo(null), Offset.zero & box.size);
+          final rect = Rect.fromPoints(boundary.globalToLocal(global.topLeft),
+              boundary.globalToLocal(global.bottomRight));
+          union = union == null ? rect : union.expandToInclude(rect);
+        }
+      }
+      if (union == null) {
+        out[entry.key] = null;
+        continue;
+      }
+      final r = union.inflate(pad).intersect(Offset.zero & boundary.size);
+      out[entry.key] = [r.left, r.top, r.right, r.bottom];
+    }
+    return out;
+  }
+
+  Map<String, dynamic>? _crops(Map<String, dynamic> step) =>
+      (step['crops'] as Map?)?.cast<String, dynamic>();
+
+  double _ratio(Map<String, dynamic> step) =>
+      (step['ratio'] as num?)?.toDouble() ?? 1.0;
 
   // ---------------------------------------------------------------------------
   // Script mode
@@ -534,7 +584,10 @@ class ProbeRunner {
                 ? PointerDeviceKind.mouse
                 : PointerDeviceKind.touch);
         await settle(frames: (step['ms'] as int? ?? 900) ~/ 50);
-        final held = step['shot'] == null ? null : await shot('${step['shot']}');
+        final held = step['shot'] == null
+            ? null
+            : await shot('${step['shot']}',
+                crops: _crops(step), ratio: _ratio(step));
         if (held != null) extra['shot'] = held;
         await gesture.up();
         await settle(frames: step['frames'] as int? ?? 25);
@@ -595,7 +648,8 @@ class ProbeRunner {
         for (var i = 0; i < steps; i++) {
           await drag.moveBy(move);
           await settle(frames: step['frames'] as int? ?? 6);
-          final taken = await shot('$name-${'$i'.padLeft(2, '0')}');
+          final taken = await shot('$name-${'$i'.padLeft(2, '0')}',
+              crops: _crops(step), ratio: _ratio(step));
           if (taken != null) shots.add(taken);
         }
         await drag.up();
@@ -723,7 +777,8 @@ class ProbeRunner {
 
       case 'shot':
         final name = '${step['name'] ?? 'shot'}';
-        final path = await shot(name);
+        final path =
+            await shot(name, crops: _crops(step), ratio: _ratio(step));
         extra['shot'] = path;
         return path == null ? 'no boundary to paint' : 'wrote $path';
 
