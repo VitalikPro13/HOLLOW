@@ -383,7 +383,9 @@ ANDROID
   Hardware AEC and NS effects enabled on Android 10+; low-latency path on 8+.
   Sample rate: PROPERTY_OUTPUT_SAMPLE_RATE, fallback 48000.
   Mic keeps working in background ONLY via a microphone-type foreground
-  service started at mic acquisition (CallForegroundService).
+  service started at mic acquisition (CallForegroundService), ended with
+  the audio mode 4 s after the last mic track and audio-carrying peer
+  connection are gone (data-channel connections never hold it).
   Device routing priority: BT headset > wired > speaker > earpiece.
   All audio-track ops (setEnabled/setVolume/dispose) go through a serial
   op queue with a 500 ms wait watchdog (mute used to freeze the UI 2+ s:

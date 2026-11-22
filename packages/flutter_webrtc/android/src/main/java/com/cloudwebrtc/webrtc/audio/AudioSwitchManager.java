@@ -7,6 +7,7 @@ import android.media.AudioManager;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.Log;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
@@ -54,6 +55,21 @@ public class AudioSwitchManager {
 
     @Nullable
     private AudioSwitch audioSwitch;
+
+    private static final long RELEASE_GRACE_MS = 4000;
+
+    private final CallAudioHolders callAudioHolders = new CallAudioHolders();
+
+    private final Runnable releaseIfIdle = this::releaseIfIdle;
+
+    // Re-checks at run time: a hold that landed meanwhile keeps call audio.
+    private void releaseIfIdle() {
+        if (isActive && audioSwitch != null && callAudioHolders.isIdle()) {
+            audioSwitch.deactivate();
+            isActive = false;
+            CallForegroundService.stop(context);
+        }
+    }
 
     /**
      * When true, AudioSwitchManager will request audio focus on start and abandon on stop.
@@ -156,6 +172,29 @@ public class AudioSwitchManager {
         }
     }
 
+    /**
+     * Hollow fork: [holder] (a {@link CallAudioHolders} key) needs call audio;
+     * activates it if it was idle. Also cancels a pending idle release.
+     */
+    public void hold(@NonNull String holder) {
+        callAudioHolders.hold(holder);
+        start();
+    }
+
+    /**
+     * Hollow fork: [holder] is done with call audio. The last release ends it
+     * after {@link #RELEASE_GRACE_MS}, so a call rebuild, a mic switch or a
+     * room handing over to a DM call keeps the microphone FGS: once the app is
+     * in the background it could not be started again.
+     */
+    public void release(@NonNull String holder) {
+        if (callAudioHolders.release(holder)) {
+            Log.i(TAG, "call audio idle, releasing in " + RELEASE_GRACE_MS + " ms");
+            handler.removeCallbacks(releaseIfIdle);
+            handler.postDelayed(releaseIfIdle, RELEASE_GRACE_MS);
+        }
+    }
+
     public void start() {
         if (audioSwitch != null) {
             handler.removeCallbacksAndMessages(null);
@@ -174,6 +213,7 @@ public class AudioSwitchManager {
     }
 
     public void stop() {
+        callAudioHolders.clear();
         if (audioSwitch != null) {
             handler.removeCallbacksAndMessages(null);
             handler.postAtFrontOfQueue(() -> {

@@ -26,6 +26,7 @@ import androidx.annotation.RequiresApi;
 import com.cloudwebrtc.webrtc.audio.AudioDeviceKind;
 import com.cloudwebrtc.webrtc.audio.AudioProcessingController;
 import com.cloudwebrtc.webrtc.audio.AudioSwitchManager;
+import com.cloudwebrtc.webrtc.audio.CallAudioHolders;
 import com.cloudwebrtc.webrtc.audio.AudioUtils;
 import com.cloudwebrtc.webrtc.audio.LocalAudioTrack;
 import com.cloudwebrtc.webrtc.audio.PlaybackSamplesReadyCallbackAdapter;
@@ -2020,6 +2021,7 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
     synchronized (localTracks) {
       localTracks.remove(trackId);
     }
+    AudioSwitchManager.instance.release(CallAudioHolders.mic(trackId));
   }
 
   public void mediaStreamTrackSetEnabled(final String id, final boolean enabled, String peerConnectionId) {
@@ -2165,6 +2167,7 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
     synchronized (localTracks) {
       localTracks.remove(_trackId);
     }
+    AudioSwitchManager.instance.release(CallAudioHolders.mic(_trackId));
     if (track.kind().equals("audio")) {
       stream.removeTrack((AudioTrack) track.track);
     } else if (track.kind().equals("video")) {
@@ -2425,6 +2428,7 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
     } else {
       pco.close();
     }
+    AudioSwitchManager.instance.release(CallAudioHolders.peerConnection(id));
   }
 
   public void peerConnectionDispose(final String id) {
@@ -2437,9 +2441,11 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
     } else {
       Log.d(TAG, "peerConnectionDispose() peerConnectionObserver is null");
     }
-    if (mPeerConnectionObservers.size() == 0) {
-      AudioSwitchManager.instance.stop();
-    }
+    // Call audio ends with the last call, never with the last connection:
+    // data-channel lanes outlive every call.
+    AudioSwitchManager.instance.release(CallAudioHolders.peerConnection(id));
+    Log.i(TAG, "peerConnectionDispose(): " + mPeerConnectionObservers.size()
+        + " peer connection(s) stay open");
   }
 
   public boolean peerConnectionDispose(final PeerConnectionObserver pco) {
@@ -2484,6 +2490,7 @@ public class MethodCallHandlerImpl implements MethodCallHandler, StateProvider {
         synchronized (localTracks) {
           localTracks.remove(trackId);
         }
+        AudioSwitchManager.instance.release(CallAudioHolders.mic(trackId));
         stream.removeTrack(track);
       } catch (IllegalStateException e) {
         Log.d(TAG, "streamDispose(): audio track already disposed, skipping");

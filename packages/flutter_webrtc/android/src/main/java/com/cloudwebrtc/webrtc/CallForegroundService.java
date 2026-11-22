@@ -27,7 +27,8 @@ import android.util.Log;
  *
  * Started from {@link com.cloudwebrtc.webrtc.audio.AudioSwitchManager#start()}
  * (fires on mic acquisition for every DM call / voice channel) and stopped
- * from its {@code stop()} (call teardown / plugin detach). The service does no
+ * once no mic track or audio-carrying peer connection holds call audio
+ * ({@code AudioSwitchManager.release}) or the plugin detaches. The service does no
  * work; it only holds the foreground state and the "Ongoing call"
  * notification, which taps back into the app.
  */

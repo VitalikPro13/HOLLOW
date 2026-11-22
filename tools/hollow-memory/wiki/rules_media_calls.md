@@ -175,7 +175,14 @@ the signal whitelist's four touches, the stream overlay consent detail, share ba
   capture buffers ALWAYS fullband mono. `project_dfn3_noise_suppression`,
   `project_voice_enhance_chain`.
 - Call audio: the Android mic survives backgrounding ONLY via `CallForegroundService`
-  (mic FGS in `AudioSwitchManager.start/stop`; never remove it); adaptive capture respects
+  (mic FGS; never remove it). It and AudioSwitch (MODE_IN_COMMUNICATION, focus) live while
+  `CallAudioHolders` holds anything: each live gUM mic track and each peer connection that
+  received an audio track, released 4 s after the last one goes (a rebuild, mic switch or room
+  handing over to a DM call keeps it; a mic FGS cannot restart from the background). NEVER tie
+  it to "no peer connections left": data-channel lanes outlive every call, and the shipped rule
+  kept a lying "Ongoing call" FGS and call mode up after every call, so `HollowSfx` played cues
+  as call signalling (#154). A new path that captures or receives call audio holds; one that
+  ends it releases. Adaptive capture respects
   `setCaptureMuted` + `setCaptureServoHold`; voice-QUALITY bugs only count from a REMOTE
   peer. `feedback_capture_servo_mute_freeze`.
 - Audio-track ops (`setEnabled`/`setVolume`/dispose) are blocking signaling-thread hops:

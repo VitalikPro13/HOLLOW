@@ -5,6 +5,7 @@ import android.util.Log;
 import androidx.annotation.Nullable;
 
 import com.cloudwebrtc.webrtc.audio.AudioSwitchManager;
+import com.cloudwebrtc.webrtc.audio.CallAudioHolders;
 import com.cloudwebrtc.webrtc.utils.AnyThreadSink;
 import com.cloudwebrtc.webrtc.utils.ConstraintsArray;
 import com.cloudwebrtc.webrtc.utils.ConstraintsMap;
@@ -542,7 +543,7 @@ class PeerConnectionObserver implements PeerConnection.Observer, EventChannel.St
       sendEvent(params);
 
       if ("audio".equals(track.kind())) {
-        AudioSwitchManager.instance.start();
+        AudioSwitchManager.instance.hold(CallAudioHolders.peerConnection(id));
       }
     }
 

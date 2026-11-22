@@ -35,6 +35,7 @@ import androidx.annotation.Nullable;
 import androidx.annotation.RequiresApi;
 
 import com.cloudwebrtc.webrtc.audio.AudioSwitchManager;
+import com.cloudwebrtc.webrtc.audio.CallAudioHolders;
 import com.cloudwebrtc.webrtc.audio.AudioUtils;
 import com.cloudwebrtc.webrtc.audio.LocalAudioTrack;
 import com.cloudwebrtc.webrtc.record.AudioChannel;
@@ -424,7 +425,6 @@ public class GetUserMediaImpl {
     }
 
     private ConstraintsMap getUserAudio(ConstraintsMap constraints, MediaStream stream) {
-        AudioSwitchManager.instance.start();
         MediaConstraints audioConstraints = new MediaConstraints();
         String deviceId = null;
         // Applied APM flags (reported back in settings). Default all-true =
@@ -451,6 +451,7 @@ public class GetUserMediaImpl {
         stream.addTrack(track);
 
         stateProvider.putLocalTrack(track.id(), new LocalAudioTrack(track));
+        AudioSwitchManager.instance.hold(CallAudioHolders.mic(track.id()));
 
         ConstraintsMap trackParams = new ConstraintsMap();
         trackParams.putBoolean("enabled", track.enabled());
