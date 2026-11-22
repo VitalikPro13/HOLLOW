@@ -1,5 +1,3 @@
-import 'dart:io';
-
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/app_relaunch.dart';
@@ -26,7 +24,8 @@ class RelaySwitch {
   /// names no relay (an old link) or it names ours.
   ///
   /// Otherwise asks, and returns false either way: on confirm the process ends
-  /// and the invite is finished after the restart. NEVER switches on its own.
+  /// (on iOS the person closes it) and the invite is finished on the next
+  /// launch. NEVER switches on its own.
   Future<bool> ensureRelayForInvite(
       BuildContext context, HollowLink link) async {
     final target = link.relay;
@@ -45,9 +44,7 @@ class RelaySwitch {
         onSwitch: () async {
           await storage_api.saveSetting(
               key: kPendingInviteAfterSwitchKey, value: link.fullUrl);
-          await _read(relayDomainProvider.notifier).setDomain(target);
-          await _read(savedRelayListProvider.notifier).addRelay(target);
-          await exitForRelaySwitch();
+          return switchRelay(_read, target);
         },
       ),
     );
@@ -66,11 +63,7 @@ class RelaySwitch {
         current: current,
         title: _titleFor(HollowLinkType.serverInvite),
         held: true,
-        onSwitch: () async {
-          await _read(relayDomainProvider.notifier).setDomain(target);
-          await _read(savedRelayListProvider.notifier).addRelay(target);
-          await exitForRelaySwitch();
-        },
+        onSwitch: () => switchRelay(_read, target),
       ),
     );
   }
@@ -103,7 +96,10 @@ Future<bool> ensureRelayForInviteId(
   return ensureRelayForInvite(context, ref, link);
 }
 
-bool get _isMobile => Platform.isAndroid || Platform.isIOS;
+/// What iOS asks once a switch is saved: it cannot close the app itself.
+String closeByHandText(String relay) =>
+    'Close Hollow from the app switcher and open it again to connect to '
+    '$relay.';
 
 String _titleFor(HollowLinkType type) => switch (type) {
       HollowLinkType.roomInvite => 'This room lives on another relay',
@@ -126,7 +122,9 @@ class _RelaySwitchDialog extends StatefulWidget {
   final bool held;
   final String target;
   final String current;
-  final Future<void> Function() onSwitch;
+
+  /// True when the app is ending; false when the person closes it (iOS).
+  final Future<bool> Function() onSwitch;
 
   @override
   State<_RelaySwitchDialog> createState() => _RelaySwitchDialogState();
@@ -134,13 +132,25 @@ class _RelaySwitchDialog extends StatefulWidget {
 
 class _RelaySwitchDialogState extends State<_RelaySwitchDialog>
     with HollowDialogAction {
+  /// The switch is saved and waits for the person to close the app.
+  bool _saved = false;
+
   Future<void> _switch() async {
-    // A switch that succeeds ends the process; one that returns anyway (a
-    // test, a relaunch that was refused) still closes the dialog.
-    if (await runDialogAction(widget.onSwitch,
-            fallback: "Couldn't switch relays. Try again.") &&
-        mounted) {
+    var ending = true;
+    if (!await runDialogAction(() async => ending = await widget.onSwitch(),
+            fallback: "Couldn't switch relays. Try again.") ||
+        !mounted) {
+      return;
+    }
+    // A switch that ends the process never gets here; one that returns anyway
+    // (a test, a relaunch that was refused) still closes the dialog.
+    if (ending) {
       Navigator.of(context).pop();
+    } else {
+      setState(() {
+        actionRunning = false;
+        _saved = true;
+      });
     }
   }
 
@@ -150,6 +160,25 @@ class _RelaySwitchDialogState extends State<_RelaySwitchDialog>
     final body = HollowTypography.body.copyWith(color: hollow.textSecondary);
     // Relay names are what the protocol produces: the console voice.
     final host = HollowTypography.mono.copyWith(color: hollow.textPrimary);
+    final end = relaySwitchEnd;
+
+    if (_saved) {
+      return HollowDialog(
+        title: 'Close and reopen Hollow',
+        width: 420,
+        showClose: true,
+        content: Text.rich(
+          TextSpan(children: [
+            const TextSpan(
+                text: 'Close Hollow from the app switcher, then open it '
+                    'again. It connects to '),
+            TextSpan(text: widget.target, style: host),
+            TextSpan(text: widget.held ? '.' : ' and finishes joining.'),
+          ]),
+          style: body,
+        ),
+      );
+    }
 
     return HollowDialog(
       title: widget.title,
@@ -162,14 +191,26 @@ class _RelaySwitchDialogState extends State<_RelaySwitchDialog>
           TextSpan(text: widget.target, style: host),
           const TextSpan(text: '. You are connected to '),
           TextSpan(text: widget.current, style: host),
-          const TextSpan(
-              text: '. Switching restarts Hollow, and your servers and '
-                  'friends on '),
+          TextSpan(
+              text: switch (end) {
+                RelaySwitchEnd.restart => '. Switching restarts Hollow, and '
+                    'your servers and friends on ',
+                RelaySwitchEnd.close => '. Switching closes Hollow, and your '
+                    'servers and friends on ',
+                RelaySwitchEnd.closeByHand => '. Switching takes effect the '
+                    'next time Hollow opens, and your servers and friends on ',
+              }),
           TextSpan(text: widget.current, style: host),
           TextSpan(
             text: ' go quiet until you switch back.'
-                '${widget.held ? '' : _isMobile ? ' Reopen Hollow to finish joining.' : ' Hollow '
-                    'finishes this join after the restart.'}',
+                '${widget.held ? '' : switch (end) {
+                    RelaySwitchEnd.restart =>
+                      ' Hollow finishes this join after the restart.',
+                    RelaySwitchEnd.close =>
+                      ' Open Hollow again to finish joining.',
+                    RelaySwitchEnd.closeByHand => ' Hollow finishes joining '
+                        'when it opens again.',
+                  }}',
           ),
         ]),
         style: body,
@@ -182,7 +223,11 @@ class _RelaySwitchDialogState extends State<_RelaySwitchDialog>
         HollowButton.filled(
           onPressed: _switch,
           loading: actionRunning,
-          child: Text(_isMobile ? 'Switch and close app' : 'Switch and restart'),
+          child: Text(switch (end) {
+            RelaySwitchEnd.restart => 'Switch and restart',
+            RelaySwitchEnd.close => 'Switch and close app',
+            RelaySwitchEnd.closeByHand => 'Switch relay',
+          }),
         ),
       ],
     );

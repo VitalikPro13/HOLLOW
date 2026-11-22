@@ -229,8 +229,15 @@ void main() {
     // A phone screen that only closes keeps the process and the open store.
     final prompt = File('lib/src/ui/dialogs/license_key_dialog.dart')
         .readAsStringSync();
-    expect(prompt, contains('exitForRelaySwitch(endProcess: widget.linking)'));
+    expect(
+        prompt.replaceAll(RegExp(r'\s+'), ' '),
+        contains('switchRelay( ref.read, kDefaultRelayDomain, '
+            'endProcess: widget.linking)'));
     final exit = File('lib/src/core/app_relaunch.dart').readAsStringSync();
-    expect(exit, contains('if (endProcess) await relaunchApp();'));
+    // Every platform ends the process for it, iOS included.
+    expect(
+        exit,
+        contains('if (!endProcess && relaySwitchEnd == '
+            'RelaySwitchEnd.closeByHand) {'));
   });
 }

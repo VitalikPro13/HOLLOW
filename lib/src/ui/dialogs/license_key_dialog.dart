@@ -1,5 +1,3 @@
-import 'dart:io';
-
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/app_relaunch.dart';
@@ -10,10 +8,12 @@ import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
+import 'package:hollow/src/ui/dialogs/relay_switch_dialog.dart';
 
 /// Asks for the access key a SELF-HOSTED relay's owner switched on; the
 /// default relay never asks. Resolves to the typed key. The only other way
-/// out is back to the default relay, which restarts Hollow. [linking]: this
+/// out is back to the default relay, which ends Hollow (on iOS it waits for
+/// the person to close it). [linking]: this
 /// device is joining an identity whose other device already holds a key, and
 /// no system back leaves the prompt.
 Future<String?> showLicenseKeyDialog(
@@ -42,8 +42,6 @@ class _LicenseKeyContentState extends ConsumerState<_LicenseKeyContent>
     with HollowDialogAction {
   final _controller = TextEditingController();
   String? _error;
-
-  static final _isMobile = Platform.isAndroid || Platform.isIOS;
 
   @override
   void initState() {
@@ -81,7 +79,7 @@ class _LicenseKeyContentState extends ConsumerState<_LicenseKeyContent>
     }
   }
 
-  void _onSubmit() {
+  Future<void> _onSubmit() async {
     if (actionRunning) return;
     final key = _controller.text.trim();
     if (key.isEmpty) {
@@ -97,21 +95,44 @@ class _LicenseKeyContentState extends ConsumerState<_LicenseKeyContent>
       return;
     }
 
+    // A key for this relay takes back a switch waiting for the next launch.
+    if (ref.read(pendingRelayProvider) != null) {
+      final relay = ref.read(relayDomainProvider);
+      if (!await runDialogAction(
+              () => ref
+                  .read(relayDomainProvider.notifier)
+                  .saveForNextLaunch(relay),
+              fallback: "Couldn't keep this relay. Try again.") ||
+          !mounted) {
+        return;
+      }
+    }
     Navigator.of(context).pop(key);
   }
 
-  Future<void> _useDefaultRelay() => runDialogAction(() async {
-        await ref
-            .read(relayDomainProvider.notifier)
-            .setDomain(kDefaultRelayDomain);
-        await exitForRelaySwitch(endProcess: widget.linking);
-      }, fallback: "Couldn't switch relays. Try again.");
+  Future<void> _useDefaultRelay() async {
+    var ending = true;
+    if (await runDialogAction(
+            () async => ending = await switchRelay(
+                ref.read, kDefaultRelayDomain,
+                endProcess: widget.linking),
+            fallback: "Couldn't switch relays. Try again.") &&
+        !ending &&
+        mounted) {
+      setState(() => actionRunning = false);
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
     final relay = ref.watch(relayDomainProvider);
     final onDefault = relay == kDefaultRelayDomain;
+    final pending = ref.watch(pendingRelayProvider);
+    final end = relaySwitchEnd;
+    // A linking device ends its process on every platform.
+    final closes = end == RelaySwitchEnd.close ||
+        (widget.linking && end == RelaySwitchEnd.closeByHand);
 
     // Linking: a system back would leave the shell on the throwaway (#123).
     return PopScope(canPop: !widget.linking, child: HollowDialog(
@@ -150,16 +171,22 @@ class _LicenseKeyContentState extends ConsumerState<_LicenseKeyContent>
             errorText: _error,
             style: HollowTypography.mono.copyWith(color: hollow.textPrimary),
           ),
+          if (pending != null) ...[
+            const SizedBox(height: HollowSpacing.md),
+            Text(closeByHandText(pending),
+                style: HollowTypography.body
+                    .copyWith(color: hollow.textSecondary)),
+          ],
         ],
       ),
       // Ghost first, primary last; in the trailing row, which wraps on a
       // phone where the longer label would not fit beside Connect.
       actions: [
-        if (!onDefault)
+        if (!onDefault && pending == null)
           HollowButton.ghost(
             onPressed: _useDefaultRelay,
             loading: actionRunning,
-            child: Text(_isMobile
+            child: Text(closes
                 ? 'Use the default relay and close'
                 : 'Use the default relay'),
           ),

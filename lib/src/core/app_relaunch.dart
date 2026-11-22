@@ -1,7 +1,9 @@
 import 'dart:io';
 
-import 'package:flutter/services.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/profile_registry.dart';
+import 'package:hollow/src/core/providers/relay_domain_provider.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/rust/api/updater.dart' as updater_api;
 
@@ -36,7 +38,8 @@ Future<Never> exitApp([int code = 0]) async {
 /// our still-alive window and forwards; and Dart cannot spawn the waiter
 /// itself (detached powershell dies instantly, a detached cmd batch wedges).
 ///
-/// Mobile has no self-relaunch: it exits and the user reopens. Never returns
+/// Mobile has no self-relaunch: it exits and the user reopens (an iOS relay
+/// switch never comes here, see [RelaySwitchEnd]). Never returns
 /// (ends in `exit(0)`) and never throws.
 Future<Never> relaunchApp() async {
   await runBeforeAppExit();
@@ -62,22 +65,60 @@ Future<Never> switchProfileAndRestart(String path) async {
   return relaunchApp();
 }
 
-/// Ends the process for a relay change, the one exit every relay switch takes.
+/// How a relay switch ends the running app, which it has to: the node binds
+/// its relay at startup, so a change only lands on a fresh process.
+enum RelaySwitchEnd {
+  /// A desktop restarts itself onto the new relay.
+  restart,
+
+  /// Android ends the process, and the person opens Hollow again.
+  close,
+
+  /// iOS gives an app no sanctioned way to quit (`exit` reads as a crash and
+  /// `SystemNavigator.pop` does nothing there), so the relay waits for the
+  /// next launch and the person closes Hollow from the app switcher.
+  closeByHand,
+}
+
+/// Stands in for the platform in tests.
+@visibleForTesting
+RelaySwitchEnd? debugRelaySwitchEnd;
+
+RelaySwitchEnd get relaySwitchEnd =>
+    debugRelaySwitchEnd ??
+    (Platform.isIOS
+        ? RelaySwitchEnd.closeByHand
+        : Platform.isAndroid
+            ? RelaySwitchEnd.close
+            : RelaySwitchEnd.restart);
+
+/// Moves this install to [domain], the one path every relay switch takes:
+/// saved and listed, then the app ends so the node starts on it.
 ///
-/// The node binds its relay at startup, so a change only lands on a fresh
-/// process; mobile has no self-relaunch and the user reopens. [endProcess]: an
-/// Android screen that only closes keeps the process and its open store, and
-/// the next launch's wipe of a link's throwaway must not run beneath them.
-Future<void> exitForRelaySwitch({bool endProcess = false}) async {
-  await runBeforeAppExit();
-  if (endProcess) await relaunchApp();
-  if (Platform.isAndroid || Platform.isIOS) {
-    try {
-      await network_api.notifyShutdown();
-    } catch (_) {}
-    await Future<void>.delayed(const Duration(milliseconds: 200));
-    await SystemNavigator.pop();
-    return;
+/// False where the person closes the app ([RelaySwitchEnd.closeByHand]):
+/// [domain] then waits in [pendingRelayProvider] for the next launch, and
+/// this process, its calls included, stays on the relay it runs on.
+/// [endProcess] ends it there too: a linking device's throwaway must not stay
+/// open beneath the next launch's wipe.
+Future<bool> switchRelay(
+    T Function<T>(ProviderListenable<T>) read, String domain,
+    {bool endProcess = false}) async {
+  if (!endProcess && relaySwitchEnd == RelaySwitchEnd.closeByHand) {
+    await read(relayDomainProvider.notifier).saveForNextLaunch(domain);
+    await read(savedRelayListProvider.notifier).addRelay(domain);
+    return false;
   }
-  await relaunchApp();
+  await read(relayDomainProvider.notifier).setDomain(domain);
+  await read(savedRelayListProvider.notifier).addRelay(domain);
+  return exitForRelaySwitch();
+}
+
+/// Ends the process for a relay change; only [switchRelay] calls it.
+///
+/// Android exits as well, never only closing its screen: a closed screen keeps
+/// the process, its open store and a node bound to the old relay, so the app
+/// opened again came up with "Node is already running" and no connection.
+Future<Never> exitForRelaySwitch() async {
+  await runBeforeAppExit();
+  return relaunchApp();
 }

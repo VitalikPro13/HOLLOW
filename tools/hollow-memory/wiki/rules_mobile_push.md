@@ -38,6 +38,14 @@ device, device targeting, channel push fan-out, the NSE) stay in CLAUDE.md; wiki
   push wake) closes again 10 s later; a session going live while away nudges `call`. No
   battery-exemption prompt, no `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`, no Wi-Fi lock (guard:
   `test/relay_triggers_native_test.dart`).
+- A relay switch never ends an iOS app (no sanctioned quit: `SystemNavigator.pop` does nothing
+  there, `exit` reads as a crash): `switchRelay` saves the relay for the next launch
+  (`pendingRelayProvider`), this process stays on its relay, calls stay up, and the copy says
+  to close Hollow from the app switcher. Any new relay-change surface goes through
+  `switchRelay` and handles its `false`. Android ENDS the process (`relaunchApp`), never only
+  `SystemNavigator.pop()`: a finished activity keeps the process and a node bound to the old
+  relay, and the reopened app fails with "Node is already running". Guard:
+  `test/widget/relay_switch_close_test.dart`.
 - A push wake on Android with the node alive goes through `rejoinThroughLiveNode`: a `push`
   nudge brings the suspended session back BEFORE the live node rejoins, or the rejoin waits in
   the queue until the app returns.

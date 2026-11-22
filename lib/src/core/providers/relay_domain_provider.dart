@@ -20,6 +20,16 @@ class RelayDomainNotifier extends Notifier<String> {
     state = domain;
     await storage_api.saveSetting(key: _kSettingKey, value: domain);
   }
+
+  /// Saves [domain] for the next launch while this process stays on [state]
+  /// (iOS cannot end the app for a switch). Saving [state] again takes a
+  /// waiting switch back.
+  Future<void> saveForNextLaunch(String domain) async {
+    await storage_api.saveSetting(key: _kSettingKey, value: domain);
+    ref
+        .read(pendingRelayProvider.notifier)
+        ._set(domain == state ? null : domain);
+  }
 }
 
 final relayDomainProvider =
@@ -59,3 +69,15 @@ class SavedRelayListNotifier extends Notifier<List<String>> {
 
 final savedRelayListProvider =
     NotifierProvider<SavedRelayListNotifier, List<String>>(SavedRelayListNotifier.new);
+
+/// The relay the next launch connects to when it is not the one this process
+/// runs on; null when no switch waits.
+class PendingRelayNotifier extends Notifier<String?> {
+  @override
+  String? build() => null;
+
+  void _set(String? domain) => state = domain;
+}
+
+final pendingRelayProvider =
+    NotifierProvider<PendingRelayNotifier, String?>(PendingRelayNotifier.new);

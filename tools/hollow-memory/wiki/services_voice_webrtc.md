@@ -431,7 +431,8 @@ and ring theirs. A sibling device never can (only the call's device may end it,
 as `call_book` holds), and a healthy call still answers `busy`. During the
 teardown the newest such invite waits (one it supersedes is told busy, an `end`
 naming it cancels it). And our own app hangs up before it ends itself: every
-self-exit goes through `app_relaunch.dart` (`relaunchApp`, `exitForRelaySwitch`,
+self-exit goes through `app_relaunch.dart` (`relaunchApp`, `exitForRelaySwitch`
+(an iOS relay switch never exits, so it hangs up nothing),
 `exitApp`) or the tray quit paths, which run `runBeforeAppExit()` first;
 `HollowShell._bootstrap` points that hook at `hangUpBeforeExit` (not `main()`:
 the fleet probe never runs it) (bounded at 3 s, a meeting host steps
