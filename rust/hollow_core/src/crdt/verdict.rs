@@ -97,6 +97,9 @@ impl ServerState {
     pub(crate) fn verdict(&self, op: &CrdtOp) -> Verdict {
         match self.direct_verdict(op) {
             Verdict::Uncounted | Verdict::Missing if self.is_endorsed(op) => Verdict::Counted,
+            // Part A (HOL-SEC-230, -231): what the fold held when the view dropped its
+            // device keeps counting here until the recovery decides it.
+            Verdict::Uncounted if self.recovery.as_ref().is_some_and(|r| r.keeps(op)) => Verdict::Counted,
             v => v,
         }
     }
@@ -114,7 +117,7 @@ impl ServerState {
     /// A held retire names `op` (clock, content id) as written by its proving device.
     /// The id is `op`'s own, never `content_of`'s: that reads the op held at the key, so a
     /// variant there would pass as the op the retire named (HOL-SEC-224).
-    fn is_endorsed(&self, op: &CrdtOp) -> bool {
+    pub(super) fn is_endorsed(&self, op: &CrdtOp) -> bool {
         let Some(dev) = op.dev.as_deref() else { return false };
         let Some(named) = self.endorsed.0.get(&(op.author.clone(), op.hlc.physical_ms, op.hlc.counter)) else { return false };
         let h = hex::encode(op.content_hash());

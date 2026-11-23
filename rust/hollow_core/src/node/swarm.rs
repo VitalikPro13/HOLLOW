@@ -8328,7 +8328,7 @@ fn load_server_states(
                                 }
                                 let restored = state.restore_op_log(rows);
                                 let base = restored.refolded.then(|| state.base.as_ref().map(|b| b.hash_hex())).flatten();
-                                if !restored.dropped.is_empty() || base.is_some() {
+                                if !restored.dropped.is_empty() || base.is_some() || restored.recovery.is_some() {
                                     crdt_store.persist(Some(crate::crdt::fold::OpDelta {
                                         server_id: server_id.clone(),
                                         rows: Vec::new(),
@@ -8336,7 +8336,7 @@ fn load_server_states(
                                         seen_keep: base.is_some().then(|| state.first_folds.keys().cloned().collect()),
                                         own_since: Vec::new(),
                                         base,
-                                        recovery: None,
+                                        recovery: restored.recovery.map(Some),
                                     }));
                                 }
                                 if restored.refolded {

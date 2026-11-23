@@ -93,7 +93,7 @@ fn review_b_a_keep_only_asker_is_served_only_when_the_view_counts_it() {
     pre.members.insert(member.clone(), pre.members[&owner].clone());
     state.recovery = Some(std::sync::Arc::new(crate::crdt::hold::Recovery {
         trigger_ms: 0, base: None, base_op: None, pre: std::sync::Arc::new(pre), removals: Default::default(),
-        leaves: None, shell: None, round: None, floor_b: None,
+        leaves: None, shell: None, round: None, floor_b: None, dropped: Vec::new(), kept: Default::default(),
     }));
     let mut r = Roster::genesis(&mkp, &kp(161), &counted, super::super::types::now_ms());
     r.add_consent(sign_consent(&uncounted, &member));
@@ -204,6 +204,8 @@ fn a_named_base_we_lack_is_asked_for_and_a_sent_one_judged() {
         shell: None,
         round: None,
         floor_b: None,
+        dropped: Vec::new(),
+        kept: Default::default(),
     }));
     let reply = reply_ext(&node.db, &node.pass, &held, None, None, None);
     let offered = reply.floor_base.as_deref().and_then(super::super::sync_ext::read_base_op).map(|o| o.content_hash());

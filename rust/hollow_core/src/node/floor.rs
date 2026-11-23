@@ -414,7 +414,7 @@ pub(crate) fn publish(server_states: &HashMap<String, ServerState>, device_id: &
         .iter()
         .filter_map(|(sid, s)| {
             let r = s.recovery.as_deref()?;
-            Some((sid.clone(), RecoverySnap { stepped_back: !s.floor_holds(), removed_by: r.shell.clone() }))
+            Some((sid.clone(), RecoverySnap { stepped_back: !s.floor_holds() && !r.keeps_fold(), removed_by: r.shell.clone() }))
         })
         .collect();
     let mut all = SNAPSHOT.lock().unwrap_or_else(|e| e.into_inner());

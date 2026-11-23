@@ -28228,7 +28228,9 @@ fn harness_fixed_sleep_budget_does_not_grow() {
     // replays, and one spawn stagger (9.5 s; scan 1280.35 s).
     // 2026-11-23: HOL-SEC-230's test adds a join stagger, the T margin and the 12 s the
     // members spend stepped back before the kept device returns (15 s; scan 1295.35 s).
-    const BUDGET_MS: u64 = 1_297_850;
+    // F5 part A: the moderator test's join stagger, T margin and the absence of a lifted
+    // ban, and the restart test's join stagger and T margin (8.4 s; scan 1303.75 s).
+    const BUDGET_MS: u64 = 1_306_250;
 
     let src = include_str!("test_harness.rs");
     // Built from pieces so this scan does not count its own source text.
@@ -73555,7 +73557,6 @@ async fn pr_a_welcome_recovery_restarted_before_the_readd_restores_the_owned_ser
 /// it folded before T.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)]
-#[ignore = "HOL-SEC-230: RED until the baseless hold (F5 design part A)"]
 async fn w3c1_a_recovery_on_a_server_without_a_checkpoint_keeps_its_members() {
     use crate::crdt::hold::Hold;
     use crate::crdt::operations::CrdtPayload as P;
@@ -73722,4 +73723,143 @@ async fn rev229_refusing_a_device_a_recovery_cut_off_never_endorses_what_it_wrot
         "J folded a retire of D1 that names what it wrote after T",
     );
     drop((d1, d2, j));
+}
+
+// pr-f5-owner-reentry
+/// A moderator's ban, written by the device its phrase recovery later drops, on a server
+/// with no checkpoint: the owner's own fold must keep it (the moderator had the device
+/// when it banned).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn rev_f5b_a_recovery_dropping_a_moderators_device_keeps_its_ban() {
+    use crate::crdt::operations::{CrdtPayload as P, MemberRole};
+    let _g = test_guard();
+    let [m_tag, d1_tag, d2_tag, r_tag, o_tag, od_tag, or_tag, k_tag] = [61u8, 62, 63, 64, 65, 66, 67, 68];
+    let W3c1Cut { relay, master, d1, d2, j: owner, server_id, _tmp } = w3c1_cut_server_by([m_tag, d1_tag, d2_tag, r_tag, o_tag], Some((od_tag, or_tag))).await;
+    let m_id = master.peer_id();
+    let k_master = tag_kp(k_tag).peer_id();
+    let mut k = spawn_node_with_friends(&relay, k_tag, k_tag, &[&owner.master_id]).await;
+    sleep_ms(1500).await;
+    k.cmd_tx
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&server_id) })
+        .await
+        .unwrap();
+    assert!(expect_joined(&mut k, &server_id, 30).await, "precondition: K joined");
+    let has_k = async |n: &TestNode| n.live_server_state(&server_id).await.is_some_and(|s| s.is_member(&k_master));
+    assert!(wait_until(30, async || has_k(&owner).await && has_k(&d1).await && has_k(&d2).await).await, "precondition: everyone holds K");
+    owner.cmd_tx.send(NodeCommand::ChangeRole { server_id: server_id.clone(), peer_id: m_id.clone(), new_role: "moderator".into() }).await.unwrap();
+    assert!(wait_until(20, async || d1.live_role(&server_id, &m_id).await == MemberRole::Moderator).await, "precondition: M is a moderator at d1");
+    d1.cmd_tx.send(NodeCommand::BanMember { server_id: server_id.clone(), peer_id: k_master.clone() }).await.unwrap();
+    let banned = async |n: &TestNode| n.live_server_state(&server_id).await.is_some_and(|s| s.is_banned(&k_master) && !s.is_member(&k_master));
+    assert!(wait_until(20, async || banned(&owner).await && banned(&d2).await).await, "precondition: the owner and d2 fold the ban");
+    let ban_by = owner.live_server_state(&server_id).await.and_then(|s| {
+        s.op_log.iter().find(|o| matches!(&o.payload, P::MemberBanned { peer_id, .. } if *peer_id == k_master)).and_then(|o| o.proven_device().map(str::to_string))
+    });
+    assert_eq!(ban_by.as_deref(), Some(d1.device_id.as_str()), "precondition: the moderator's d1 proved the ban");
+    assert!(owner.live_server_state(&server_id).await.is_some_and(|s| s.base.is_none()), "precondition: no checkpoint");
+    sleep_ms(1200).await;
+
+    // The moderator's kept device is away; its phrase dropped d1; the owner hears of it.
+    relay.set_online(&d2.device_id, false);
+    let roster = d2.store().load_roster(&m_id).ok().flatten().expect("M's roster");
+    relay.set_online(&d1.device_id, false);
+    drop(d1);
+    let d2_id = d2.device_id.clone();
+    let recovered = {
+        let mut r = roster.clone();
+        r.add_phrase_statement(
+            &crate::identity::roster::r_pub_of(&tag_kp(r_tag)),
+            Some(crate::identity::roster::sign_recovery(&master, &tag_kp(r_tag), super::roster_book::now_ms(), std::slice::from_ref(&d2_id), false)),
+            None,
+        )
+        .expect("the phrase signs the recovery");
+        r
+    };
+    super::roster_book::merge_for_test(&owner.store(), &recovered, &owner.master_id, &owner.device_id);
+    super::server_rosters::touched();
+    let dropped = async || {
+        owner.live_server_state(&server_id).await.is_some_and(|s| s.authority.device_verdict(&m_id, &tag_kp(d1_tag).peer_id()) == crate::crdt::authority::DeviceVerdict::Uncounted)
+    };
+    assert!(wait_until(30, dropped).await, "precondition: the owner's view no longer counts d1");
+    // ABSENCE: the lift would land with the rebuild the view change ran (BUDGET_MS).
+    sleep_ms(3000).await;
+    let s = owner.live_server_state(&server_id).await.expect("the owner holds its server");
+    assert!(
+        s.is_banned(&k_master),
+        "HOL-SEC-231: the owner's fold lifted the moderator's ban once the phrase dropped d1: banned={} member(K)={} role(M)={:?} in_recovery={} parked_ban={}",
+        s.is_banned(&k_master),
+        s.is_member(&k_master),
+        s.get_role(&m_id),
+        s.in_recovery(),
+        s.stored.iter().any(|(o, _)| matches!(&o.payload, P::MemberBanned { peer_id, .. } if *peer_id == k_master)),
+    );
+    drop((owner, d2, k));
+}
+
+/// Section 8.8's trigger at restart: a member whose store took the owner's recovery while
+/// its node was down (the push fetch keeps removals) must still open the hold.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn rev_f5b_a_recovery_stored_while_the_node_is_down_still_opens_the_hold() {
+    let _g = test_guard();
+    let [m_tag, d1_tag, d2_tag, r_tag, j_tag, k_tag] = [71u8, 72, 73, 74, 75, 76];
+    let W3c1Cut { relay, master, d1, d2, j, server_id, _tmp } = w3c1_cut_server([m_tag, d1_tag, d2_tag, r_tag, j_tag]).await;
+    let m_id = master.peer_id();
+    let (j_master, k_master) = (j.master_id.clone(), tag_kp(k_tag).peer_id());
+    let mut k = spawn_node_with_friends(&relay, k_tag, k_tag, &[&m_id]).await;
+    sleep_ms(1500).await;
+    k.cmd_tx
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&server_id) })
+        .await
+        .unwrap();
+    assert!(expect_joined(&mut k, &server_id, 30).await, "precondition: K joined");
+    let both = async |n: &TestNode| n.live_server_state(&server_id).await.is_some_and(|s| s.is_member(&j_master) && s.is_member(&k_master));
+    assert!(wait_until(30, async || both(&j).await && both(&k).await).await, "precondition: J and K hold both");
+    // The kept device is away before the checkpoint: it would write its own child.
+    relay.set_online(&d2.device_id, false);
+    let pre = j.live_server_state(&server_id).await.expect("J holds the server");
+    let cp1 = w3c1e_checkpoint(&server_id, &master, d1_tag, &pre, crate::crdt::hlc::wall_clock_ms());
+    for to in [&j, &k] {
+        carry_as(&d1, to, crdt_broadcast(&server_id, &cp1)).await;
+    }
+    let cp1_hash = cp1.content_hash();
+    let base_at = async |n: &TestNode| n.live_server_state(&server_id).await.and_then(|s| s.base.as_ref().map(|b| b.hash));
+    assert!(wait_until(20, async || base_at(&j).await == Some(cp1_hash) && base_at(&k).await == Some(cp1_hash)).await, "precondition: cp1 is both members' base");
+    sleep_ms(1200).await;
+    let roster = d2.store().load_roster(&m_id).ok().flatten().expect("the identity's roster");
+    relay.set_online(&d1.device_id, false);
+    drop(d1);
+    let d2_id = d2.device_id.clone();
+    let recovered = {
+        let mut r = roster.clone();
+        r.add_phrase_statement(
+            &crate::identity::roster::r_pub_of(&tag_kp(r_tag)),
+            Some(crate::identity::roster::sign_recovery(&master, &tag_kp(r_tag), super::roster_book::now_ms(), std::slice::from_ref(&d2_id), false)),
+            None,
+        )
+        .expect("the phrase signs the recovery");
+        r
+    };
+    // Control: K hears of it live and holds.
+    super::roster_book::merge_for_test(&k.store(), &recovered, &k.master_id, &k.device_id);
+    super::server_rosters::touched();
+    assert!(wait_until(30, async || k.live_server_state(&server_id).await.is_some_and(|s| s.in_recovery())).await, "control: a member that hears live is in recovery");
+    // J is down; its push fetch stores the same roster; then the app starts.
+    let (jm, jd, rec, by) = (j_master.clone(), j.device_id.clone(), recovered.clone(), d2_id.clone());
+    let j = restart_node_with(&relay, j, j_tag, j_tag, move |db, pass| {
+        assert!(super::roster_book::ingest_stored(db, pass, &jm, &jd, &by, rec), "the push fetch keeps the recovery");
+    })
+    .await;
+    wait_until(20, async || j.live_server_state(&server_id).await.is_some_and(|s| s.in_recovery())).await;
+    let s = j.live_server_state(&server_id).await.expect("J holds the server");
+    assert!(
+        s.in_recovery(),
+        "a recovery stored while J was down opened no hold: in_recovery={} base={:?} member(J)={} member(K)={} members={}",
+        s.in_recovery(),
+        s.base.as_ref().map(|b| b.hash_hex()),
+        s.is_member(&j_master),
+        s.is_member(&k_master),
+        s.members.len(),
+    );
+    drop((j, k, d2));
 }

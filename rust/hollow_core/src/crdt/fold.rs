@@ -348,6 +348,8 @@ pub struct Restored {
     pub refolded: bool,
     /// Rows to delete: parked past their time, or over their group's bound.
     pub dropped: Vec<OpKey>,
+    /// A recovery the restart itself opened (HOL-SEC-232): the `floor_pending` row to save.
+    pub recovery: Option<String>,
 }
 
 /// What an ingest did.
@@ -2217,11 +2219,12 @@ impl ServerState {
             {
                 r.floor_b = r.base_op.clone();
                 let mark = self.create_op(CrdtPayload::FloorMark { cp });
-                let mut fresh = fresh;
+                let mut fresh = fresh.clone();
                 fresh.push(mark);
                 plan = self.plan(fresh, now_ms);
             }
         }
+        let candidates = if trigger.is_none() { self.kept_candidates() } else { None };
         // The view never changes inside a rebuild, so an op it refuses now stays refused
         // (dropped or parked) until a roster arrives.
         for (op, _, class, _) in &plan.ops {
@@ -2237,9 +2240,10 @@ impl ServerState {
         if let Some(r) = trigger {
             out.recovery = r.to_json().map(Some);
             self.recovery = Some(Arc::new(r));
+        } else if let Some(c) = candidates {
+            self.kept_after_install(c, settled, now_ms, &mut out);
         } else if self.recovery_ends(settled) {
-            self.recovery = None;
-            out.recovery = Some(None);
+            self.end_recovery(now_ms, &mut out);
         }
 
         // What changed in the store, against what it held when this rebuild began.
@@ -2277,6 +2281,37 @@ impl ServerState {
         out.base = self.base.as_ref().map(|b| b.hash_hex());
         out.seen_keep = Some(self.first_folds.keys().cloned().collect());
         out
+    }
+
+    /// Part A after a rebuild that may have dropped `c`: open (or grow) the hold and fold
+    /// again with what the fold held still counted, else end a recovery that ends. Its
+    /// own frame: `fold_all` runs on 2 MiB debug workers.
+    #[inline(never)]
+    fn kept_after_install(&mut self, c: super::hold::KeptCandidates, settled: bool, now_ms: u64, out: &mut Ingested) {
+        match self.kept_trigger(c) {
+            Some(r) => {
+                out.recovery = r.to_json().map(Some);
+                self.recovery = Some(Arc::new(r));
+                let again = self.plan(Vec::new(), now_ms);
+                let more = self.install(again, now_ms);
+                out.own_since.extend(more);
+            }
+            None if self.recovery_ends(settled) => self.end_recovery(now_ms, out),
+            None => {}
+        }
+    }
+
+    /// End the recovery; what only a part A hold still counted is judged again without it.
+    #[inline(never)]
+    fn end_recovery(&mut self, now_ms: u64, out: &mut Ingested) {
+        let kept = self.recovery.as_ref().is_some_and(|r| r.keeps_fold());
+        self.recovery = None;
+        out.recovery = Some(None);
+        if kept {
+            let again = self.plan(Vec::new(), now_ms);
+            let more = self.install(again, now_ms);
+            out.own_since.extend(more);
+        }
     }
 
     /// Fold a plan into this state: what `fold_all` and a restart that cannot trust its
@@ -2488,9 +2523,16 @@ impl ServerState {
     pub(super) fn restore_rows(&mut self, rows: Vec<(CrdtOp, Option<u64>)>) -> Restored {
         let now_ms = super::hlc::wall_clock_ms();
         let had: Vec<OpKey> = rows.iter().map(|(o, _)| (o.author.clone(), o.hlc.clone())).collect();
+        let had_recovery = self.recovery.clone();
         let refolded = self.restore_classified(rows, now_ms);
         let dropped = had.into_iter().filter(|k| !self.op_log_dedup.contains_key(k)).collect();
-        Restored { refolded, dropped }
+        let opened = match (&had_recovery, &self.recovery) {
+            (None, Some(_)) => true,
+            (Some(a), Some(b)) => !Arc::ptr_eq(a, b) && b.keeps_fold(),
+            _ => false,
+        };
+        let recovery = opened.then(|| self.recovery.as_ref().and_then(|r| r.to_json())).flatten();
+        Restored { refolded, dropped, recovery }
     }
 
     fn restore_classified(&mut self, rows: Vec<(CrdtOp, Option<u64>)>, now_ms: u64) -> bool {
@@ -2560,8 +2602,48 @@ impl ServerState {
             self.cap_parked();
             return false;
         }
+        // HOL-SEC-232: a roster stored while the node was down (the push fetch keeps
+        // removals, or a crash between the roster save and the rebuild) meets the saved
+        // rows here, never in `fold_all`: judge both triggers against what they folded.
+        if let Some(r) = self.restore_trigger(&mut plan, now_ms) {
+            let _ = self.install(plan, now_ms);
+            self.recovery = Some(Arc::new(r));
+            return true;
+        }
+        let candidates = self.kept_candidates();
         let _ = self.install(plan, now_ms);
+        if let Some(r) = candidates.and_then(|c| self.kept_trigger(c)) {
+            self.recovery = Some(Arc::new(r));
+            let again = self.plan(Vec::new(), now_ms);
+            let _ = self.install(again, now_ms);
+        }
         true
+    }
+
+    /// The 8.8 trigger at a restart that refolds: the base the saved rows folded on
+    /// (the folded checkpoint the saved state's `checkpoint_hlc` names) stands for the
+    /// base before the view changed. On a trigger `plan` becomes the plan that judged it.
+    fn restore_trigger(&mut self, plan: &mut Plan, now_ms: u64) -> Option<super::hold::Recovery> {
+        if self.recovery.is_some() {
+            return None;
+        }
+        let covers = self.checkpoint_hlc.clone()?;
+        let old = self
+            .op_log
+            .iter()
+            .filter(|o| matches!(&o.payload, CrdtPayload::ServerCheckpoint { covers: c, .. } if *c == covers))
+            .filter_map(|o| self.base_of_content(o))
+            .max_by(|a, b| a.hlc.cmp(&b.hlc))?;
+        self.base = Some(Box::new(old));
+        let judged = self.plan(Vec::new(), now_ms);
+        let owner = self.fold_owner(&judged.ops);
+        let new_base = judged.base.as_ref().map(Base::hash_hex);
+        let trigger = self.recovery_trigger(new_base.as_deref(), judged.old_eligible, judged.settled, owner.as_deref());
+        self.base = None;
+        if trigger.is_some() {
+            *plan = judged;
+        }
+        trigger
     }
 
     /// Every row a whole-log page serves, in fold order: the folded log and the rows
