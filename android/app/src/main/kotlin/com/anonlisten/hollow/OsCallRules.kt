@@ -56,11 +56,11 @@ object OsCallRules {
 
     /**
      * The avatar the notification may show: raw RGBA pixels Dart drew (never peer-encoded bytes,
-     * so no Android decoder sees them), exactly [side] squared, and only beside a name. A hidden
-     * title hides the face too (HOL-SEC-155), whatever Dart sent.
+     * so no Android decoder sees them), exactly [side] squared, only for a DM call or ring and
+     * only beside a name. A hidden title hides the face too (HOL-SEC-155), whatever Dart sent.
      */
-    fun avatarFor(title: String, side: Int?, rgba: ByteArray?): CallAvatar? {
-        if (side == null || rgba == null) return null
+    fun avatarFor(kind: String?, title: String, side: Int?, rgba: ByteArray?): CallAvatar? {
+        if (side == null || rgba == null || kind != DM) return null
         if (title.isBlank() || title == HIDDEN_TITLE) return null
         if (side !in 1..AVATAR_MAX_SIDE || rgba.size != side * side * 4) return null
         return CallAvatar(side, rgba)
@@ -75,6 +75,24 @@ object OsCallRules {
         hasLook && foregroundTypes != 0
 }
 
+/**
+ * A call's or ring's title, one way (R-AR-04): once it reads "Hollow" (or blank) it stays "Hollow"
+ * whatever is asked later, so the name and its face never come back for that call.
+ */
+class TitleLatch {
+    var blanked = false
+        private set
+
+    fun take(asked: String): String {
+        if (asked.isBlank() || asked == OsCallRules.HIDDEN_TITLE) blanked = true
+        return if (blanked) OsCallRules.HIDDEN_TITLE else asked
+    }
+
+    fun reset() {
+        blanked = false
+    }
+}
+
 /** A square avatar as premultiplied RGBA bytes, row by row ([OsCallRules.avatarFor]). */
 class CallAvatar(val side: Int, val rgba: ByteArray)
 
@@ -87,6 +105,9 @@ class RingOut {
     var ringing = false
         private set
 
+    /** This ring's title; a new ring (or Dart's `fresh`, another ring at once) starts it over. */
+    val title = TitleLatch()
+
     /** Ring-out started. True = start the call service. */
     fun on(sessionHeld: Boolean): Boolean {
         if (sessionHeld || ringing) return false
@@ -98,6 +119,7 @@ class RingOut {
     fun off(sessionHeld: Boolean): Boolean {
         if (!ringing) return false
         ringing = false
+        title.reset()
         return !sessionHeld
     }
 

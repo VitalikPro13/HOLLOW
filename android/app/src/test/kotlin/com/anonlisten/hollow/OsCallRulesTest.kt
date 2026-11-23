@@ -318,25 +318,25 @@ class OsCallRulesTest {
 
     @Test
     fun anAvatarRidesOnlyWithAName() {
-        assertNotNull(OsCallRules.avatarFor("Ada", 2, pixels(2)))
-        assertNull(OsCallRules.avatarFor(OsCallRules.HIDDEN_TITLE, 2, pixels(2)))
-        assertNull(OsCallRules.avatarFor("", 2, pixels(2)))
-        assertNull(OsCallRules.avatarFor("  ", 2, pixels(2)))
+        assertNotNull(OsCallRules.avatarFor("dm", "Ada", 2, pixels(2)))
+        assertNull(OsCallRules.avatarFor("dm", OsCallRules.HIDDEN_TITLE, 2, pixels(2)))
+        assertNull(OsCallRules.avatarFor("dm", "", 2, pixels(2)))
+        assertNull(OsCallRules.avatarFor("dm", "  ", 2, pixels(2)))
     }
 
     @Test
     fun anAvatarIsExactlyTheSquareOfPixelsItClaims() {
-        assertNull(OsCallRules.avatarFor("Ada", null, pixels(2)))
-        assertNull(OsCallRules.avatarFor("Ada", 2, null))
-        assertNull(OsCallRules.avatarFor("Ada", 2, ByteArray(15)))
-        assertNull(OsCallRules.avatarFor("Ada", 2, ByteArray(17)))
-        assertNull(OsCallRules.avatarFor("Ada", 0, ByteArray(0)))
-        assertNull(OsCallRules.avatarFor("Ada", -2, pixels(2)))
-        assertNotNull(OsCallRules.avatarFor("Ada", OsCallRules.AVATAR_MAX_SIDE, pixels(OsCallRules.AVATAR_MAX_SIDE)))
+        assertNull(OsCallRules.avatarFor("dm", "Ada", null, pixels(2)))
+        assertNull(OsCallRules.avatarFor("dm", "Ada", 2, null))
+        assertNull(OsCallRules.avatarFor("dm", "Ada", 2, ByteArray(15)))
+        assertNull(OsCallRules.avatarFor("dm", "Ada", 2, ByteArray(17)))
+        assertNull(OsCallRules.avatarFor("dm", "Ada", 0, ByteArray(0)))
+        assertNull(OsCallRules.avatarFor("dm", "Ada", -2, pixels(2)))
+        assertNotNull(OsCallRules.avatarFor("dm", "Ada", OsCallRules.AVATAR_MAX_SIDE, pixels(OsCallRules.AVATAR_MAX_SIDE)))
         val over = OsCallRules.AVATAR_MAX_SIDE + 1
-        assertNull(OsCallRules.avatarFor("Ada", over, pixels(over)))
+        assertNull(OsCallRules.avatarFor("dm", "Ada", over, pixels(over)))
         // A side whose square overflows an Int never matches a real array.
-        assertNull(OsCallRules.avatarFor("Ada", 46_341, ByteArray(4)))
+        assertNull(OsCallRules.avatarFor("dm", "Ada", 46_341, ByteArray(4)))
     }
 
     @Test
@@ -363,5 +363,41 @@ class OsCallRulesTest {
         assertFalse(r.repost(sessionHeld = true))
         r.onBegin()
         assertFalse(r.repost(sessionHeld = false))
+    }
+
+    @Test
+    fun aRoomNeverCarriesAFace() {
+        assertNotNull(OsCallRules.avatarFor(OsCallRules.DM, "Ada", 2, pixels(2)))
+        assertNull(OsCallRules.avatarFor("room", "Lounge · Den", 2, pixels(2)))
+        assertNull(OsCallRules.avatarFor("meeting", "Meeting with Ada", 2, pixels(2)))
+        assertNull(OsCallRules.avatarFor(null, "Ada", 2, pixels(2)))
+        assertNull(OsCallRules.avatarFor("DM", "Ada", 2, pixels(2)))
+    }
+
+    // R-AR-04 on the native side: once a call's or ring's title reads "Hollow", a later named
+    // title (a Dart bug, a stale update) never brings the name, or with it the face, back.
+    @Test
+    fun aBlankedTitleNeverTakesBackItsName() {
+        val t = TitleLatch()
+        assertEquals("Ada", t.take("Ada"))
+        assertEquals(OsCallRules.HIDDEN_TITLE, t.take(OsCallRules.HIDDEN_TITLE))
+        assertEquals(OsCallRules.HIDDEN_TITLE, t.take("Ada"))
+        assertTrue(t.blanked)
+        assertNull(OsCallRules.avatarFor(OsCallRules.DM, t.take("Ada"), 2, pixels(2)))
+        val blank = TitleLatch()
+        assertEquals(OsCallRules.HIDDEN_TITLE, blank.take(" "))
+        assertEquals(OsCallRules.HIDDEN_TITLE, blank.take("Ada"))
+    }
+
+    @Test
+    fun aNewRingStartsItsTitleOver() {
+        val r = RingOut()
+        assertTrue(r.on(sessionHeld = false))
+        assertEquals(OsCallRules.HIDDEN_TITLE, r.title.take(OsCallRules.HIDDEN_TITLE))
+        assertEquals(OsCallRules.HIDDEN_TITLE, r.title.take("Ada"))
+        assertTrue(r.off(sessionHeld = false))
+        assertFalse(r.title.blanked)
+        assertTrue(r.on(sessionHeld = false))
+        assertEquals("Bob", r.title.take("Bob"))
     }
 }

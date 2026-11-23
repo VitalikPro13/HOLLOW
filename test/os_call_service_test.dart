@@ -38,10 +38,15 @@ class _Native implements OsCallChannel {
   /// What `begin` answers; a throw stands in for a broken native side.
   Object? Function(Map<String, Object?> args) onBegin = (_) => {'ok': true};
 
+  /// A native side slow to answer [holdMethod] until [hold] completes.
+  String? holdMethod;
+  Completer<void>? hold;
+
   @override
   Future<Object?> invoke(String method, [Map<String, Object?>? args]) async {
     final a = args ?? const <String, Object?>{};
     calls.add((method, a));
+    if (method == holdMethod) await hold?.future;
     if (method == 'begin') return onBegin(a);
     if (method == 'available') return true;
     return null;
@@ -978,6 +983,10 @@ void main() {
     Map<String, Object?> face(OsCallAvatar a) =>
         {'avatar': a.rgba, 'avatarSide': a.side};
 
+    /// Every message native was sent that carried a face.
+    List<(String, Map<String, Object?>)> faced(_Native n) =>
+        [for (final c in n.calls) if (c.$2.containsKey('avatar')) c];
+
     test('an answered DM call shows the friend\'s face beside the name',
         () async {
       final asked = <String>[];
@@ -989,17 +998,39 @@ void main() {
       await r.settle();
       final begin = r.native.lastOf('begin');
       expect(begin['title'], 'Ada');
-      expect(begin, containsPair('avatar', _adaFace.rgba));
-      expect(begin, containsPair('avatarSide', 2));
+      expect(begin, isNot(contains('avatar')), reason: 'the face follows');
+      final update = r.native.lastOf('update');
+      expect(update['uuid'], begin['uuid']);
+      expect(update['title'], 'Ada');
+      expect(update, containsPair('avatar', _adaFace.rgba));
+      expect(update, containsPair('avatarSide', 2));
       expect(asked, ['ada'], reason: 'the face is the MASTER\'s');
     });
 
-    test('the ring-out shows the face too', () async {
+    test('an answered call begins before its face loads', () async {
+      final r = await _rig(faces: (_) => Completer<OsCallAvatar?>().future);
+      r.call.set(_placed('c1'));
+      await r.settle();
+      expect(r.native.lastOf('begin')['title'], 'Ada');
+    });
+
+    test('the ring-out shows the face too, after it starts', () async {
       final r = await _rig();
       r.call.set(_outgoing('c1'));
       await r.settle();
-      expect(r.native.lastOf('ringOut'),
-          {'on': true, 'title': 'Ada', ...face(_adaFace)});
+      expect(r.native.of('ringOut'), [
+        {'on': true, 'title': 'Ada'},
+        {'on': true, 'title': 'Ada', ...face(_adaFace)},
+      ]);
+    });
+
+    test('the ring-out starts before its face loads', () async {
+      final r = await _rig(faces: (_) => Completer<OsCallAvatar?>().future);
+      r.call.set(_outgoing('c1'));
+      await r.settle();
+      expect(r.native.of('ringOut'), [
+        {'on': true, 'title': 'Ada'}
+      ]);
     });
 
     test('a launch password hides the face with the name, and loads none',
@@ -1017,44 +1048,95 @@ void main() {
           {'on': true, 'title': kHiddenNotificationTitle});
       r.call.set(_placed('c1'));
       await r.settle();
-      expect(r.native.lastOf('begin'), isNot(contains('avatar')));
       expect(r.native.lastOf('begin')['title'], kHiddenNotificationTitle);
+      expect(faced(r.native), isEmpty);
       expect(asked, 0);
     });
 
-    test('a face that loaded before the lock rose still never shows',
-        () async {
-      final r = await _rig(faces: (_) async {
-        // The lock rises while the face is being drawn.
-        await Future<void>.delayed(Duration.zero);
-        return _adaFace;
-      });
-      final pending = r.call;
-      pending.set(_placed('c1'));
-      await pumpEventQueue(times: 1);
+    test('a face that loads after the lock rose never shows', () async {
+      final gate = Completer<OsCallAvatar?>();
+      final r = await _rig(faces: (_) => gate.future);
+      r.call.set(_placed('c1'));
+      await r.settle();
+      expect(r.native.lastOf('begin')['title'], 'Ada');
       r.lock.set(true);
       await r.settle();
-      expect(r.native.lastOf('begin')['title'], kHiddenNotificationTitle);
-      expect(r.native.lastOf('begin'), isNot(contains('avatar')));
+      gate.complete(_adaFace);
+      await r.settle();
+      expect(faced(r.native), isEmpty);
+      expect(r.native.lastOf('update')['title'], kHiddenNotificationTitle);
     });
 
-    test('a lock that rises while the ring-out face loads shows neither',
+    test('a ring-out face that loads after the lock rose never shows',
         () async {
-      final r = await _rig(faces: (_) async {
-        await Future<void>.delayed(Duration.zero);
-        return _adaFace;
-      });
+      final gate = Completer<OsCallAvatar?>();
+      final r = await _rig(faces: (_) => gate.future);
       r.call.set(_outgoing('c1'));
-      await pumpEventQueue(times: 1);
+      await r.settle();
       r.lock.set(true);
       await r.settle();
-      expect(r.native.of('ringOut').first,
+      gate.complete(_adaFace);
+      await r.settle();
+      expect(faced(r.native), isEmpty);
+      expect(r.native.lastOf('ringOut'),
           {'on': true, 'title': kHiddenNotificationTitle});
+    });
+
+    test('a lock that rose and fell while the face loaded: the blanked call '
+        'never gets it', () async {
+      final gate = Completer<OsCallAvatar?>();
+      final r = await _rig(faces: (_) => gate.future);
+      r.call.set(_placed('c1'));
+      await r.settle();
+      r.lock.set(true);
+      await r.settle();
+      r.lock.set(false);
+      await r.settle();
+      gate.complete(_adaFace);
+      await r.settle();
+      expect(faced(r.native), isEmpty);
+    });
+
+    test('a lock that rose and fell while the ring-out face loaded: the '
+        'blanked ring never gets it', () async {
+      final gate = Completer<OsCallAvatar?>();
+      final r = await _rig(faces: (_) => gate.future);
+      r.call.set(_outgoing('c1'));
+      await r.settle();
+      r.lock.set(true);
+      await r.settle();
+      r.lock.set(false);
+      await r.settle();
+      gate.complete(_adaFace);
+      await r.settle();
+      expect(faced(r.native), isEmpty);
+      expect(r.native.lastOf('ringOut')['title'], kHiddenNotificationTitle);
+    });
+
+    test('a lock that rises while a late face waits behind a slow native call '
+        'keeps it off', () async {
+      final gate = Completer<OsCallAvatar?>();
+      final r = await _rig(faces: (_) => gate.future);
+      r.call.set(_placed('c1'));
+      await r.settle();
+      r.native
+        ..holdMethod = 'update'
+        ..hold = Completer<void>();
+      r.call.set(_placed('c1', video: true));
+      await pumpEventQueue();
+      gate.complete(_adaFace);
+      await pumpEventQueue();
+      // The lock's reconcile queues behind the face's step.
+      r.lock.set(true);
+      r.native.hold!.complete();
+      await r.settle();
+      expect(faced(r.native), isEmpty);
+      expect(r.native.lastOf('update')['title'], kHiddenNotificationTitle);
     });
 
     test('App Lock blanks the face with the name, for good', () async {
       final r = await _rig(call: _placed('c1'));
-      expect(r.native.lastOf('begin'), contains('avatar'));
+      expect(r.native.lastOf('update'), contains('avatar'));
       r.native.clear();
       r.lock.set(true);
       await r.settle();
@@ -1093,19 +1175,24 @@ void main() {
     });
 
     test('a name not known yet shows no face either', () async {
-      final r = await _rig();
+      var asked = 0;
+      final r = await _rig(faces: (_) async {
+        asked++;
+        return _adaFace;
+      });
       r.call.set(_placed('c1').copyWith(peerId: 'stranger-id'));
       await r.settle();
       expect(r.native.lastOf('begin')['title'], kHiddenNotificationTitle);
-      expect(r.native.lastOf('begin'), isNot(contains('avatar')));
+      expect(faced(r.native), isEmpty);
+      expect(asked, 0);
     });
 
     test('no face: the notification stays as it was', () async {
       final r = await _rig(faces: (_) async => null);
       r.call.set(_placed('c1'));
       await r.settle();
-      expect(r.native.lastOf('begin')['title'], 'Ada');
-      expect(r.native.lastOf('begin'), isNot(contains('avatar')));
+      expect(r.native.methods, ['begin']);
+      expect(faced(r.native), isEmpty);
     });
 
     test('a face source that throws or hangs never holds the call up',
@@ -1115,23 +1202,24 @@ void main() {
       hang.call.set(_placed('c1'));
       await Future<void>.delayed(const Duration(milliseconds: 60));
       await hang.settle();
-      expect(hang.native.methods, contains('begin'));
-      expect(hang.native.lastOf('begin'), isNot(contains('avatar')));
+      expect(hang.native.methods, ['begin']);
       final boom = await _rig(faces: (_) async => throw StateError('no rust'));
       boom.call.set(_placed('c2'));
       await boom.settle();
       expect(boom.native.lastOf('begin')['title'], 'Ada');
+      expect(faced(boom.native), isEmpty);
     });
 
-    test('a call that ends while its face loads begins nothing', () async {
+    test('a call that ends while its face loads never gets it', () async {
       final gate = Completer<OsCallAvatar?>();
       final r = await _rig(faces: (_) => gate.future);
       r.call.set(_placed('c1'));
-      await pumpEventQueue();
+      await r.settle();
       r.call.set(const CallState());
+      await r.settle();
       gate.complete(_adaFace);
       await r.settle();
-      expect(r.native.methods, isNot(contains('begin')));
+      expect(r.native.methods, ['begin', 'end']);
     });
 
     test('a DM that turns into a room while its face loads gives the room '
@@ -1142,11 +1230,11 @@ void main() {
       await pumpEventQueue();
       r.call.set(const CallState());
       r.voice.set(_room());
+      await r.settle();
       gate.complete(_adaFace);
       await r.settle();
-      expect(r.native.of('begin'), hasLength(1));
       expect(r.native.lastOf('begin')['kind'], 'room');
-      expect(r.native.lastOf('begin'), isNot(contains('avatar')));
+      expect(faced(r.native), isEmpty);
     });
 
     test('a room joined while a DM rings in gets no face', () async {
@@ -1160,21 +1248,66 @@ void main() {
       r.voice.set(_room());
       await r.settle();
       expect(r.native.lastOf('begin')['kind'], 'room');
-      expect(r.native.lastOf('begin'), isNot(contains('avatar')));
+      expect(faced(r.native), isEmpty);
       expect(asked, 0);
     });
 
-    test('a ring answered while its face loads never rings out', () async {
+    test('a ring answered while its face loads: the face goes to the call, '
+        'never back to the ring', () async {
+      final ring = Completer<OsCallAvatar?>();
+      var loads = 0;
+      final r = await _rig(faces: (_) {
+        loads++;
+        return loads == 1 ? ring.future : Future.value(_adaFace);
+      });
+      r.call.set(_outgoing('c1'));
+      await r.settle();
+      r.call.set(_placed('c1'));
+      await r.settle();
+      ring.complete(_adaFace);
+      await r.settle();
+      expect([for (final c in faced(r.native)) c.$1], ['update']);
+      expect(r.native.lastOf('ringOut'), {'on': false});
+    });
+
+    test('a ring that turns into another friend\'s while the face loads '
+        'never shows the first friend\'s face', () async {
       final gate = Completer<OsCallAvatar?>();
-      final r = await _rig(faces: (_) => gate.future);
-      r.native.clear();
+      final r = await _rig(
+          faces: (m) => m == 'ada' ? gate.future : Future.value(null));
+      r.c.read(profileProvider);
+      r.profiles.rename('bob', 'Bob');
       r.call.set(_outgoing('c1'));
       await pumpEventQueue();
-      r.call.set(_placed('c1'));
+      r.call.set(const CallState());
+      r.call.set(_outgoing('c2').copyWith(peerId: 'bob'));
       gate.complete(_adaFace);
       await r.settle();
-      expect(r.native.methods, ['begin']);
-      expect(r.native.lastOf('begin'), contains('avatar'));
+      final ring = r.native.lastOf('ringOut');
+      expect(ring['title'], 'Bob');
+      expect(faced(r.native), isEmpty,
+          reason: 'Ada\'s face beside Bob\'s name');
+    });
+
+    test('a second ring-out between reconciles is re-titled, as a fresh ring',
+        () async {
+      final r = await _rig(
+          call: _outgoing('c1'),
+          faces: (m) async => m == 'ada' ? _adaFace : null);
+      r.profiles.rename('bob', 'Bob');
+      r.call.set(const CallState());
+      r.call.set(_outgoing('c2').copyWith(peerId: 'bob'));
+      await r.settle();
+      final rings = r.native.of('ringOut');
+      final ring = rings.last;
+      expect(ring['title'], 'Bob', reason: 'still $ring');
+      // Native starts the new ring's title over: told it is fresh, or the old
+      // ring was let go first.
+      expect(
+          ring['fresh'] == true || rings[rings.length - 2]['on'] == false,
+          isTrue,
+          reason: '$rings');
+      expect(ring, isNot(contains('avatar')));
     });
 
     test('rooms and meetings show no face and load none', () async {
@@ -1185,7 +1318,7 @@ void main() {
       });
       r.voice.set(_room());
       await r.settle();
-      expect(r.native.lastOf('begin'), isNot(contains('avatar')));
+      expect(faced(r.native), isEmpty);
       final m = await _rig(
           voice: _meetingSeat(),
           conference: const ConferenceState(
@@ -1196,7 +1329,7 @@ void main() {
             asked++;
             return _adaFace;
           });
-      expect(m.native.lastOf('begin'), isNot(contains('avatar')));
+      expect(faced(m.native), isEmpty);
       expect(asked, 0);
     });
 
@@ -1210,7 +1343,7 @@ void main() {
       });
       r.call.set(_placed('c1'));
       await r.settle();
-      expect(r.native.lastOf('begin'), isNot(contains('avatar')));
+      expect(faced(r.native), isEmpty);
       expect(asked, 0);
     });
   });

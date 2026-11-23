@@ -30,7 +30,7 @@ class HollowCallService : Service() {
 
         /** The session's look; null = no session, so a start still in flight stops at once. */
         private var look: CallLook? = null
-        private var lastLook = CallLook("Hollow", muted = false, connectedAt = null)
+        private var lastLook = CallLook(OsCallRules.HIDDEN_TITLE, muted = false, connectedAt = null)
 
         /** The types the last startForeground got (0 = not foreground), for the debug status. */
         @Volatile var grantedTypes = 0
@@ -90,6 +90,8 @@ class HollowCallService : Service() {
         /** Main thread. */
         fun stop() {
             look = null
+            // No name or face outlives its call in a static.
+            lastLook = CallLook(OsCallRules.HIDDEN_TITLE, muted = false, connectedAt = null)
             current?.finish()
         }
 

@@ -120,8 +120,7 @@ class _Mirror {
   bool held = false;
   ({bool muted, bool deafened})? beforeHold;
 
-  _Mirror(this.key, this.kind, this.uuid, this.title, this.sentVideo,
-      this.avatar);
+  _Mirror(this.key, this.kind, this.uuid, this.title, this.sentVideo);
 }
 
 /// Mirrors the one live call, voice room or meeting to the OS (#154,
@@ -165,15 +164,17 @@ class OsCallService {
 
   _Mirror? _live;
 
-  /// How long a face may hold up a begin or a ring-out; then it goes without.
+  /// How long a face may take to load; then the notification goes without.
   @visibleForTesting
   static Duration avatarTimeout = const Duration(seconds: 1);
 
   /// Whether native was last told a call we placed rings out.
   bool _ringOut = false;
 
-  /// Whether that ring-out was sent a name (and maybe a face) still to blank.
-  bool _ringOutNamed = false;
+  /// The ring native was last told of: its call (a new ring has a new id)
+  /// and its title, which only ever blanks.
+  String? _ringCall;
+  String? _ringTitle;
 
   /// Every uuid begun and not yet ended, oldest first: `begin` hands native the
   /// set so it can drop anything it still holds outside it (N2).
@@ -249,49 +250,75 @@ class OsCallService {
 
   Future<void> _reconcileRingOut(OsSession? want) async {
     if (!ringOutService) return;
-    final ringing = want == null && ringsOut(_read(callProvider));
-    if (ringing == _ringOut) {
+    final call = _read(callProvider);
+    final ringing = want == null && ringsOut(call);
+    if (!ringing) {
+      if (!_ringOut) return;
+      _ringOut = false;
+      _ringCall = null;
+      _ringTitle = null;
+      await _send('ringOut', {'on': false});
+      return;
+    }
+    final master = osCallPeerMaster(_read);
+    if (_ringOut && call.callId == _ringCall) {
       // One way, like a session's title: a name that may no longer show
       // blanks, its face with it.
-      if (ringing && _ringOutNamed && !_read(osContentAllowedProvider)) {
-        _ringOutNamed = false;
+      if (_ringTitle != kHiddenNotificationTitle &&
+          !_read(osContentAllowedProvider)) {
+        _ringTitle = kHiddenNotificationTitle;
         await _send(
             'ringOut', {'on': true, 'title': kHiddenNotificationTitle});
       }
       return;
     }
-    if (!ringing) {
-      _ringOut = false;
-      _ringOutNamed = false;
-      await _send('ringOut', {'on': false});
-      return;
-    }
-    OsCallAvatar? face;
-    if (osCallAvatars) {
-      face = await _face();
-      // The ring can end or be answered while the face loads; the change
-      // queued its own reconcile.
-      if (_read(osSessionProvider) != null || !ringsOut(_read(callProvider))) {
-        return;
-      }
-    }
+    // A new ring, or another one since the last reconcile (a cancel and a
+    // call to someone else inside one beat): its own title, and no face yet,
+    // so the service starts at once while the app is still in front.
+    final fresh = _ringOut;
     final title = osRingOutTitle(_read);
     _ringOut = true;
-    _ringOutNamed = title != kHiddenNotificationTitle;
+    _ringCall = call.callId;
+    _ringTitle = title;
     await _send('ringOut', {
       'on': true,
       'title': title,
-      if (osCallShowsAvatar(title)) ..._avatarArgs(face),
+      if (fresh) 'fresh': true,
+    });
+    final callId = call.callId;
+    if (master == null || !osCallShowsAvatar(title)) return;
+    _faceThen(master, (face) async {
+      // Only the ring it was loaded for (a new ring has a new id), still
+      // ringing and still named. The content check covers a lock whose
+      // reconcile is queued behind this step.
+      final now = _read(callProvider);
+      if (now.callId != callId ||
+          !ringsOut(now) ||
+          _ringTitle == kHiddenNotificationTitle ||
+          !_read(osContentAllowedProvider)) {
+        return;
+      }
+      await _send(
+          'ringOut', {'on': true, 'title': title, ..._avatarArgs(face)});
     });
   }
 
-  /// The DM peer's face, or null: not while a name may not show, and never
+  /// Loads [master]'s face OFF the queue (a begin or ring-out never waits for
+  /// it), then queues [apply], which must re-check that the call, the peer
+  /// and the name are still the ones it was loaded for.
+  void _faceThen(
+      String master, Future<void> Function(OsCallAvatar face) apply) {
+    if (!osCallAvatars) return;
+    unawaited(_face(master).then((face) {
+      if (face != null && !_disposed) _enqueue(() => apply(face));
+    }));
+  }
+
+  /// [master]'s face, or null: not while a name may not show, and never
   /// longer than [avatarTimeout].
-  Future<OsCallAvatar?> _face() async {
+  Future<OsCallAvatar?> _face(String master) async {
     try {
       if (!_read(osContentAllowedProvider)) return null;
-      final master = osCallPeerMaster(_read);
-      if (master == null) return null;
       return await _read(osCallAvatarSourceProvider)(master)
           .timeout(avatarTimeout);
     } catch (e) {
@@ -304,8 +331,7 @@ class OsCallService {
       ? const {}
       : {'avatar': face.rgba, 'avatarSide': face.side};
 
-  Future<void> _reconcileSession(OsSession? wanted) async {
-    var want = wanted;
+  Future<void> _reconcileSession(OsSession? want) async {
     var mirror = _live;
     if (mirror != null && (want == null || want.key != mirror.key)) {
       _live = null;
@@ -313,18 +339,7 @@ class OsCallService {
       mirror = null;
     }
     if (want == null) return;
-    if (mirror == null) {
-      OsCallAvatar? face;
-      if (osCallAvatars && want.kind == OsCallKind.dm) {
-        face = await _face();
-        // The session can end or change while the face loads; the change
-        // queued its own reconcile.
-        final now = _read(osSessionProvider);
-        if (now == null || now.key != want.key) return;
-        want = now;
-      }
-      mirror = await _begin(want, face);
-    }
+    mirror ??= await _begin(want);
     if (want.live && !mirror.connected) {
       mirror.connected = true;
       await _send('connected', {'uuid': mirror.uuid});
@@ -354,12 +369,32 @@ class OsCallService {
     }
   }
 
-  Future<_Mirror> _begin(OsSession want, OsCallAvatar? face) async {
-    final title = osCallTitle(_read, want);
-    final mirror = _Mirror(want.key, want.kind, _mintUuid(), title, want.video,
-        osCallShowsAvatar(title) ? face : null);
+  Future<_Mirror> _begin(OsSession want) async {
+    final mirror = _Mirror(want.key, want.kind, _mintUuid(),
+        osCallTitle(_read, want), want.video);
     _live = mirror;
     await _sendBegin(mirror, outgoing: want.outgoing);
+    final master = osCallPeerMaster(_read);
+    if (want.kind == OsCallKind.dm &&
+        master != null &&
+        osCallShowsAvatar(mirror.title)) {
+      _faceThen(master, (face) async {
+        // Only the call it was loaded for, still named. The content check
+        // covers a lock whose reconcile is queued behind this step.
+        if (!identical(_live, mirror) ||
+            !osCallShowsAvatar(mirror.title) ||
+            !_read(osContentAllowedProvider)) {
+          return;
+        }
+        mirror.avatar = face;
+        await _send('update', {
+          'uuid': mirror.uuid,
+          'title': mirror.title,
+          'video': mirror.sentVideo,
+          ..._avatarArgs(face),
+        });
+      });
+    }
     return mirror;
   }
 

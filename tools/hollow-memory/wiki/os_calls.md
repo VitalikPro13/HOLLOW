@@ -48,14 +48,18 @@ decisions in its section 11. Android: `OsCallBridge.kt`, `HollowCallService.kt` 
   `system_notification_provider`); never an id ("Hollow" for anything not known yet); an 18+
   server the phone hides is never named. App Lock raised mid-call blanks it one way (defence
   only: the lock cannot rise during a call, `appLockBusyProvider`).
-- Face (Android only, `osCallAvatars`): a DM's `begin`, `update` and the ring-out carry the
-  friend's avatar as `avatar` (raw premultiplied RGBA) + `avatarSide` (160), and only beside a
-  name (`osCallShowsAvatar`: a DM on Android whose title is not "Hollow"), so whatever hides the
-  name (HOL-SEC-155, a name not known yet) hides the face. The face is loaded BEFORE the title is
-  read (`_face`, at most `avatarTimeout` 1 s, then the call goes without), so a lock that rises
-  during the load wins; a session or ring that changed meanwhile begins nothing (its change
-  queued a reconcile). The one-way blank drops it for good (`mirror.avatar = null`; the ring-out
-  is re-sent `{on: true, title: "Hollow"}`, native re-posts it). Bytes: `getAvatar` (image_gate
+- Face (Android only, `osCallAvatars`): the friend's avatar rides as `avatar` (raw premultiplied
+  RGBA) + `avatarSide` (160), and only beside a name (`osCallShowsAvatar`: Android, a title that is
+  not "Hollow"), so whatever hides the name (HOL-SEC-155, a name not known yet) hides the face.
+  `begin` and `ringOut {on: true}` go out AT ONCE with no face (the service must start while the
+  app is in front); the face loads OFF the queue (`_faceThen`, at most `avatarTimeout` 1 s) and
+  then follows as an `update` (a session) or a second `ringOut {on: true}` (the ring), queued and
+  sent only if the same call is there (`identical(_live, mirror)`, or the same `callId` still
+  ringing out) with a title still named and allowed. A ring is tracked by its `callId`
+  (`_ringCall`, a new ring has a new id): another ring inside one beat
+  (cancel, call someone else) is re-sent with its own title and `fresh: true`, so a late face
+  never lands beside another friend's name. The one-way blank drops the face for good
+  (`mirror.avatar = null`; the ring-out is re-sent `{on: true, title: "Hollow"}`). Bytes: `getAvatar` (image_gate
   `shown`), then `renderOsCallAvatar` draws the first frame (an animated avatar gives a still),
   centre-cropped, into pixels of our own: Android never decodes a peer's encoded image. Rooms,
   meetings and iOS (CallKit has no avatar) get none.
@@ -219,8 +223,10 @@ decisions in its section 11. Android: `OsCallBridge.kt`, `HollowCallService.kt` 
   LOW may hide the status-bar call chip): Person = the title, Hang up + Mute/Unmute through
   `CallActionReceiver` (not exported, explicit immutable PendingIntents) -> `osEnd` / `osMute`
   (a ring-out's plain notification has Hang up only -> `osRingOutEnd`); a chronometer from
-  `connected`. The face: `OsCallRules.avatarFor` keeps an `avatar` only beside a name that is
-  not "Hollow" and only when it is exactly `side * side * 4` bytes (side 1..256), and
+  `connected`. Titles are one-way natively too (`TitleLatch`, per Call and per ring; a new ring
+  or Dart's `fresh` starts it over): once "Hollow", a later named title stays "Hollow". The face:
+  `OsCallRules.avatarFor` keeps an `avatar` only for a DM, only beside a name that is not
+  "Hollow" (after the latch) and only when it is exactly `side * side * 4` bytes (side 1..256), and
   `CallNotification` copies those pixels into a bitmap (no decoder) as the CallStyle Person's
   icon, or the ring-out's large icon. Every look carries its face afresh: an `update` without
   one removes it. Swipe-away: Android 14+ lets the person dismiss any `setOngoing` foreground
