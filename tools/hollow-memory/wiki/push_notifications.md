@@ -283,6 +283,18 @@ db_passphrase) -> Vec<FetchedDm>`.
   counting and with an evicted roster record.
 - `get_push_profile(peer_id) -> PushProfile` — opens its OWN SQLCipher connection,
   reads `load_profile_light` + `load_avatar`. Tier 1 (name + avatar, no node).
+  The avatar it returns is never the stored bytes: after `image_gate` passes them,
+  `image_convert::notification_icon` draws the first frame, centre-cropped, at most
+  192 px square, and encodes it as PNG (#154). Every OS notification avatar comes
+  from here (Android `ByteArrayAndroidBitmap`, push AND the live node's banner via
+  `systemNotificationProvider._avatarFor`; macOS and Windows toasts), so
+  BitmapFactory, ImageIO and the Windows shell only ever parse a PNG we wrote.
+  Done in Rust, not Flutter, so it works in the push isolate and the UnifiedPush
+  background engine without asking them to rasterize. A new OS image site is
+  listed in `test/image_file_decode_guard_test.dart`, which also keeps the
+  notification files off the raw getters (`getAvatar` and friends). The iOS NSE
+  is the exception: it attaches `push_hints/<master>.img`, which `PushHintsCache`
+  writes from `getAvatar` (gated, but the peer's own bytes).
 - `get_push_channel_meta(server_id, channel_id) -> PushChannelMeta` — server +
   channel names and the effective LOCAL notification level, straight from
   SQLCipher (no node). Used by the Android channel-wake handler.

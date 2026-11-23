@@ -684,7 +684,70 @@ mod crossing_tests {
         profile_with(&store, "bad-peer", &bad(), &good());
         profile_with(&store, "good-peer", &good(), &good());
         assert_eq!(crate::api::network::push_profile_in_for_test(&store, "bad-peer"), None);
-        assert_eq!(crate::api::network::push_profile_in_for_test(&store, "good-peer"), Some(good()));
+        assert!(crate::api::network::push_profile_in_for_test(&store, "good-peer").is_some());
+    }
+
+    /// The gate on its own: bytes our decoder reads but the check refused give no icon.
+    #[test]
+    fn a_refused_avatar_gives_no_notification_icon_even_when_it_decodes() {
+        let store = fresh_store();
+        profile_with(&store, "peer", &good(), &good());
+        store.record_image_verdict(&digest(&good()), CODE_REFUSED, RULE).unwrap();
+        assert_eq!(crate::api::network::push_profile_in_for_test(&store, "peer"), None);
+    }
+
+    /// Every OS draws a notification's icon with its own native decoder, so it gets a
+    /// PNG we encoded from the checked avatar, never the bytes the peer sent.
+    #[test]
+    fn a_push_banner_icon_is_never_the_peers_encoded_bytes() {
+        use image::{AnimationDecoder as _, Frame, ImageFormat, Rgba, RgbaImage};
+        let encode = |img: &RgbaImage, f: ImageFormat| {
+            let mut out = Vec::new();
+            image::DynamicImage::ImageRgba8(img.clone())
+                .to_rgb8()
+                .write_to(&mut std::io::Cursor::new(&mut out), f)
+                .unwrap();
+            out
+        };
+        // Blue sides, green middle third: a square crop of its centre is mostly green.
+        let wide = RgbaImage::from_fn(300, 200, |x, _| {
+            if (100..200).contains(&x) { Rgba([0, 255, 0, 255]) } else { Rgba([0, 0, 255, 255]) }
+        });
+        let mut gif = Vec::new();
+        {
+            let mut enc = image::codecs::gif::GifEncoder::new(&mut gif);
+            enc.set_repeat(image::codecs::gif::Repeat::Infinite).unwrap();
+            for c in [[255, 0, 0, 255], [0, 0, 255, 255]] {
+                enc.encode_frame(Frame::new(RgbaImage::from_pixel(40, 40, Rgba(c)))).unwrap();
+            }
+        }
+        assert_eq!(
+            image::codecs::gif::GifDecoder::new(std::io::Cursor::new(&gif)).unwrap().into_frames().count(),
+            2
+        );
+        let sources = [
+            ("png", encode(&wide, ImageFormat::Png)),
+            ("jpeg", encode(&wide, ImageFormat::Jpeg)),
+            ("webp", encode(&wide, ImageFormat::WebP)),
+            ("animated gif", gif),
+        ];
+        let store = fresh_store();
+        for (what, avatar) in sources {
+            assert_eq!(judge_in(&store, &avatar, SLOT_WAIT), Verdict::Pass, "{what}");
+            profile_with(&store, what, &avatar, &good());
+            let icon = crate::api::network::push_profile_in_for_test(&store, what)
+                .unwrap_or_else(|| panic!("{what}: no icon"));
+            assert_ne!(icon, avatar, "{what}: the peer's own bytes");
+            assert!(icon.starts_with(b"\x89PNG\r\n\x1a\n"), "{what}: not a PNG");
+            let drawn = image::load_from_memory_with_format(&icon, ImageFormat::Png).unwrap().to_rgba8();
+            assert_eq!(drawn.width(), drawn.height(), "{what}: square");
+            let mid = drawn.get_pixel(drawn.width() / 2, drawn.height() / 2).0;
+            if what == "animated gif" {
+                assert!(mid[0] > 200 && mid[2] < 50, "{what}: the first frame, got {mid:?}");
+            } else {
+                assert!(mid[1] > 200 && mid[2] < 60, "{what}: the centre kept, got {mid:?}");
+            }
+        }
     }
 
     fn get_store_for_test() -> std::sync::MutexGuard<'static, Option<MessageStore>> {

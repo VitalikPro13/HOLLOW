@@ -1648,6 +1648,30 @@ mod tests {
         assert!(err.contains("512 KB"), "got: {err}");
     }
 
+    #[test]
+    fn a_notification_icon_is_a_centred_square_png_never_upscaled() {
+        // Blue sides, green middle third.
+        let wide = image::RgbaImage::from_fn(600, 400, |x, _| {
+            if (200..400).contains(&x) { image::Rgba([0, 255, 0, 255]) } else { image::Rgba([0, 0, 255, 255]) }
+        });
+        let mut src = Vec::new();
+        wide.write_to(&mut Cursor::new(&mut src), ImageFormat::Png).unwrap();
+        let icon = notification_icon(&src).expect("decodes");
+        let drawn = image::load_from_memory_with_format(&icon, ImageFormat::Png).unwrap().to_rgba8();
+        assert_eq!(drawn.dimensions(), (NOTIFICATION_ICON_SIDE, NOTIFICATION_ICON_SIDE));
+        let px = |x: u32| drawn.get_pixel(x, NOTIFICATION_ICON_SIDE / 2).0;
+        assert!(px(NOTIFICATION_ICON_SIDE / 2)[1] > 200, "the centre is green");
+        assert!(px(8)[2] > 200 && px(8)[1] < 60, "the crop's edge is the blue side");
+        assert!(px(NOTIFICATION_ICON_SIDE - 8)[2] > 200, "and the other side");
+
+        let small = notification_icon(&make_test_png(64, 48)).expect("decodes");
+        let small = image::load_from_memory_with_format(&small, ImageFormat::Png).unwrap();
+        assert_eq!((small.width(), small.height()), (48, 48), "a small avatar is never upscaled");
+
+        assert_eq!(notification_icon(b"not an image"), None);
+        assert_eq!(notification_icon(&[]), None);
+    }
+
 }
 
 /// Convert a WebP file to another format (for "Save As").
@@ -2279,6 +2303,36 @@ pub(crate) fn peer_thumb_for_display(b64: &str) -> Option<(String, u32, u32)> {
         m.insert(key, out.clone());
     }
     out
+}
+
+/// Longest side of an OS notification's icon: Android draws its large icon at 64 dp
+/// (192 px at 3x), desktop toasts smaller.
+pub(crate) const NOTIFICATION_ICON_SIDE: u32 = 192;
+
+/// An avatar as an OS notification may carry it: the first frame, centre-cropped to a
+/// square of at most [`NOTIFICATION_ICON_SIDE`], encoded by us as PNG, so the OS's own
+/// image decoder only ever parses bytes we wrote. `None` when the bytes do not decode.
+/// A peer's bytes come here only after `image_gate` passed them.
+pub(crate) fn notification_icon(avatar: &[u8]) -> Option<Vec<u8>> {
+    use image::ImageEncoder as _;
+    let img = load_bounded(avatar).ok()?;
+    let (w, h) = (img.width(), img.height());
+    let side = w.min(h);
+    if side == 0 {
+        return None;
+    }
+    let cropped = img.crop_imm((w - side) / 2, (h - side) / 2, side, side);
+    let dim = side.min(NOTIFICATION_ICON_SIDE);
+    let rgba = if dim == side {
+        cropped.to_rgba8()
+    } else {
+        cropped.resize_exact(dim, dim, FilterType::Lanczos3).to_rgba8()
+    };
+    let mut out = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut out)
+        .write_image(rgba.as_raw(), dim, dim, image::ExtendedColorType::Rgba8)
+        .ok()?;
+    Some(out)
 }
 
 /// Side of the avatar thumbnail a friend-request card carries, a ceiling on receive.

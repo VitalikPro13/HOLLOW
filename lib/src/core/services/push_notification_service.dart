@@ -1294,6 +1294,8 @@ Future<void> _showNotification({
   body = messagePreviewText(body);
   lines = lines?.map(messagePreviewText).toList();
 
+  // BitmapFactory decodes this, so it is only ever getPushProfile's avatar: a
+  // PNG Rust drew from the checked still, never the bytes the peer sent.
   AndroidBitmap<Object>? largeIcon;
   if (avatarBytes != null && avatarBytes.isNotEmpty) {
     largeIcon = ByteArrayAndroidBitmap(avatarBytes);

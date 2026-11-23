@@ -2705,6 +2705,8 @@ pub fn decline_link_push(target_peer: String) -> Result<(), String> {
 /// Profile data for push notifications (Tier 1: cached profile, no node needed).
 pub struct PushProfile {
     pub display_name: String,
+    /// A PNG we encoded from the checked avatar's first frame, at most 192 px square:
+    /// the only avatar bytes an OS notification may carry.
     pub avatar_bytes: Option<Vec<u8>>,
 }
 
@@ -2759,20 +2761,23 @@ pub(crate) fn push_profile_in_for_test(store: &MessageStore, peer_id: &str) -> O
     push_profile_in(store, peer_id).ok().flatten().and_then(|p| p.avatar_bytes)
 }
 
-/// The push profile of `peer_id` from an open store, its avatar through the image check.
+/// The push profile of `peer_id` from an open store, its avatar through the image check
+/// and our own re-encode.
 fn push_profile_in(store: &MessageStore, peer_id: &str) -> Result<Option<PushProfile>, String> {
     let master = node::resolver::resolve(peer_id);
     let profile = store.load_profile_light(&master)?;
     match profile {
         Some(p) => {
-            // The notification icon is decoded by the OS's own native codec, no tap.
+            // The OS's own native codec draws the icon with no tap: it gets only our
+            // re-encode of a checked avatar, never the peer's bytes.
             let avatar = store
                 .load_avatar(&master)
                 .unwrap_or(None)
                 .filter(|b| {
                     let wait = node::image_gate::FFI_SLOT_WAIT;
                     node::image_gate::judge_in(store, b, wait) == node::image_gate::Verdict::Pass
-                });
+                })
+                .and_then(|b| node::image_convert::notification_icon(&b));
             let named = !p.display_name.is_empty();
             hollow_log!("[HOLLOW-PUSH] get_push_profile: loaded (name={named}, avatar={})", avatar.is_some());
             Ok(Some(PushProfile {

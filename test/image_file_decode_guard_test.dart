@@ -125,13 +125,43 @@ const _allowed = <String, (int, String)>{
 };
 
 /// Raw-decode sites in [source], comment lines left out; a call may span lines.
-int rawDecodeSites(String source) => _rawDecode
+int rawDecodeSites(String source) => _sites(_rawDecode, source);
+
+int _sites(RegExp pattern, String source) => pattern
     .allMatches(source
         .replaceAll('\r\n', '\n')
         .split('\n')
         .where((l) => !l.trimLeft().startsWith('//'))
         .join('\n'))
     .length;
+
+/// Every way lib/ hands image bytes or an image file to an OS notification, whose
+/// native decoder (BitmapFactory, ImageIO, the Windows shell) parses them.
+final _osNotificationImage = RegExp(
+  r'\b(?:ByteArrayAndroidBitmap|ByteArrayAndroidIcon|FilePathAndroidBitmap'
+  r'|BitmapFilePathAndroidIcon|ContentUriAndroidIcon|BigPictureStyleInformation'
+  r'|DarwinNotificationAttachment|WindowsImage|ByteDataLinuxIcon'
+  r'|FilePathLinuxIcon)\s*(?:\(|\.\s*new\b)',
+);
+
+/// Each site with where its bytes come from. A peer's avatar reaches one only as
+/// `get_push_profile` returns it: a PNG Rust drew from the checked avatar's first
+/// frame (`notification_icon`), never the bytes the peer sent.
+const _osNotificationImageSites = <String, (int, String)>{
+  'lib/src/core/services/push_notification_service.dart':
+      (1, 'ours: the large icon is get_push_profile\'s PNG'),
+  'lib/src/core/services/desktop_notification_service.dart':
+      (2, 'ours: the macOS attachment and Windows logo are get_push_profile\'s PNG'),
+};
+
+/// The files that build OS notifications: none reads a raw image getter, so
+/// their avatar can only be the push profile's re-encode.
+const _osNotificationFiles = [
+  'lib/src/core/services/push_notification_service.dart',
+  'lib/src/core/services/desktop_notification_service.dart',
+  'lib/src/core/services/linux_notifier.dart',
+  'lib/src/core/providers/system_notification_provider.dart',
+];
 
 void main() {
   test('no widget decodes a file straight from disk', () {
@@ -210,6 +240,56 @@ void main() {
     }
     expect(rawDecodeSites('if (ref.read(guestServerAvatarProvider.notifier).state == m) {}'),
         0);
+  });
+
+  test('a push banner icon is never the peer\'s encoded bytes', () {
+    final found = <String, int>{};
+    for (final f in Directory('lib').listSync(recursive: true).whereType<File>()) {
+      final path = f.path.replaceAll(r'\', '/');
+      if (!path.endsWith('.dart') || path.startsWith('lib/src/rust/')) continue;
+      final n = _sites(_osNotificationImage, f.readAsStringSync());
+      if (n > 0) found[path] = n;
+    }
+    final drift = <String>[
+      for (final e in found.entries)
+        if (_osNotificationImageSites[e.key]?.$1 != e.value)
+          '${e.key}: ${e.value} site(s), listed '
+              '${_osNotificationImageSites[e.key]?.$1 ?? 0}',
+      for (final path in _osNotificationImageSites.keys)
+        if (!found.containsKey(path)) '$path: listed but has no site now',
+    ];
+    expect(drift, isEmpty,
+        reason: 'An OS decoder never parses a peer\'s bytes: hand it only '
+            'getPushProfile\'s avatar (Rust notification_icon), then list the '
+            'site here.');
+
+    final raw = RegExp(r'\b(?:getAvatar|getBanner|getServerAvatar|'
+        r'getEmoteBytes|readAtRestImage)\s*\(|\bavatarProvider\b');
+    for (final path in _osNotificationFiles) {
+      expect(_sites(raw, File(path).readAsStringSync()), 0,
+          reason: '$path reads a raw image getter; its avatar must come '
+              'from getPushProfile');
+    }
+    expect(
+        File('lib/src/core/providers/system_notification_provider.dart')
+            .readAsStringSync(),
+        contains('getPushProfile('));
+  });
+
+  test('the notification scan sees each form and skips comments', () {
+    for (final site in [
+      'largeIcon = ByteArrayAndroidBitmap(bytes)',
+      'ByteArrayAndroidIcon.new(bytes)',
+      'FilePathAndroidBitmap(path)',
+      'BigPictureStyleInformation(FilePathAndroidBitmap.new(p))',
+      '[DarwinNotificationAttachment(path, identifier: "a")]',
+      'WindowsImage(\n  uri, altText: "a")',
+    ]) {
+      expect(_sites(_osNotificationImage, site), greaterThanOrEqualTo(1),
+          reason: site);
+    }
+    expect(_sites(_osNotificationImage, '// ByteArrayAndroidBitmap(b)'), 0);
+    expect(_sites(_osNotificationImage, 'final images = <WindowsImage>[];'), 0);
   });
 
   test('every raw-bytes decode site is listed with where its bytes come from',

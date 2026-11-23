@@ -135,6 +135,10 @@ stay in CLAUDE.md. Wiki `rust_file_handler`, `emotes`, `hollowpack`.
   fails CI until it is listed; peer bytes get there only through a gated getter
   (`AttachmentImage`, `emoteBytesProvider`, `get_avatar`/`get_banner`, the server and showcase
   getters). Swept 2026-10-31 (track b14-images): no peer site bypassed the gate.
+- No OS decoder parses a peer's image (#154): an OS notification gets only bytes or pixels we
+  made. Message banners and desktop toasts take `get_push_profile`'s avatar (Rust
+  `notification_icon`: our PNG of the checked still), the Android call face raw RGBA
+  (`renderOsCallAvatar`). A new site is listed in `image_file_decode_guard_test.dart`.
 - Sender-side link-preview fetches go through the `PublicResolver` client: no loopback,
   private, link-local or metadata address on any hop, no proxy. HOL-SEC-148.
 - Vault shard streams ride `vault_ops::shard_stream_id(cid, si, from, to)`, never the

@@ -2763,6 +2763,9 @@ class PushChannelMeta {
 /// Profile data for push notifications (Tier 1: cached profile, no node needed).
 class PushProfile {
   final String displayName;
+
+  /// A PNG we encoded from the checked avatar's first frame, at most 192 px square:
+  /// the only avatar bytes an OS notification may carry.
   final Uint8List? avatarBytes;
 
   const PushProfile({required this.displayName, this.avatarBytes});

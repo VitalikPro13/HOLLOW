@@ -201,8 +201,9 @@ class SystemNotificationNotifier
     }
   }
 
-  /// Fetch (and cache) the avatar bytes for a peer/server id via the push
-  /// profile FFI — same source the mobile push banner uses.
+  /// The avatar an OS notification may carry for a peer/server id, cached: the
+  /// push profile's PNG that Rust drew, the same source as the push banner. An
+  /// OS decoder never sees a peer's own bytes, so no raw image getter here.
   Future<Uint8List?> _avatarFor(String id) async {
     if (_avatarCache.containsKey(id)) return _avatarCache[id];
     Uint8List? bytes;
