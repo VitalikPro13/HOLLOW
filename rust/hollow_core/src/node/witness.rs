@@ -768,6 +768,16 @@ mod tests {
         assert_eq!(judge(&w[..2], &f, &|m| m == "h1").pick.as_deref(), Some("x"), "a listed identity that never answered blocks nothing");
     }
 
+    /// Only a contact or a friend's entry lists a member for item 1, never a content or a
+    /// join answer (puppets fill those).
+    #[test]
+    fn only_contacts_and_friend_entries_list_a_member() {
+        let mut desk = WitnessDesk::default();
+        desk.note_members("s", vec![("c".into(), MemberSource::Contact), ("f".into(), MemberSource::FriendEntry), ("j".into(), MemberSource::JoinAnswer), ("n".into(), MemberSource::NamedInContent)]);
+        assert!(desk.listed("s", "c") && desk.listed("s", "f"));
+        assert!(!desk.listed("s", "j") && !desk.listed("s", "n") && !desk.listed("t", "c"));
+    }
+
     /// Steps 3 to 6: honest members on one line pick the newest point two of them support.
     #[test]
     fn honest_witnesses_on_one_line_pick_the_newest_supported_point() {

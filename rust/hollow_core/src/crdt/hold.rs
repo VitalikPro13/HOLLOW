@@ -1585,6 +1585,16 @@ mod tests {
         m.authority = Arc::new(missing);
         let _ = m.rebuild_now();
         assert!(!m.in_recovery(), "a Missing roster is no trigger");
+        // A member whose roster is not held yet (Missing): its op parks, no hold forms.
+        let mut parked = baseless_replica(&log, MEMBER, MEMBER_PHONE, true);
+        let mut no_mod = (*view_after(false)).clone();
+        let (before, _) = owner_rosters();
+        no_mod.insert(keys(OWNER).1, authority::judge(&keys(OWNER).1, &KeyRule::FirstHeld, &[&before]));
+        no_mod.insert(keys(MOD).1, authority::ViewEntry::default());
+        parked.authority = Arc::new(no_mod);
+        let _ = parked.rebuild_now();
+        assert!(!parked.is_banned(&keys(STRANGER).1), "precondition: the moderator's ban no longer folds");
+        assert!(!parked.in_recovery(), "an op whose author's roster is Missing opens no hold");
         // A view that still counts every device: nothing lost.
         let mut same = baseless_replica(&log, MEMBER, MEMBER_PHONE, true);
         let _ = same.rebuild_now();
@@ -1722,10 +1732,34 @@ mod tests {
         laptop.authority = view_after(false);
         let _ = laptop.rebuild_now();
         assert!(laptop.settle_owed(&keys(OWNER).1), "the phone proved ops of ours nothing settled");
+        laptop.author_checked(P::ServerRenamed { new_name: "after".into() }).expect("the laptop still writes");
         assert!(!laptop.checkpoint_due(&keys(OWNER).1, now + 10 * super::super::fold::CHECKPOINT_MIN_GAP_MS), "no checkpoint of the stepped-back fold");
         // The writer rule never takes a fold listing only us as witnessed.
         let mut alone = laptop.clone();
         alone.members.retain(|m, _| *m == keys(OWNER).1);
         assert!(!alone.checkpoint_witnessed(&keys(OWNER).1, &Default::default()), "no other identity, no witness");
+    }
+
+    #[test]
+    fn a_restart_judges_the_base_trigger_against_the_saved_base() {
+        let w = world();
+        let m = member_of(&w, MEMBER, MEMBER_PHONE, true);
+        let rows: Vec<(CrdtOp, Option<u64>)> = m
+            .op_log
+            .iter()
+            .map(|o| (o.clone(), None))
+            .chain(m.stored.iter().map(|(o, k)| (o.clone(), if let RowKind::Parked(u) = k { Some(*u) } else { None })))
+            .collect();
+        let mut back: ServerState = serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
+        let (kp, id, pk) = keys(MEMBER);
+        back.set_hlc(super::super::hlc::Hlc::for_device(id, &keys(MEMBER_PHONE).1));
+        back.set_signer(kp, pk);
+        back.set_device_signer(keys(MEMBER_PHONE).0);
+        let (_, after) = owner_rosters();
+        back.authority = view(&after);
+        let restored = back.restore_op_log(rows);
+        let r = back.recovery.clone().expect("HOL-SEC-232: the restart opens the 8.8 hold");
+        assert_eq!(r.base.as_deref(), Some(hex::encode(w.cp1.content_hash()).as_str()), "the step back records the saved base");
+        assert!(!r.keeps_fold() && restored.recovery.is_some(), "a base step-back, saved");
     }
 }

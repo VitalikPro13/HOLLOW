@@ -73664,6 +73664,14 @@ async fn w3c1_a_recovery_on_a_server_without_a_checkpoint_keeps_its_members() {
     assert!(away_ok, "HOL-SEC-230: members lost seats while the owner's kept device was away: {away:?} leaves (K at J, J at K)={leaves:?}; after the settling ok={settled_ok} reseated={reseated} {after:?}");
     assert!(settled_ok, "the settling did not bring both members back: {after:?}");
     assert!(reseated, "the members' MLS leaves did not come back after the settling");
+    assert!(
+        wait_until(20, async || {
+            let ended = async |n: &TestNode| n.live_server_state(&server_id).await.is_some_and(|s| !s.in_recovery());
+            ended(&j).await && ended(&k).await
+        })
+        .await,
+        "the settling that drops the lost device ends the members' hold",
+    );
 }
 
 // rev229-retire
