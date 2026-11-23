@@ -165,7 +165,7 @@ Unread clearing: `_markSeen()` called after history loads in `initState` `.then(
 Scaffold
 ├── SafeArea (inside EmoteScope)
 │   └── Column
-│       ├── _MobileChatHeader (back ("Back to channels" on a server's channel), name + `VerifiedMark` for a verified contact, status; DM: calls, search, mute bell; channel: status, pins, members (opens the side panel), search). A 56 px FLOOR, not a height: at large text sizes it grows (`dm_header_verified_test`)
+│       ├── _MobileChatHeader (back ("Back to channels" on a server's channel), name + `VerifiedMark` for a verified contact, status; DM: calls, search (the mute bell lives in the profile sheet the name opens, after the nickname button, as on the desktop DM panel; Vitalik, Nov 23); channel: status, pins, members (opens the side panel), search). A 56 px FLOOR, not a height: at large text sizes it grows (`dm_header_verified_test`)
 │       ├── MobileMinimisedCall (the call or room you are in, docked)
 │       ├── _buildSearchBar (DM, channel and meeting, when _searchOpen)
 │       ├── _buildSyncIndicator (channel only)
@@ -288,6 +288,8 @@ A sheet, not a dialog: "Add friend", "User ID or nickname" (`kAddFriendHint`, mo
 
 ### Long-Press Actions (bottom sheet with `SafeArea`)
 The desktop person menu's labels, as touch `HollowListRow`s under `HollowSheetTitle(name)`: Message, Start a call (online, no call up; `startMobileDmCall`), Profile (`showMobileProfileSheet`), Add to favourites / Remove favourite, Move up / Move down (favourites only, the keyboard-free reorder), Set nickname / Edit nickname (`showLocalNicknameDialog`, THE nickname dialog), a divider, Remove friend (`confirmRemoveFriend`, THE remove confirm, run inside the dialog).
+
+**Profile sheet DM bell** (`ProfileIdentityColumn` at touch density, `_DmNotifyButton`): right after "Set a nickname", for a friend or the DM on screen, never for someone blocked, a stranger or yourself; desktop's compact card has none (its bell is on the DM panel). Keyed by the MASTER (`isDmEnabled`/`setDmEnabled`), "Mute notifications" / "Unmute notifications" (`selected` while muted), a toast after the save lands ("Notifications muted"/"unmuted", or "Could not change notifications"). Saved messages has no bell, like desktop. Tests: `test/widget/block_reach_test.dart` "the phone DM bell".
 
 ---
 

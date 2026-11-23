@@ -101,7 +101,6 @@ import 'package:hollow/src/ui/mobile/mobile_minimised_call.dart';
 import 'package:hollow/src/ui/mobile/mobile_message_actions.dart';
 import 'package:hollow/src/ui/mobile/mobile_profile_sheet.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
-import 'package:hollow/src/core/providers/notification_provider.dart';
 import 'package:hollow/src/core/providers/pinned_provider.dart';
 import 'package:hollow/src/core/providers/system_notification_provider.dart';
 import 'package:hollow/src/core/services/push_notification_service.dart';
@@ -3394,7 +3393,7 @@ class _MobileChatHeader extends ConsumerWidget {
       ),
     );
   }
-  /// The DM's calls, search and mute, or the channel's status, pins, members
+  /// The DM's calls and search, or the channel's status, pins, members
   /// and search.
   List<Widget> _trailingActions(
       BuildContext context, WidgetRef ref, HollowTheme hollow,
@@ -3417,7 +3416,7 @@ class _MobileChatHeader extends ConsumerWidget {
         // Someone we blocked is not rung, searched or heard from.
         if (!isSaved && !blocked) _DmCallButtons(peerId: peerId!),
         if (onSearchToggle != null && !blocked) _searchButton(),
-        if (!blocked) _DmMuteButton(peerId: peerId!),
+        // Mute lives in the profile sheet, beside the nickname, as on desktop.
       ];
     }
     final pinnedIds = serverId != null && channelId != null
@@ -3539,33 +3538,6 @@ class _MobileChannelStatus extends ConsumerWidget {
     return Padding(
       padding: const EdgeInsets.only(right: HollowSpacing.xs),
       child: offline,
-    );
-  }
-}
-
-class _DmMuteButton extends ConsumerWidget {
-  final String peerId;
-  const _DmMuteButton({required this.peerId});
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final enabled = ref.watch(notificationSettingsProvider
-        .select((s) => s.isDmEnabled(peerId)));
-    return HollowIconButton(
-      icon: enabled ? LucideIcons.bell : LucideIcons.bellOff,
-      label: enabled ? 'Mute notifications' : 'Unmute notifications',
-      size: 44,
-      selected: !enabled,
-      onPressed: () {
-        ref
-            .read(notificationSettingsProvider.notifier)
-            .setDmEnabled(peerId, !enabled);
-        HollowToast.show(
-          context,
-          enabled ? 'Notifications muted' : 'Notifications unmuted',
-          type: HollowToastType.info,
-        );
-      },
     );
   }
 }

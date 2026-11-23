@@ -10,6 +10,7 @@ import 'package:hollow/src/core/providers/dm_navigation.dart';
 import 'package:hollow/src/core/providers/friends_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/local_nickname_provider.dart';
+import 'package:hollow/src/core/providers/notification_provider.dart';
 import 'package:hollow/src/core/providers/profile_anim_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/selected_peer_provider.dart';
@@ -547,6 +548,13 @@ class _ProfileIdentityColumnState extends ConsumerState<ProfileIdentityColumn> {
           size: iconSize,
           onPressed: _openNicknameDialog,
         ),
+        // Beside the nickname, as on the desktop DM panel: the phone's DM
+        // header leaves it to this sheet. Nothing of theirs notifies while
+        // blocked, and only a DM can be muted.
+        if (_touch && !isBlocked && (isFriend || inTheirDm)) ...[
+          const SizedBox(width: HollowSpacing.xs),
+          _DmNotifyButton(master: master, size: iconSize),
+        ],
         if (!_touch && _canManageMember()) ...[
           const SizedBox(width: HollowSpacing.xs),
           HollowIconButton(
@@ -965,6 +973,47 @@ class _Banner extends ConsumerWidget {
         fit: BoxFit.cover,
         errorWidget: flat,
       ),
+    );
+  }
+}
+
+/// Mutes or unmutes notifications from a DM, keyed by the MASTER.
+class _DmNotifyButton extends ConsumerWidget {
+  final String master;
+  final double size;
+
+  const _DmNotifyButton({required this.master, required this.size});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final notifying = ref.watch(
+        notificationSettingsProvider.select((s) => s.isDmEnabled(master)));
+    return HollowIconButton(
+      icon: notifying ? LucideIcons.bell : LucideIcons.bellOff,
+      label: notifying ? 'Mute notifications' : 'Unmute notifications',
+      size: size,
+      selected: !notifying,
+      onPressed: () async {
+        try {
+          await ref
+              .read(notificationSettingsProvider.notifier)
+              .setDmEnabled(master, !notifying);
+        } catch (_) {
+          if (context.mounted) {
+            HollowToast.show(context, 'Could not change notifications',
+                type: HollowToastType.error);
+          }
+          return;
+        }
+        // A touch control has no tooltip: say what changed.
+        if (context.mounted) {
+          HollowToast.show(
+            context,
+            notifying ? 'Notifications muted' : 'Notifications unmuted',
+            type: HollowToastType.info,
+          );
+        }
+      },
     );
   }
 }

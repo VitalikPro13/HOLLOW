@@ -16,6 +16,7 @@ import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/friends_provider.dart';
+import 'package:hollow/src/core/providers/notification_provider.dart';
 import 'package:hollow/src/core/providers/pinned_provider.dart';
 import 'package:hollow/src/core/providers/system_notification_provider.dart';
 import 'package:hollow/src/core/providers/unread_provider.dart';
@@ -31,6 +32,7 @@ import 'package:hollow/src/ui/components/peer_id_text.dart';
 import 'package:hollow/src/ui/components/profile_identity_column.dart';
 import 'package:hollow/src/ui/mobile/mobile_chat_route.dart';
 import 'package:hollow/src/ui/mobile/mobile_page_route.dart';
+import 'package:hollow/src/ui/mobile/mobile_profile_sheet.dart';
 
 import '../helpers/test_app.dart';
 import '../helpers/test_data.dart';
@@ -64,6 +66,16 @@ class _Api implements RustLibApi {
 
   @override
   Future<List<String>> crateApiStorageLoadBlockedPeers() async => stored;
+
+  final settings = <String, String>{};
+  bool failSettings = false;
+
+  @override
+  Future<void> crateApiStorageSaveSetting(
+      {required String key, required String value}) async {
+    if (failSettings) throw StateError('store closed');
+    settings[key] = value;
+  }
 
   @override
   dynamic noSuchMethod(Invocation invocation) => Completer<Never>().future;
@@ -183,14 +195,12 @@ void main() {
       expect(_hasButton('Voice call'), isTrue);
       expect(_hasButton('Video call'), isTrue);
       expect(_hasButton('Search messages'), isTrue);
-      expect(_hasButton('Mute notifications'), isTrue);
 
       unawaited(c.read(blockedUsersProvider.notifier).block(kFriendPeerId1));
       await tester.pump();
       expect(_hasButton('Voice call'), isFalse);
       expect(_hasButton('Video call'), isFalse);
       expect(_hasButton('Search messages'), isFalse);
-      expect(_hasButton('Mute notifications'), isFalse);
       expect(_hasButton('Back'), isTrue);
       await tester.pump(const Duration(seconds: 2));
     });
@@ -307,11 +317,121 @@ void main() {
             width: width, relay: RelayConnectionStatus.disconnected);
         expect(tester.takeException(), isNull);
         expect(_hasButton('Voice call'), isTrue);
-        expect(_hasButton('Mute notifications'), isTrue);
         expect(find.text('Offline'), width < 360 ? findsNothing : findsWidgets);
         await tester.pump(const Duration(seconds: 2));
       });
     }
+  });
+
+  // Vitalik, Nov 23: the phone keeps the bell where desktop does, in the
+  // profile, beside the nickname; the DM header no longer carries it.
+  group('the phone DM bell', () {
+    Future<void> openProfile(WidgetTester tester) async {
+      await tester.tap(find.bySemanticsLabel(RegExp(r'^Profile of ')));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 500));
+    }
+
+    Finder button(String label) => find
+        .byWidgetPredicate((w) => w is HollowIconButton && w.label == label);
+
+    testWidgets('the header has no bell; the profile sheet has it beside '
+        'the nickname', (tester) async {
+      await _pumpPhoneDm(tester, kFriendPeerId1);
+      expect(_hasButton('Mute notifications'), isFalse);
+      expect(_hasButton('Unmute notifications'), isFalse);
+      await openProfile(tester);
+      expect(button('Mute notifications'), findsOneWidget);
+      final nick = tester.getRect(button('Set a nickname'));
+      final bell = tester.getRect(button('Mute notifications'));
+      expect(bell.left, greaterThan(nick.right),
+          reason: 'right after the nickname, as on desktop');
+      expect(bell.center.dy, closeTo(nick.center.dy, 1));
+      await tester.pump(const Duration(seconds: 2));
+    });
+
+    testWidgets('the bell mutes and unmutes this DM, and says so',
+        (tester) async {
+      api.settings.clear();
+      final c = await _pumpPhoneDm(tester, kFriendPeerId1);
+      await openProfile(tester);
+      await tester.tap(button('Mute notifications'));
+      await tester.pump();
+      expect(c.read(notificationSettingsProvider).isDmEnabled(kFriendPeerId1),
+          isFalse);
+      expect(api.settings['notif:dm:$kFriendPeerId1'], 'false');
+      expect(find.text('Notifications muted'), findsOneWidget);
+      expect(button('Unmute notifications'), findsOneWidget);
+      await tester.pump(const Duration(seconds: 4));
+      await tester.tap(button('Unmute notifications'));
+      await tester.pump();
+      expect(c.read(notificationSettingsProvider).isDmEnabled(kFriendPeerId1),
+          isTrue);
+      expect(find.text('Notifications unmuted'), findsOneWidget);
+      await tester.pump(const Duration(seconds: 4));
+    });
+
+    testWidgets('a failed save says so and changes nothing', (tester) async {
+      api.failSettings = true;
+      addTearDown(() => api.failSettings = false);
+      final c = await _pumpPhoneDm(tester, kFriendPeerId1);
+      await openProfile(tester);
+      await tester.tap(button('Mute notifications'));
+      await tester.pump();
+      expect(c.read(notificationSettingsProvider).isDmEnabled(kFriendPeerId1),
+          isTrue);
+      expect(find.text('Could not change notifications'), findsOneWidget);
+      expect(find.text('Notifications muted'), findsNothing);
+      await tester.pump(const Duration(seconds: 4));
+    });
+
+    testWidgets('no bell for someone blocked', (tester) async {
+      final c = await _pumpPhoneDm(tester, kFriendPeerId1);
+      unawaited(c.read(blockedUsersProvider.notifier).block(kFriendPeerId1));
+      await tester.pump();
+      await openProfile(tester);
+      expect(_hasButton('Mute notifications'), isFalse);
+      expect(_hasButton('Unmute notifications'), isFalse);
+      await tester.pump(const Duration(seconds: 2));
+    });
+
+    testWidgets('no bell on a stranger\'s sheet, and none on desktop',
+        (tester) async {
+      tester.view.physicalSize = const Size(375, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(ProviderScope(
+        overrides: hollowTestOverrides(),
+        child: MaterialApp(
+          theme: HollowThemeData.dark(),
+          home: const Scaffold(
+              body: SingleChildScrollView(
+                  child: MobileProfileSheet(peerId: _nameless))),
+        ),
+      ));
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(_hasButton('Set a nickname'), isTrue);
+      expect(_hasButton('Mute notifications'), isFalse);
+
+      await tester.pumpWidget(ProviderScope(
+        overrides: hollowTestOverrides(),
+        child: MaterialApp(
+          theme: HollowThemeData.dark(),
+          home: Scaffold(
+            body: ProfileIdentityColumn(
+              width: kProfileCompactWidth,
+              peerId: kFriendPeerId1,
+              density: ProfileCardDensity.compact,
+              dismissHost: () {},
+            ),
+          ),
+        ),
+      ));
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(_hasButton('Mute notifications'), isFalse,
+          reason: 'desktop keeps its bell on the DM panel');
+      await tester.pump(const Duration(seconds: 2));
+    });
   });
 
   group('calls', () {
