@@ -177,6 +177,8 @@ ticks AFTER the KeyPackage is queued (Welcome only goes out post-queue).
 
 The rescuers: the sender's `pending_messages` queue (offline-but-has-session devices get queued, and attach handlers rewrite queued envelopes in place); the MockRelay's per-device offline buffer (`relay.buffered_count(dev)`, replayed on reconnect); and topic catch-up replay from `topic_buffers`.
 
+The MockRelay keeps directs as the relay does (`handle_binary_direct_msg`): into a room someone holds, only from a sender in it (a target not in it is buffered for its next join of THAT room); into a room nobody holds, only for a target with no socket at all. A send pinned to a room the sender left, or to an empty room for a connected target, is lost in the harness as on the relay (`mock_relay_drops_the_directs_the_relay_drops`). Frames a test holds (`hold_direct`) are judged as they arrive, so `release_held` delivers them though the sender has left since (the relay took them in). A node just restarted is in no room until its `Connected` join flow runs: wait for `sees_peer` before a send the test needs live, or the relay drops it and only catch-up sync brings it.
+
 Use a peer for whom backfill is the ONLY vehicle:
 - `backfilled_member_gets_link_preview_through_channel_sync` — a member who JOINS AFTER the content exists. Nothing was ever addressed, queued or broadcast to them.
 - `freshly_linked_device_backfills_dm_link_previews_from_its_sibling` — a device that did not exist at send time (`spawn_node_full` with a pre-seeded source-only device list). Seed it into `resolver::seed_self` only AFTER the activity, or the sender queues for it.

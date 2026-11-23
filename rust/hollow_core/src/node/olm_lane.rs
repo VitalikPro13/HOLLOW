@@ -125,7 +125,12 @@ pub(crate) async fn released(cmd: WsCommand, node: &super::frame_auth::CarryTx, 
         crate::crypto::Saved::Stored => Some(*frame),
         outcome => {
             hollow_log!("[HOLLOW-SECURITY] Kept back an Olm frame to {device}: its session save did not land ({outcome:?})");
-            let park = WsCommand::Carry { device, room: None, json: plaintext, no_session: NoSession::Park, ticket: None };
+            // Its room goes with it, so the node judges a refusal of that room as it would have.
+            let room = match *frame {
+                WsCommand::SendDirect { room_code, .. } | WsCommand::SendDirectImage { room_code, .. } => Some(room_code),
+                _ => None,
+            };
+            let park = WsCommand::Carry { device, room, json: plaintext, no_session: NoSession::Park, ticket: None };
             let (done_tx, done_rx) = tokio::sync::oneshot::channel();
             if node.send((park, done_tx)).is_ok() {
                 let _ = tokio::time::timeout(SAVE_WAIT, done_rx).await;
@@ -201,7 +206,7 @@ pub(crate) fn carry_to_every_own_device(
         if device != local_device && super::resolver::is_own_unrevoked_device(device, local_master) {
             // The route is fixed now, as the away ones' is: a device gone by delivery
             // would else be parked in our memory, lost if we quit before it returns.
-            let room = super::crypto_handler::send_room_for_peer(ws_room_peers, device).unwrap_or_else(|| own_inbox.clone());
+            let room = own_device_room(ws_room_peers, local_master, device);
             carry_json(ws_cmd_tx, device, Some(&room), json.clone(), NoSession::Queue);
             sent += 1;
         }
@@ -213,6 +218,20 @@ pub(crate) fn carry_to_every_own_device(
         }
     }
     sent
+}
+
+/// The room a carry to our own `device` is pinned to: our own room when it shows the
+/// device (every device of ours joins it, a waiting one too), else our inbox. The relay
+/// holds a direct for a device gone from a room only while the sender is in it, and
+/// replays it when the device joins that room again: a server or DM room we share
+/// with the device may be one either of us is leaving.
+fn own_device_room(ws_room_peers: &WsRoomPeers, local_master: &str, device: &str) -> String {
+    let own = super::roster_book::own_room(local_master);
+    if ws_room_peers.get(&own).is_some_and(|peers| peers.contains(device)) {
+        own
+    } else {
+        format!("inbox:{local_master}")
+    }
 }
 
 /// Carry an envelope to every online device of one identity (a master or a device
@@ -579,8 +598,11 @@ mod tests {
     }
 
     /// A device of ours seen present at the fan-out that leaves before the node delivers
-    /// the carry is still sent it, for the relay to hold: parked, it would wait in our
-    /// memory for a return we may quit before (a phone going away misses the age gate's OFF).
+    /// the carry is still sent it, through a room it rejoins on every connect (our own
+    /// room when it showed there, else our inbox), never a room we share by chance:
+    /// parked, it would wait in our memory for a return we may quit before (a phone
+    /// going away misses the age gate's OFF), and the relay holds nothing for a server
+    /// or DM room the sender has left.
     #[tokio::test]
     #[allow(clippy::await_holding_lock)] // the resolver is process-global
     async fn an_own_device_that_leaves_before_delivery_still_gets_the_carry() {
@@ -591,20 +613,37 @@ mod tests {
         let store = CryptoStore::open(path, "6d".repeat(32)).unwrap();
         let (master, us, sib) = ("m-master", "alice", "bob");
         crate::node::resolver::seed_self(master, &[us.into(), sib.into()]);
+        let (own, inbox) = (crate::node::roster_book::own_room(master), format!("inbox:{master}"));
+        let cases = [
+            (vec![own.as_str(), "a-server", inbox.as_str()], own.as_str()),
+            (vec!["a-server", inbox.as_str()], inbox.as_str()),
+            (vec!["a-server"], inbox.as_str()),
+            (vec!["a-dm-room"], inbox.as_str()),
+        ];
         with_carry_book(async {
             let (mut alice, _bob) = established();
             let keypair = NativeKeypair::from_secret_bytes(&[9; 32]);
-            let present: WsRoomPeers = [("inbox:m-master".to_string(), [us, sib].iter().map(|s| s.to_string()).collect())].into();
-            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-            carry_to_every_own_device(&tx, &present, master, us, &HavenMessage::StatusUpdate { status: "x".into() });
-            let Ok(WsCommand::Carry { device, room, json, no_session, ticket }) = rx.try_recv() else {
-                panic!("precondition: the present sibling is carried to");
-            };
-            let (gone, mut pending, mut asked) = (WsRoomPeers::new(), HashMap::new(), HashMap::new());
-            let mut lane = OlmLane::new(&mut alice, &store, &gone, &mut pending, &mut asked, &keypair, us);
-            let frames = lane.deliver(&device, room.as_deref(), &json, no_session, ticket);
-            assert_eq!(frames.len(), 1, "a sibling that left before delivery was sent nothing");
-            assert!(pending.is_empty(), "a sibling that left before delivery waits in our memory");
+            for (seen_in, expected) in cases {
+                let present: WsRoomPeers =
+                    seen_in.iter().map(|room| (room.to_string(), [us, sib].iter().map(|s| s.to_string()).collect())).collect();
+                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+                carry_to_every_own_device(&tx, &present, master, us, &HavenMessage::StatusUpdate { status: "x".into() });
+                let Ok(WsCommand::Carry { device, room, json, no_session, ticket }) = rx.try_recv() else {
+                    panic!("precondition: the present sibling is carried to");
+                };
+                assert!(rx.try_recv().is_err(), "one copy per device, seen in {seen_in:?}");
+                let (gone, mut pending, mut asked) = (WsRoomPeers::new(), HashMap::new(), HashMap::new());
+                let mut lane = OlmLane::new(&mut alice, &store, &gone, &mut pending, &mut asked, &keypair, us);
+                let frames = lane.deliver(&device, room.as_deref(), &json, no_session, ticket);
+                let [WsCommand::AfterSave { frame, .. }] = frames.as_slice() else {
+                    panic!("a sibling seen in {seen_in:?} that left before delivery was sent {frames:?}");
+                };
+                let WsCommand::SendDirect { room_code, target_peer, .. } = frame.as_ref() else {
+                    panic!("the carry left as {frame:?}");
+                };
+                assert_eq!((room_code.as_str(), target_peer.as_str()), (expected, sib), "seen in {seen_in:?}");
+                assert!(pending.is_empty(), "a sibling that left before delivery waits in our memory");
+            }
         })
         .await;
         crate::node::resolver::clear_for_test();
@@ -687,7 +726,7 @@ mod tests {
         let kept = tokio::spawn(async move { released(after_save(crate::crypto::SessionSaved::failed(), "the plaintext"), &node, &mut MlsReleases::default()).await });
         let (park, done) = asks.recv().await.expect("the node is asked to keep it");
         assert!(
-            matches!(&park, WsCommand::Carry { device, json, no_session: NoSession::Park, ticket: None, .. } if device == "bob" && json == "the plaintext"),
+            matches!(&park, WsCommand::Carry { device, room: Some(room), json, no_session: NoSession::Park, ticket: None } if device == "bob" && room == "r" && json == "the plaintext"),
             "{park:?}"
         );
         done.send(Vec::new()).unwrap();
@@ -711,6 +750,31 @@ mod tests {
             assert!(lane.deliver("bob", None, json, NoSession::Park, None).is_empty(), "a held-back frame is never re-sent at once");
         }
         assert_eq!(pending.get("bob"), Some(&vec![durable]), "kept once, the live signal dropped");
+    }
+
+    /// A frame held back on its way to a room the relay has since refused waits for no
+    /// other route: its room comes back with it and is judged as any carry's.
+    #[tokio::test]
+    async fn a_held_back_frame_for_a_refused_room_is_not_kept() {
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        let path = tmp.path().join("lane.db").to_string_lossy().into_owned();
+        let store = CryptoStore::open(path, "6c".repeat(32)).unwrap();
+        super::super::relay_denial::with_denials(async {
+            let (mut alice, _bob) = established();
+            let keypair = NativeKeypair::from_secret_bytes(&[9; 32]);
+            let (rooms, mut pending, mut asked) = (WsRoomPeers::new(), HashMap::new(), HashMap::new());
+            let durable = serde_json::to_string(&MessageEnvelope::SessionAck).unwrap();
+            super::super::relay_denial::current().deny(REFUSED, Instant::now());
+            {
+                let mut lane = OlmLane::new(&mut alice, &store, &rooms, &mut pending, &mut asked, &keypair, "alice");
+                assert!(lane.deliver("bob", Some(REFUSED), &durable, NoSession::Park, None).is_empty());
+            }
+            assert!(pending.is_empty(), "a frame held back from a refused room was kept to leave by another");
+            let mut lane = OlmLane::new(&mut alice, &store, &rooms, &mut pending, &mut asked, &keypair, "alice");
+            assert!(lane.deliver("bob", Some("dm:1"), &durable, NoSession::Park, None).is_empty());
+            assert_eq!(pending.get("bob"), Some(&vec![durable]), "control: held back from another room, it is kept");
+        })
+        .await;
     }
 
     /// Node code reaches Olm only through [`encrypt_in_turn`], so no direct frame takes

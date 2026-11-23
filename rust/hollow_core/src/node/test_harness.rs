@@ -1534,7 +1534,7 @@ impl MockRelay {
                 .label() == kind
         });
         for m in go {
-            inner.deliver_direct(&m.room, &m.from, target, m.data, m.direct);
+            inner.deliver_admitted_direct(&m.room, &m.from, target, m.data, m.direct);
         }
         inner.held_directs.insert(key, stay);
     }
@@ -1555,7 +1555,7 @@ impl MockRelay {
         let mut inner = self.inner.lock().unwrap();
         let held = inner.held_directs.remove(&(from.to_string(), target.to_string())).unwrap_or_default();
         for m in held {
-            inner.deliver_direct(&m.room, &m.from, target, m.data, m.direct);
+            inner.deliver_admitted_direct(&m.room, &m.from, target, m.data, m.direct);
         }
     }
 
@@ -2632,6 +2632,22 @@ impl RelayInner {
                 return 0;
             }
         }
+        // As the relay (`handle_binary_direct_msg`), judged as the frame arrives: a room
+        // nobody holds keeps a direct only for a target with no socket at all, a held room
+        // only from a sender in it.
+        if self.room_slots(room).is_empty() {
+            if self.conns.get(target).is_some_and(|c| c.online) {
+                return 0;
+            }
+        } else if !self.peer_in_room(room, from) {
+            return 0;
+        }
+        self.deliver_admitted_direct(room, from, target, data, direct)
+    }
+
+    /// [`Self::deliver_direct`] for a frame the relay already took in: one a test held
+    /// at the relay is released past a sender that has left since.
+    fn deliver_admitted_direct(&mut self, room: &str, from: &str, target: &str, data: Vec<u8>, direct: bool) -> u64 {
         if let Some(held) = self.held_directs.get_mut(&(from.to_string(), target.to_string())) {
             held.push(BufferedMsg { room: room.to_string(), from: from.to_string(), data, direct });
             return 0;
@@ -34746,12 +34762,17 @@ async fn olm_a_sender_back_on_an_older_copy_of_its_session_is_re_keyed() {
     }
 
     let backup = backup.expect("backup");
+    // A writes before it reads anything of B's: a frame from B would ratchet the restored
+    // copy past the spent keys. The relay keeps them until B has judged A's write.
+    relay.hold_direct(&b_dev, &a_dev);
     let a = restart_node_with(&relay, a, a_tag, a_tag, |db_path, pass| {
         crate::storage::MessageStore::open(db_path, pass)
             .expect("open A's store")
             .restore_olm_session_for_test(&b_dev, &backup);
     })
     .await;
+    // The relay drops a direct from a sender not yet back in the DM room.
+    assert!(wait_until(10, async || a.sees_peer(&b_dev).await).await, "precondition: A is back in a room with B");
     send_dm_burst(&a, &b, "after-restore", 1).await;
 
     let mut events = Vec::new();
@@ -34760,6 +34781,7 @@ async fn olm_a_sender_back_on_an_older_copy_of_its_session_is_re_keyed() {
         !stale_session_errors(&events).is_empty()
     })
     .await;
+    relay.release_held(&b_dev, &a_dev);
     assert!(re_keyed, "a sender writing on spent keys under a new seal must be re-keyed");
     // Either session may win: past the keys it already spent, the copy reads again.
     let healed = wait_until(20, async || {
@@ -71936,4 +71958,81 @@ async fn i151_the_owner_names_a_missing_home_once() {
     // ABSENCE: a second start names nothing again (one batch tick is 2 s).
     sleep_ms(2500).await;
     assert_eq!(stamps(&o), 1, "and never again");
+}
+
+// fix-flakes-own-carry
+
+/// The computer fans the OFF out while the phone is seen, but delivers it only after
+/// the phone went away (a busy loop), then quits: the route fixed at the fan-out has
+/// the relay hold it, so the phone learns the OFF on return with no computer online.
+/// Delivered by a route picked at delivery, it waited in the computer's memory and
+/// went nowhere.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
+async fn agegate_an_off_delivered_after_the_phone_left_still_reaches_it() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let (b, c) = sibling_pair(&relay, 222, 223, 224).await;
+    ag_author(&b, true).await;
+    assert!(wait_until(15, async || ag_held(&c).is_some_and(|e| e.allow)).await, "precondition: the online phone hears ON");
+
+    super::olm_lane::hold_carry_lane(&b.device_id, true);
+    ag_author(&b, false).await;
+    // Commands run in order: once this answers, the OFF's fan-out has been made.
+    assert!(b.sees_peer(&c.device_id).await, "precondition: the fan-out saw the phone present");
+    relay.set_online(&c.device_id, false);
+    let gone = wait_until(10, async || !b.sees_peer(&c.device_id).await).await;
+    super::olm_lane::hold_carry_lane(&b.device_id, false);
+    assert!(gone, "precondition: the computer saw the phone leave before it delivered");
+    let off_carried = async || b.carried_to(&c.device_id).await.iter().any(|m| {
+        matches!(m, super::types::HavenMessage::AgeGateSync { entry } if !entry.allow)
+    });
+    assert!(wait_until(10, off_carried).await, "the computer never delivered the OFF");
+    expect_relay_drained(&relay, &b, "agegate-late-off").await;
+    relay.set_online(&b.device_id, false);
+    assert!(wait_until(10, async || !relay.online_devices().contains(&b.device_id)).await);
+
+    relay.set_online(&c.device_id, true);
+    assert!(
+        wait_until(20, async || ag_held(&c).is_some_and(|e| !e.allow)).await,
+        "a phone gone before the computer delivered its OFF must learn it on return, held {:?}",
+        ag_held(&c),
+    );
+}
+
+/// The mock relay drops the directs the relay drops (`handle_binary_direct_msg`): one
+/// into a held room from a sender not in it, and one into a room nobody holds for a
+/// target that is connected. A product path sending either loses its frame for real.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests vs the global resolver
+async fn mock_relay_drops_the_directs_the_relay_drops() {
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let a = spawn_node_with_friends(&relay, 225, 225, &[]).await;
+    let b = spawn_node_with_friends(&relay, 249, 249, &[]).await;
+    expect_relay_drained(&relay, &b, "mock-direct").await;
+    let room = format!("barrier:{}:mock-direct", b.device_id);
+    let away = tag_kp(192).peer_id();
+    let send = |room: &str, target: &str| relay.inner.lock().unwrap().deliver_direct(room, &a.device_id, target, b"x".to_vec(), true);
+    let held = |peer: &str| relay.buffered_count(peer);
+
+    let before = held(&b.device_id);
+    assert_eq!(send(&room, &b.device_id), 0, "a sender outside the room reached its member");
+    assert_eq!(held(&b.device_id), before, "a sender outside the room had a frame kept for its member");
+    assert_eq!(send("nobody-holds-this", &b.device_id), 0, "a room nobody holds delivered");
+    assert_eq!(held(&b.device_id), before, "a room nobody holds kept a frame for a connected target");
+
+    assert_eq!(send("nobody-holds-this", &away), 0);
+    assert_eq!(held(&away), 1, "control: a room nobody holds keeps a frame for a target with no socket");
+    expect_relay_drained(&relay, &a, "mock-direct-a").await;
+    let shared = format!("barrier:{}:mock-direct-a", a.device_id);
+    b.cmd_tx.send(NodeCommand::JoinRoom { room_code: shared.clone() }).await.unwrap();
+    assert!(wait_until(10, async || relay.room_devices(&shared).contains(&b.device_id)).await, "precondition: b joins a's room");
+    assert_eq!(send(&shared, &b.device_id), 1, "control: a sender in the room reaches its member");
+    assert_eq!(send(&shared, &away), 0);
+    assert_eq!(held(&away), 2, "control: a sender in the room has a frame kept for a target not in it");
 }
