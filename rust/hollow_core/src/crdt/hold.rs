@@ -100,11 +100,13 @@ impl Recovery {
             dropped: self.dropped.clone(),
             kept: self.kept.iter().map(|((a, ms, c), h)| (a.clone(), *ms, *c, hex::encode(h))).collect(),
         };
-        serde_json::to_string(&row).ok()
+        // The row carries a whole state: serde's frames for it take a few hundred KB in a
+        // Windows debug build, more than a node task has left (as `parse_state`).
+        std::thread::scope(|scope| std::thread::Builder::new().stack_size(8 << 20).spawn_scoped(scope, || serde_json::to_string(&row).ok()).ok()?.join().ok().flatten())
     }
 
     pub(crate) fn from_json(json: &str) -> Option<Self> {
-        let row: Row = serde_json::from_str(json).ok()?;
+        let row: Row = std::thread::scope(|scope| std::thread::Builder::new().stack_size(8 << 20).spawn_scoped(scope, || serde_json::from_str::<Row>(json).ok()).ok()?.join().ok().flatten())?;
         let removals = row.removals.into_iter().collect();
         let mut kept = BTreeMap::new();
         for (a, ms, c, h) in row.kept {
@@ -334,6 +336,13 @@ impl ServerState {
     /// decides nothing) for an identity other than ours (ours settles through our own
     /// settling). Empty under a base step-back, which 8.8 item 1 holds, or when we are no
     /// member. With them, the fold as it stands (`pre`).
+    /// Whether `kept_candidates` would find any (no snapshot): the common rebuild skips it.
+    pub(super) fn may_keep(&self) -> bool {
+        let Some(me) = self.hlc.as_ref().map(|h| h.actor()) else { return false };
+        self.recovery.as_ref().is_none_or(|r| r.keeps_fold())
+            && self.op_log.iter().any(|o| o.author != me && o.dev.is_some() && self.verdict(o) == Verdict::Uncounted)
+    }
+
     #[inline(never)]
     pub(super) fn kept_candidates(&self) -> Option<KeptCandidates> {
         if self.recovery.as_ref().is_some_and(|r| !r.keeps_fold()) {
@@ -346,7 +355,9 @@ impl ServerState {
         let ops: Vec<(OpKey, String, [u8; 32])> = self
             .op_log
             .iter()
-            .filter(|o| o.author != me && self.direct_verdict(o) == Verdict::Uncounted)
+            // The full verdict: an op a retire endorses or this hold keeps folds anyway, so
+            // only a view change since the last fold makes one (and the snapshot) here.
+            .filter(|o| o.author != me && self.verdict(o) == Verdict::Uncounted)
             .filter_map(|o| Some(((o.author.clone(), o.hlc.clone()), o.proven_device()?.to_string(), o.content_hash())))
             .collect();
         if ops.is_empty() {
@@ -414,7 +425,7 @@ impl ServerState {
     /// retire of `master` names it (it decides what the device's ops count for), or, for
     /// the owner, a settling on `base`'s line drops it. Never a base alone: the settler's
     /// first checkpoint names no device.
-    fn device_decided(&self, deciders: &[&CrdtOp], base: Option<&super::fold::Base>, owner: Option<&str>, master: &str, device: &str) -> bool {
+    pub(super) fn device_decided(&self, deciders: &[&CrdtOp], base: Option<&super::fold::Base>, owner: Option<&str>, master: &str, device: &str) -> bool {
         if self.authority.counts(master, device) {
             return true;
         }
@@ -457,7 +468,15 @@ impl ServerState {
         }
         let deciders = Self::deciders(all());
         let owner = self.anchor_owner();
-        let covers = self.base.as_ref().map(|b| (b.covers.physical_ms, b.covers.counter));
+        // Another identity's op the owner's newer base no longer folds on top and holds
+        // unparked (or no more): the owner's checkpoint decided it (part C's mitigation).
+        let base_at = self.base.as_ref().map(|b| b.hlc.clone());
+        let parked = |k: &(String, u64, u32)| {
+            self.stored.iter().any(|(o, kind)| o.author == k.0 && o.hlc.physical_ms == k.1 && o.hlc.counter == k.2 && matches!(kind, super::fold::RowKind::Parked(_)))
+        };
+        let by_base = |k: &(String, u64, u32)| {
+            base_at.as_ref().is_some_and(|b| (k.1, k.2) < (b.physical_ms, b.counter)) && !folded.contains(&(k.0.as_str(), k.1, k.2)) && !parked(k)
+        };
         r.dropped.iter().all(|(m, d)| {
             if self.device_decided(&deciders, self.base.as_deref(), owner.as_deref(), m, d) {
                 return true;
@@ -465,8 +484,8 @@ impl ServerState {
             owner.as_deref() != Some(m.as_str())
                 && r.kept
                     .iter()
-                    .filter(|(k, h)| k.0 == *m && held(k, h).and_then(|o| o.proven_device()) == Some(d.as_str()))
-                    .all(|(k, h)| covers.is_some_and(|c| (k.1, k.2) <= c) || unheld(k, h))
+                    .filter(|(k, h)| k.0 == *m && held(k, h).is_none_or(|o| o.proven_device() == Some(d.as_str())))
+                    .all(|(k, h)| by_base(k) || unheld(k, h))
         })
     }
 
@@ -1665,5 +1684,48 @@ mod tests {
         assert!(back.in_recovery(), "HOL-SEC-232: the restart judges the trigger against the saved rows");
         assert!(restored.recovery.is_some(), "and hands the row to save");
         assert!(back.is_member(&keys(LATE).1), "the fold keeps what it held");
+    }
+
+    // Part C (HOL-SEC-230): early owner checkpoints, and none of a stepped-back fold.
+
+    #[test]
+    fn an_owner_checkpoints_a_cut_server_soon_after_its_first_admission() {
+        let (before, _) = owner_rosters();
+        let (master, m_id, pk) = keys(OWNER);
+        let (phone, phone_id, _) = keys(PHONE);
+        let r_pub = before.r_pub.clone();
+        let (mut owner, _) = ServerState::found_on("c".into(), m_id.clone(), Founder { device_peer_id: &phone_id, device: Some(&phone), r_pub: Some(&r_pub) }, master, pk);
+        owner.authority = view(&before);
+        let _ = owner.rebuild_now();
+        let now = super::super::hlc::wall_clock_ms();
+        assert!(owner.cut, "precondition: a phrase-rooted server is cut from its founding op");
+        assert!(!owner.checkpoint_due(&m_id, now), "the founding op alone owes nothing");
+        admit(&mut owner, MEMBER);
+        assert!(owner.checkpoint_due(&m_id, now), "the first admission is due a checkpoint");
+        checkpoint(&mut owner);
+        assert!(owner.base.is_some(), "precondition: the checkpoint is the base");
+        let hour = super::super::fold::CHECKPOINT_MIN_GAP_MS + 60_000;
+        let mut idle = owner.clone();
+        admit(&mut owner, MOD);
+        assert!(!owner.checkpoint_due(&m_id, now), "at most hourly");
+        assert!(owner.checkpoint_due(&m_id, now + hour), "an hour on, an admission past the base is due");
+        idle.author_checked(P::MessagePinned { channel_id: "general".into(), message_id: "m".into() });
+        assert!(!idle.checkpoint_due(&m_id, now + hour), "a pin alone never checkpoints an idle server");
+    }
+
+    #[test]
+    fn no_early_checkpoint_while_an_owned_server_awaits_its_settling() {
+        let (_, log) = baseless_world();
+        let mut laptop = baseless_replica(&log, OWNER, LAPTOP, true);
+        let now = super::super::hlc::wall_clock_ms();
+        assert!(laptop.checkpoint_due(&keys(OWNER).1, now), "precondition: before the recovery the first checkpoint is due");
+        laptop.authority = view_after(false);
+        let _ = laptop.rebuild_now();
+        assert!(laptop.settle_owed(&keys(OWNER).1), "the phone proved ops of ours nothing settled");
+        assert!(!laptop.checkpoint_due(&keys(OWNER).1, now + 10 * super::super::fold::CHECKPOINT_MIN_GAP_MS), "no checkpoint of the stepped-back fold");
+        // The writer rule never takes a fold listing only us as witnessed.
+        let mut alone = laptop.clone();
+        alone.members.retain(|m, _| *m == keys(OWNER).1);
+        assert!(!alone.checkpoint_witnessed(&keys(OWNER).1, &Default::default()), "no other identity, no witness");
     }
 }

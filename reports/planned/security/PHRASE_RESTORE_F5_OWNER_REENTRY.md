@@ -1,11 +1,38 @@
 # F5 and HOL-SEC-230: the members a recovery must keep, and the owner's way back (0.14.3)
 
-Status: DESIGN, revision 2, for a fresh hostile review. No product code changed. Branch
+Status: BUILDING (revision 3 notes below); revision 2 passed review with changes. Branch
 `feat/phrase-restore-f5` at 447cfab4 (EMBARGOED, local only). Revision 1 (option B, a
 sync re-entry alone) got REDESIGN: it assumed the members' folds still list the members,
 and on a server with no checkpoint they do not (HOL-SEC-230, proven below). Builds on
 `PHRASE_RESTORE_DESIGN.md` and `DEVICE_PROOF_DESIGN.md` 7, 8.3, 8.4, 8.7, 8.8. Line
 numbers are of 447cfab4.
+
+## Build status (revision 3, after the second design review)
+
+Built on `feat/phrase-restore-f5` (5c166763, ade6c0ef): part A with review items 2, 3
+(HOL-SEC-231), 4 (HOL-SEC-232), 11 and 13; part C with items 5 and 6; item 1 in the
+chooser. Not built yet: part B (records, items 7 and 14), the invite key rule (items 8
+and 12), the F5 sync re-entry (3.2, 3.3), the waiting card (item 9), the item 15 rows for
+those. `.team/HANDOFF.md` lists the next steps.
+
+One deliberate change from 2.3: part A keeps the FOLD, not only the seats. When a
+rebuild stops folding ops whose device the view stopped counting (Uncounted, never
+Missing, another identity's), the replica records those (master, device) pairs and
+exactly those ops (author, clock, content id) and `verdict` keeps counting them until
+something decides the device: its identity's counted retire, the view counting it again,
+for the owner's devices a settling on the base's line that drops it (never a base alone,
+item 13), for another identity's ops the owner's newer base. Seats alone cannot fix
+HOL-SEC-231 (the owner's own fold lifted the moderator's ban) and leave members silent:
+a base step-back (8.8) refuses their posts until the settling, a part A hold refuses
+nothing it held (item 10). Nothing the device writes after the trigger counts, so the
+thief gains no more than before the notice. Parked ops then need no expiry rule (item
+11): the kept ops never park while the hold lasts.
+
+Item 6: cadence counts only authority changes (`cadence_op`: not pins, marks, lock moves
+or checkpoints) and waits an hour after the base. Authority changes are rare, so the
+64-generation lineage spans weeks to months on a normal server, and an honest stale
+witness stays on line; a server with hourly admissions rolls it in about three days,
+where an off-line witness leaves the dated list (fail-safe).
 
 ## 0. In one screen
 

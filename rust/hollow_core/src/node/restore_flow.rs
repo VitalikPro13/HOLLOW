@@ -170,7 +170,8 @@ fn rejudge(desk: &mut WitnessDesk, state: &ServerState, store: &MessageStore, db
     let mut named: Vec<String> = facts.values().flat_map(|f| f.members.iter().cloned()).collect();
     named.sort();
     named.dedup();
-    desk.update(&sid, super::witness::judge(&seen, &facts), now_ms);
+    let judged = super::witness::judge(&seen, &facts, &|m| desk.listed(&sid, m));
+    desk.update(&sid, judged, now_ms);
     desk.keep_contents(&sid, contents.into_iter().filter(|(cp, _)| facts.contains_key(cp)).collect());
     named
 }

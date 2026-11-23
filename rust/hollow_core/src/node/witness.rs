@@ -295,6 +295,16 @@ impl WitnessDesk {
         self.recovering.iter().filter(|(_, r)| !r.done).map(|(s, _)| s.clone()).collect()
     }
 
+    /// Whether `server_id` is still being restored here (no checkpoint of ours meanwhile).
+    pub(crate) fn is_restoring(&self, server_id: &str) -> bool {
+        self.recovering.get(server_id).is_some_and(|r| !r.done)
+    }
+
+    /// Whether a contact or a friend's entry named `identity` a member of `server_id`.
+    pub(crate) fn listed(&self, server_id: &str, identity: &str) -> bool {
+        self.members.get(server_id).is_some_and(|m| m.iter().any(|(i, src)| i == identity && matches!(src, MemberSource::Contact | MemberSource::FriendEntry)))
+    }
+
     pub(crate) fn t_ms(&self, server_id: &str) -> Option<i64> {
         self.recovering.get(server_id).map(|r| r.t_ms)
     }
@@ -573,8 +583,11 @@ pub(crate) fn content_order(seen: &[Seen], contact: &dyn Fn(&str) -> bool) -> Ve
 /// Section 8.4 steps 1 to 6 over `seen` (witnesses that passed the receipt checks, each
 /// attributed to the identity our view counts its device for) and `facts`, the contents
 /// that checked as bases of the server. A witness naming a content not in `facts`, or
-/// one whose state does not list its identity, does not count.
-pub(crate) fn judge(seen: &[Seen], facts: &std::collections::HashMap<String, CpFacts>) -> Judged {
+/// one whose state does not list its identity, does not count. A counted "none" from an
+/// identity `listed` (a contact or a friend's entry named it, not a content or a join
+/// answer) leaves no pick, only the dated list: honest members holding no point before
+/// T must not hand the pick to puppets that hold one.
+pub(crate) fn judge(seen: &[Seen], facts: &std::collections::HashMap<String, CpFacts>, listed: &dyn Fn(&str) -> bool) -> Judged {
     use std::collections::{BTreeMap, BTreeSet};
     let on_line = |a: &str, b: &str| a == b || facts[a].lineage.iter().any(|x| x == b) || facts[b].lineage.iter().any(|x| x == a);
     let mut out = Judged::default();
@@ -624,7 +637,8 @@ pub(crate) fn judge(seen: &[Seen], facts: &std::collections::HashMap<String, CpF
                 .all(|p| sup.iter().filter(|m| facts[*p].members.contains(**m)).count() >= 2)
     };
     let picks: Vec<&str> = cps.iter().copied().filter(|x| supporters(x).len() >= 2 && continuous(x)).collect();
-    if picks.iter().all(|a| picks.iter().all(|b| on_line(a, b))) {
+    let listed_none = seen.iter().any(|s| s.cp.is_empty() && listed(&s.identity));
+    if !listed_none && picks.iter().all(|a| picks.iter().all(|b| on_line(a, b))) {
         out.pick = picks.into_iter().max_by(|a, b| order_key(facts, a).cmp(&order_key(facts, b))).map(str::to_string);
     }
     out
@@ -741,18 +755,31 @@ mod tests {
         Seen { identity: identity.into(), cp: cp.into(), folded_age_ms: age, received_ms: 1_000_000 }
     }
 
+    /// Review F5b item 1: on a server without a point before T, two puppets naming one
+    /// get no pick while a member a contact or a friend's entry lists answers none.
+    #[test]
+    fn a_counted_none_witness_turns_a_puppet_pick_into_the_list() {
+        let f = facts(&[("x", 1, &[], &["p1", "p2", "h1", "h2"])]);
+        let w = [seen("p1", "x", 5), seen("p2", "x", 5), seen("h1", "", 0), seen("h2", "", 0)];
+        assert_eq!(judge(&w, &f, &|_| false).pick.as_deref(), Some("x"), "control: no listed none, the puppets' point is the pick");
+        let j = judge(&w, &f, &|m| m == "h1");
+        assert_eq!(j.pick, None, "a listed member's none leaves only the dated list");
+        assert_eq!(j.points.len(), 1, "the point is still listed");
+        assert_eq!(judge(&w[..2], &f, &|m| m == "h1").pick.as_deref(), Some("x"), "a listed identity that never answered blocks nothing");
+    }
+
     /// Steps 3 to 6: honest members on one line pick the newest point two of them support.
     #[test]
     fn honest_witnesses_on_one_line_pick_the_newest_supported_point() {
         let f = facts(&[("a", 1, &[], &["h1", "h2", "h3"]), ("b", 2, &["a"], &["h1", "h2", "h3"])]);
-        let j = judge(&[seen("h1", "b", 10), seen("h2", "b", 10), seen("h3", "a", 50)], &f);
+        let j = judge(&[seen("h1", "b", 10), seen("h2", "b", 10), seen("h3", "a", 50)], &f, &|_| false);
         assert_eq!(j.pick.as_deref(), Some("b"));
         assert_eq!(j.points.iter().map(|p| p.cp.as_str()).collect::<Vec<_>>(), ["b", "a"], "newest first");
         assert_eq!(j.points[0].named_by, ["h1", "h2"]);
         assert_eq!(j.points[1].date_ms, Some(1_000_000 - 50));
-        let j = judge(&[seen("h1", "b", 10), seen("h3", "a", 50)], &f);
+        let j = judge(&[seen("h1", "b", 10), seen("h3", "a", 50)], &f, &|_| false);
         assert_eq!(j.pick.as_deref(), Some("a"), "one supporter of b is no candidate; a has two");
-        assert!(judge(&[seen("h1", "b", 10)], &f).pick.is_none(), "a lone witness is never a pick, continuous or not");
+        assert!(judge(&[seen("h1", "b", 10)], &f, &|_| false).pick.is_none(), "a lone witness is never a pick, continuous or not");
     }
 
     /// R31-1: puppets naming a thief line on top of an honest checkpoint never make it the
@@ -765,10 +792,10 @@ mod tests {
             ("xt", 3, &["y", "ch"], &["p1", "p2", "p3"]),
         ]);
         let w = [seen("h1", "ch", 9), seen("h2", "ch", 9), seen("p1", "y", 1), seen("p2", "xt", 1), seen("p3", "xt", 1)];
-        assert_eq!(judge(&w, &f).pick.as_deref(), Some("ch"));
+        assert_eq!(judge(&w, &f, &|_| false).pick.as_deref(), Some("ch"));
         // Without the honest witnesses the puppets pick their own line (section 17); p3,
         // never a member of y, cannot carry xt past it.
-        assert_eq!(judge(&w[2..], &f).pick.as_deref(), Some("y"));
+        assert_eq!(judge(&w[2..], &f, &|_| false).pick.as_deref(), Some("y"));
     }
 
     /// R3-8: two continuous candidates off one line make the choice ambiguous: no pick,
@@ -776,7 +803,7 @@ mod tests {
     #[test]
     fn two_lines_are_ambiguous_and_list_every_point() {
         let f = facts(&[("a", 1, &[], &["m1", "m2", "m3", "m4"]), ("b", 2, &["a"], &["m1", "m2", "m3", "m4"]), ("c", 2, &["a"], &["m1", "m2", "m3", "m4"])]);
-        let j = judge(&[seen("m1", "b", 1), seen("m2", "b", 1), seen("m3", "c", 1), seen("m4", "c", 1)], &f);
+        let j = judge(&[seen("m1", "b", 1), seen("m2", "b", 1), seen("m3", "c", 1), seen("m4", "c", 1)], &f, &|_| false);
         assert_eq!(j.pick, None);
         assert_eq!(j.points.len(), 2);
         assert_eq!(j.counted.len(), 4);
@@ -787,7 +814,7 @@ mod tests {
     #[test]
     fn a_point_named_off_the_line_leaves_no_pick() {
         let f = facts(&[("a", 1, &[], &["m1", "m2", "m3"]), ("b", 2, &["a"], &["m1", "m2", "m3"]), ("c", 2, &["a"], &["m1", "m2", "m3"])]);
-        let j = judge(&[seen("m1", "b", 1), seen("m2", "b", 1), seen("m3", "c", 1)], &f);
+        let j = judge(&[seen("m1", "b", 1), seen("m2", "b", 1), seen("m3", "c", 1)], &f, &|_| false);
         assert_eq!(j.pick, None, "{j:?}");
         assert_eq!(j.points.len(), 2);
     }
@@ -797,17 +824,17 @@ mod tests {
     #[test]
     fn one_witness_per_identity_from_members_only() {
         let f = facts(&[("a", 1, &[], &["m1", "m2"]), ("b", 2, &["a"], &["m1", "m2"]), ("c", 2, &["a"], &["m1", "m2"])]);
-        let j = judge(&[seen("m1", "a", 5), seen("m1", "b", 5), seen("m2", "b", 5)], &f);
+        let j = judge(&[seen("m1", "a", 5), seen("m1", "b", 5), seen("m2", "b", 5)], &f, &|_| false);
         assert_eq!(j.pick.as_deref(), Some("b"), "m1's devices agree on a line: its greatest counts");
-        let j = judge(&[seen("m1", "b", 5), seen("m1", "c", 5), seen("m2", "b", 5)], &f);
+        let j = judge(&[seen("m1", "b", 5), seen("m1", "c", 5), seen("m2", "b", 5)], &f, &|_| false);
         assert!(j.points.iter().any(|p| p.cp == "a" || p.named_by.contains(&"m1".to_string()) && p.cp != "c"), "{j:?}");
         assert!(!j.points.iter().any(|p| p.cp == "c"), "m1's devices off one line: its oldest counts");
-        let j = judge(&[seen("m1", "a", 1), seen("m1", "b", 1 + LINE_AGE_MS + 1), seen("m2", "b", 5)], &f);
+        let j = judge(&[seen("m1", "a", 1), seen("m1", "b", 1 + LINE_AGE_MS + 1), seen("m2", "b", 5)], &f, &|_| false);
         assert!(j.points.iter().find(|p| p.cp == "a").is_some_and(|p| p.named_by == ["m1"]), "ages far apart: the oldest");
-        let j = judge(&[seen("stranger", "a", 1), seen("m1", "a", -1), seen("m2", "", 0)], &f);
+        let j = judge(&[seen("stranger", "a", 1), seen("m1", "a", -1), seen("m2", "", 0)], &f, &|_| false);
         assert!(!j.counted.contains("stranger") && j.counted.contains("m2"), "a non-member counts nothing, a none-held witness counts");
         assert_eq!(j.points[0].date_ms, None, "a seeded record is undated");
-        assert!(judge(&[seen("m1", "zz", 1)], &f).counted.is_empty(), "a content that did not check");
+        assert!(judge(&[seen("m1", "zz", 1)], &f, &|_| false).counted.is_empty(), "a content that did not check");
     }
 
     /// Step 7 and the chooser: progress until every asked identity answered or the wait
@@ -826,7 +853,7 @@ mod tests {
         assert_eq!(desk.stage("s", 20_000), Some(Stage::Checking));
         assert!(desk.choose("s", None, 20_000).is_err(), "no choice before the wait ends");
         let f = facts(&[("a", 1, &[], &["h1", "h2", "h3"])]);
-        desk.update("s", judge(&[seen("h1", "a", 1), seen("h2", "a", 1)], &f), 30_000);
+        desk.update("s", judge(&[seen("h1", "a", 1), seen("h2", "a", 1)], &f, &|_| false), 30_000);
         assert_eq!(desk.stage("s", 30_000), Some(Stage::Waiting), "a pick waits W for more");
         assert_eq!(desk.stage("s", 30_000 + WAIT_MS), Some(Stage::Pick));
         assert!(desk.choose("s", Some("zz".into()), 70_000).is_err(), "only a named point");

@@ -62908,6 +62908,10 @@ async fn w3c1_cut_server(tags: [u8; 5]) -> W3c1Cut {
 /// As `w3c1_cut_server`, but with `j_owner` = (J's device, J's recovery) tags J is
 /// phrase-rooted, founds the server, and both devices join it.
 async fn w3c1_cut_server_by(tags: [u8; 5], j_owner: Option<(u8, u8)>) -> W3c1Cut {
+    // These servers model an owner that has not checkpointed yet (no part C): the
+    // device-proof rules they test hold whether or not a base is held.
+    early_off(&tag_kp(tags[0]).peer_id(), true);
+    early_off(&tag_kp(tags[4]).peer_id(), true);
     w3c1_cut_server_with(tags, j_owner, false).await
 }
 
@@ -73862,4 +73866,35 @@ async fn rev_f5b_a_recovery_stored_while_the_node_is_down_still_opens_the_hold()
         s.members.len(),
     );
     drop((j, k, d2));
+}
+
+/// Part C off (or back on) for servers `owner` owns, in this test process.
+fn early_off(owner: &str, off: bool) {
+    let mut set = crate::crdt::fold::EARLY_OFF_OWNERS.lock().unwrap_or_else(|e| e.into_inner());
+    if off {
+        set.insert(owner.to_string());
+    } else {
+        set.remove(owner);
+    }
+}
+
+/// Part C (HOL-SEC-230): the owner checkpoints a cut server soon after its first
+/// admission, once a member witnessed it, so members hold a base before any recovery.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn w3c1_an_owner_checkpoints_a_cut_server_soon_after_its_first_admission() {
+    let _g = test_guard();
+    let W3c1Cut { relay: _relay, master: _master, d1, d2, j, server_id, _tmp } = w3c1_cut_server([81, 82, 83, 84, 85]).await;
+    early_off(&tag_kp(81).peer_id(), false);
+    let base_at = async |n: &TestNode| n.live_server_state(&server_id).await.and_then(|s| s.base.as_ref().map(|b| b.hash));
+    assert!(
+        wait_until(90, async || base_at(&j).await.is_some() && base_at(&j).await == base_at(&d1).await && base_at(&j).await == base_at(&d2).await).await,
+        "no early checkpoint reached J and both owner devices: J={:?} d1={:?} d2={:?}",
+        base_at(&j).await,
+        base_at(&d1).await,
+        base_at(&d2).await,
+    );
+    let s = j.live_server_state(&server_id).await.expect("J holds the server");
+    assert!(s.is_member(&j.master_id) && s.base.as_ref().is_some_and(|b| b.state.is_member(&j.master_id)), "the checkpoint lists J");
+    drop((d1, d2, j));
 }

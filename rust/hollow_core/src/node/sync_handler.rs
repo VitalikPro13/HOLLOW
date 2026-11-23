@@ -303,6 +303,7 @@ pub(crate) async fn author_due_checkpoints(
         .iter()
         .filter(|(id, s)| {
             s.checkpoint_due(local_peer_str, now)
+                && !crdt_resync.witness.is_restoring(id)
                 && s.checkpoint_witnessed(local_peer_str, &crdt_resync.op_sync.witnesses(id))
         })
         .map(|(id, _)| id.clone())

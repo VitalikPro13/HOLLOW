@@ -803,9 +803,13 @@ impl ServerState {
 
     /// Whether the owner (`me`) owes this server a checkpoint now: once to move it off
     /// the legacy anchor or off a base from before 0.14, then whenever its log has grown
-    /// past `CHECKPOINT_AFTER_OPS`, at most once an hour after the base's own clock.
+    /// past `CHECKPOINT_AFTER_OPS`, at most once an hour after the base's own clock. On a
+    /// cut server also soon after its first change (part C: members then hold a base the
+    /// 8.8 hold and floor protect), then hourly while authority changes arrive. Never
+    /// while a device of ours that proved a held op of ours waits for its settling: a
+    /// checkpoint then would bake the step back in (`settle_owed`).
     pub fn checkpoint_due(&self, me: &str, now_ms: u64) -> bool {
-        if self.deleted || now_ms < self.cp_retry_at_ms || self.current_owner().as_deref() != Some(me) {
+        if self.deleted || now_ms < self.cp_retry_at_ms || self.current_owner().as_deref() != Some(me) || self.settle_owed(me) {
             return false;
         }
         match self.anchor() {
@@ -815,8 +819,40 @@ impl ServerState {
                 (self.op_log.len() > CHECKPOINT_AFTER_OPS
                     && self.base.as_ref().is_none_or(|b| now_ms.saturating_sub(b.hlc.physical_ms) > CHECKPOINT_MIN_GAP_MS))
                     || self.refold_due(now_ms)
+                    || self.early_checkpoint_due(now_ms)
             }
         }
+    }
+
+    /// Part C (HOL-SEC-230): with the cut in force, the first checkpoint follows the
+    /// first change past the founding op, a later one an authority change past the base
+    /// once the base is an hour old. Only `cadence_op`s count: posts' pins, lock moves
+    /// and marks never checkpoint an idle server, so the 64-generation lineage spans the
+    /// server's authority history rather than its traffic.
+    fn early_checkpoint_due(&self, now_ms: u64) -> bool {
+        #[cfg(test)]
+        if self.anchor_owner().is_some_and(|o| EARLY_OFF_OWNERS.lock().unwrap_or_else(|e| e.into_inner()).contains(&o)) {
+            return false;
+        }
+        if !self.cut {
+            return false;
+        }
+        match &self.base {
+            None => self.op_log.iter().any(|o| cadence_op(&o.payload)),
+            Some(b) => now_ms.saturating_sub(b.hlc.physical_ms) > CHECKPOINT_MIN_GAP_MS && self.op_log.iter().any(|o| o.hlc > b.hlc && cadence_op(&o.payload)),
+        }
+    }
+
+    /// A device of `me` that proved a held op of ours is uncounted and nothing decides it
+    /// (no counted retire of ours, no settling on the base's line drops it): our own
+    /// recovery still owes its settling here.
+    pub(crate) fn settle_owed(&self, me: &str) -> bool {
+        let all = || self.op_log.iter().chain(self.stored.iter().map(|(o, _)| o));
+        let deciders = Self::deciders(all());
+        let mut seen: HashSet<&str> = HashSet::new();
+        all().filter(|o| o.author == me).filter_map(|o| o.proven_device()).any(|d| {
+            d != me && seen.insert(d) && !self.device_decided(&deciders, self.base.as_deref(), Some(me), me, d)
+        })
     }
 
     /// Writer rule (F1 mitigation a, M1): the owner checkpoints only once completed digest
@@ -831,6 +867,10 @@ impl ServerState {
             return true;
         }
         let others: Vec<&String> = self.members.keys().filter(|m| m.as_str() != me).collect();
+        // A fold that lists only us witnesses nothing: a stepped-back fold looks like it.
+        if others.is_empty() {
+            return false;
+        }
         if others.iter().all(|m| witnesses.contains(m.as_str())) {
             return true;
         }
@@ -2224,7 +2264,7 @@ impl ServerState {
                 plan = self.plan(fresh, now_ms);
             }
         }
-        let candidates = if trigger.is_none() { self.kept_candidates() } else { None };
+        let candidates = if trigger.is_none() && self.may_keep() { on_big_stack(|| self.kept_candidates()) } else { None };
         // The view never changes inside a rebuild, so an op it refuses now stays refused
         // (dropped or parked) until a roster arrives.
         for (op, _, class, _) in &plan.ops {
@@ -2241,9 +2281,9 @@ impl ServerState {
             out.recovery = r.to_json().map(Some);
             self.recovery = Some(Arc::new(r));
         } else if let Some(c) = candidates {
-            self.kept_after_install(c, settled, now_ms, &mut out);
+            on_big_stack(|| self.kept_after_install(c, settled, now_ms, &mut out));
         } else if self.recovery_ends(settled) {
-            self.end_recovery(now_ms, &mut out);
+            on_big_stack(|| self.end_recovery(now_ms, &mut out));
         }
 
         // What changed in the store, against what it held when this rebuild began.
@@ -2844,6 +2884,39 @@ impl ServerState {
 /// A set's fingerprint: its count and the wrapping sum of its hashes, order-free.
 /// Ancestors a stamped checkpoint carries (section 7).
 pub(crate) const LINEAGE: usize = 64;
+
+/// Part A's extra rebuild and snapshot run here: a whole state's clone and a second plan
+/// on a node task's 2 MiB debug stack overflow it (as `parse_state`). Inline when the
+/// thread cannot start.
+fn on_big_stack<T: Send>(f: impl FnOnce() -> T + Send) -> T {
+    let slot = std::sync::Mutex::new(Some(f));
+    let ran = std::thread::scope(|scope| {
+        let job = || slot.lock().ok().and_then(|mut g| g.take()).map(|j| j());
+        std::thread::Builder::new().stack_size(8 << 20).spawn_scoped(scope, job).ok().and_then(|h| h.join().ok()).flatten()
+    });
+    match ran {
+        Some(v) => v,
+        None => match slot.into_inner().ok().flatten() {
+            Some(j) => j(),
+            None => std::panic::resume_unwind(Box::new("part A's rebuild panicked")),
+        },
+    }
+}
+
+/// Harness switch, per owner: an owner without part C (0.14.2, or one that has not
+/// checkpointed yet), for tests of what members do on a server with no checkpoint.
+#[cfg(test)]
+pub(crate) static EARLY_OFF_OWNERS: std::sync::LazyLock<std::sync::Mutex<HashSet<String>>> = std::sync::LazyLock::new(Default::default);
+
+/// An op that moves part C's cadence: an authority change, never a pin, mark, lock move,
+/// checkpoint or the founding op.
+fn cadence_op(p: &CrdtPayload) -> bool {
+    match p {
+        CrdtPayload::MessagePinned { .. } | CrdtPayload::MessageUnpinned { .. } => false,
+        CrdtPayload::JoinKeySet { .. } | CrdtPayload::DeviceRetired { .. } => true,
+        _ => super::refold::payload_kind(p) == super::refold::PayloadKind::Writes,
+    }
+}
 
 /// The `cp_lineage` of a child of `parent`: the parent, then its own lineage.
 pub(super) fn lineage_after(parent: &Base) -> Vec<String> {
