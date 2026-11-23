@@ -28230,7 +28230,9 @@ fn harness_fixed_sleep_budget_does_not_grow() {
     // members spend stepped back before the kept device returns (15 s; scan 1295.35 s).
     // F5 part A: the moderator test's join stagger, T margin and the absence of a lifted
     // ban, and the restart test's join stagger and T margin (8.4 s; scan 1303.75 s).
-    const BUDGET_MS: u64 = 1_306_250;
+    // F5 round 2: the T margins after the members' last store in the record, early
+    // checkpoint and in-app key tests (3.9 s; scan 1310.1 s).
+    const BUDGET_MS: u64 = 1_312_600;
 
     let src = include_str!("test_harness.rs");
     // Built from pieces so this scan does not count its own source text.
@@ -74035,4 +74037,73 @@ async fn w3c1_an_in_app_recovery_resets_each_owned_servers_invite_key_in_its_set
     let base_key = s.base.as_ref().and_then(|b| b.state.join_public_text());
     assert_eq!(base_key, Some(new_key), "the fresh key is in the settled state itself");
     drop((d2, j));
+}
+
+/// HOL-SEC-230 part C end to end (F5 note test 3): the owner's early checkpoint lists J
+/// and K before the owner's devices are lost, so a fresh install's restore picks it from
+/// their witnesses and both stay members.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pr_a_a_fresh_install_restores_members_from_the_owners_early_checkpoint() {
+    let _g = test_guard();
+    let [m_tag, d1_tag, d2_tag, r_tag, j_tag] = [243u8, 244, 245, 246, 247];
+    let (k_tag, f_tag) = (248u8, 249u8);
+    let W3c1Cut { relay, master, d1, d2, j, server_id, _tmp } = w3c1_cut_server_with([m_tag, d1_tag, d2_tag, r_tag, j_tag], None, false).await;
+    let m_id = master.peer_id();
+    let (j_master, k_master) = (j.master_id.clone(), tag_kp(k_tag).peer_id());
+    let k = spawn_node_with_friends(&relay, k_tag, k_tag, &[&m_id]).await;
+    k.cmd_tx
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&server_id) })
+        .await
+        .unwrap();
+    assert!(wait_until(30, async || j.live_server_state(&server_id).await.is_some_and(|s| s.is_member(&k_master))).await, "precondition: K joined");
+    let base_listing = async |n: &TestNode| {
+        n.live_server_state(&server_id).await.and_then(|s| s.base.as_ref().filter(|b| b.state.is_member(&j_master) && b.state.is_member(&k_master)).map(|b| b.hash))
+    };
+    assert!(
+        wait_until(90, async || base_listing(&j).await.is_some() && base_listing(&j).await == base_listing(&k).await).await,
+        "no early checkpoint listing J and K reached both: J={:?} K={:?}",
+        base_listing(&j).await,
+        base_listing(&k).await,
+    );
+    let cp = base_listing(&j).await.unwrap();
+    // T after both stored the checkpoint (a first fold has no signal past this one).
+    sleep_ms(1200).await;
+    let t_ms = crate::crdt::hlc::wall_clock_ms() as i64;
+    for n in [&d1, &d2] {
+        relay.set_online(&n.device_id, false);
+    }
+    drop((d1, d2));
+    let f = spawn_node_staged_at(&relay, master.clone(), f_tag, &[], |st, db, pass| {
+        let sign = crate::api::roster::RestoreSign::Recover { lost_since_ms: t_ms, no_wait: true };
+        crate::api::roster::sign_restore(&master, &tag_kp(f_tag), &tag_kp(r_tag), sign, db, pass).expect("the restore signs");
+        let mark = super::phrase_restore::Mark { at_ms: super::roster_book::now_ms(), branch: super::phrase_restore::Branch::Recover, empty: true, device: tag_kp(f_tag).peer_id() };
+        super::phrase_restore::write(st, &mark).expect("the mark");
+    })
+    .await;
+    let f_dev = f.device_id.clone();
+    for friend in [&j_master, &k_master] {
+        f.cmd_tx.send(NodeCommand::SendFriendRequest { peer_id: friend.clone() }).await.unwrap();
+    }
+    let restore = || super::restore_flow::snapshot_of(&f_dev).into_iter().find(|s| s.server_id == server_id);
+    assert!(
+        wait_until(120, async || restore().is_some_and(|r| r.stage == super::witness::Stage::Pick)).await,
+        "F is never offered the early checkpoint: {:?}",
+        restore().map(|r| (r.stage, r.points.iter().map(|p| (p.cp.clone(), p.named_by.clone())).collect::<Vec<_>>())),
+    );
+    let pick = restore().and_then(|r| r.pick).expect("a pick");
+    assert_eq!(pick.cp, hex::encode(cp), "the owner's early checkpoint");
+    let (reply, rx) = tokio::sync::oneshot::channel();
+    f.cmd_tx.send(NodeCommand::ChooseRestore { server_id: server_id.clone(), cp: Some(pick.cp.clone()), reply }).await.unwrap();
+    rx.await.expect("an answer").expect("the choice is taken");
+    assert!(
+        wait_until(40, async || j.live_server_state(&server_id).await.is_some_and(|s| s.base.as_ref().is_some_and(|b| b.state.cp_settles.is_some())))
+            .await,
+        "J never took F's settling",
+    );
+    for n in [&j, &f] {
+        let s = n.live_server_state(&server_id).await.expect("the server is held");
+        assert!(s.is_member(&j_master) && s.is_member(&k_master), "the restore keeps J and K");
+    }
+    drop(k);
 }
