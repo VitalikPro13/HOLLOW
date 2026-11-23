@@ -266,9 +266,10 @@ class _RosterLockScreenState extends ConsumerState<RosterLockScreen> {
   }
 }
 
-/// Whether [status] still has [device] waiting to join.
+/// Whether [status] still has [device] waiting to join and this device may answer for
+/// it: a device the roster does not count (a recovery left it out) vouches for nothing.
 bool rosterStillWaiting(roster_api.RosterStatus status, String device) =>
-    status.devices.any((d) => d.devicePeerId == device && d.state == 'pending');
+    status.member && status.devices.any((d) => d.devicePeerId == device && d.state == 'pending');
 
 /// Asks this device's person whether a device restored from a backup is theirs.
 /// Approve vouches for it; Refuse removes it; Later leaves it waiting. An ask that

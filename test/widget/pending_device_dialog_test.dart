@@ -11,12 +11,12 @@ import '../helpers/test_app.dart';
 
 const _asker = '12D3KooWAskerAskerAskerAskerAskerAskerAskerAsker';
 
-roster_api.RosterStatus _status(String askerState, {bool backupWait = true}) => roster_api.RosterStatus(
-      member: true,
+roster_api.RosterStatus _status(String askerState, {bool backupWait = true, bool member = true}) => roster_api.RosterStatus(
+      member: member,
       protected: true,
       backupWait: backupWait,
       devices: [
-        const roster_api.RosterDevice(devicePeerId: 'me', state: 'member', thisDevice: true, added: []),
+        if (member) const roster_api.RosterDevice(devicePeerId: 'me', state: 'member', thisDevice: true, added: []),
         roster_api.RosterDevice(devicePeerId: _asker, state: askerState, thisDevice: false, added: const []),
       ],
     );
@@ -24,10 +24,11 @@ roster_api.RosterStatus _status(String askerState, {bool backupWait = true}) => 
 /// Our roster as Rust holds it; the tests move the asker between states.
 class _RosterApi implements RustLibApi {
   String askerState = 'pending';
+  bool member = true;
   int refusals = 0;
 
   @override
-  Future<roster_api.RosterStatus> crateApiRosterRosterStatus() async => _status(askerState);
+  Future<roster_api.RosterStatus> crateApiRosterRosterStatus() async => _status(askerState, member: member);
 
   @override
   Future<void> crateApiRosterRefuseDevice({required String devicePeerId}) async => refusals++;
@@ -44,6 +45,7 @@ void main() {
   setUpAll(() => RustLib.initMock(api: api));
   setUp(() {
     api.askerState = 'pending';
+    api.member = true;
     api.refusals = 0;
   });
 
@@ -128,5 +130,38 @@ void main() {
 
     expect(api.refusals, 1);
     expect(find.text('A device wants to join'), findsNothing);
+  });
+
+  // A device the roster does not count (a phrase recovery left it out) vouches for
+  // nothing, so it is never put the question, and an open one closes once it is out.
+  testWidgets('a device the phrase left out is never asked to approve a join', (tester) async {
+    final container = await pumpHost(tester, extra: [
+      rosterStatusProvider.overrideWith((ref) async => _status('pending')),
+    ]);
+    container.read(pendingDeviceAsksProvider.notifier).add(_asker);
+    api.member = false;
+
+    final shown = showPendingDeviceDialog(host, hostRef, _asker);
+    await tester.pumpAndSettle();
+
+    expect(find.text('A device wants to join'), findsNothing);
+    await shown;
+    expect(api.refusals, 0);
+    expect(container.read(pendingDeviceAsksProvider), isEmpty);
+  });
+
+  testWidgets('an open ask closes once this device is left out', (tester) async {
+    final container = await pumpHost(tester);
+    final shown = showPendingDeviceDialog(host, hostRef, _asker);
+    await tester.pumpAndSettle();
+    expect(find.text('A device wants to join'), findsOneWidget);
+
+    api.member = false;
+    container.invalidate(rosterStatusProvider);
+    await tester.pumpAndSettle();
+
+    expect(find.text('A device wants to join'), findsNothing);
+    await shown;
+    expect(api.refusals, 0);
   });
 }

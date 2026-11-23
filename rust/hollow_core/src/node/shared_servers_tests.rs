@@ -176,17 +176,35 @@ fn only_an_asked_device_is_heard_and_an_answered_one_is_not_asked_again() {
     let mut asks = Asks::default();
     let t0 = Instant::now();
     assert!(!asks.take_frame("d"), "an unasked device's answer would be taken");
-    assert!(asks.may_ask("d", t0));
-    assert!(!asks.may_ask("d", t0), "asked twice at once");
-    assert!(asks.may_ask("d", t0 + ASK_AGAIN), "a device that has not answered is not asked again on its next arrival");
+    assert!(asks.may_ask("d", t0, false));
+    assert!(!asks.may_ask("d", t0, false), "asked twice at once");
+    assert!(asks.may_ask("d", t0 + ASK_AGAIN, false), "a device that has not answered is not asked again on its next arrival");
     assert!(asks.take_frame("d"));
-    assert!(!asks.may_ask("d", t0 + ASK_AGAIN * 10), "a device that answered was asked again");
+    assert!(!asks.may_ask("d", t0 + ASK_AGAIN * 10, false), "a device that answered was asked again");
+}
+
+/// F1: a friend's accept answers the request that carried our roster, so it re-asks
+/// inside the floor, once; an answered device is never asked again.
+#[test]
+fn an_accept_asks_again_once_inside_the_floor() {
+    let mut asks = Asks::default();
+    let t0 = Instant::now();
+    let s = Duration::from_secs(1);
+    assert!(asks.may_ask("d", t0, false));
+    assert!(!asks.may_ask("d", t0 + s, false), "an arrival asked again inside the floor");
+    assert!(asks.may_ask("d", t0 + s, true), "the accept did not ask again");
+    assert!(!asks.may_ask("d", t0 + 2 * s, true), "a second accept asked again inside the floor");
+    assert!(!asks.may_ask("d", t0 + 2 * s, false), "an arrival asked again inside the floor");
+    assert!(asks.may_ask("d", t0 + s + ASK_AGAIN, false), "the floor never ran out");
+    assert!(asks.may_ask("d", t0 + s + ASK_AGAIN + s, true), "the floor's next accept did not ask again");
+    assert!(asks.take_frame("d"));
+    assert!(!asks.may_ask("d", t0 + ASK_AGAIN * 3, true), "an accept asked a device that answered");
 }
 
 #[test]
 fn one_ask_takes_at_most_four_frames() {
     let mut asks = Asks::default();
-    assert!(asks.may_ask("d", Instant::now()));
+    assert!(asks.may_ask("d", Instant::now(), false));
     for i in 0..FRAMES {
         assert!(asks.take_frame("d"), "frame {i} of the answer was dropped");
     }

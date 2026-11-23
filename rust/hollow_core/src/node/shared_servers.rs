@@ -81,6 +81,25 @@ fn may_answer(local_device: &str, asker: &str, now: Instant) -> bool {
     true
 }
 
+#[cfg(test)]
+static REFUSED: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+
+/// Harness: `local_device` left `asker`'s ask unanswered.
+#[cfg(test)]
+pub(crate) fn note_refused(local_device: &str, asker: &str) {
+    REFUSED.lock().unwrap_or_else(|e| e.into_inner()).push((local_device.to_string(), asker.to_string()));
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+pub(crate) fn note_refused(_local_device: &str, _asker: &str) {}
+
+/// Harness: how many of `asker`'s asks `local_device` left unanswered.
+#[cfg(test)]
+pub(crate) fn refused_for_test(local_device: &str, asker: &str) -> usize {
+    REFUSED.lock().unwrap_or_else(|e| e.into_inner()).iter().filter(|(d, a)| d == local_device && a == asker).count()
+}
+
 /// Whether we answer `asker`: an accepted friend's device our BOOK counts for that
 /// friend's identity (first-party statements only, never a roster a co-member delivered).
 /// A minted key or a removed device of the friend gets nothing.
@@ -215,8 +234,9 @@ pub(crate) fn accepted(store: &MessageStore, db_path: &str, from: &str, servers:
 /// Which friend devices this recovering device asked, and which answered.
 #[derive(Default)]
 pub(crate) struct Asks {
-    /// When we asked, and how many answer frames we took since.
-    asked: HashMap<String, (Instant, usize)>,
+    /// When we asked, how many answer frames we took since, and whether a friend's
+    /// accept already asked again inside [`ASK_AGAIN`].
+    asked: HashMap<String, (Instant, usize, bool)>,
     answered: std::collections::HashSet<String>,
 }
 
@@ -227,7 +247,7 @@ impl Asks {
     /// Take one answer frame from `device`: only from a device we asked, and at most
     /// [`FRAMES`] per ask. An answer nobody asked for joins nothing.
     pub(crate) fn take_frame(&mut self, device: &str) -> bool {
-        let Some((_, taken)) = self.asked.get_mut(device) else { return false };
+        let Some((_, taken, _)) = self.asked.get_mut(device) else { return false };
         *taken += 1;
         if *taken >= FRAMES {
             self.asked.remove(device);
@@ -238,17 +258,27 @@ impl Asks {
         true
     }
 
-    fn may_ask(&mut self, device: &str, now: Instant) -> bool {
-        if self.answered.contains(device) || self.asked.get(device).is_some_and(|(at, _)| now.saturating_duration_since(*at) < ASK_AGAIN) {
+    /// `accepted`: the device's accept of our friend request just landed. It answers the
+    /// request that carried our roster, so an ask it left unanswered for want of that
+    /// roster is sent again at once, once per [`ASK_AGAIN`].
+    fn may_ask(&mut self, device: &str, now: Instant, accepted: bool) -> bool {
+        if self.answered.contains(device) {
+            return false;
+        }
+        if let Some((at, _, reasked)) = self.asked.get(device)
+            && now.saturating_duration_since(*at) < ASK_AGAIN
+            && !(accepted && !*reasked)
+        {
             return false;
         }
         if self.asked.len() >= ANSWERED_MAX {
-            self.asked.retain(|_, (at, _)| now.saturating_duration_since(*at) < ASK_AGAIN);
+            self.asked.retain(|_, (at, ..)| now.saturating_duration_since(*at) < ASK_AGAIN);
             if self.asked.len() >= ANSWERED_MAX {
                 return false;
             }
         }
-        self.asked.insert(device.to_string(), (now, 0));
+        let reasked = self.asked.get(device).is_some_and(|(at, ..)| now.saturating_duration_since(*at) < ASK_AGAIN);
+        self.asked.insert(device.to_string(), (now, 0, reasked));
         true
     }
 }
@@ -417,12 +447,14 @@ pub(crate) fn start_reentry(
 
 /// Ask friend device `peer` which servers we share, when we are a recovering fresh start,
 /// it is an accepted friend's device in our DM room with it, and it has not answered yet.
-/// `live_only`, so this runs again each time the device arrives (LOW).
+/// `live_only`, so this runs again each time the device arrives (LOW), and on its
+/// accept (`after_accept`): our first ask can reach it before the roster that counts us.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn ask_if_recovering(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     asks: &mut Asks,
     room: Option<&str>,
+    after_accept: bool,
     peer: &str,
     local_master: &str,
     local_device: &str,
@@ -435,7 +467,7 @@ pub(crate) fn ask_if_recovering(
     }
     let Ok(store) = MessageStore::lease(db_path, db_passphrase) else { return };
     let accepted = store.get_friend_row(&master).ok().flatten().is_some_and(|(status, ..)| status == "accepted");
-    if !accepted || !recovering(local_master, local_device, db_path, db_passphrase) || !asks.may_ask(peer, Instant::now()) {
+    if !accepted || !recovering(local_master, local_device, db_path, db_passphrase) || !asks.may_ask(peer, Instant::now(), after_accept) {
         return;
     }
     hollow_log!("[HOLLOW-SERVER] Asking {peer} which servers we share");

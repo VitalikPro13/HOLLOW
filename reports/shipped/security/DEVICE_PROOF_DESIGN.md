@@ -1511,7 +1511,8 @@ only lets members judge F's device by F's roster, which the phrase signed.
      removed thief) nothing. F starts the ordinary join for each entry, as from an invite.
      The relay never reads it.
    - `SharedServers` is `live_only`, so F re-asks each time a friend device arrives in the
-     DM room until that device has answered (LOW). An answer is always 4 frames of 16
+     DM room until that device has answered (LOW), and once more when that device's accept
+     of F's re-add lands: the request carried F's roster, which F's first ask can outrun. An answer is always 4 frames of 16
      entries, each padded to the size of 16 full entries, so the relay learns nothing from
      its size (LOW).
 3. **F's roster into each server room, as a hidden sender.** As soon as F learns a server

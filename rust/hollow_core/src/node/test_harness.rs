@@ -73345,3 +73345,52 @@ fn pr_b_the_own_room_hand_off_is_bounded_for_fresh_and_churning_ids() {
     assert_eq!(sent, super::roster_book::HAND_OFF_BUDGET - 1, "fresh ids drew {sent} notices, {bytes} bytes");
     super::resolver::clear_all();
 }
+
+// pr-f1-reask
+
+/// F1: a recovering device's first shared-servers ask can reach a friend before the roster
+/// that counts it (the ask races the profile carrying it), and the friend leaves it
+/// unanswered. The friend's accept of the re-add answers the request that carried the
+/// roster, so the device asks again then, inside the 60 s re-ask floor, gets its server
+/// back, and posts flow both ways.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pr_a_a_shared_servers_ask_refused_before_the_friend_counts_us_is_asked_again() {
+    let _g = test_guard();
+    let (a, a1_tag, b_tag, f_tag) = (221u8, 222u8, 223u8, 224u8);
+    let PrWorld { relay, a1, mut b, sid, _tmp } = pr_world([a, a1_tag, b_tag]).await;
+    let (a_master, b_master) = (tag_kp(a).peer_id(), tag_kp(b_tag).peer_id());
+    let a1_dev = a1.device_id.clone();
+    relay.set_online(&a1_dev, false);
+    drop(a1);
+
+    // B has not met F's roster when F's first ask, sent on its arrival, lands.
+    let b_dev = b.device_id.clone();
+    super::authority_view::refuse_book_for_test(&b_dev, &a_master);
+    let mut f = pr_restored(&relay, a, f_tag, &[&b_master], crate::api::roster::RestoreSign::Admit, super::roster_book::now_ms()).await;
+    let f_dev = f.device_id.clone();
+    assert!(
+        wait_until(30, async || super::shared_servers::refused_for_test(&b_dev, &f_dev) > 0).await,
+        "precondition: B left F's first ask unanswered",
+    );
+    let refused_at = std::time::Instant::now();
+    super::authority_view::unrefuse_book_for_test(&b_dev);
+    f.cmd_tx.send(NodeCommand::SendFriendRequest { peer_id: b_master.clone() }).await.unwrap();
+    assert!(wait_until(30, async || f.friend_status(&b_master).as_deref() == Some("accepted")).await, "B never answered the re-add");
+    // Inside the re-ask floor, so only the accept can have asked again.
+    let left = std::time::Duration::from_secs(55).saturating_sub(refused_at.elapsed());
+    assert!(
+        wait_event(&mut f, left, |ev| matches!(ev, NetworkEvent::ServerJoined { server_id: s, .. } if *s == sid)).await,
+        "F was never asked again after B's accept, so it never got the server back",
+    );
+    expect_mls_leaf(&b, &sid, &f_dev, 40).await;
+    expect_mls_leaf(&f, &sid, &b_dev, 40).await;
+    let general = general_channel_of(&sid);
+    drain_events(&mut b);
+    post_in(&f, &sid, &general, "f1 from f").await;
+    assert!(reads_live(&mut b, "f1 from f").await, "B never read F's post");
+    drain_events(&mut f);
+    post_in(&b, &sid, &general, "f1 from b").await;
+    assert!(reads_live(&mut f, "f1 from b").await, "F never read B's post");
+    drop((b, f));
+}
