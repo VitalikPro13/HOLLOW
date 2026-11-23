@@ -704,13 +704,15 @@ fn recovery_cut_off_key(base: &str) -> String {
 }
 
 /// The most devices one base's record names: only the phrase holder makes bases, and a
-/// base cuts off at most the consents a roster keeps, so this is room, not a limit.
+/// base cuts off at most the consents a roster keeps, so this is room, not a limit. Past
+/// it the newest cuts are kept, and a device left out still reads as maybe cut off.
 const MAX_CUT_OFF: usize = 512;
 
 /// Which devices the recovery that made a base cut off, as this device knows it
-/// (HOL-SEC-229): device -> when it was cut off, and `unknown_at` where a recovery held
-/// no roster before it (a Welcome recovery into an empty install), so any device asking
-/// in that base may be one of the old ones. Local to this device, never sent.
+/// (HOL-SEC-229): device -> when it was cut off, and `unknown_at`, the newest recovery
+/// that cut any device: the master key signs a join ask for any key, and this device
+/// cannot tell an old device it never held from a new one, so every other asker in that
+/// base may be one of the old ones. Local to this device, never sent.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CutOff {
     #[serde(default)]
@@ -730,41 +732,47 @@ impl CutOff {
     }
 }
 
-pub(crate) fn recovery_cut_off(store: &MessageStore, base: &str) -> CutOff {
-    store
-        .load_setting(&recovery_cut_off_key(base))
-        .ok()
-        .flatten()
-        .and_then(|v| serde_json::from_str(&v).ok())
-        .unwrap_or_default()
+/// `base`'s record; an unreadable one is an error, never an empty record.
+fn read_cut_off(store: &MessageStore, base: &str) -> Result<CutOff, String> {
+    match store.load_setting(&recovery_cut_off_key(base))? {
+        Some(v) => serde_json::from_str(&v).map_err(|e| format!("recovery cut-off record: {e}")),
+        None => Ok(CutOff::default()),
+    }
 }
 
 /// What a move from `prev` to a new base signed at `at` cut off: `prev`'s members the new
 /// base does not count, and whatever `prev`'s own base cut off that it does not take back.
-fn cut_by(store: &MessageStore, prev: &RosterState, at: i64, kept: impl Fn(&str) -> bool) -> CutOff {
-    let earlier = recovery_cut_off(store, &prev.base);
+/// A move that cuts a member marks every other asker as maybe one of the old ones; one
+/// that cuts none keeps the earlier mark, since the master key it guards against is
+/// still out there.
+fn cut_by(store: &MessageStore, prev: &RosterState, at: i64, kept: impl Fn(&str) -> bool) -> Result<CutOff, String> {
+    let earlier = read_cut_off(store, &prev.base)?;
     let mut devices: std::collections::BTreeMap<String, i64> =
         earlier.devices.into_iter().filter(|(d, _)| !kept(d)).collect();
+    let mut cut_here = false;
     for d in prev.members.iter().filter(|d| !kept(d)) {
         devices.entry(d.clone()).or_insert(at);
+        cut_here = true;
     }
-    CutOff { devices, unknown_at: earlier.unknown_at }
+    Ok(CutOff { devices, unknown_at: if cut_here { Some(at) } else { earlier.unknown_at } })
 }
 
-/// Add `cut` to what `base`'s record holds; the earlier time of a device wins.
+/// Add `cut` to what `base`'s record holds: a device's earliest cut and the newest mark
+/// win, the newest cuts first while there is room.
 fn note_cut_off(store: &MessageStore, base: &str, cut: CutOff) -> Result<(), String> {
-    let mut held = recovery_cut_off(store, base);
-    for (d, at) in cut.devices {
+    let mut held = read_cut_off(store, base)?;
+    let mut devices: Vec<(String, i64)> = cut.devices.into_iter().collect();
+    devices.sort_by_key(|(_, at)| std::cmp::Reverse(*at));
+    let mut left_out = None;
+    for (d, at) in devices {
         if held.devices.len() >= MAX_CUT_OFF && !held.devices.contains_key(&d) {
-            break;
+            left_out = left_out.max(Some(at));
+            continue;
         }
         let e = held.devices.entry(d).or_insert(at);
         *e = (*e).min(at);
     }
-    held.unknown_at = match (held.unknown_at, cut.unknown_at) {
-        (Some(a), Some(b)) => Some(a.min(b)),
-        (a, b) => a.or(b),
-    };
+    held.unknown_at = held.unknown_at.max(cut.unknown_at).max(left_out);
     if held.is_empty() {
         return Ok(());
     }
@@ -772,19 +780,23 @@ fn note_cut_off(store: &MessageStore, base: &str, cut: CutOff) -> Result<(), Str
 }
 
 /// `device`, waiting in our own `state`, as a recovery cut it off: when, and whether this
-/// device knows it was one of ours (else the recovery knew none of the old devices).
-pub(crate) fn cut_off_by_recovery(store: &MessageStore, _roster: &Roster, state: &RosterState, device: &str) -> Option<(i64, bool)> {
+/// device knows it was one of ours (else it may be). An unreadable record reads as maybe.
+pub(crate) fn cut_off_by_recovery(store: &MessageStore, roster: &Roster, state: &RosterState, device: &str) -> Option<(i64, bool)> {
     if !state.pending.contains(device) {
         return None;
     }
-    recovery_cut_off(store, &state.base).of(device)
+    match read_cut_off(store, &state.base) {
+        Ok(cut) => cut.of(device),
+        Err(_) => Some((roster.base_at().unwrap_or(0), false)),
+    }
 }
 
 /// Whether the person is asked about `device`, waiting in our own `state`: a device a
-/// recovery cut off gets no pop-up where waiting cannot let it in (HOL-SEC-229), only
-/// its row in the device list; where it can, the pop-up warns and never offers Approve.
+/// recovery cut off, or may have, gets no pop-up where waiting cannot let it in
+/// (HOL-SEC-229), only its row in the device list; where it can, the pop-up warns and
+/// never offers Approve. An unreadable record asks nothing.
 fn asks_the_person(store: &MessageStore, state: &RosterState, device: &str) -> bool {
-    !(state.no_wait && recovery_cut_off(store, &state.base).of(device).is_some())
+    !state.no_wait || read_cut_off(store, &state.base).is_ok_and(|cut| cut.of(device).is_none())
 }
 
 /// How a device leaves (DEVICE_PROOF_DESIGN 8.1): retiring keeps what it did, lost or
@@ -1034,13 +1046,12 @@ pub(crate) fn recover(
         if let Some(t) = lost_since_ms {
             note_recovery_lost_since(&store, &base, t)?;
         }
-        // With no roster held before (a Welcome recovery into an empty install), every
-        // old device is unknown here.
-        let cut = if s.members.is_empty() && lost_since_ms.is_some() {
-            CutOff { unknown_at: Some(at), ..Default::default() }
-        } else {
-            cut_by(&store, s, at, |d| keep.iter().any(|k| k == d))
-        };
+        // A recovery dropping devices as lost cut off whatever its held roster missed
+        // too (an empty install's, a stale one), and any key the master signs an ask for.
+        let mut cut = cut_by(&store, s, at, |d| keep.iter().any(|k| k == d))?;
+        if lost_since_ms.is_some() {
+            cut.unknown_at = Some(at);
+        }
         note_cut_off(&store, &base, cut)?;
         r.add_phrase_statement(&roster::r_pub_of(recovery), Some(rec), None)
     })?;
@@ -1694,7 +1705,7 @@ async fn ingest_inner(
     let added: Vec<String> = now.members.difference(&prev.members).cloned().collect();
 
     if master == local_master {
-        own_changes(event_tx, &master, local_device, &prev, &now, db_path, db_passphrase).await;
+        own_changes(event_tx, local_device, &prev, &now, db_path, db_passphrase).await;
         for (device, voucher, created_at) in own_news {
             let _ = event_tx
                 .send(NetworkEvent::SecurityAlert {
@@ -2013,6 +2024,15 @@ fn fold_in_store(
         hollow_log!("[HOLLOW-ROSTER] Failed to save the roster for {master}: {e}");
         return None;
     }
+    // A recovery typed on another device of ours: what it cut off, as we held it, in this
+    // fold's own transaction, since a later fold sees no base move to record (HOL-SEC-229).
+    if master == local_master && prev.base != now.base && !prev.members.is_empty() {
+        let at = merged.base_at().unwrap_or_else(now_ms);
+        if let Err(e) = cut_by(store, &prev, at, |d| now.is_member(d)).and_then(|cut| note_cut_off(store, &now.base, cut)) {
+            hollow_log!("[HOLLOW-ROSTER] Dropped our roster from {sender}: what its recovery cut off was not recorded ({e})");
+            return None;
+        }
+    }
 
     // One of the identity's own devices showed us its roster and we now hold all of it
     // (AR-29): that confirms its own slot, never another device's. A sibling sharing a
@@ -2059,7 +2079,6 @@ fn fold_in_store(
 /// What a change to our own roster means for this device: removed, back, or asked.
 async fn own_changes(
     event_tx: &mpsc::Sender<NetworkEvent>,
-    master: &str,
     local_device: &str,
     prev: &RosterState,
     now: &RosterState,
@@ -2082,12 +2101,6 @@ async fn own_changes(
     } else if now.is_member(local_device) && !prev.is_member(local_device) {
         note_own_removal(&store, None);
         let _ = event_tx.send(NetworkEvent::DeviceRestored).await;
-    }
-    // A recovery typed on another device of ours: what it cut off, as we held it.
-    if prev.base != now.base && now.is_member(local_device) && !prev.members.is_empty() {
-        let at = load(&store, master).and_then(|r| r.base_at()).unwrap_or_else(now_ms);
-        let cut = cut_by(&store, prev, at, |d| now.is_member(d));
-        let _ = note_cut_off(&store, &now.base, cut);
     }
     let asking: Vec<String> = now
         .pending
@@ -4854,9 +4867,10 @@ mod tests {
     }
 
     /// HOL-SEC-229: a recovery records the members it cut off. One that asks again is
-    /// named as ours and raises no pop-up where backups need approval; a device that was
-    /// never ours stays a restored backup. A recovery into an empty install knew no
-    /// device, so any asker may be one of the old ones.
+    /// named as ours and raises no pop-up where backups need approval; any other asker
+    /// may be one of the old ones (the master key signs an ask for any key), so it is
+    /// named as maybe cut off, never as a restored backup. A recovery into an empty
+    /// install knew no device, so every asker is a maybe.
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn a_recovery_records_the_devices_it_cut_off() {
@@ -4870,8 +4884,8 @@ mod tests {
         assert!(!prompted(&events, &old), "the cut-off device raised the approval pop-up");
         assert_eq!(cut_off_here(&me, &old), Some((at, true)));
         let events = asks(&mut me, &backup).await;
-        assert!(prompted(&events, &backup), "a device that was never ours is still asked about");
-        assert_eq!(cut_off_here(&me, &backup), None, "a restored backup is not named as cut off");
+        assert!(!prompted(&events, &backup), "a device no record names was offered as a restored backup");
+        assert_eq!(cut_off_here(&me, &backup), Some((at, false)), "a device no record names is not a maybe");
 
         let mut fresh = Observer::new(0x31, 0x36);
         let (r, _) = recover(&fresh.master, &recovery, &fresh.device, &[], true, Some(now_ms() - 1_000), &fresh.db, &fresh.pass).unwrap();
@@ -4915,5 +4929,142 @@ mod tests {
         assert!(prompted(&events, &old), "a cut-off device that can join by waiting went unannounced");
         assert_eq!(cut_off_here(&me, &old), Some((r.base_at().unwrap(), true)));
     }
-}
 
+    /// HOL-SEC-229 review: the master key signs a join ask for any key, so a recovery that
+    /// drops devices as lost marks every asker its record does not name as maybe one of
+    /// the old ones: a fresh key is never offered as a restored backup.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn rev229_a_fresh_key_after_a_lost_recovery_is_not_offered_as_a_backup() {
+        let _g = guard();
+        let mut me = Observer::new(0x91, 0x92);
+        let (recovery, old, fresh) = (kp(0x93), kp(0x94), kp(0x95));
+        rooted_with(&me, &recovery, &[&old]);
+        let (r, _) = recover(&me.master, &recovery, &me.device, &[], true, Some(now_ms() - 1_000), &me.db, &me.pass).unwrap();
+        let events = asks(&mut me, &fresh).await;
+        assert!(cut_off_here(&me, &fresh).is_some(), "a fresh key after a lost recovery is named as a restored backup");
+        assert_eq!(cut_off_here(&me, &fresh), Some((r.base_at().unwrap(), false)));
+        assert!(!prompted(&events, &fresh), "a fresh key after a lost recovery raised the approval pop-up");
+    }
+
+    /// HOL-SEC-229 review: a kept device records the cut in the fold that takes the new
+    /// base, not after it: a fold that committed while the after-step never ran (a kill,
+    /// a failed lease) still leaves the record, and nothing pops for the cut-off device,
+    /// at once or at the next start. A fresh key reads as maybe one of the old ones.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn rev229_b_a_kept_device_that_missed_the_after_step_still_never_prompts() {
+        let _g = guard();
+        let mut me = Observer::new(0xa1, 0xa2);
+        let (recovery, typist, old, fresh) = (kp(0xa3), kp(0xa4), kp(0xa5), kp(0xa6));
+        let (m, d) = (me.master.peer_id(), me.device.peer_id());
+        let mut r = rooted_with(&me, &recovery, &[&typist, &old]);
+        let mut keep = vec![d.clone(), typist.peer_id()];
+        keep.sort();
+        let at = now_ms() - 1_000;
+        r.recoveries.push(roster::sign_recovery(&me.master, &recovery, at, &keep, true));
+        // The fold's store half commits; the async half after it never runs.
+        let folded = fold_in(&me.db, &me.pass, &r.verified(now_ms()), &typist.peer_id(), &m, &d, Source::Delivered);
+        assert!(folded.is_some_and(|f| f.prev.base != f.now.base), "precondition: the fold took the new base");
+        assert!(!me.state_of(&m).is_member(&old.peer_id()), "precondition: the new base cut it off");
+
+        let events = asks(&mut me, &old).await;
+        assert!(!prompted(&events, &old), "the kept device raised the approval pop-up for the cut-off device");
+        assert_eq!(cut_off_here(&me, &old), Some((at, true)));
+        let events = asks(&mut me, &fresh).await;
+        assert!(!prompted(&events, &fresh), "the kept device raised the approval pop-up for a fresh key");
+        assert_eq!(cut_off_here(&me, &fresh), Some((at, false)));
+        announce_own_state(&me.events, &d, &me.state_of(&m), &me.db, &me.pass).await;
+        let events = me.drain();
+        assert!(!prompted(&events, &old) && !prompted(&events, &fresh), "the next start raised the approval pop-up");
+    }
+
+    /// HOL-SEC-229 review: a kept device that cannot record what a recovery cut off takes
+    /// none of that base: the fold fails, the roster stays as it was.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn rev229_c_a_kept_device_that_cannot_record_the_cut_refuses_the_base() {
+        let _g = guard();
+        let me = Observer::new(0xb1, 0xb2);
+        let (recovery, typist, old) = (kp(0xb3), kp(0xb4), kp(0xb5));
+        let (m, d) = (me.master.peer_id(), me.device.peer_id());
+        let mut r = rooted_with(&me, &recovery, &[&typist, &old]);
+        let before = me.state_of(&m).base;
+        let mut keep = vec![d.clone(), typist.peer_id()];
+        keep.sort();
+        r.recoveries.push(roster::sign_recovery(&me.master, &recovery, now_ms() - 1_000, &keep, true));
+        let new_base = r.reverified().base();
+        me.store().save_setting(&recovery_cut_off_key(&new_base), "not json").unwrap();
+        let folded = fold_in(&me.db, &me.pass, &r.verified(now_ms()), &typist.peer_id(), &m, &d, Source::Delivered);
+        assert!(folded.is_none(), "the fold took a base whose cut it could not record");
+        assert_eq!(me.state_of(&m).base, before, "the roster moved without the record");
+    }
+
+    /// HOL-SEC-229 review, item 5: a recovery that keeps every member (choosing whether
+    /// backups wait, confirming the stored phrase) marks nothing, so a backup asking after
+    /// it is still put to the person; after a lost recovery the mark stays through such a
+    /// base (the master key is still out there) and moves to the date of the newest
+    /// recovery that cut a device; a device stays named by its own first cut.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn rev229_d_the_maybe_mark_names_the_newest_recovery_that_cut_a_device() {
+        let _g = guard();
+        let mut me = Observer::new(0xc1, 0xc2);
+        let (recovery, old, other) = (kp(0xc3), kp(0xc4), kp(0xc5));
+        let (backup, fresh, later) = (kp(0xc6), kp(0xc7), kp(0xc8));
+        let m = me.master.peer_id();
+        rooted_with(&me, &recovery, &[&old, &other]);
+        let all = |me: &Observer| me.state_of(&m).members.into_iter().collect::<Vec<_>>();
+        recover(&me.master, &recovery, &me.device, &all(&me), true, None, &me.db, &me.pass).unwrap();
+        let events = asks(&mut me, &backup).await;
+        assert!(prompted(&events, &backup), "a recovery that kept every member hid a restored backup");
+        assert_eq!(cut_off_here(&me, &backup), None, "a recovery that cut nothing marked an asker");
+
+        let (r1, _) = recover(&me.master, &recovery, &me.device, &[other.peer_id()], true, Some(now_ms() - 1_000), &me.db, &me.pass).unwrap();
+        let t1 = r1.base_at().unwrap();
+        recover(&me.master, &recovery, &me.device, &all(&me), false, None, &me.db, &me.pass).unwrap();
+        asks(&mut me, &old).await;
+        asks(&mut me, &fresh).await;
+        assert_eq!(cut_off_here(&me, &old), Some((t1, true)), "the cut-off device lost its record through a base keeping every member");
+        assert_eq!(cut_off_here(&me, &fresh), Some((t1, false)), "the mark did not stay with the recovery that cut");
+
+        let (r3, _) = recover(&me.master, &recovery, &me.device, &[], true, None, &me.db, &me.pass).unwrap();
+        let t3 = r3.base_at().unwrap();
+        asks(&mut me, &old).await;
+        asks(&mut me, &later).await;
+        assert_eq!(cut_off_here(&me, &later), Some((t3, false)), "the mark names an older recovery than the newest one that cut");
+        assert_eq!(cut_off_here(&me, &old), Some((t1, true)), "a device is named by its first cut");
+        assert_eq!(cut_off_here(&me, &other), None, "a device not asking is named nowhere");
+    }
+
+    /// HOL-SEC-229 review, item 6: past the cap the record keeps the newest cuts, and a
+    /// device left out still reads as maybe cut off, never as a restored backup.
+    #[test]
+    fn rev229_e_a_device_past_the_cut_off_cap_still_reads_as_maybe() {
+        let me = Observer::new(0xd1, 0xd2);
+        let store = me.store();
+        let name = |i: usize| format!("dev{i:04}");
+        let devices = (0..=MAX_CUT_OFF).map(|i| (name(i), 1_000 + i as i64)).collect();
+        note_cut_off(&store, "base", CutOff { devices, unknown_at: None }).unwrap();
+        let held = read_cut_off(&store, "base").unwrap();
+        assert_eq!(held.devices.len(), MAX_CUT_OFF);
+        assert_eq!(held.of(&name(MAX_CUT_OFF)), Some((1_000 + MAX_CUT_OFF as i64, true)), "the newest cut was left out");
+        assert_eq!(held.of(&name(0)), Some((1_000, false)), "a device past the cap reads as a restored backup");
+    }
+
+    /// HOL-SEC-229 review: a record that cannot be read never makes an asker a restored
+    /// backup: no pop-up, and the device list names it as maybe cut off.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn rev229_f_an_unreadable_record_offers_no_asker_as_a_backup() {
+        let _g = guard();
+        let mut me = Observer::new(0xe1, 0xe2);
+        let (recovery, old, fresh) = (kp(0xe3), kp(0xe4), kp(0xe5));
+        rooted_with(&me, &recovery, &[&old]);
+        let (r, s) = recover(&me.master, &recovery, &me.device, &[], true, Some(now_ms() - 1_000), &me.db, &me.pass).unwrap();
+        me.store().save_setting(&recovery_cut_off_key(&s.base), "not json").unwrap();
+        let events = asks(&mut me, &fresh).await;
+        assert!(!prompted(&events, &fresh), "an unreadable record raised the approval pop-up");
+        assert_eq!(cut_off_here(&me, &fresh), Some((r.base_at().unwrap(), false)), "an unreadable record named an asker as a backup");
+    }
+}

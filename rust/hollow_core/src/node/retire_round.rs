@@ -85,6 +85,16 @@ pub(crate) struct RetireRounds {
     resume_at: Option<Instant>,
 }
 
+/// Devices a round was started for in this process. Tests only.
+#[cfg(test)]
+static STARTED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Whether a retire round was started for `device`. Tests only.
+#[cfg(test)]
+pub(crate) fn round_started_for_test(device: &str) -> bool {
+    STARTED.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|d| d == device)
+}
+
 /// Note `removal` as held, so a restart finishes it.
 pub(crate) fn save_held(store: &crate::storage::MessageStore, removal: &Removal) {
     let deps = if removal.with_dependents { "deps" } else { "one" };
@@ -129,6 +139,8 @@ impl RetireRounds {
     /// Hold `removal` until its round ends; `asked` lists, per server, how many member
     /// identities other than ours were asked. The removal comes back when nothing waits.
     pub(crate) fn start(&mut self, removal: Removal, asked: Vec<(String, usize)>, now: Instant) -> Option<Removal> {
+        #[cfg(test)]
+        STARTED.lock().unwrap_or_else(|e| e.into_inner()).push(removal.device.clone());
         if self.open.iter().any(|r| r.removal.device == removal.device) {
             return None;
         }

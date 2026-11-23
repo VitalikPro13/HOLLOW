@@ -594,6 +594,9 @@ class _HollowShellState extends ConsumerState<HollowShell>
     ref.listenManual<List<String>>(pendingDeviceAsksProvider, (_, asks) {
       if (asks.isNotEmpty) _askAboutPendingDevices();
     });
+    ref.listenManual<AsyncValue<roster_api.RosterStatus>>(rosterStatusProvider, (_, next) {
+      if (next.hasValue && ref.read(pendingDeviceAsksProvider).isNotEmpty) _askAboutPendingDevices();
+    });
     ref.listenManual<RestoreChooserAsk?>(restoreChooserAskProvider, (_, ask) {
       if (ask != null) unawaited(_restoreOffers.afterRecovery(fresh: ask.fresh));
     });
@@ -648,7 +651,8 @@ class _HollowShellState extends ConsumerState<HollowShell>
         final asks = ref.read(pendingDeviceAsksProvider);
         // Only a device that belongs can answer for another.
         if (asks.isEmpty || ref.read(rosterGateProvider).kind != RosterGateKind.none) break;
-        await showPendingDeviceDialog(context, ref, asks.first);
+        // An unreadable roster leaves the ask queued until the roster is read again.
+        if (!await showPendingDeviceDialog(context, ref, asks.first)) break;
       }
     } finally {
       _pendingDeviceDialogOpen = false;

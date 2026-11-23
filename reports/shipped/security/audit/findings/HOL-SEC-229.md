@@ -10,9 +10,11 @@ Severity:    Medium                      (Impact M: one tap re-admits a device t
                                           device, which asks again by itself after
                                           every recovery, and the person's tap)
 Category:    Identity authority (user-confirmed approval)
-Component:   rust/hollow_core/src/node/roster_book.rs (own_changes,
-             announce_own_state, recover), lib/src/ui/shell/roster_lock.dart
-             (showPendingDeviceDialog), lib/src/ui/settings/devices_section.dart
+Component:   rust/hollow_core/src/node/roster_book.rs (fold_in_store,
+             own_changes, announce_own_state, recover), node/swarm.rs
+             (RevokeDevice), lib/src/ui/shell/roster_lock.dart
+             (showPendingDeviceDialog), lib/src/ui/shell/hollow_shell.dart,
+             lib/src/ui/settings/devices_section.dart
 Boundary:    TB-1 (the person's own devices)
 Traces to:   design ID-1 sections 4 and 8; R-ID-19
 Found:       2026-11-23 (phrase-restore clean macOS fleet, Yes flow, and the
@@ -53,25 +55,43 @@ restore (#155, unreleased) shows the same, fleet evidence
 The device that signs a recovery records, per base, which devices it cut off
 (`recovery_cut_off:{base}`: the members the base before counted that the recovery does
 not keep, with those an earlier recovery cut off and this one does not take back). A
-device a recovery keeps records the same when the new base reaches it. A Welcome
-recovery into an empty install held no roster, so it knew none of the old devices: it
-records that any device asking in its base may be one of them.
+device of the identity records the same when the new base reaches it, inside the
+roster fold's own transaction: a record it cannot read or write fails the fold, so a
+kill between taking the base and writing the record cannot happen (a later fold sees
+no base move and would never write it).
 
-- A device asking to join that a recovery cut off is never presented as a restored
-  backup. Where waiting cannot let it in (backups need approval, which a Welcome
-  recovery on an empty install always signs), no pop-up appears for it, at once or at
-  any start. Where it could join by seven quiet days, a warning names it as cut off
-  and offers only Refuse ("Later" leaves it); the approval pop-up never shows for it,
-  and one already open closes.
+Every move that cuts a member, and every recovery that drops devices as lost, also
+marks the base: any device asking to join that the record does not name may be one
+of the old ones. The master key signs a join ask for any key, so the person's devices
+cannot tell a key the thief made, an old device their roster missed (an empty
+install, a stale roster, a sibling-vouched device not yet folded) and a real backup
+apart. A move that cuts nothing (choosing whether backups wait, confirming the phrase
+an old version stored) adds no mark and keeps the earlier one, since the key it
+guards against never rotates; the mark names the newest recovery that cut a device.
+
+- No device asking in a marked base, or named by its record, is presented as a
+  restored backup. Where waiting cannot let it in (backups need approval, which a
+  Welcome recovery on an empty install always signs), no pop-up appears for it, at
+  once or at any start. Where it could join by seven quiet days, a warning names it
+  as cut off (or as maybe one of the old devices) and offers only Refuse ("Later"
+  leaves it); the approval pop-up never shows for it, and one already open closes.
+- An unreadable record reads as "maybe" (no pop-up, the warning copy on its row). An
+  unreadable roster status in the app shows nothing and leaves the ask queued for the
+  next read: only a status saying the device was not cut off opens the Approve
+  variant.
 - The device list names it for what it is ("Your recovery phrase cut it off on
-  {date}. Approve it only if you have it with you.", or for an empty install "...cut
-  off your old devices on {date}. It may be one of them, or a copy someone else
-  has.").
+  {date}. Approve it only if you have it with you.", or "...cut off your old devices
+  on {date}. It may be one of them, or a copy someone else has.").
 - Re-admission stays possible, but only by a deliberate act: Approve on its row in
   Settings, Devices, on a device that belongs, or the recovery phrase typed on the
-  cut-off device itself (its lock says both). A person who answered "I'm not sure" may
-  find the old device in a drawer, so the way back is not closed; it is never a
-  pop-up.
+  cut-off device itself (its lock says both, and names Settings, under Devices). A
+  person who answered "I'm not sure" may find the old device in a drawer, so the way
+  back is not closed; it is never a pop-up.
+- Refusing such a device (a Retire removal of a device our roster does not count as
+  a member) mints no retire and starts no retire round, at once or late. Before, the
+  first mint was refused only because `retire_allowed` needs the device stated
+  (`states_device`) and the retire was authored before the removal; the round's late
+  mint runs after the removal states it.
 
 The fold, the relay and contacts are unchanged: what the person sees changes, never
 who counts.
@@ -84,6 +104,16 @@ Tests:
 - unit `roster_book::tests::a_recovery_records_the_devices_it_cut_off`,
   `a_kept_device_records_what_a_recovery_elsewhere_cut_off`,
   `a_cut_off_device_still_warns_where_it_can_join_by_waiting`.
+- review round (Nov 23): unit
+  `rev229_a_fresh_key_after_a_lost_recovery_is_not_offered_as_a_backup` and
+  `rev229_b_a_kept_device_that_missed_the_after_step_still_never_prompts` (both red
+  before), `rev229_c_a_kept_device_that_cannot_record_the_cut_refuses_the_base`,
+  `rev229_d_the_maybe_mark_names_the_newest_recovery_that_cut_a_device`,
+  `rev229_e_a_device_past_the_cut_off_cap_still_reads_as_maybe`,
+  `rev229_f_an_unreadable_record_offers_no_asker_as_a_backup`; harness
+  `rev229_refusing_a_device_a_recovery_cut_off_never_endorses_what_it_wrote_after_t`;
+  widget "an unreadable roster never offers Approve for a device that may be cut off"
+  (red before).
 - unit `api::roster::tests::roster_status_names_a_device_the_in_app_recovery_cut_off`
   (through the shipped `recover_with_phrase` FFI).
 - widget `pending_device_dialog_test.dart`: "a device a recovery cut off (ours/maybe)
@@ -97,6 +127,15 @@ possibly cut off, and Approve there lets l back in (it then deleted the throwawa
 server): `.team/fleet/combined/r229_hol_sec_229_before_after.png`,
 `r229_pr4_cleanup_flow.png` (scratch, not merged).
 
-Residual: a device the person links AFTER the recovery inherits the record only
-through the link snapshot (the database rides it); a device that held this identity
-before the recovery and was away records the cut when the new base reaches it.
+Residual: what holds after the fix. On a device that held the identity when a
+recovery cut devices off (the typist, and every device that folds the new base),
+no device asking in that base or a later one is offered for approval in a pop-up,
+whatever key it uses. The record is local and never sent: a device that joins the
+identity AFTER the recovery has it only through the link snapshot (the database
+rides it); a device that never held the base before the recovery (prev members
+empty) records nothing and treats askers as backups. A device the record does not
+name reads as "maybe" even when it is a real backup restored later, which the person
+approves from the Devices page. The record holds at most 512 devices; one left out
+reads "maybe". None of this changes who counts: the seven-day path still admits a
+cut-off device nobody refuses where the phrase left that path on, which is why the
+warning stays there.

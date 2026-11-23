@@ -189,8 +189,9 @@ class _RosterLockScreenState extends ConsumerState<RosterLockScreen> {
             'under Devices, on your other device.$when';
       } else {
         title = 'Waiting to join your identity';
-        body = 'This device was restored from a backup. Approve it on one of '
-            'your other devices, or type your recovery phrase.$when';
+        body = 'This device was restored from a backup. Type your recovery '
+            'phrase, or approve it in Settings, under Devices, on one of your '
+            'other devices.$when';
       }
     }
 
@@ -284,14 +285,28 @@ bool rosterAsksApproval(roster_api.RosterStatus status, String device) =>
 /// Approve vouches for it; Refuse removes it; Later leaves it waiting. An ask that
 /// was settled meanwhile (on another device, or by the phrase) is never shown. A
 /// device a recovery cut off gets no pop-up where it cannot join by waiting, and
-/// only a warning that offers Refuse where it can.
-Future<void> showPendingDeviceDialog(BuildContext context, WidgetRef ref, String device) async {
+/// only a warning that offers Refuse where it can. False when the roster could not
+/// be read: nothing is shown (only a status saying the device was not cut off may
+/// offer Approve) and the ask stays queued for the next read.
+Future<bool> showPendingDeviceDialog(BuildContext context, WidgetRef ref, String device) async {
   final asks = ref.read(pendingDeviceAsksProvider.notifier);
-  final status = await roster_api.rosterStatus().then<roster_api.RosterStatus?>((s) => s, onError: (_) => null);
-  if (status != null && !rosterStillWaiting(status, device) || !context.mounted) return asks.answered(device);
-  final asker = status == null ? null : rosterDeviceOf(status, device);
-  final cutOffAt = asker?.cutOffAtMs;
-  if (cutOffAt != null && !status!.backupWait) return asks.answered(device);
+  final roster_api.RosterStatus status;
+  try {
+    status = await roster_api.rosterStatus();
+  } catch (e) {
+    debugPrint('[HOLLOW] Roster status unavailable, a join ask waits: $e');
+    return false;
+  }
+  if (!rosterStillWaiting(status, device) || !context.mounted) {
+    asks.answered(device);
+    return true;
+  }
+  final asker = rosterDeviceOf(status, device)!;
+  final cutOffAt = asker.cutOffAtMs;
+  if (cutOffAt != null && !status.backupWait) {
+    asks.answered(device);
+    return true;
+  }
   final name = deviceGivenName(device,
           labels: ref.read(deviceLabelProvider), kinds: ref.read(deviceKindProvider)) ??
       shortPeerLabel(device);
@@ -304,13 +319,14 @@ Future<void> showPendingDeviceDialog(BuildContext context, WidgetRef ref, String
             device: device,
             name: name,
             cutOffAt: DateTime.fromMillisecondsSinceEpoch(cutOffAt.toInt()),
-            ours: asker!.cutOff == 'ours',
+            ours: asker.cutOff == 'ours',
             joinsAt: asker.firstSeenMs == null
                 ? null
                 : DateTime.fromMillisecondsSinceEpoch(asker.firstSeenMs!.toInt()).add(const Duration(days: 7)),
           ),
   );
   asks.answered(device);
+  return true;
 }
 
 /// A device a recovery cut off that can still join by nobody refusing it: the person
@@ -319,8 +335,8 @@ class _CutOffDeviceDialog extends ConsumerStatefulWidget {
   final String device;
   final String name;
   final DateTime cutOffAt;
-  /// This device knows it was one of ours; else the recovery knew none of the old
-  /// devices (a fresh install), so it may be one of them or a copy of the key.
+  /// This device knows it was one of ours; else it is a device no record here names,
+  /// which may be an old one or one someone else made with the identity's key.
   final bool ours;
   final DateTime? joinsAt;
   const _CutOffDeviceDialog({

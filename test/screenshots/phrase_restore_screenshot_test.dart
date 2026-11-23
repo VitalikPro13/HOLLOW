@@ -460,6 +460,11 @@ void main() {
       RosterGate(
           kind: RosterGateKind.pending, droppedAt: DateTime(2026, 11, 20, 14, 5)),
     ),
+    (
+      'waiting',
+      RosterGate(
+          kind: RosterGateKind.pending, joinsAt: DateTime(2026, 11, 30, 14, 5)),
+    ),
   ]) {
     for (final light in [false, true]) {
       final theme = light ? 'light' : 'dark';
