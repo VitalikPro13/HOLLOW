@@ -38,6 +38,8 @@ const _allowed = <String, (int, String)>{
       (1, 'own: our animation as process_and_store re-encoded it'),
   'lib/src/core/providers/background_provider.dart':
       (3, 'own: the chat background the user picked'),
+  'lib/src/core/services/os_call_avatar.dart':
+      (1, 'gated: the call notification face via get_avatar (shown)'),
   'lib/src/ui/chat/dm_profile_panel.dart':
       (1, 'gated: banner via get_banner, its animation via rail_blob_shown'),
   'lib/src/ui/chat/emoji_picker.dart':
