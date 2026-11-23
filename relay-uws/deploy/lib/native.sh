@@ -13,6 +13,7 @@ INSTALLER_COPY=$LIB_DIR/installer
 VERSION_FILE=$LIB_DIR/VERSION
 BUILT_FROM_FILE=$LIB_DIR/BUILT_FROM
 PREVIOUS_DIR=$LIB_DIR/previous
+PROGRAMS_DIR=/usr/local/bin
 # The third-party notices a release carries in its setup copy, installed beside
 # the programs from the verified download (scripts/build_relay_binaries.sh
 # NOTICES, FWD_NOTICES): a first install keeps the copy of the setup it runs
@@ -91,11 +92,11 @@ installed_source() { [ -r "$BUILT_FROM_FILE" ] && head -n 1 "$BUILT_FROM_FILE"; 
 install_programs() {
     local dir=$1 f
     # An update that an earlier run started already kept the pair it replaces.
-    if [ "$DRY_RUN" = 0 ] && [ -x /usr/local/bin/hollow-relay ] && ! update_kept programs; then
+    if [ "$DRY_RUN" = 0 ] && [ -x "$PROGRAMS_DIR/hollow-relay" ] && ! update_kept programs; then
         install -d -m 0755 "$PREVIOUS_DIR"
         rm -f -- "$PREVIOUS_DIR/hollow-relay" "$PREVIOUS_DIR/hollow-forwarder" "$PREVIOUS_DIR/VERSION" "$PREVIOUS_DIR/BUILT_FROM"
         for f in $RELEASE_NOTICES; do rm -f -- "${PREVIOUS_DIR:?}/$f"; done
-        for f in /usr/local/bin/hollow-relay /usr/local/bin/hollow-forwarder "$VERSION_FILE" "$BUILT_FROM_FILE"; do
+        for f in "$PROGRAMS_DIR/hollow-relay" "$PROGRAMS_DIR/hollow-forwarder" "$VERSION_FILE" "$BUILT_FROM_FILE"; do
             [ -e "$f" ] && cp -p "$f" "$PREVIOUS_DIR/"
         done
         for f in $RELEASE_NOTICES; do
@@ -106,11 +107,11 @@ install_programs() {
     for f in hollow-relay hollow-forwarder; do
         [ -f "$dir/$f" ] || continue
         if [ "$DRY_RUN" = 1 ]; then
-            say "  would install: /usr/local/bin/$f"
+            say "  would install: $PROGRAMS_DIR/$f"
             continue
         fi
-        install -m 0755 -o root -g root "$dir/$f" "/usr/local/bin/$f.new"
-        mv -f "/usr/local/bin/$f.new" "/usr/local/bin/$f"
+        install -m 0755 -o root -g root "$dir/$f" "$PROGRAMS_DIR/$f.new"
+        mv -f "$PROGRAMS_DIR/$f.new" "$PROGRAMS_DIR/$f"
     done
     # The notices of the programs from a release, never of programs built here.
     for f in $RELEASE_NOTICES; do
@@ -134,8 +135,8 @@ restore_previous_programs() {
     [ -x "$PREVIOUS_DIR/hollow-relay" ] || return 1
     for f in hollow-relay hollow-forwarder; do
         [ -f "$PREVIOUS_DIR/$f" ] || continue
-        install -m 0755 -o root -g root "$PREVIOUS_DIR/$f" "/usr/local/bin/$f.new"
-        mv -f "/usr/local/bin/$f.new" "/usr/local/bin/$f"
+        install -m 0755 -o root -g root "$PREVIOUS_DIR/$f" "$PROGRAMS_DIR/$f.new"
+        mv -f "$PROGRAMS_DIR/$f.new" "$PROGRAMS_DIR/$f"
     done
     [ -f "$PREVIOUS_DIR/VERSION" ] && cp -p "$PREVIOUS_DIR/VERSION" "$VERSION_FILE"
     [ -f "$PREVIOUS_DIR/BUILT_FROM" ] && cp -p "$PREVIOUS_DIR/BUILT_FROM" "$BUILT_FROM_FILE"
@@ -145,7 +146,6 @@ restore_previous_programs() {
     return 0
 }
 
-PROGRAMS_DIR=/usr/local/bin
 programs_present() {
     [ -x "$PROGRAMS_DIR/hollow-relay" ] || return 1
     [ "$CFG_FORWARDER" != yes ] || [ -x "$PROGRAMS_DIR/hollow-forwarder" ] || return 1

@@ -1377,7 +1377,7 @@ t_release_notices() {
     : >"$d/dl/hollow-relay"; : >"$d/dl/hollow-forwarder"; printf 'version=0.14.3\nbuild=0\n' >"$d/dl/VERSION"
     echo relay-notes >"$d/dl/setup/deploy/THIRD_PARTY_NOTICES.txt"
     echo fwd-notes >"$d/dl/setup/deploy/THIRD_PARTY_NOTICES_FORWARDER.txt"
-    LIB_DIR=$d/lib BUILT_FROM_FILE=$d/lib/BUILT_FROM VERSION_FILE=$d/lib/VERSION PREVIOUS_DIR=$d/lib/previous DRY_RUN=0 CFG_FORWARDER=yes
+    LIB_DIR=$d/lib BUILT_FROM_FILE=$d/lib/BUILT_FROM VERSION_FILE=$d/lib/VERSION PREVIOUS_DIR=$d/lib/previous DRY_RUN=0 CFG_FORWARDER=yes PROGRAMS_DIR=$d/bin UPDATE_MARK=$d/no-update
     put_file() { cat >"$1"; }
     install() { :; }
     mv() { :; }
@@ -1403,6 +1403,17 @@ t_release_notices() {
     yes_ restore_previous_programs
     eq "the earlier relay notices come back" "$(cat "$d/lib/THIRD_PARTY_NOTICES.txt")" old-relay-notes
     yes_ test ! -e "$d/lib/THIRD_PARTY_NOTICES_FORWARDER.txt"
+    # An update keeps the notices of the pair it replaces, for that rollback.
+    rm -rf "$d/lib/previous"
+    mkdir -p "$d/bin" && : >"$d/bin/hollow-relay" && chmod 0755 "$d/bin/hollow-relay"
+    echo kept-relay-notes >"$d/lib/THIRD_PARTY_NOTICES.txt"
+    echo kept-fwd-notes >"$d/lib/THIRD_PARTY_NOTICES_FORWARDER.txt"
+    install() { if [ "$1" = -d ]; then mkdir -p "${@: -1}"; fi; }
+    install_programs "$d/dl" prebuilt >/dev/null
+    eq "the replaced relay notices are kept" "$(cat "$d/lib/previous/THIRD_PARTY_NOTICES.txt")" kept-relay-notes
+    eq "and the replaced forwarder notices" "$(cat "$d/lib/previous/THIRD_PARTY_NOTICES_FORWARDER.txt")" kept-fwd-notes
+    eq "while the new ones are installed" "$(cat "$d/lib/THIRD_PARTY_NOTICES.txt")" relay-notes
+    install() { :; }
     # A dry run changes nothing.
     echo keep >"$d/lib/THIRD_PARTY_NOTICES_FORWARDER.txt"
     DRY_RUN=1
