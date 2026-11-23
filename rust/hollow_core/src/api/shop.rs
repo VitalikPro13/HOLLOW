@@ -763,7 +763,7 @@ async fn read_bounded(resp: reqwest::Response, max_bytes: usize) -> Result<Vec<u
 pub fn fetch_shop_catalog() -> Result<ShopCatalog, String> {
     let origin = shop_origin();
     let url = format!("{origin}/api/catalog.json");
-    let rt = get_http_runtime();
+    let rt = get_http_runtime()?;
     let body = rt.block_on(async move {
         let client = shop_client()?;
         fetch_bounded(
@@ -801,7 +801,7 @@ pub(crate) fn check_art_bytes(hash: &str, bytes: &[u8]) -> Result<(), String> {
 #[frb]
 pub fn fetch_shop_art(hash: String) -> Result<Vec<u8>, String> {
     shop_art_from(hash, |url| {
-        get_http_runtime().block_on(async move {
+        get_http_runtime()?.block_on(async move {
             let client = shop_client()?;
             fetch_bounded(&client, &url, 20, MAX_FILE_BYTES, None).await
         })
@@ -1175,7 +1175,7 @@ pub fn redeem_lookup(code: String) -> Result<RedeemLookup, String> {
         return Err("That does not look like a redeem code".into());
     }
     let origin = shop_origin();
-    let looked = get_http_runtime().block_on(lookup_remote(&origin, &code))?;
+    let looked = get_http_runtime()?.block_on(lookup_remote(&origin, &code))?;
     let status = clamp(&looked.status, 16);
     if lookup_status_is_dead(&status) {
         // A kept code the shop will never honour again does not sit in "Codes kept for
@@ -1221,7 +1221,7 @@ pub fn redeem_code(code: String) -> Result<RedeemOutcome, String> {
     }
     let master = my_master_peer_id()?;
     let origin = shop_origin();
-    let rt = get_http_runtime();
+    let rt = get_http_runtime()?;
     let root = support_creds::root_verifying_key();
 
     // 1. What the code buys, and the key that will sign for it.
@@ -1666,7 +1666,7 @@ fn twitch_post(origin: &str, path: &str, body: serde_json::Value) -> Result<Vec<
     let url = format!("{origin}{path}");
     let client = shop_client()?;
     let (status, answer) =
-        get_http_runtime().block_on(post_json_bounded(&client, &url, &body, 30, 64 * 1024))?;
+        get_http_runtime()?.block_on(post_json_bounded(&client, &url, &body, 30, 64 * 1024))?;
     if !(200..300).contains(&status) {
         return Err(twitch_refusal(status, &answer));
     }

@@ -37,6 +37,14 @@ release pipeline is the `release` skill.
   calls `crash_dumps::keep_secrets_out` (RLIMIT_CORE 0 on Unix, heap out of Windows Error
   Reporting dumps). Never `PR_SET_DUMPABLE=0` on Linux: xdg-desktop-portal and PipeWire
   identify a flatpak client through /proc/PID/root, and the flatpak loses them (HOL-SEC-200).
+- Beside it, `open_files::raise_soft_limit` lifts the open-file SOFT limit to min(hard,
+  kern.maxfilesperproc on Apple, 8192), never lowering it. launchd starts processes at 256
+  (the macOS app reached Rust init at 2560 on the mini, raised by something before it); with
+  25 network interfaces three WebRTC connections at boot hit EMFILE on the mini (Nov 23), and
+  every later open failed. Windows has no such limit for handles and sockets (no-op);
+  Android starts at 32768 (no-op). A new process entry calls both; a source test pairs them.
+  The authoring HTTP runtime (`get_http_runtime`) returns an error instead of panicking when
+  it cannot start, and a failed start is retried on the next call.
 - Windows debug builds: tokio workers have a 2048 KiB stack and a debug poll frame keeps
   every future built in it (`Box::pin(f(..))` still builds `f` in the caller). A new swarm
   loop or request arm builds its future in a short non-async helper returning `BoxedStep`,

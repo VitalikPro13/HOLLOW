@@ -141,7 +141,7 @@ pub(crate) fn catalog_client() -> Result<reqwest::Client, String> {
 
 #[frb(ignore)]
 fn fetch(url: String) -> Result<Vec<u8>, String> {
-    get_http_runtime().block_on(async move {
+    get_http_runtime()?.block_on(async move {
         let resp = catalog_client()?
             .get(&url)
             .timeout(std::time::Duration::from_secs(20))
@@ -234,7 +234,7 @@ mod tests {
             let _ = s.read(&mut buf);
             let _ = write!(s, "HTTP/1.1 302 Found\r\nLocation: {target}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
         });
-        let status = get_http_runtime().block_on(async {
+        let status = get_http_runtime().expect("http runtime").block_on(async {
             let ask = catalog_client().unwrap().get(&url).timeout(std::time::Duration::from_secs(5));
             ask.send().await.map(|r| r.status().as_u16())
         });

@@ -714,14 +714,17 @@ pub(crate) fn get_runtime() -> &'static tokio::runtime::Runtime {
 }
 
 static HTTP_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+static HTTP_RUNTIME_START: Mutex<()> = Mutex::new(());
 
 /// Small dedicated runtime for authoring-time website-proxy HTTP (FFZ, IGDB, GIF
 /// search). ISOLATED from the node runtime on purpose: reqwest resolves DNS on its
 /// runtime's blocking pool, and the node's pool is routinely saturated by SQLCipher
 /// bursts, so on a shared runtime a picker search could burn its whole timeout
 /// before the request was ever sent.
-pub(crate) fn get_http_runtime() -> &'static tokio::runtime::Runtime {
-    HTTP_RUNTIME.get_or_init(|| {
+///
+/// Fails instead of panicking when the runtime cannot start (out of descriptors).
+pub(crate) fn get_http_runtime() -> Result<&'static tokio::runtime::Runtime, String> {
+    built_once(&HTTP_RUNTIME, &HTTP_RUNTIME_START, || {
         tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
             .max_blocking_threads(4)
@@ -729,8 +732,26 @@ pub(crate) fn get_http_runtime() -> &'static tokio::runtime::Runtime {
             .thread_name("hollow-http")
             .enable_all()
             .build()
-            .expect("Failed to create HTTP runtime")
     })
+    .map_err(|e| format!("Could not start the connection for this request: {e}"))
+}
+
+/// The cell's value, built on first use. A failed build is not kept, so a later call
+/// tries again once descriptors are free.
+fn built_once<T>(
+    cell: &'static OnceLock<T>,
+    start: &Mutex<()>,
+    build: impl FnOnce() -> std::io::Result<T>,
+) -> std::io::Result<&'static T> {
+    if let Some(v) = cell.get() {
+        return Ok(v);
+    }
+    let _one_builder = start.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(v) = cell.get() {
+        return Ok(v);
+    }
+    let v = build()?;
+    Ok(cell.get_or_init(|| v))
 }
 
 /// Convert internal event to FFI event. Also logs Error events to the debug log file.
@@ -1588,6 +1609,7 @@ pub fn set_channels_on_screen(
 #[frb]
 pub fn start_node() -> Result<String, String> {
     crate::crash_dumps::keep_secrets_out();
+    crate::open_files::raise_soft_limit();
     let node = get_node();
     let mut guard = node.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
 
@@ -2118,7 +2140,7 @@ pub fn verify_message_proof_v2(
 /// fetch the URL.
 #[frb]
 pub fn fetch_link_preview(url: String) -> Result<LinkPreviewRef, String> {
-    let rt = get_http_runtime();
+    let rt = get_http_runtime()?;
     let internal = rt
         .block_on(async move {
             crate::node::link_preview::fetch_link_preview(&url).await
@@ -2881,6 +2903,7 @@ pub fn start_fetch_node(
     server_room: Option<String>,
 ) -> Result<Vec<FetchedMessage>, String> {
     crate::crash_dumps::keep_secrets_out();
+    crate::open_files::raise_soft_limit();
     if FETCH_ACTIVE.swap(true, Ordering::SeqCst) {
         return Err("Fetch already in progress".to_string());
     }
@@ -4658,5 +4681,24 @@ mod tests_t17_name_color {
             None, None, None, None, None, None, Some("1:ff0000,00ff00".into()),
         );
         assert_ne!(ok, Err("That name colour can't be used".to_string()));
+    }
+}
+
+#[cfg(test)]
+mod http_runtime_tests {
+    use super::*;
+
+    #[test]
+    fn an_http_runtime_that_cannot_start_returns_an_error_and_a_later_call_retries() {
+        static CELL: OnceLock<u32> = OnceLock::new();
+        static START: Mutex<()> = Mutex::new(());
+        let failed = built_once(&CELL, &START, || {
+            Err(std::io::Error::from_raw_os_error(24)) // EMFILE
+        });
+        assert!(failed.is_err(), "a failed start must come back as an error");
+        assert!(CELL.get().is_none(), "a failed start must not be kept");
+        assert_eq!(built_once(&CELL, &START, || Ok(7)).ok(), Some(&7));
+        assert_eq!(built_once(&CELL, &START, || Ok(8)).ok(), Some(&7), "built once");
+        assert!(get_http_runtime().is_ok());
     }
 }

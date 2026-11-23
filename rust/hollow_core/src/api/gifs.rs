@@ -560,7 +560,7 @@ fn parse_gif_page(v: &serde_json::Value, base: &str) -> Result<GifPage, String> 
 }
 
 fn proxy_query(params: Vec<(&'static str, String)>) -> Result<serde_json::Value, String> {
-    let rt = get_http_runtime();
+    let rt = get_http_runtime()?;
     rt.block_on(async move {
         let base = gif_proxy_base();
         let client = super::catalog::catalog_client()?;
@@ -609,7 +609,7 @@ fn direct_query(
     params: Vec<(&'static str, String)>,
 ) -> Result<serde_json::Value, String> {
     let url = format!("{KLIPY_API_ROOT}{key}/{}/{path}", kind.upstream_segment());
-    let rt = get_http_runtime();
+    let rt = get_http_runtime()?;
     rt.block_on(async move {
         let client = super::catalog::catalog_client()?;
         let resp = client
@@ -982,7 +982,7 @@ pub(crate) fn media_fetch_and_store(
 
 fn proxy_pick_bytes(id: &str) -> Result<Vec<u8>, String> {
     let url = format!("{}f/{id}", gif_proxy_base());
-    let rt = get_http_runtime();
+    let rt = get_http_runtime()?;
     rt.block_on(async move {
         let client = super::catalog::catalog_client()?;
         let resp = client
@@ -1057,7 +1057,7 @@ fn direct_pick_bytes(
         ));
     }
 
-    let rt = get_http_runtime();
+    let rt = get_http_runtime()?;
     rt.block_on(async move {
         let client = super::catalog::catalog_client()?;
         let mut last_err = String::from("GIF download failed");

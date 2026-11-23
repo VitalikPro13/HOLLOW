@@ -311,7 +311,7 @@ fn parse_ffz_rows(items: &[serde_json::Value]) -> Vec<FfzEmote> {
 }
 
 fn ffz_query(params: Vec<(&'static str, String)>) -> Result<Vec<FfzEmote>, String> {
-    let rt = get_http_runtime();
+    let rt = get_http_runtime()?;
     rt.block_on(async move {
         let client = super::catalog::catalog_client()?;
         let resp = client
@@ -364,7 +364,7 @@ pub fn ffz_import_emote(image_url: String) -> Result<ProcessedEmote, String> {
     if !super::catalog::url_under(&image_url, FFZ_IMAGE_BASE) {
         return Err("Emote URL is not on the Hollow CDN".into());
     }
-    let rt = get_http_runtime();
+    let rt = get_http_runtime()?;
     let raw = rt.block_on(async move {
         let client = super::catalog::catalog_client()?;
         let resp = client

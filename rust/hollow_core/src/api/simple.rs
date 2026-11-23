@@ -6,6 +6,7 @@ pub fn greet(name: String) -> String {
 #[flutter_rust_bridge::frb(init)]
 pub fn init_app() {
     crate::crash_dumps::keep_secrets_out();
+    crate::open_files::raise_soft_limit();
     flutter_rust_bridge::setup_default_user_utils();
     // FRB's setup installs platform console loggers at TRACE even in release, so
     // tungstenite would log every relay frame (room ids on a phone, against

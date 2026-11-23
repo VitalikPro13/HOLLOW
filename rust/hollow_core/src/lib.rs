@@ -452,6 +452,7 @@ mod archive;
 mod audio_peaks;
 mod chat_clock;
 mod crash_dumps;
+mod open_files;
 /// C-ABI entry point for the iOS Notification Service Extension. Raw `extern "C"`,
 /// intentionally OUTSIDE `api` so flutter_rust_bridge codegen never scans it.
 pub mod push_enrich;

@@ -53,6 +53,7 @@ pub unsafe extern "C" fn hollow_push_fetch_and_decrypt(
     server_room: *const c_char,
 ) -> *mut c_char {
     crate::crash_dumps::keep_secrets_out();
+    crate::open_files::raise_soft_limit();
     let (data_dir, relay_domain, sender, license, server_room) = unsafe {
         let data_dir = match cstr(data_dir) {
             Some(s) if !s.is_empty() => s,
@@ -90,6 +91,7 @@ pub unsafe extern "C" fn hollow_push_fetch_and_decrypt(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hollow_push_server_hidden(data_dir: *const c_char, server_id: *const c_char) -> i32 {
     crate::crash_dumps::keep_secrets_out();
+    crate::open_files::raise_soft_limit();
     let (Some(dir), Some(sid)) = (unsafe { cstr(data_dir) }, unsafe { cstr(server_id) }) else {
         return 1;
     };
@@ -107,6 +109,7 @@ pub unsafe extern "C" fn hollow_push_server_hidden(data_dir: *const c_char, serv
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hollow_push_server_age_restricted(data_dir: *const c_char, server_id: *const c_char) -> i32 {
     crate::crash_dumps::keep_secrets_out();
+    crate::open_files::raise_soft_limit();
     let (Some(dir), Some(sid)) = (unsafe { cstr(data_dir) }, unsafe { cstr(server_id) }) else {
         return 1;
     };
@@ -150,6 +153,7 @@ const MAX_FIELDS_JSON: usize = 16 * 1024;
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn hollow_push_open_wake(data_dir: *const c_char, fields_json: *const c_char) -> *mut c_char {
     crate::crash_dumps::keep_secrets_out();
+    crate::open_files::raise_soft_limit();
     let (Some(dir), Some(fields)) = (unsafe { cstr(data_dir) }, unsafe { cstr(fields_json) }) else {
         return ptr::null_mut();
     };

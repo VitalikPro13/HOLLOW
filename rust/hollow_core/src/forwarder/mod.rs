@@ -155,6 +155,7 @@ pub fn stored_peer_id(data_dir: &str) -> Result<String, String> {
 /// storage failure); the signaling loop reconnects forever otherwise.
 pub async fn run(cfg: ForwarderConfig) -> Result<(), String> {
     crate::crash_dumps::keep_secrets_out();
+    crate::open_files::raise_soft_limit();
     crate::identity::set_data_dir(cfg.data_dir.clone())?;
     // No log file: hollow_log! reaches stderr only, which the relay box keeps
     // in its RAM-only journal. A file would put share activity on the disk.
