@@ -5047,6 +5047,24 @@ mod tests {
         assert_eq!(cut_off_here(&me, &other), None, "a device not asking is named nowhere");
     }
 
+    /// The key rule's cut-off (F5 note 4): the latest cut of every device a settling
+    /// drops, and none at all when one of them is not named (a key it held may still
+    /// work), unless the record's "maybe" mark names it.
+    #[test]
+    fn keys_after_ms_is_none_when_a_dropped_device_is_not_named() {
+        let me = Observer::new(0xd5, 0xd6);
+        let store = me.store();
+        let roster = Roster::genesis(&me.master, &kp(0xd7), &me.device, 1_000);
+        let base = roster.base();
+        let (named, other, unnamed) = ("dev-named".to_string(), "dev-other".to_string(), "dev-unnamed".to_string());
+        note_cut_off(&store, &base, CutOff { devices: [(named.clone(), 2_000), (other.clone(), 3_000)].into_iter().collect(), unknown_at: None }).unwrap();
+        assert_eq!(keys_after_ms(&store, &roster, std::slice::from_ref(&named)), Some(2_000));
+        assert_eq!(keys_after_ms(&store, &roster, &[named.clone(), other.clone()]), Some(3_000), "the latest cut");
+        assert_eq!(keys_after_ms(&store, &roster, &[named.clone(), unnamed.clone()]), None, "a device the record does not name");
+        note_cut_off(&store, &base, CutOff { devices: Default::default(), unknown_at: Some(4_000) }).unwrap();
+        assert_eq!(keys_after_ms(&store, &roster, &[named, unnamed]), Some(4_000), "the maybe mark names every other device");
+    }
+
     /// HOL-SEC-229 review, item 6: past the cap the record keeps the newest cuts, and a
     /// device left out still reads as maybe cut off, never as a restored backup.
     #[test]

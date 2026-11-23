@@ -22,8 +22,14 @@ named "none", which counts for good; it now holds the ask until its rebuild
 key whenever the key in force was set by a device the answerer's FRESH view no longer
 counts (part A's hold or a fold not yet rebuilt, `join_key_dropped`), and members refuse a
 newcomer's ask under such a key until the settling (the old link no longer admits
-strangers meanwhile). Not built yet: the waiting card (item 9) and the rest of the item 15
-rows. `.team/HANDOFF.md` lists the next steps.
+strangers meanwhile). Round 3 also built item 9 (the server waits for a member, Home row)
+and the item 15 rows. Round 4 wrote section 7's tests 7 to 12 and 14 to 17 and fixed two
+gaps they found: the lock keeper minted the owner's lock the moment a sync re-entry
+completed (its wait now holds from the first ask until the settling seats the members),
+and any answer from a source put the next ask off (only an answer to the open digest round
+does now, so the nonce-less deferred witness answer cannot stall it; it needs no new
+variant). Test 12 has two owner devices each type the recovery, the only way two
+settlings of one recovery happen.
 
 One deliberate change from 2.3: part A keeps the FOLD, not only the seats. When a
 rebuild stops folding ops whose device the view stopped counting (Uncounted, never

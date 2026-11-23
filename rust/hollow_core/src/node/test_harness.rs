@@ -73853,7 +73853,20 @@ async fn rev_f5b_a_recovery_dropping_a_moderators_device_keeps_its_ban() {
 #[allow(clippy::await_holding_lock)]
 async fn rev_f5b_a_recovery_stored_while_the_node_is_down_still_opens_the_hold() {
     let _g = test_guard();
-    let [m_tag, d1_tag, d2_tag, r_tag, j_tag, k_tag] = [71u8, 72, 73, 74, 75, 76];
+    rev_f5b_stored_recovery([71, 72, 73, 74, 75, 76], false).await;
+}
+
+/// A12: the 8.8 hold that start opened is a saved row, so a second start (the roster
+/// unchanged, nothing left to trigger on) still holds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn rev_f5b_a_base_step_back_hold_survives_a_second_restart() {
+    let _g = test_guard();
+    rev_f5b_stored_recovery([111, 112, 113, 114, 115, 116], true).await;
+}
+
+async fn rev_f5b_stored_recovery(tags: [u8; 6], twice: bool) {
+    let [m_tag, d1_tag, d2_tag, r_tag, j_tag, k_tag] = tags;
     let W3c1Cut { relay, master, d1, d2, j, server_id, _tmp } = w3c1_cut_server([m_tag, d1_tag, d2_tag, r_tag, j_tag]).await;
     let m_id = master.peer_id();
     let (j_master, k_master) = (j.master_id.clone(), tag_kp(k_tag).peer_id());
@@ -73912,6 +73925,15 @@ async fn rev_f5b_a_recovery_stored_while_the_node_is_down_still_opens_the_hold()
         s.is_member(&k_master),
         s.members.len(),
     );
+    let j = if twice {
+        let j = restart_node(&relay, j, j_tag, j_tag).await;
+        let held = wait_until(20, async || j.live_server_state(&server_id).await.is_some_and(|s| s.in_recovery())).await;
+        let s = j.live_server_state(&server_id).await.expect("J holds the server after a second start");
+        assert!(held, "the 8.8 hold was lost at the second start: base={:?} member(K)={} members={}", s.base.as_ref().map(|b| b.hash_hex()), s.is_member(&k_master), s.members.len());
+        j
+    } else {
+        j
+    };
     drop((j, k, d2));
 }
 
@@ -74105,8 +74127,13 @@ async fn w3c1_an_in_app_recovery_resets_each_owned_servers_invite_key_in_its_set
 #[allow(clippy::await_holding_lock)]
 async fn pr_a_a_fresh_install_restores_members_from_the_owners_early_checkpoint() {
     let _g = test_guard();
-    let [m_tag, d1_tag, d2_tag, r_tag, j_tag] = [243u8, 244, 245, 246, 247];
-    let (k_tag, f_tag) = (248u8, 249u8);
+    pr_a_early_checkpoint_restore([243, 244, 245, 246, 247], (248, 249), false).await;
+}
+
+/// Note test 3, and with `check_key` note test 11: the key in force after the settling is
+/// a fresh one at every member.
+async fn pr_a_early_checkpoint_restore(tags: [u8; 5], (k_tag, f_tag): (u8, u8), check_key: bool) {
+    let [m_tag, d1_tag, d2_tag, r_tag, j_tag] = tags;
     let W3c1Cut { relay, master, d1, d2, j, server_id, _tmp } = w3c1_cut_server_with([m_tag, d1_tag, d2_tag, r_tag, j_tag], None, false).await;
     let m_id = master.peer_id();
     let (j_master, k_master) = (j.master_id.clone(), tag_kp(k_tag).peer_id());
@@ -74126,6 +74153,7 @@ async fn pr_a_a_fresh_install_restores_members_from_the_owners_early_checkpoint(
         base_listing(&k).await,
     );
     let cp = base_listing(&j).await.unwrap();
+    let old_key = j.live_server_state(&server_id).await.and_then(|s| s.join_public_text()).expect("precondition: J holds the join key");
     // T after both stored the checkpoint (a first fold has no signal past this one).
     sleep_ms(1200).await;
     let t_ms = crate::crdt::hlc::wall_clock_ms() as i64;
@@ -74143,6 +74171,17 @@ async fn pr_a_a_fresh_install_restores_members_from_the_owners_early_checkpoint(
     let f_dev = f.device_id.clone();
     for friend in [&j_master, &k_master] {
         f.cmd_tx.send(NodeCommand::SendFriendRequest { peer_id: friend.clone() }).await.unwrap();
+    }
+    if check_key {
+        // A base holds the key's op, so no member can tell which device set it: J's entry
+        // names the key (the keyed re-entry through the members' door).
+        assert!(
+            wait_until(40, async || {
+                j.live_server_state(&server_id).await.is_some_and(|s| s.in_recovery() && !s.join_key_dropped(&s.authority) && s.join_public_text().as_deref() == Some(old_key.as_str()))
+            })
+            .await,
+            "precondition: J holds under 8.8 and its entry names the key in force",
+        );
     }
     let restore = || super::restore_flow::snapshot_of(&f_dev).into_iter().find(|s| s.server_id == server_id);
     assert!(
@@ -74164,5 +74203,495 @@ async fn pr_a_a_fresh_install_restores_members_from_the_owners_early_checkpoint(
         let s = n.live_server_state(&server_id).await.expect("the server is held");
         assert!(s.is_member(&j_master) && s.is_member(&k_master), "the restore keeps J and K");
     }
+    if check_key {
+        let new_key = f.live_server_state(&server_id).await.and_then(|s| s.join_public_text()).expect("F's key");
+        assert_ne!(new_key, old_key, "the settling left the key the cut-off devices knew in force");
+        let key_at = async |n: &TestNode| n.live_server_state(&server_id).await.and_then(|s| s.join_public_text());
+        assert!(
+            wait_until(20, async || key_at(&j).await.as_deref() == Some(new_key.as_str()) && key_at(&k).await.as_deref() == Some(new_key.as_str())).await,
+            "J or K never took F's fresh key",
+        );
+    }
     drop(k);
+}
+
+// pr-f5-round4
+/// Note section 7's keyless world: the owner's phone D1 founded the server and admitted J
+/// and K (part C off, so no member holds a checkpoint), T falls after every store of the
+/// members, both owner devices are gone, and F is the fresh install the phrase recovered
+/// keeping only F. Tags: master, d1, d2, recovery, J, K, F.
+struct PrF5 {
+    relay: MockRelay,
+    master: NativeKeypair,
+    d1: TestNode,
+    j: TestNode,
+    k: TestNode,
+    f: TestNode,
+    server_id: String,
+    old_key: String,
+    _tmp: crate::test_tmp::TestDir,
+}
+
+async fn pr_f5_keyless(tags: [u8; 7]) -> PrF5 {
+    let [m_tag, d1_tag, d2_tag, r_tag, j_tag, k_tag, f_tag] = tags;
+    let W3c1Cut { relay, master, d1, d2, j, server_id, _tmp } = w3c1_cut_server([m_tag, d1_tag, d2_tag, r_tag, j_tag]).await;
+    let m_id = master.peer_id();
+    let k_master = tag_kp(k_tag).peer_id();
+    let k = spawn_node_with_friends(&relay, k_tag, k_tag, &[&m_id]).await;
+    k.cmd_tx
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&server_id) })
+        .await
+        .unwrap();
+    let has_k = async |n: &TestNode| n.live_server_state(&server_id).await.is_some_and(|s| s.is_member(&k_master));
+    assert!(wait_until(30, async || has_k(&j).await && has_k(&k).await).await, "precondition: K joined");
+    expect_mls_leaf(&j, &server_id, &k.device_id, 30).await;
+    expect_mls_leaf(&k, &server_id, &j.device_id, 30).await;
+    let old_key = j.live_server_state(&server_id).await.and_then(|s| s.join_public_text()).expect("precondition: J holds the join key");
+    assert!(j.live_server_state(&server_id).await.is_some_and(|s| s.base.is_none()), "precondition: no checkpoint (part C off)");
+    // T after everything the members stored: a record is what they first stored before it.
+    let stored = [&j, &k].iter().filter_map(|n| n.store().op_seen_ms(&server_id).ok()).flat_map(|m| m.into_values()).max().unwrap_or(0);
+    assert!(wait_until(5, async || crate::crdt::hlc::wall_clock_ms() > stored).await);
+    let t_ms = crate::crdt::hlc::wall_clock_ms() as i64;
+    for n in [&d1, &d2] {
+        relay.set_online(&n.device_id, false);
+    }
+    drop(d2);
+    let f = spawn_node_staged_at(&relay, master.clone(), f_tag, &[], |st, db, pass| {
+        let sign = crate::api::roster::RestoreSign::Recover { lost_since_ms: t_ms, no_wait: true };
+        crate::api::roster::sign_restore(&master, &tag_kp(f_tag), &tag_kp(r_tag), sign, db, pass).expect("the restore signs");
+        let mark = super::phrase_restore::Mark { at_ms: super::roster_book::now_ms(), branch: super::phrase_restore::Branch::Recover, empty: true, device: tag_kp(f_tag).peer_id() };
+        super::phrase_restore::write(st, &mark).expect("the mark");
+    })
+    .await;
+    PrF5 { relay, master, d1, j, k, f, server_id, old_key, _tmp }
+}
+
+/// F re-adds `friends` (their masters) and each accepts.
+async fn pr_f5_readd(f: &TestNode, friends: &[&str]) {
+    for friend in friends {
+        f.cmd_tx.send(NodeCommand::SendFriendRequest { peer_id: friend.to_string() }).await.unwrap();
+    }
+    assert!(
+        wait_until(30, async || friends.iter().all(|m| f.friend_status(m).as_deref() == Some("accepted"))).await,
+        "a member never answered F's re-add",
+    );
+}
+
+fn pr_f5_restore(f: &TestNode, sid: &str) -> Option<super::restore_flow::RestoreSnap> {
+    super::restore_flow::snapshot_of(&f.device_id).into_iter().find(|s| s.server_id == sid)
+}
+
+/// F holds the server again (by sync) and restores it from witnesses.
+async fn pr_f5_back(f: &TestNode, sid: &str, secs: u64) -> bool {
+    wait_until(secs, async || f.live_server_state(sid).await.is_some() && pr_f5_restore(f, sid).is_some()).await
+}
+
+/// Wait for F's chooser to pick, choose that point, and return it.
+async fn pr_f5_choose_pick(f: &TestNode, sid: &str, secs: u64) -> super::restore_flow::PointSnap {
+    assert!(
+        wait_until(secs, async || pr_f5_restore(f, sid).is_some_and(|r| r.stage == super::witness::Stage::Pick)).await,
+        "F is never offered a pick: {:?}",
+        pr_f5_restore(f, sid).map(|r| (r.stage, r.points.iter().map(|p| (p.cp.clone(), p.named_by.clone())).collect::<Vec<_>>())),
+    );
+    let pick = pr_f5_restore(f, sid).and_then(|r| r.pick).expect("a pick");
+    let (reply, rx) = tokio::sync::oneshot::channel();
+    f.cmd_tx.send(NodeCommand::ChooseRestore { server_id: sid.to_string(), cp: Some(pick.cp.clone()), reply }).await.unwrap();
+    rx.await.expect("an answer").expect("the choice is taken");
+    pick
+}
+
+/// `n` folded a settling that lists every one of `members` and holds no recovery.
+async fn pr_f5_settled(n: &TestNode, sid: &str, members: &[&str]) -> bool {
+    n.live_server_state(sid).await.is_some_and(|s| {
+        members.iter().all(|m| s.is_member(m)) && !s.in_recovery() && s.base.as_ref().is_some_and(|b| b.state.cp_settles.is_some())
+    })
+}
+
+async fn pr_f5_key(n: &TestNode, sid: &str) -> Option<String> {
+    n.live_server_state(sid).await.and_then(|s| s.join_public_text())
+}
+
+async fn pr_f5_door(n: &TestNode, sid: &str) -> Option<String> {
+    n.live_server_state(sid).await.and_then(|s| s.join_lock.chain().last().map(|l| l.door.clone()))
+}
+
+/// Note test 7: a server no member ever checkpointed comes back to a fresh install by a
+/// sync re-entry from the friends that named it and their records. Nobody loses a seat
+/// or a leaf meanwhile; the settling batch hands J and K the fresh key and F's door; F
+/// gets its leaf and posts flow both ways.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pr_f5_a_server_that_never_checkpointed_comes_back_by_sync_and_records() {
+    use crate::crdt::hold::Hold;
+    let _g = test_guard();
+    let PrF5 { relay, master: _m, d1, j, k, f, server_id: sid, old_key, _tmp } = pr_f5_keyless([11, 12, 13, 14, 15, 16, 17]).await;
+    let (j_master, k_master, f_dev) = (j.master_id.clone(), k.master_id.clone(), f.device_id.clone());
+    let general = general_channel_of(&sid);
+    pr_f5_readd(&f, &[&j_master, &k_master]).await;
+    assert!(pr_f5_back(&f, &sid, 60).await, "F never got back by sync the server no member checkpointed");
+    let s = f.live_server_state(&sid).await.expect("F holds the server");
+    assert!(!s.is_member(&j_master) && !s.is_member(&k_master), "a keyless re-entry seats nobody before the settling");
+
+    let holds = async |n: &TestNode| n.live_server_state(&sid).await.is_some_and(|s| s.in_recovery());
+    assert!(wait_until(40, async || holds(&j).await && holds(&k).await).await, "precondition: J and K hold under part A");
+    let seat = |s: &ServerState, m: &str| s.is_member(m) || s.recovery_hold(None, m) >= Hold::Keep;
+    for n in [&j, &k] {
+        let s = n.live_server_state(&sid).await.expect("the member still holds the server");
+        assert!(seat(&s, &j_master) && seat(&s, &k_master), "{} lost a seat while the owner was away", n.device_id);
+    }
+    assert!(j.mls_members(&sid).await.contains(&k.device_id) && k.mls_members(&sid).await.contains(&j.device_id), "a member's leaf went while the owner was away");
+
+    let pick = pr_f5_choose_pick(&f, &sid, 90).await;
+    assert!(pick.named_by.contains(&j_master) && pick.named_by.contains(&k_master), "both members name the record: {:?}", pick.named_by);
+    let both = [j_master.as_str(), k_master.as_str()];
+    assert!(
+        wait_until(40, async || pr_f5_settled(&j, &sid, &both).await && pr_f5_settled(&k, &sid, &both).await && pr_f5_settled(&f, &sid, &both).await).await,
+        "the settling never reached J, K and F with both seats",
+    );
+    let new_key = pr_f5_key(&f, &sid).await.expect("F's key");
+    assert_ne!(new_key, old_key, "the key the cut-off device knew is still in force");
+    assert!(
+        wait_until(20, async || pr_f5_key(&j, &sid).await.as_deref() == Some(new_key.as_str()) && pr_f5_key(&k, &sid).await.as_deref() == Some(new_key.as_str())).await,
+        "J or K never took F's key",
+    );
+    assert!(
+        wait_until(30, async || {
+            let door = pr_f5_door(&f, &sid).await;
+            door.is_some() && relay.lock_chain(&sid, "").last().map(|l| l.door.clone()) == door && pr_f5_door(&j, &sid).await == door && pr_f5_door(&k, &sid).await == door
+        })
+        .await,
+        "F's door never reached the relay, J and K",
+    );
+    expect_mls_leaf(&j, &sid, &f_dev, 60).await;
+    expect_mls_leaf(&k, &sid, &f_dev, 60).await;
+    expect_mls_leaf(&f, &sid, &k.device_id, 30).await;
+    w3c1h_post(&f, &[&j, &k], &sid, &general, "f5r4-7-from-f", &f_dev).await;
+    w3c1h_post(&k, &[&f], &sid, &general, "f5r4-7-from-k", &k.device_id).await;
+    drop((d1, j, k, f));
+}
+
+/// Note test 8 (revision 1 test 2): a device the thief mints with the master key, named
+/// by no roster the phrase signed, gets nothing back. The friend refuses its shared
+/// servers ask and serves its sync ask no op, while F's ask is served; it never holds
+/// the server or a leaf.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pr_f5_a_master_key_holders_fresh_device_is_never_re_added() {
+    let _g = test_guard();
+    let [m_tag, d1_tag] = [21u8, 22];
+    let x_tag = 28u8;
+    let PrF5 { relay, master, d1, j, k, f, server_id: sid, old_key: _o, _tmp } = pr_f5_keyless([m_tag, d1_tag, 23, 24, 25, 26, 27]).await;
+    let (m_id, j_master, j_dev) = (master.peer_id(), j.master_id.clone(), j.device_id.clone());
+    pr_f5_readd(&f, &[&j_master]).await;
+    assert!(pr_f5_back(&f, &sid, 60).await, "precondition: F gets the server back");
+    assert!(super::op_sync::served_for_test(&j_dev, &sid, &f.device_id) > 0, "control: J served F's sync");
+
+    // The thief's device: the stolen roster, with the cut-off D1 vouching for it.
+    let x_id = tag_kp(x_tag).peer_id();
+    let mut stolen = d1.store().load_roster(&m_id).ok().flatten().expect("D1's roster from before the recovery");
+    stolen.add_vouch(crate::identity::roster::sign_vouch(&tag_kp(d1_tag), &m_id, &stolen.base(), &x_id));
+    stolen.add_consent(crate::identity::roster::sign_consent(&tag_kp(x_tag), &m_id));
+    let x = spawn_node_seeded(&relay, m_tag, x_tag, &[&j_master], Some(stolen)).await;
+    carry_as(&x, &j, super::types::HavenMessage::SharedServers { ask: true, servers: Vec::new(), part: 0, pad: String::new() }).await;
+    let ask = super::crdt_resync::CrdtResync::for_test().sync_ask(&ServerState::skeleton(sid.clone()), &j_dev, None, None);
+    carry_as(&x, &j, ask).await;
+    assert!(wait_until(30, async || super::op_sync::heard_for_test(&j_dev, &sid, &x_id) > 0).await, "precondition: X's sync ask reached J's handler");
+    assert!(wait_until(20, async || super::shared_servers::refused_for_test(&j_dev, &x_id) > 0).await, "J answered X's shared servers ask");
+    // ABSENCE: an answer would leave J at once (the ask was heard above).
+    assert!(!wait_until(5, async || super::op_sync::served_for_test(&j_dev, &sid, &x_id) > 0).await, "J served the server's ops to a device the phrase never counted");
+    assert!(x.live_server_state(&sid).await.is_none_or(|s| !s.is_member(&m_id)), "X holds the server");
+    assert!(!j.mls_members(&sid).await.contains(&x_id), "X has a leaf at J");
+    drop((d1, j, k, f, x));
+}
+
+/// Note test 9: the device the recovery cut off writes a new join key while the members
+/// hold (carried by a member, as gossip would); it never counts, nor one it writes after
+/// F's settling, and its own node resetting the invite link moves neither the key nor
+/// the lock at J or the relay.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pr_f5_the_cut_off_device_never_moves_the_key_or_the_lock_back() {
+    use crate::crdt::operations::{CrdtPayload as P, JoinSecret};
+    let _g = test_guard();
+    let d1_tag = 32u8;
+    let PrF5 { relay, master, d1, j, k, f, server_id: sid, old_key, _tmp } = pr_f5_keyless([31, d1_tag, 33, 34, 35, 36, 37]).await;
+    let (j_master, k_master) = (j.master_id.clone(), k.master_id.clone());
+    pr_f5_readd(&f, &[&j_master, &k_master]).await;
+    assert!(wait_until(40, async || j.live_server_state(&sid).await.is_some_and(|s| s.in_recovery())).await, "precondition: J holds under part A");
+    let fresh = |b: u8| P::JoinKeySet { secret: JoinSecret(hex::encode([b; 32])) };
+    let during = w3c1_device_op(&sid, &master, &tag_kp(d1_tag), fresh(0x71), 0);
+    carry_as(&k, &j, crdt_broadcast(&sid, &during)).await;
+    // ABSENCE: the op lands with the broadcast it rides.
+    assert!(
+        !wait_until(5, async || pr_f5_key(&j, &sid).await.as_deref() != Some(old_key.as_str())).await,
+        "the cut-off device's new key took over at J during the hold: {:?}",
+        pr_f5_key(&j, &sid).await,
+    );
+
+    pr_f5_choose_pick(&f, &sid, 90).await;
+    let both = [j_master.as_str(), k_master.as_str()];
+    assert!(wait_until(40, async || pr_f5_settled(&j, &sid, &both).await).await, "the settling never reached J");
+    let new_key = pr_f5_key(&f, &sid).await.expect("F's key");
+    assert!(wait_until(20, async || pr_f5_key(&j, &sid).await.as_deref() == Some(new_key.as_str())).await, "J never took F's key");
+    assert!(wait_until(30, async || pr_f5_door(&f, &sid).await.is_some() && relay.lock_chain(&sid, "").last().map(|l| l.door.clone()) == pr_f5_door(&f, &sid).await).await, "precondition: F's door on the relay");
+    let f_door = pr_f5_door(&f, &sid).await;
+
+    let after = w3c1_device_op(&sid, &master, &tag_kp(d1_tag), fresh(0x72), 60_000);
+    carry_as(&k, &j, crdt_broadcast(&sid, &after)).await;
+    relay.set_online(&d1.device_id, true);
+    d1.cmd_tx.send(NodeCommand::ResetInviteLink { server_id: sid.clone() }).await.unwrap();
+    // ABSENCE: a key or lock that counted would land with the frames above.
+    assert!(
+        !wait_until(10, async || {
+            pr_f5_key(&j, &sid).await.as_deref() != Some(new_key.as_str())
+                || pr_f5_door(&j, &sid).await != f_door
+                || relay.lock_chain(&sid, "").last().map(|l| l.door.clone()) != f_door
+        })
+        .await,
+        "the cut-off device moved the key or the lock: J key {:?} door {:?}, relay door {:?}",
+        pr_f5_key(&j, &sid).await,
+        pr_f5_door(&j, &sid).await,
+        relay.lock_chain(&sid, "").last().map(|l| l.door.clone()),
+    );
+    drop((d1, j, k, f));
+}
+
+/// Note test 10: while the members hold for the owner, a newcomer with the old invite
+/// link is not let in (the cut-off device knows that key); after F's settling a fresh
+/// link from J admits, and the old key is refused as reset.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pr_f5_members_admit_again_once_the_owner_is_back() {
+    let _g = test_guard();
+    let (n_tag, p_tag) = (48u8, 49u8);
+    let PrF5 { relay, master: _m, d1, j, k, f, server_id: sid, old_key, _tmp } = pr_f5_keyless([41, 42, 43, 44, 45, 46, 47]).await;
+    let (j_master, k_master) = (j.master_id.clone(), k.master_id.clone());
+    let (n_master, p_master) = (tag_kp(n_tag).peer_id(), tag_kp(p_tag).peer_id());
+    pr_f5_readd(&f, &[&j_master, &k_master]).await;
+    assert!(
+        wait_until(40, async || j.live_server_state(&sid).await.is_some_and(|s| s.in_recovery()) && k.live_server_state(&sid).await.is_some_and(|s| s.in_recovery())).await,
+        "precondition: J and K hold under part A",
+    );
+    let n = spawn_node_with_friends(&relay, n_tag, n_tag, &[]).await;
+    n.cmd_tx
+        .send(NodeCommand::JoinServer { server_id: sid.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: Some(old_key.clone()) })
+        .await
+        .unwrap();
+    let admits = async |who: &str| j.live_server_state(&sid).await.is_some_and(|s| s.is_member(who)) || k.live_server_state(&sid).await.is_some_and(|s| s.is_member(who));
+    // ABSENCE: an admission lands within the join's own round trips.
+    assert!(!wait_until(20, async || admits(&n_master).await).await, "a newcomer with the old link was let in while the members held");
+
+    pr_f5_choose_pick(&f, &sid, 90).await;
+    let both = [j_master.as_str(), k_master.as_str()];
+    assert!(wait_until(40, async || pr_f5_settled(&j, &sid, &both).await && pr_f5_settled(&k, &sid, &both).await).await, "the settling never reached J and K");
+    let new_key = pr_f5_key(&f, &sid).await.expect("F's key");
+    assert!(wait_until(20, async || pr_f5_key(&j, &sid).await.as_deref() == Some(new_key.as_str())).await, "J never took F's key");
+    let mut p = spawn_node_with_friends(&relay, p_tag, p_tag, &[]).await;
+    p.cmd_tx
+        .send(NodeCommand::JoinServer { server_id: sid.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: pr_f5_key(&j, &sid).await })
+        .await
+        .unwrap();
+    assert!(expect_joined(&mut p, &sid, 60).await, "a fresh link from J admits nobody after the settling");
+    assert!(wait_until(20, async || admits(&p_master).await).await, "J and K never folded the newcomer");
+    assert!(!admits(&n_master).await, "the old link admitted after the settling");
+    drop((d1, j, k, f, n, p));
+}
+
+/// Note test 11: a keyed re-entry (part C wrote an early checkpoint, so J's entry names
+/// the key in force) still ends with a key the cut-off device never held: F's settling
+/// on the witnessed checkpoint sets a fresh one, before any missing-key tick could.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pr_f5_a_keyed_reentry_still_ends_with_a_key_the_cut_off_device_never_held() {
+    let _g = test_guard();
+    pr_a_early_checkpoint_restore([51, 52, 53, 54, 55], (56, 57), true).await;
+}
+
+/// Note test 12 (finding 3): two owner devices each type the recovery that cut off the
+/// phone. The first settling sets a fresh key; the second finds that key ours, from a
+/// counted device, after the cut-off, and sets none.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pr_f5_two_owner_devices_rotate_the_key_once() {
+    let _g = test_guard();
+    let [m_tag, d1_tag, d2_tag, d3_tag, r_tag, j_tag] = [61u8, 62, 63, 64, 65, 66];
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+    let relay = MockRelay::new();
+    let master = tag_kp(m_tag);
+    let m_id = master.peer_id();
+    let (d1_id, d2_id, d3_id) = (tag_kp(d1_tag).peer_id(), tag_kp(d2_tag).peer_id(), tag_kp(d3_tag).peer_id());
+    let j_master = tag_kp(j_tag).peer_id();
+    early_off(&m_id, true);
+    super::resolver::seed_self(&m_id, &[d1_id.clone(), d2_id.clone(), d3_id.clone()]);
+    let mut roster = crate::identity::roster::Roster::genesis(&master, &tag_kp(r_tag), &tag_kp(d1_tag), super::roster_book::now_ms());
+    for (tag, id) in [(d2_tag, &d2_id), (d3_tag, &d3_id)] {
+        roster.add_vouch(crate::identity::roster::sign_vouch(&tag_kp(d1_tag), &m_id, &roster.base(), id));
+        roster.add_consent(crate::identity::roster::sign_consent(&tag_kp(tag), &m_id));
+    }
+    let mut d1 = spawn_node_seeded(&relay, m_tag, d1_tag, &[&j_master], Some(roster.clone())).await;
+    let d2 = spawn_node_seeded(&relay, m_tag, d2_tag, &[&j_master], Some(roster.clone())).await;
+    let d3 = spawn_node_seeded(&relay, m_tag, d3_tag, &[&j_master], Some(roster)).await;
+    let j = spawn_node_with_friends(&relay, j_tag, j_tag, &[&m_id]).await;
+    expect_siblings_ready(&relay, &d1, &d2, 15).await;
+    expect_siblings_ready(&relay, &d1, &d3, 15).await;
+    expect_dm_pair_ready(&relay, &d1, &j, 15).await;
+    let sid = create_server_and_wait(&mut d1, "Twice").await;
+    for n in [&d2, &d3, &j] {
+        let who = n.master_id.clone();
+        n.cmd_tx
+            .send(NodeCommand::JoinServer { server_id: sid.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&sid) })
+            .await
+            .unwrap();
+        assert!(wait_until(30, async || n.live_server_state(&sid).await.is_some_and(|s| s.is_member(&who) && s.cut)).await, "precondition: {} holds the server", n.device_id);
+    }
+    let old_key = pr_f5_key(&j, &sid).await.expect("precondition: J holds the key");
+    let stored = j.store().op_seen_ms(&sid).unwrap_or_default().into_values().max().unwrap_or(0);
+    assert!(wait_until(5, async || crate::crdt::hlc::wall_clock_ms() > stored).await);
+    let t_ms = crate::crdt::hlc::wall_clock_ms() as i64;
+    relay.set_online(&d1.device_id, false);
+    drop(d1);
+    let settled_by = |s: &ServerState, dev: &str| {
+        s.base.as_ref().is_some_and(|b| {
+            b.state.cp_settles.as_ref().is_some_and(|st| st.devices.contains(&d1_id))
+                && s.op_log.iter().chain(s.stored.iter().map(|(o, _)| o)).any(|o| o.content_hash() == b.hash && o.proven_device() == Some(dev))
+        })
+    };
+
+    // The in-app order (`api::roster::changed`): hold, sign, then the command.
+    let mut first = None;
+    for (n, tag, keep) in [(&d2, d2_tag, &d3_id), (&d3, d3_tag, &d2_id)] {
+        assert!(super::authority_view::hold_own(&n.store(), &m_id), "nothing held before this change");
+        super::roster_book::recover(&master, &tag_kp(r_tag), &tag_kp(tag), std::slice::from_ref(keep), true, Some(t_ms), &n.db_path, &n.passphrase).expect("the phrase recovers");
+        super::resolver::blind_for_test(&n.device_id, &d1_id);
+        n.cmd_tx.send(NodeCommand::RosterChanged { newly_revoked: vec![d1_id.clone()] }).await.unwrap();
+        let dev = n.device_id.clone();
+        assert!(wait_until(30, async || j.live_server_state(&sid).await.is_some_and(|s| settled_by(&s, &dev))).await, "precondition: {dev}'s settling reached J");
+        if first.is_none() {
+            first = pr_f5_key(&j, &sid).await;
+            assert!(first.is_some() && first.as_deref() != Some(old_key.as_str()), "the first settling set no fresh key");
+            assert!(wait_until(20, async || pr_f5_key(&d3, &sid).await == first).await, "precondition: the first key reached the second device");
+        }
+    }
+    let s = j.live_server_state(&sid).await.expect("J holds the server");
+    let settled_key = s.base.as_ref().and_then(|b| b.state.join_public_text());
+    assert!(
+        s.join_public_text() == first && settled_key == first && pr_f5_key(&d3, &sid).await == first,
+        "the second owner device rotated the key again: J {:?}, its settled state {:?}, D3 {:?}, first {:?}",
+        s.join_public_text(),
+        settled_key,
+        pr_f5_key(&d3, &sid).await,
+        first,
+    );
+    drop((d2, d3, j, global_tmp));
+}
+
+/// Note test 14 (finding 5): a sync re-entry hears only the friend devices it asked. A
+/// third member's raw answer with the whole log, carried over Olm, completes nothing;
+/// the asked friend's answer does.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pr_f5_a_sync_reentry_takes_answers_only_from_the_devices_it_asked() {
+    let _g = test_guard();
+    let PrF5 { relay: _r, master: _m, d1, j, k, mut f, server_id: sid, old_key: _o, _tmp } = pr_f5_keyless([71, 72, 73, 74, 75, 76, 77]).await;
+    let (j_master, j_dev, f_dev) = (j.master_id.clone(), j.device_id.clone(), f.device_id.clone());
+    super::op_sync::mute_answers_for_test(&j_dev, &sid, true);
+    pr_f5_readd(&f, &[&j_master]).await;
+    assert!(wait_until(60, async || super::op_sync::swallowed_for_test(&j_dev, &sid, &f_dev) > 0).await, "precondition: F asked J for the server");
+    drain_events(&mut f);
+    let log = j.live_server_state(&sid).await.expect("J holds the server").op_log.clone();
+    carry_as(&k, &f, sync_response(&sid, &log)).await;
+    // ABSENCE: a taken answer completes the join on the spot.
+    assert!(!expect_joined(&mut f, &sid, 10).await, "F's sync re-entry completed on an answer from a device it never asked");
+    assert!(f.live_server_state(&sid).await.is_none(), "F kept a state from a device it never asked");
+    super::op_sync::mute_answers_for_test(&j_dev, &sid, false);
+    assert!(expect_joined(&mut f, &sid, 45).await, "control: the asked friend's answer completes the re-entry");
+    drop((d1, j, k, f));
+}
+
+/// Note test 15 (finding 5): a sync re-entry completes only on the answer that ends its
+/// digest round with the asked friend: neither a digest-less answer with the whole log
+/// nor one naming a round never asked completes it, though the fold lists us.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pr_f5_a_sync_reentry_completes_only_once_its_digest_round_is_caught_up() {
+    let _g = test_guard();
+    let PrF5 { relay: _r, master, d1, j, k, mut f, server_id: sid, old_key: _o, _tmp } = pr_f5_keyless([81, 82, 83, 84, 85, 86, 87]).await;
+    let (j_master, j_dev, f_dev) = (j.master_id.clone(), j.device_id.clone(), f.device_id.clone());
+    super::op_sync::mute_answers_for_test(&j_dev, &sid, true);
+    pr_f5_readd(&f, &[&j_master]).await;
+    assert!(wait_until(60, async || super::op_sync::swallowed_for_test(&j_dev, &sid, &f_dev) > 0).await, "precondition: F asked J for the server");
+    drain_events(&mut f);
+    let log = j.live_server_state(&sid).await.expect("J holds the server").op_log.clone();
+    carry_as(&j, &f, sync_response(&sid, &log)).await;
+    assert!(wait_until(15, async || f.live_server_state(&sid).await.is_some_and(|s| s.is_member(&master.peer_id()))).await, "precondition: F folded the answer, which lists us");
+    let mut stray = sync_response(&sid, &log);
+    if let super::types::HavenMessage::SyncResponse { digest, .. } = &mut stray {
+        *digest = Some(crate::crdt::digest::DigestReply { ask: 7, round: 0, groups: Vec::new(), vector: false, rd: Vec::new() });
+    }
+    carry_as(&j, &f, stray).await;
+    // ABSENCE: a completing answer emits the join at once.
+    assert!(!expect_joined(&mut f, &sid, 10).await, "F's sync re-entry completed on an answer that ends no round it asked");
+    super::op_sync::mute_answers_for_test(&j_dev, &sid, false);
+    assert!(expect_joined(&mut f, &sid, 45).await, "control: the asked round's own answer completes the re-entry");
+    drop((d1, j, k, f));
+}
+
+/// Note test 16: the friend that named the server goes quiet (asks lost, only bare
+/// witness-style answers come back); the re-entry keeps waiting and asking, and once
+/// the friend answers again it completes. A nonce-less answer with no digest never puts
+/// the next ask off (item 6 of round 4).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pr_f5_an_owner_reentry_waits_for_a_friend_and_completes_when_one_returns() {
+    let _g = test_guard();
+    let PrF5 { relay: _r, master: _m, d1, j, k, mut f, server_id: sid, old_key: _o, _tmp } = pr_f5_keyless([91, 92, 93, 94, 95, 96, 97]).await;
+    let (j_master, j_dev, f_dev) = (j.master_id.clone(), j.device_id.clone(), f.device_id.clone());
+    super::op_sync::mute_answers_for_test(&j_dev, &sid, true);
+    pr_f5_readd(&f, &[&j_master]).await;
+    assert!(wait_until(60, async || super::op_sync::swallowed_for_test(&j_dev, &sid, &f_dev) > 0).await, "precondition: F asked J for the server");
+    drain_events(&mut f);
+    let mut joined = false;
+    for i in 0..18 {
+        if i == 5 {
+            super::op_sync::mute_answers_for_test(&j_dev, &sid, false);
+        }
+        carry_as(&j, &f, sync_response(&sid, &[])).await;
+        if wait_event(&mut f, std::time::Duration::from_secs(4), |ev| matches!(ev, NetworkEvent::ServerJoined { server_id, .. } if *server_id == sid)).await {
+            joined = true;
+            break;
+        }
+    }
+    assert!(joined, "the re-entry never asked the friend again once it answered (asks swallowed: {})", super::op_sync::swallowed_for_test(&j_dev, &sid, &f_dev));
+    drop((d1, j, k, f));
+}
+
+/// Note test 17: while a keyless re-entry's fold seats only us and its restore is open,
+/// F mints no lock: the relay keeps the members' door and J keeps seeing the room until
+/// the settling hands out F's.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pr_f5_the_lock_waits_for_the_settling_on_a_server_whose_fold_seats_only_us() {
+    let _g = test_guard();
+    let PrF5 { relay, master: _m, d1, j, k, f, server_id: sid, old_key: _o, _tmp } = pr_f5_keyless([101, 102, 103, 104, 105, 106, 107]).await;
+    let (j_master, k_master) = (j.master_id.clone(), k.master_id.clone());
+    let tip = || relay.lock_chain(&sid, "").last().map(|l| l.door.clone());
+    let before = tip();
+    assert!(before.is_some(), "precondition: the members' lock is on the relay");
+    pr_f5_readd(&f, &[&j_master, &k_master]).await;
+    assert!(pr_f5_back(&f, &sid, 60).await, "precondition: F holds the server by sync");
+    // ABSENCE: the lock keeper runs on every batch tick.
+    assert!(
+        !wait_until(20, async || tip() != before || !relay.sees_room(&sid, &j.device_id)).await,
+        "F moved the lock before its settling: relay door changed {}, J sees the room {}",
+        tip() != before,
+        relay.sees_room(&sid, &j.device_id),
+    );
+    pr_f5_choose_pick(&f, &sid, 90).await;
+    assert!(
+        wait_until(40, async || pr_f5_door(&f, &sid).await.is_some() && tip() == pr_f5_door(&f, &sid).await && tip() != before).await,
+        "control: the settling puts F's lock on the relay",
+    );
+    assert!(wait_until(30, async || relay.sees_room(&sid, &j.device_id)).await, "J lost the room after the settling");
+    drop((d1, j, k, f));
 }

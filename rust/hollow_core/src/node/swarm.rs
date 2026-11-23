@@ -6414,8 +6414,18 @@ async fn run_event_loop(
                 // The join lock: made, moved, put back, compacted and granted where due.
                 let keys = super::lock_keeper::LockKeys { master: &master_keypair, device: &device_keypair };
                 let leaves = |s: &str| super::lock_keeper::server_leaves(mls.as_ref(), s);
+                // A completed sync re-entry counts until its witness restore opens (that
+                // registers on a later tick) or the settling seats the members.
+                let seats_only_us = |sid: &str| server_states.get(sid).is_some_and(|s| s.members.keys().all(|m| *m == local_peer_str));
+                let reentered = crdt_resync.shared_joins.reentered(&seats_only_us);
                 lock_keeper.set_restoring(
-                    crdt_resync.witness.restoring().into_iter().chain(pending_server_joins.iter().filter(|(_, p)| p.sync_reentry()).map(|(s, _)| s.clone())).collect(),
+                    crdt_resync
+                        .witness
+                        .restoring()
+                        .into_iter()
+                        .chain(pending_server_joins.iter().filter(|(_, p)| p.sync_reentry()).map(|(s, _)| s.clone()))
+                        .chain(reentered)
+                        .collect(),
                 );
                 let due_ops = lock_keeper.tick(&server_states, keys, &ws_room_peers, &ws_cmd_tx, &leaves);
                 for (server_id, payload) in due_ops {
@@ -7040,6 +7050,9 @@ async fn run_event_loop(
                     );
                     if let Some(p) = pending_server_joins.get_mut(&sid) {
                         p.sync_fresh = !server_states.contains_key(&sid);
+                        if p.sync_reentry() {
+                            lock_keeper.note_restoring(&sid);
+                        }
                     }
                     if pending_server_joins.contains_key(&sid) {
                         crdt_resync.room_notices.start(&sid, now);
@@ -9369,7 +9382,10 @@ async fn handle_sync_response(
             return;
         }
         let sync_round_ends = sync_reentry == Some(true) && digest.as_ref().is_some_and(|r| crdt_resync.op_sync.ends_round(&server_id, peer_str, r));
-        if let Some(p) = pending_server_joins.get_mut(&server_id).filter(|_| sync_reentry == Some(true)) {
+        // Only an answer to our open round puts the next ask off: a witness answer alone
+        // (nonce-less, no digest) or any other answer would let a source stall the retry.
+        let sync_progress = sync_reentry == Some(true) && digest.as_ref().is_some_and(|r| crdt_resync.op_sync.answers_round(&server_id, peer_str, r));
+        if let Some(p) = pending_server_joins.get_mut(&server_id).filter(|_| sync_progress) {
             p.sync_asked_at = Some(std::time::Instant::now());
         }
         // Rosters before ops (DEVICE_PROOF_DESIGN section 9): what the answer says about
@@ -9574,6 +9590,9 @@ async fn handle_sync_response(
                         let _ = event_tx.send(event).await;
                     }
                     if let Some(completed) = pending_server_joins.remove(&server_id) {
+                        if completed.sync_reentry() {
+                            crdt_resync.shared_joins.note_reentered(&server_id);
+                        }
                         // A member again: a leave of ours from before must never land.
                         leave_book.drop_pending(&server_id);
                         let server_name = state.name().to_string();
@@ -10149,6 +10168,10 @@ async fn handle_sync_request(
     x: Option<Box<super::sync_ext::AskExt>>,
 ) {
         hollow_log!("[HOLLOW-CRDT] SyncRequest from {peer_str} for server {server_id}");
+        #[cfg(test)]
+        if super::op_sync::answer_muted_for_test(device_peer_id, &server_id, peer_str) {
+            return;
+        }
 
         // Rosters before ops (DEVICE_PROOF_DESIGN section 9): the asker's own roster
         // first, for a master this server names; then nothing is served to a device our
@@ -10313,6 +10336,10 @@ async fn handle_sync_request(
             };
             if let Some((ops_json, reply)) = answer {
                 hollow_log!("[HOLLOW-CRDT] Answering {peer_str}'s sync of {server_id} ({} bytes of ops)", ops_json.len());
+                #[cfg(test)]
+                if ops_json != "[]" {
+                    super::op_sync::note_served_for_test(device_peer_id, &server_id, peer_str);
+                }
                 super::olm_lane::carry(
                     ws_cmd_tx, peer_str, None,
                     &HavenMessage::SyncResponse {

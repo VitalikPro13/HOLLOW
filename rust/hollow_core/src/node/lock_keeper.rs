@@ -499,6 +499,12 @@ impl LockKeeper {
         self.restoring = servers.into_iter().collect();
     }
 
+    /// A sync re-entry of `server_id` starts now: the wait holds at once, not from the
+    /// next batch tick (a relay chain answer ticks the server before that one).
+    pub(crate) fn note_restoring(&mut self, server_id: &str) {
+        self.restoring.insert(server_id.to_string());
+    }
+
     /// One batch tick: what is due for each server we are in. Returns the ops to write.
     pub(crate) fn tick(
         &mut self,

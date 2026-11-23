@@ -410,9 +410,26 @@ const JOINS_PER_TICK: usize = 4;
 pub(crate) struct Joins {
     queue: std::collections::VecDeque<Queued>,
     started: HashMap<String, (Queued, Instant)>,
+    /// Sync re-entries that completed while our fold still seats only us: the lock
+    /// keeper waits on them as on an open restore (F5 note 3.3), which registers later.
+    reentered: std::collections::BTreeSet<String>,
 }
 
 impl Joins {
+    /// A sync re-entry of `sid` completed.
+    pub(crate) fn note_reentered(&mut self, sid: &str) {
+        if self.reentered.len() < MAX_SERVERS {
+            self.reentered.insert(sid.to_string());
+        }
+    }
+
+    /// The completed sync re-entries whose fold still `seats_only_us`; the others are
+    /// forgotten (the settling seated the members, or the server is gone).
+    pub(crate) fn reentered(&mut self, seats_only_us: &dyn Fn(&str) -> bool) -> Vec<String> {
+        self.reentered.retain(|sid| seats_only_us(sid));
+        self.reentered.iter().cloned().collect()
+    }
+
     /// Queue `entry` from `friend`'s `device`, unless it is already on its way or held; at
     /// most [`MAX_SERVERS`] in all. An entry on another relay waits for the person. A
     /// keyless entry already queued takes `device` as one more source (finding 6).

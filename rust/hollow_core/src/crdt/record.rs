@@ -268,6 +268,11 @@ pub(crate) mod tests {
             P::MessagePinned { channel_id: "c".into(), message_id: "m".into() },
             P::MessageUnpinned { channel_id: "c".into(), message_id: "m".into() },
             P::ServerCreated { name: "x".into(), owner_peer_id: keys(OWNER).1, nonce: "00".into() },
+            P::JoinLock {
+                link: crate::node::join_lock::LockLink { n: 2, door: "d".repeat(43), change: "c".into(), sig: "s".into(), owner: None, nonce: None, dev: None },
+                door: None,
+                grants: Default::default(),
+            },
         ] {
             let op = by_phone.create_op(p.clone());
             assert!(!scope(&op), "out of every record: {p:?}");
@@ -437,5 +442,55 @@ pub(crate) mod tests {
         assert!(counted.key_stands_for_test(&settled, &keys(OWNER).1, Some(0)), "control: the same key while the phone counts");
         assert!(!counted.key_stands_for_test(&settled, &keys(MEMBER).1, Some(0)), "never another identity's");
         assert!(!counted.key_stands_for_test(&settled, &keys(OWNER).1, Some(phone_key.hlc.physical_ms)), "stamped at the cut-off is not after it");
+    }
+    /// The record's bounds: a witness whose in-scope ops pass 4,096, or 8 MiB of JSON,
+    /// names no record at all (fail closed to an answer naming none); at the bound it does.
+    /// The extra ops sit as parked rows: a test build's fold quota holds far fewer, a real
+    /// one (128 MiB) holds this many.
+    #[test]
+    fn a_record_past_its_op_or_byte_bound_is_never_built() {
+        let w = recorded_world();
+        let mut m = baseless_replica(&w.log, MEMBER, MEMBER_PHONE, true);
+        m.authority = view_after(false);
+        let _ = m.rebuild_now();
+        assert!(m.recovery.as_ref().is_some_and(|r| r.keeps_fold()), "precondition: part A holds");
+        let base = m.witness_record(T, &seen_of(&m, &w.late)).expect("the plain record").0.len();
+        // Each at its own clock in the phone's lane: one device minted them over time.
+        let (master, _, pk) = keys(OWNER);
+        let parked = |extra: usize, name_bytes: usize| {
+            let mut r = m.clone();
+            for i in 0..extra {
+                let mut op = w.late.clone();
+                op.payload = P::ChannelAdded { channel_id: format!("bound-{i}"), name: "x".repeat(name_bytes.max(1)), category: None, channel_type: String::new() };
+                op.hlc.physical_ms += 1 + i as u64;
+                op.auth = None;
+                op.dev = None;
+                op.sign(&master, &pk);
+                op.sign_device(&keys(PHONE).0);
+                r.stored.push((op, super::super::fold::RowKind::Parked(u64::MAX)));
+            }
+            let seen = seen_of(&r, &w.late);
+            r.witness_record(T, &seen).map(|(ids, _)| ids.len())
+        };
+        assert_eq!(parked(RECORD_OPS_MAX - base, 0), Some(RECORD_OPS_MAX), "control: a record of exactly the bound");
+        assert_eq!(parked(RECORD_OPS_MAX - base + 1, 0), None, "one op past the bound");
+        let big = super::super::fold::MAX_OP_BYTES - 64 * 1024;
+        assert!(parked(7, big).is_some(), "control: about 7 MiB");
+        assert_eq!(parked(9, big), None, "past 8 MiB");
+    }
+
+    /// The settling's own scope (item 7): a record id naming an op the scope refuses (the
+    /// dropped phone's join key) never enters the settling's input, whatever the id list says.
+    #[test]
+    fn a_record_id_out_of_scope_never_enters_the_settling() {
+        let w = recorded_world();
+        let mut f = baseless_replica(&w.log, OWNER, LAPTOP, true);
+        f.authority = view_after(false);
+        let _ = f.rebuild_now();
+        let admit = w.log.iter().find(|o| matches!(&o.payload, P::MemberAdded { peer_id, .. } if *peer_id == keys(MEMBER).1)).unwrap().clone();
+        let ids: BTreeSet<[u8; 32]> = [admit.content_hash(), w.key.content_hash()].into_iter().collect();
+        let input = f.record_input(&ids);
+        assert!(input.iter().any(|o| o.content_hash() == admit.content_hash()), "control: the admission the record lists");
+        assert!(!input.iter().any(|o| o.content_hash() == w.key.content_hash()), "the phone's join key rode a record id into the settling");
     }
 }
