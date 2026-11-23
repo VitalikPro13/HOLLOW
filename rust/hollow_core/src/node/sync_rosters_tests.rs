@@ -273,11 +273,14 @@ fn review_b_a_looping_roster_asker_gets_bounded_answers() {
     let ask = AskExt { rosters_wanted: vec![removed.master.clone()], ..Default::default() };
     let mut serve = RosterServe::default();
     let mut answered = 0usize;
+    let started = std::time::Instant::now();
     for _ in 0..2_000 {
         let reply = reply_ext_within(&node.db, &node.pass, &state, Some(&ask), None, None, Some((&mut serve, "looper")));
         answered += reply.rosters.len();
     }
-    let cap = (ROSTERS_ASKER.0 as usize) / super::super::server_rosters::ROSTER_MIN_CHARGE;
+    // The budget refills by wall clock, so a slow machine earns what the loop's own time refilled.
+    let refilled = started.elapsed().as_secs_f64() * ROSTERS_ASKER.1;
+    let cap = ((ROSTERS_ASKER.0 + refilled) as usize) / super::super::server_rosters::ROSTER_MIN_CHARGE;
     assert!(answered > 0, "control: the asker is answered at first");
     assert!(answered <= cap + 2, "a looping asker was handed {answered} rosters, past its budget of about {cap}");
     let other = reply_ext_within(&node.db, &node.pass, &state, Some(&ask), None, None, Some((&mut serve, "other")));
