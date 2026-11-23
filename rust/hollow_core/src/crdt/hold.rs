@@ -1649,6 +1649,24 @@ pub(crate) mod tests {
         assert!(m.is_member(&keys(MEMBER).1) && !m.is_member(&keys(LATE).1), "what it named counts, the rest does not");
     }
 
+    /// `fold_lags` (F5 round 3): an op of the dropped phone that a counted retire endorses
+    /// counts under the fresh view too, so a fold holding only such ops does not lag (a
+    /// witness would hold its answer for nothing).
+    #[test]
+    fn a_fold_whose_dropped_device_a_retire_endorses_does_not_lag() {
+        let (_, log) = baseless_world();
+        let m = baseless_replica(&log, MEMBER, MEMBER_PHONE, true);
+        assert!(m.fold_lags(&view_removed()), "control: the phone's ops lag a view that dropped it");
+        let mut laptop = baseless_replica(&log, OWNER, LAPTOP, true);
+        let named: Vec<CrdtOp> = log.iter().filter(|o| o.proven_device() == Some(keys(PHONE).1.as_str())).cloned().collect();
+        let mut refs: Vec<super::super::operations::OpRef> = named.iter().map(super::super::operations::OpRef::of).collect();
+        refs.sort();
+        let dr = laptop.create_op(P::DeviceRetired { device: keys(PHONE).1, ops: refs, posts_until_ms: None, restore: None });
+        let mut retired = m.clone();
+        retired.ingest_remote(std::slice::from_ref(&dr));
+        assert!(!retired.fold_lags(&view_removed()), "a retire endorses every op the phone wrote: nothing lags");
+    }
+
     #[test]
     fn a_baseless_hold_survives_the_settlers_first_checkpoint() {
         let (_, log) = baseless_world();

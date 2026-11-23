@@ -84,6 +84,26 @@ fn may_answer(local_device: &str, asker: &str, now: Instant) -> bool {
 #[cfg(test)]
 static REFUSED: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
 
+#[cfg(test)]
+static SILENT: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Harness: `local_device` answers no shared-servers ask (a friend that names nothing,
+/// or a 0.14.2 one), whatever its state holds.
+#[cfg(test)]
+pub(crate) fn silence_for_test(local_device: &str) {
+    SILENT.lock().unwrap_or_else(|e| e.into_inner()).push(local_device.to_string());
+}
+
+#[cfg(test)]
+fn silent_for_test(local_device: &str) -> bool {
+    SILENT.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|d| d == local_device)
+}
+
+#[cfg(not(test))]
+fn silent_for_test(_local_device: &str) -> bool {
+    false
+}
+
 /// Harness: `local_device` left `asker`'s ask unanswered.
 #[cfg(test)]
 pub(crate) fn note_refused(local_device: &str, asker: &str) {
@@ -166,6 +186,9 @@ pub(crate) fn answer<'a>(
     asker: &str,
     states: impl IntoIterator<Item = &'a ServerState>,
 ) -> Option<Vec<HavenMessage>> {
+    if silent_for_test(local_device) {
+        return None;
+    }
     let store = MessageStore::lease(db_path, db_passphrase).ok()?;
     let master = asker_ok(&store, db_path, asker)?;
     if !may_answer(local_device, asker, Instant::now()) {
@@ -463,9 +486,8 @@ impl Joins {
         let n = self.queue.len().min(JOINS_PER_TICK);
         self.queue
             .drain(..n)
-            .map(|q| {
+            .inspect(|q| {
                 self.started.insert(q.entry.server_id.clone(), (q.clone(), now));
-                q
             })
             .collect()
     }

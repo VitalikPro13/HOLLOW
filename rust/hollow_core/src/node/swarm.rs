@@ -9364,6 +9364,8 @@ async fn handle_sync_response(
     x: Option<Box<super::sync_ext::ReplyExt>>,
 ) {
         hollow_log!("[HOLLOW-CRDT] SyncResponse from {peer_str} for server {server_id}");
+        #[cfg(test)]
+        super::op_sync::note_response_for_test(device_peer_id, &server_id, peer_str);
         let digest_sid = digest.as_ref().map(|_| server_id.clone());
 
         // A witness for a server we are recovering: track C1 judges it, whoever sent it.
@@ -10337,7 +10339,7 @@ async fn handle_sync_request(
             if let Some((ops_json, reply)) = answer {
                 hollow_log!("[HOLLOW-CRDT] Answering {peer_str}'s sync of {server_id} ({} bytes of ops)", ops_json.len());
                 #[cfg(test)]
-                if ops_json != "[]" {
+                if ops_json != "[]" || reply.is_some() {
                     super::op_sync::note_served_for_test(device_peer_id, &server_id, peer_str);
                 }
                 super::olm_lane::carry(

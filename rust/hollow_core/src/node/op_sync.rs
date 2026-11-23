@@ -507,6 +507,7 @@ struct AnswerHooks {
     heard: HashMap<(String, String, String), usize>,
     swallowed: HashMap<(String, String, String), usize>,
     served: HashMap<(String, String, String), usize>,
+    responses: HashMap<(String, String, String), usize>,
 }
 
 #[cfg(test)]
@@ -549,13 +550,25 @@ pub(crate) fn heard_for_test(device: &str, server: &str, asker: &str) -> usize {
     ANSWER_HOOKS.lock().unwrap_or_else(|e| e.into_inner()).heard.get(&(device.to_string(), server.to_string(), asker.to_string())).copied().unwrap_or(0)
 }
 
-/// Harness: `device` sent `asker` ops of `server` in a sync answer.
+/// Harness: `device` answered `asker`'s sync of `server` as a member's (ops or a digest reply).
 #[cfg(test)]
 pub(crate) fn note_served_for_test(device: &str, server: &str, asker: &str) {
     *ANSWER_HOOKS.lock().unwrap_or_else(|e| e.into_inner()).served.entry((device.to_string(), server.to_string(), asker.to_string())).or_default() += 1;
 }
 
-/// How many sync answers carrying ops of `server` `device` sent `asker`.
+/// Harness: `device`'s handler took a sync answer for `server` from `from`.
+#[cfg(test)]
+pub(crate) fn note_response_for_test(device: &str, server: &str, from: &str) {
+    *ANSWER_HOOKS.lock().unwrap_or_else(|e| e.into_inner()).responses.entry((device.to_string(), server.to_string(), from.to_string())).or_default() += 1;
+}
+
+/// How many sync answers for `server` from `from` reached `device`'s handler.
+#[cfg(test)]
+pub(crate) fn responses_for_test(device: &str, server: &str, from: &str) -> usize {
+    ANSWER_HOOKS.lock().unwrap_or_else(|e| e.into_inner()).responses.get(&(device.to_string(), server.to_string(), from.to_string())).copied().unwrap_or(0)
+}
+
+/// How many sync answers carrying ops or a digest reply of `server` `device` sent `asker`.
 #[cfg(test)]
 pub(crate) fn served_for_test(device: &str, server: &str, asker: &str) -> usize {
     ANSWER_HOOKS.lock().unwrap_or_else(|e| e.into_inner()).served.get(&(device.to_string(), server.to_string(), asker.to_string())).copied().unwrap_or(0)

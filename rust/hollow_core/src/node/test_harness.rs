@@ -73682,7 +73682,7 @@ async fn w3c1_a_recovery_on_a_server_without_a_checkpoint_keeps_its_members() {
         away_ok &= held.as_ref().is_some_and(|s| seat(s, &j_master) && seat(s, &k_master));
         away.push((n.device_id[n.device_id.len() - 6..].to_string(), facts(n).await));
     }
-    let leaves = (j.mls_members(&server_id).await.iter().any(|m| *m == k.device_id), k.mls_members(&server_id).await.iter().any(|m| *m == j.device_id));
+    let leaves = (j.mls_members(&server_id).await.contains(&k.device_id), k.mls_members(&server_id).await.contains(&j.device_id));
     away_ok &= leaves == (true, true);
 
     // The kept device takes the recovery (the shipped in-app path) and settles.
@@ -73697,7 +73697,7 @@ async fn w3c1_a_recovery_on_a_server_without_a_checkpoint_keeps_its_members() {
         after.push((n.device_id[n.device_id.len() - 6..].to_string(), facts(n).await));
     }
     let reseated = wait_until(60, async || {
-        j.mls_members(&server_id).await.iter().any(|m| *m == k.device_id) && k.mls_members(&server_id).await.iter().any(|m| *m == j.device_id)
+        j.mls_members(&server_id).await.contains(&k.device_id) && k.mls_members(&server_id).await.contains(&j.device_id)
     })
     .await;
     assert!(away_ok, "HOL-SEC-230: members lost seats while the owner's kept device was away: {away:?} leaves (K at J, J at K)={leaves:?}; after the settling ok={settled_ok} reseated={reseated} {after:?}");
@@ -74211,6 +74211,8 @@ async fn pr_a_early_checkpoint_restore(tags: [u8; 5], (k_tag, f_tag): (u8, u8), 
             wait_until(20, async || key_at(&j).await.as_deref() == Some(new_key.as_str()) && key_at(&k).await.as_deref() == Some(new_key.as_str())).await,
             "J or K never took F's fresh key",
         );
+        let settled_key = j.live_server_state(&server_id).await.and_then(|s| s.base.as_ref().and_then(|b| b.state.join_public_text()));
+        assert_eq!(settled_key, Some(new_key), "the fresh key is not in the settled state itself (a later tick set it)");
     }
     drop(k);
 }
@@ -74219,7 +74221,8 @@ async fn pr_a_early_checkpoint_restore(tags: [u8; 5], (k_tag, f_tag): (u8, u8), 
 /// Note section 7's keyless world: the owner's phone D1 founded the server and admitted J
 /// and K (part C off, so no member holds a checkpoint), T falls after every store of the
 /// members, both owner devices are gone, and F is the fresh install the phrase recovered
-/// keeping only F. Tags: master, d1, d2, recovery, J, K, F.
+/// keeping only F. Tags: master, d1, d2, recovery, J, K, F. With `j_mod` D1 made J a
+/// moderator before T, so J admits newcomers while the owner is away.
 struct PrF5 {
     relay: MockRelay,
     master: NativeKeypair,
@@ -74233,6 +74236,10 @@ struct PrF5 {
 }
 
 async fn pr_f5_keyless(tags: [u8; 7]) -> PrF5 {
+    pr_f5_keyless_with(tags, false).await
+}
+
+async fn pr_f5_keyless_with(tags: [u8; 7], j_mod: bool) -> PrF5 {
     let [m_tag, d1_tag, d2_tag, r_tag, j_tag, k_tag, f_tag] = tags;
     let W3c1Cut { relay, master, d1, d2, j, server_id, _tmp } = w3c1_cut_server([m_tag, d1_tag, d2_tag, r_tag, j_tag]).await;
     let m_id = master.peer_id();
@@ -74246,6 +74253,11 @@ async fn pr_f5_keyless(tags: [u8; 7]) -> PrF5 {
     assert!(wait_until(30, async || has_k(&j).await && has_k(&k).await).await, "precondition: K joined");
     expect_mls_leaf(&j, &server_id, &k.device_id, 30).await;
     expect_mls_leaf(&k, &server_id, &j.device_id, 30).await;
+    if j_mod {
+        d1.cmd_tx.send(NodeCommand::ChangeRole { server_id: server_id.clone(), peer_id: j.master_id.clone(), new_role: "moderator".into() }).await.unwrap();
+        let is_mod = async |n: &TestNode| n.live_role(&server_id, &j.master_id).await == crate::crdt::operations::MemberRole::Moderator;
+        assert!(wait_until(20, async || is_mod(&j).await && is_mod(&k).await).await, "precondition: J is a moderator");
+    }
     let old_key = j.live_server_state(&server_id).await.and_then(|s| s.join_public_text()).expect("precondition: J holds the join key");
     assert!(j.live_server_state(&server_id).await.is_some_and(|s| s.base.is_none()), "precondition: no checkpoint (part C off)");
     // T after everything the members stored: a record is what they first stored before it.
@@ -74457,14 +74469,14 @@ async fn pr_f5_the_cut_off_device_never_moves_the_key_or_the_lock_back() {
 }
 
 /// Note test 10: while the members hold for the owner, a newcomer with the old invite
-/// link is not let in (the cut-off device knows that key); after F's settling a fresh
-/// link from J admits, and the old key is refused as reset.
+/// link is not let in by J, a moderator that admits newcomers (the cut-off device knows
+/// that key); after F's settling a fresh link from J admits, and the old key is refused.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)]
 async fn pr_f5_members_admit_again_once_the_owner_is_back() {
     let _g = test_guard();
     let (n_tag, p_tag) = (48u8, 49u8);
-    let PrF5 { relay, master: _m, d1, j, k, f, server_id: sid, old_key, _tmp } = pr_f5_keyless([41, 42, 43, 44, 45, 46, 47]).await;
+    let PrF5 { relay, master: _m, d1, j, k, f, server_id: sid, old_key, _tmp } = pr_f5_keyless_with([41, 42, 43, 44, 45, 46, 47], true).await;
     let (j_master, k_master) = (j.master_id.clone(), k.master_id.clone());
     let (n_master, p_master) = (tag_kp(n_tag).peer_id(), tag_kp(p_tag).peer_id());
     pr_f5_readd(&f, &[&j_master, &k_master]).await;
@@ -74595,12 +74607,16 @@ async fn pr_f5_a_sync_reentry_takes_answers_only_from_the_devices_it_asked() {
     let _g = test_guard();
     let PrF5 { relay: _r, master: _m, d1, j, k, mut f, server_id: sid, old_key: _o, _tmp } = pr_f5_keyless([71, 72, 73, 74, 75, 76, 77]).await;
     let (j_master, j_dev, f_dev) = (j.master_id.clone(), j.device_id.clone(), f.device_id.clone());
+    let (k_master, k_dev) = (k.master_id.clone(), k.device_id.clone());
     super::op_sync::mute_answers_for_test(&j_dev, &sid, true);
-    pr_f5_readd(&f, &[&j_master]).await;
+    // K is a friend F holds a session with, but names nothing: never a source.
+    super::shared_servers::silence_for_test(&k_dev);
+    pr_f5_readd(&f, &[&j_master, &k_master]).await;
     assert!(wait_until(60, async || super::op_sync::swallowed_for_test(&j_dev, &sid, &f_dev) > 0).await, "precondition: F asked J for the server");
     drain_events(&mut f);
     let log = j.live_server_state(&sid).await.expect("J holds the server").op_log.clone();
     carry_as(&k, &f, sync_response(&sid, &log)).await;
+    assert!(wait_until(20, async || super::op_sync::responses_for_test(&f_dev, &sid, &k_dev) > 0).await, "precondition: K's answer reached F's handler");
     // ABSENCE: a taken answer completes the join on the spot.
     assert!(!expect_joined(&mut f, &sid, 10).await, "F's sync re-entry completed on an answer from a device it never asked");
     assert!(f.live_server_state(&sid).await.is_none(), "F kept a state from a device it never asked");
