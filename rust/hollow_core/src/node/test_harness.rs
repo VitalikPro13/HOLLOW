@@ -74694,9 +74694,22 @@ async fn pr_f5_the_lock_waits_for_the_settling_on_a_server_whose_fold_seats_only
     let tip = || relay.lock_chain(&sid, "").last().map(|l| l.door.clone());
     let before = tip();
     assert!(before.is_some(), "precondition: the members' lock is on the relay");
+    // Both friends quiet first: the re-entry stays pending over several batch ticks.
+    for n in [&j, &k] {
+        super::op_sync::mute_answers_for_test(&n.device_id, &sid, true);
+    }
     pr_f5_readd(&f, &[&j_master, &k_master]).await;
-    assert!(pr_f5_back(&f, &sid, 60).await, "precondition: F holds the server by sync");
+    assert!(
+        wait_until(60, async || [&j, &k].iter().any(|n| super::op_sync::swallowed_for_test(&n.device_id, &sid, &f.device_id) > 0)).await,
+        "precondition: the re-entry asked a friend",
+    );
     // ABSENCE: the lock keeper runs on every batch tick.
+    assert!(!wait_until(12, async || tip() != before || !relay.sees_room(&sid, &j.device_id)).await, "F moved the lock while its sync re-entry was pending");
+    for n in [&j, &k] {
+        super::op_sync::mute_answers_for_test(&n.device_id, &sid, false);
+    }
+    assert!(pr_f5_back(&f, &sid, 60).await, "precondition: F holds the server by sync");
+    // ABSENCE: as above, once the re-entry completed and until the settling.
     assert!(
         !wait_until(20, async || tip() != before || !relay.sees_room(&sid, &j.device_id)).await,
         "F moved the lock before its settling: relay door changed {}, J sees the room {}",
@@ -74709,5 +74722,60 @@ async fn pr_f5_the_lock_waits_for_the_settling_on_a_server_whose_fold_seats_only
         "control: the settling puts F's lock on the relay",
     );
     assert!(wait_until(30, async || relay.sees_room(&sid, &j.device_id)).await, "J lost the room after the settling");
+    drop((d1, j, k, f));
+}
+
+/// Finding 6 on the started path: a second friend's keyless entry that arrives while the
+/// sync re-entry already runs joins its sources. J named the server and went quiet; K
+/// names it later, and the next ask goes to K, whose answer completes the re-entry.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pr_f5_a_friend_that_names_the_server_late_is_asked_too() {
+    let _g = test_guard();
+    let PrF5 { relay: _r, master: _m, d1, j, k, mut f, server_id: sid, old_key: _o, _tmp } = pr_f5_keyless([121, 122, 123, 124, 125, 126, 127]).await;
+    let (j_master, j_dev, f_dev) = (j.master_id.clone(), j.device_id.clone(), f.device_id.clone());
+    let k_master = k.master_id.clone();
+    super::op_sync::mute_answers_for_test(&j_dev, &sid, true);
+    pr_f5_readd(&f, &[&j_master]).await;
+    assert!(wait_until(60, async || super::op_sync::swallowed_for_test(&j_dev, &sid, &f_dev) > 0).await, "precondition: the re-entry asked J");
+    drain_events(&mut f);
+    pr_f5_readd(&f, &[&k_master]).await;
+    assert!(expect_joined(&mut f, &sid, 60).await, "the re-entry never asked the friend that named the server after it started");
+    assert!(super::op_sync::served_for_test(&k.device_id, &sid, &f_dev) > 0, "K's answer completed it");
+    drop((d1, j, k, f));
+}
+
+/// Finding 8 (note 18): a keyless entry for a self-certifying id carries no owner, so the
+/// first answer decides. A friend names its own server as one we share and answers with
+/// its log: the founding op founds it for the friend, and the re-entry ends there with
+/// nothing kept.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pr_f5_a_genesis_reentry_founded_for_another_owner_ends_at_the_first_answer() {
+    let _g = test_guard();
+    let PrF5 { relay: _r, master: _m, d1, mut j, k, f, server_id: _sid, old_key: _o, _tmp } = pr_f5_keyless([131, 132, 133, 134, 135, 136, 137]).await;
+    let (j_master, j_dev, f_dev) = (j.master_id.clone(), j.device_id.clone(), f.device_id.clone());
+    let theirs = create_server_and_wait(&mut j, "Theirs").await;
+    assert!(crate::crdt::anchor::is_genesis_id(&theirs), "precondition: a self-certifying id");
+    super::shared_servers::silence_for_test(&j_dev);
+    pr_f5_readd(&f, &[&j_master]).await;
+    let entry = super::shared_servers::SharedServer { server_id: theirs.clone(), owner: String::new(), join_key: String::new(), relay: String::new(), members: vec![j_master.clone()] };
+    let mut started = false;
+    for _ in 0..10 {
+        carry_as(&j, &f, super::types::HavenMessage::SharedServers { ask: false, servers: vec![entry.clone()], part: 0, pad: String::new() }).await;
+        if wait_until(3, async || super::op_sync::heard_for_test(&j_dev, &theirs, &f_dev) > 0).await {
+            started = true;
+            break;
+        }
+    }
+    assert!(started, "precondition: the entry started a sync re-entry that asked J");
+    let log = j.live_server_state(&theirs).await.expect("J holds its server").op_log.clone();
+    carry_as(&j, &f, sync_response(&theirs, &log)).await;
+    assert!(wait_until(20, async || super::op_sync::responses_for_test(&f_dev, &theirs, &j_dev) > 0).await, "precondition: J's answer reached F's handler");
+    // ABSENCE: a kept state would stay right after the answer that built it.
+    assert!(
+        !wait_until(5, async || f.live_server_state(&theirs).await.is_some()).await,
+        "F kept a server founded for another identity",
+    );
     drop((d1, j, k, f));
 }

@@ -1667,6 +1667,24 @@ pub(crate) mod tests {
         assert!(!retired.fold_lags(&view_removed()), "a retire endorses every op the phone wrote: nothing lags");
     }
 
+    /// `join_key_dropped` (F5): a key the dropped phone set that a counted retire
+    /// endorses is not a dropped key (the retire vouches for it); without the retire it is.
+    #[test]
+    fn a_join_key_a_retire_endorses_is_not_dropped() {
+        let (mut owner, mut log) = baseless_world();
+        log.push(owner.author_checked(P::JoinKeySet { secret: super::super::operations::JoinSecret(hex::encode([9u8; 32])) }).unwrap());
+        let m = baseless_replica(&log, MEMBER, MEMBER_PHONE, true);
+        assert!(m.join_key_dropped(&view_removed()), "control: the phone's key is dropped once a view drops the phone");
+        let mut laptop = baseless_replica(&log, OWNER, LAPTOP, true);
+        let named: Vec<CrdtOp> = log.iter().filter(|o| o.proven_device() == Some(keys(PHONE).1.as_str())).cloned().collect();
+        let mut refs: Vec<super::super::operations::OpRef> = named.iter().map(super::super::operations::OpRef::of).collect();
+        refs.sort();
+        let dr = laptop.create_op(P::DeviceRetired { device: keys(PHONE).1, ops: refs, posts_until_ms: None, restore: None });
+        let mut retired = m.clone();
+        retired.ingest_remote(std::slice::from_ref(&dr));
+        assert!(!retired.join_key_dropped(&view_removed()), "a retire endorses the phone's key: it is not dropped");
+    }
+
     #[test]
     fn a_baseless_hold_survives_the_settlers_first_checkpoint() {
         let (_, log) = baseless_world();
