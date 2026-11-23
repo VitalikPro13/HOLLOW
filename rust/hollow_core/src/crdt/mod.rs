@@ -9,6 +9,7 @@ pub(crate) mod hlc;
 pub(crate) mod lock_state;
 pub(crate) mod members;
 pub(crate) mod operations;
+pub(crate) mod record;
 pub(crate) mod refold;
 pub(crate) mod refold_write;
 pub(crate) mod server_state;

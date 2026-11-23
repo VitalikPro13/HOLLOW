@@ -11,7 +11,9 @@ numbers are of 447cfab4.
 
 Built on `feat/phrase-restore-f5` (5c166763, ade6c0ef): part A with review items 2, 3
 (HOL-SEC-231), 4 (HOL-SEC-232), 11 and 13; part C with items 5 and 6; item 1 in the
-chooser. Not built yet: part B (records, items 7 and 14), the invite key rule (items 8
+chooser. Round 2 built part B (`crdt/record.rs`, one `record_scope` for the build, the
+receipt check, the trial fold and the settling; item 14 by riding the ops on the digest
+sync and only the ids beside the witness). Not built yet: the invite key rule (items 8
 and 12), the F5 sync re-entry (3.2, 3.3), the waiting card (item 9), the item 15 rows for
 those. `.team/HANDOFF.md` lists the next steps.
 

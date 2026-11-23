@@ -32,6 +32,8 @@ const ANSWERED_MAX: usize = 4096;
 const MAX_T_AGE_MS: i64 = 400 * 24 * 3600 * 1000;
 const NONCE_MAX: usize = 128;
 const WITNESS_TAG: &str = "hollow-cp-witness2\n";
+/// A witness naming a record signs this text, so a v2 verifier never reads one.
+const WITNESS_REC_TAG: &str = "hollow-cp-witness3\n";
 /// Counted witnesses kept per server and servers tracked, on a fresh install.
 const TAKEN_PER_SERVER: usize = 256;
 const TAKEN_SERVERS: usize = 64;
@@ -55,15 +57,14 @@ fn well_formed(w: &CpWitness) -> bool {
         && w.server.len() <= 128
         && w.server.bytes().all(|b| b.is_ascii_graphic())
         && (0..=MAX_T_AGE_MS).contains(&w.t_age_ms)
-        && (w.cp.is_empty() || w.cp.len() == 64 && w.cp.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()))
+        && (w.cp.is_empty() || crate::crdt::record::hex64(&w.cp))
+        && (w.rec.is_empty() || w.cp.is_empty() && crate::crdt::record::hex64(&w.rec))
         && w.folded_age_ms >= -1
 }
 
 fn signed_text(w: &CpWitness) -> String {
-    format!(
-        "{WITNESS_TAG}{}\n{}\n{}\n{}\n{}\n{}\n{}",
-        w.server, w.asker, w.nonce, w.t_age_ms, w.cp, w.folded_age_ms, w.by
-    )
+    let v2 = format!("{}\n{}\n{}\n{}\n{}\n{}\n{}", w.server, w.asker, w.nonce, w.t_age_ms, w.cp, w.folded_age_ms, w.by);
+    if w.rec.is_empty() { format!("{WITNESS_TAG}{v2}") } else { format!("{WITNESS_REC_TAG}{v2}\n{}", w.rec) }
 }
 
 impl CpWitness {
@@ -71,6 +72,12 @@ impl CpWitness {
     /// of shape.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn sign(server: &str, asker: &str, ask: &WitnessAsk, cp: String, folded_age_ms: i64, device: &NativeKeypair) -> Option<Self> {
+        Self::sign_with(server, asker, ask, cp, String::new(), folded_age_ms, device)
+    }
+
+    /// [`Self::sign`] naming record `rec` (then `cp` is empty).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn sign_with(server: &str, asker: &str, ask: &WitnessAsk, cp: String, rec: String, folded_age_ms: i64, device: &NativeKeypair) -> Option<Self> {
         use base64::Engine as _;
         let mut w = CpWitness {
             server: server.to_string(),
@@ -81,6 +88,7 @@ impl CpWitness {
             folded_age_ms,
             by: device.peer_id(),
             sig: String::new(),
+            rec,
         };
         if !well_formed(&w) {
             return None;
@@ -112,6 +120,9 @@ fn named_before(state: &ServerState, t_w: u64) -> Option<(CrdtOp, u64)> {
     Some((op, first))
 }
 
+/// A witness that passed the receipt checks, the content it carried, when it arrived.
+type Taken = (CpWitness, Option<CrdtOp>, i64);
+
 /// An ask we sent for a server we are recovering: the nonce and T's age it named, per
 /// asked device.
 #[derive(Debug, Clone)]
@@ -134,7 +145,9 @@ const NONCE_KEEP_MS: i64 = 2 * ANSWER_EVERY_MS;
 pub(crate) struct WitnessDesk {
     answered: HashMap<(String, String), i64>,
     asked: HashMap<String, Asked>,
-    taken: HashMap<String, Vec<(CpWitness, Option<CrdtOp>, i64)>>,
+    taken: HashMap<String, Vec<Taken>>,
+    /// Per server, the records taken witnesses name: id -> content ids.
+    records: HashMap<String, HashMap<String, Vec<String>>>,
     us: String,
     members: HashMap<String, Vec<(String, MemberSource)>>,
     recovering: HashMap<String, Recovery>,
@@ -185,8 +198,9 @@ fn fresh_nonce() -> Option<String> {
 
 impl WitnessDesk {
     /// Our witness for `ask` from `asker` (a device the view counts for the server's
-    /// OWNER), signed by our `device` key, with the named checkpoint op; `None` when we
-    /// answer nothing.
+    /// OWNER), signed by our `device` key, with the named checkpoint op, or when we name
+    /// none before T, the content ids of our record (`ServerState::witness_record`; its
+    /// ops ride the digest sync); `None` when we answer nothing.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn answer(
         &mut self,
@@ -197,8 +211,7 @@ impl WitnessDesk {
         asker: &str,
         device: &NativeKeypair,
         now_ms: i64,
-    ) -> Option<(CpWitness, Option<CrdtOp>)> {
-        let _ = store;
+    ) -> Option<(CpWitness, Option<CrdtOp>, Vec<String>)> {
         let owner = state.current_owner()?;
         if !view.counts(&owner, asker) || !(0..=MAX_T_AGE_MS).contains(&ask.t_age_ms) || !nonce_shape(&ask.nonce) {
             return None;
@@ -215,14 +228,19 @@ impl WitnessDesk {
         }
         let t_w = u64::try_from(now_ms.saturating_sub(ask.t_age_ms)).unwrap_or(0);
         let named = named_before(state, t_w);
-        let (cp, folded_age_ms) = match &named {
-            Some((op, 0)) => (hex::encode(state.content_of(op)), -1),
-            Some((op, first)) => (hex::encode(state.content_of(op)), now_ms.saturating_sub(*first as i64).max(0)),
-            None => (String::new(), 0),
+        let record = match &named {
+            None => state.witness_record(t_w, &store.op_seen_ms(&state.server_id).unwrap_or_default()),
+            Some(_) => None,
         };
-        let witness = CpWitness::sign(&state.server_id, asker, ask, cp, folded_age_ms, device)?;
+        let (cp, rec, folded_age_ms) = match (&named, &record) {
+            (Some((op, 0)), _) => (hex::encode(state.content_of(op)), String::new(), -1),
+            (Some((op, first)), _) => (hex::encode(state.content_of(op)), String::new(), now_ms.saturating_sub(*first as i64).max(0)),
+            (None, Some((ids, newest))) => (String::new(), crate::crdt::record::record_id(&state.server_id, ids), now_ms.saturating_sub(*newest as i64).max(0)),
+            (None, None) => (String::new(), String::new(), 0),
+        };
+        let witness = CpWitness::sign_with(&state.server_id, asker, ask, cp, rec, folded_age_ms, device)?;
         self.answered.insert(key, now_ms);
-        Some((witness, named.map(|(op, _)| op)))
+        Some((witness, named.map(|(op, _)| op), record.map(|(ids, _)| ids).unwrap_or_default()))
     }
 
     /// Note a witness ask we send to `device` for `server` (a fresh install's recovery);
@@ -242,7 +260,16 @@ impl WitnessDesk {
     /// A witness answer arrived from `from` for a server we are recovering. Kept only when
     /// it answers an ask of ours (nonce, age, server, our device), comes from the device it
     /// names and its signature verifies; one per witness device, the newest.
-    pub(crate) fn receive(&mut self, from: &str, witness: CpWitness, content: Option<CrdtOp>, now_ms: i64) {
+    /// A witness naming a record carries its content ids, which must recompute its id.
+    pub(crate) fn receive(&mut self, from: &str, witness: CpWitness, content: Option<CrdtOp>, ids: Vec<String>, now_ms: i64) {
+        let rec_ok = if witness.rec.is_empty() {
+            ids.is_empty()
+        } else {
+            crate::crdt::record::ids_shape(&ids) && crate::crdt::record::record_id(&witness.server, &ids) == witness.rec
+        };
+        if !rec_ok {
+            return;
+        }
         let Some(asked) = self.asked.get(&witness.nonce) else { return };
         if witness.by != from
             || witness.by != asked.device
@@ -259,9 +286,36 @@ impl WitnessDesk {
         }
         let list = self.taken.entry(witness.server.clone()).or_default();
         list.retain(|(w, _, _)| w.by != witness.by);
-        if list.len() < TAKEN_PER_SERVER {
-            list.push((witness, content, now_ms));
+        if list.len() >= TAKEN_PER_SERVER {
+            return;
         }
+        let (server, rec) = (witness.server.clone(), witness.rec.clone());
+        list.push((witness, content, now_ms));
+        if !rec.is_empty() {
+            self.keep_record(&server, rec, ids);
+        }
+    }
+
+    /// Keep a record's ids, at most [`CONTENTS_MAX`] records per server (no more are
+    /// checked): a new one takes the place of one named by at most one witness, the
+    /// fewest named first, so two honest namers keep theirs against single puppets.
+    fn keep_record(&mut self, server: &str, rec: String, ids: Vec<String>) {
+        let namers = |taken: &HashMap<String, Vec<Taken>>, r: &str| taken.get(server).map_or(0, |l| l.iter().filter(|(w, _, _)| w.rec == r).count());
+        let held = self.records.entry(server.to_string()).or_default();
+        held.retain(|r, _| namers(&self.taken, r) > 0);
+        if !held.contains_key(&rec) && held.len() >= CONTENTS_MAX {
+            let Some(weakest) = held.keys().map(|r| (namers(&self.taken, r), r.clone())).min() else { return };
+            if weakest.0 > 1 {
+                return;
+            }
+            held.remove(&weakest.1);
+        }
+        held.insert(rec, ids);
+    }
+
+    /// The content ids of record `rec` of `server_id`, as a witness listed them.
+    pub(crate) fn record_ids(&self, server_id: &str, rec: &str) -> Option<&[String]> {
+        self.records.get(server_id)?.get(rec).map(Vec::as_slice)
     }
 
     /// The witnesses kept for `server_id` (receipt checks passed), with the content each
@@ -475,6 +529,7 @@ impl WitnessDesk {
             r.done = true;
         }
         self.taken.remove(server_id);
+        self.records.remove(server_id);
         self.asked.retain(|_, a| a.server != server_id);
     }
 
@@ -667,7 +722,7 @@ mod tests {
         let asker = phone.peer_id();
         let me = keys(30).0;
         let mut desk = WitnessDesk::default();
-        let (w, op) = desk.answer(&store(), &state, &view, &ask("n1", 3_000), &asker, &me, NOW).expect("a counted asker is answered");
+        let (w, op, _) = desk.answer(&store(), &state, &view, &ask("n1", 3_000), &asker, &me, NOW).expect("a counted asker is answered");
         assert_eq!(w.cp, hex::encode(cp1.content_hash()), "before T the phone's checkpoint, never the laptop's");
         assert_eq!(op.map(|o| o.hlc), Some(cp1.hlc.clone()), "and its op rides along");
         assert_eq!(w.folded_age_ms, NOW - 1_000);
@@ -675,15 +730,15 @@ mod tests {
         assert!(w.verifies());
 
         let other = keys(31).0;
-        let (w, _) = WitnessDesk::default().answer(&store(), &state, &view, &ask("n2", 6_000), &asker, &other, NOW).expect("answered");
+        let (w, _, _) = WitnessDesk::default().answer(&store(), &state, &view, &ask("n2", 6_000), &asker, &other, NOW).expect("answered");
         assert_eq!(w.cp, hex::encode(thief_cp.content_hash()), "a later T names the later checkpoint");
 
-        let (w, op) = WitnessDesk::default().answer(&store(), &state, &view, &ask("n3", 500), &asker, &other, NOW).expect("answered");
+        let (w, op, _) = WitnessDesk::default().answer(&store(), &state, &view, &ask("n3", 500), &asker, &other, NOW).expect("answered");
         assert!(w.cp.is_empty() && op.is_none(), "nothing folded before T names nothing");
 
         let mut seeded = state.clone();
         std::sync::Arc::make_mut(&mut seeded.first_folds).insert(hex::encode(cp1.content_hash()), 0);
-        let (w, _) = WitnessDesk::default().answer(&store(), &seeded, &view, &ask("n4", 3_000), &asker, &other, NOW).expect("answered");
+        let (w, _, _) = WitnessDesk::default().answer(&store(), &seeded, &view, &ask("n4", 3_000), &asker, &other, NOW).expect("answered");
         assert_eq!(w.folded_age_ms, -1, "the upgrade's seed is 'before the 0.14 update'");
     }
 
@@ -710,32 +765,32 @@ mod tests {
         let (state, view, cp1, thief_cp, phone, _) = crate::crdt::settle::tests::witness_world();
         let us = phone.peer_id();
         let me = keys(30).0;
-        let (w, op) = WitnessDesk::default().answer(&store(), &state, &view, &ask("n1", 3_000), &us, &me, NOW).unwrap();
+        let (w, op, _) = WitnessDesk::default().answer(&store(), &state, &view, &ask("n1", 3_000), &us, &me, NOW).unwrap();
         let mut desk = WitnessDesk::default();
-        desk.receive(&me.peer_id(), w.clone(), op.clone(), NOW);
+        desk.receive(&me.peer_id(), w.clone(), op.clone(), vec![], NOW);
         assert!(desk.taken(&state.server_id).is_empty(), "an answer to no ask of ours");
         desk.asked(&us, &me.peer_id(), &state.server_id, "n1", w.t_age_ms, NOW);
-        desk.receive(&keys(33).1, w.clone(), op.clone(), NOW);
+        desk.receive(&keys(33).1, w.clone(), op.clone(), vec![], NOW);
         assert!(desk.taken(&state.server_id).is_empty(), "relayed by a device it does not name");
         let mut forged = w.clone();
         forged.cp = hex::encode(thief_cp.content_hash());
-        desk.receive(&me.peer_id(), forged, Some(thief_cp.clone()), NOW);
+        desk.receive(&me.peer_id(), forged, Some(thief_cp.clone()), vec![], NOW);
         assert!(desk.taken(&state.server_id).is_empty(), "a changed field breaks the signature");
-        desk.receive(&me.peer_id(), w.clone(), Some(thief_cp.clone()), NOW);
+        desk.receive(&me.peer_id(), w.clone(), Some(thief_cp.clone()), vec![], NOW);
         assert!(desk.taken(&state.server_id).is_empty(), "content that is not the named checkpoint");
         let mut aged = w.clone();
         aged.t_age_ms += 1;
-        desk.receive(&me.peer_id(), aged, op.clone(), NOW);
+        desk.receive(&me.peer_id(), aged, op.clone(), vec![], NOW);
         assert!(desk.taken(&state.server_id).is_empty(), "an age our ask did not name");
-        let (signed_other_age, other_op) = WitnessDesk::default().answer(&store(), &state, &view, &ask("n1", 2_000), &us, &me, NOW).unwrap();
+        let (signed_other_age, other_op, _) = WitnessDesk::default().answer(&store(), &state, &view, &ask("n1", 2_000), &us, &me, NOW).unwrap();
         assert!(signed_other_age.verifies());
-        desk.receive(&me.peer_id(), signed_other_age, other_op, NOW);
+        desk.receive(&me.peer_id(), signed_other_age, other_op, vec![], NOW);
         assert!(desk.taken(&state.server_id).is_empty(), "a well-signed witness to an age our ask did not name");
         let other = keys(34).0;
-        let (unasked, unasked_op) = WitnessDesk::default().answer(&store(), &state, &view, &ask("n1", 3_000), &us, &other, NOW).unwrap();
-        desk.receive(&other.peer_id(), unasked, unasked_op, NOW);
+        let (unasked, unasked_op, _) = WitnessDesk::default().answer(&store(), &state, &view, &ask("n1", 3_000), &us, &other, NOW).unwrap();
+        desk.receive(&other.peer_id(), unasked, unasked_op, vec![], NOW);
         assert!(desk.taken(&state.server_id).is_empty(), "a well-signed witness from a device the nonce never went to");
-        desk.receive(&me.peer_id(), w.clone(), op, NOW);
+        desk.receive(&me.peer_id(), w.clone(), op, vec![], NOW);
         assert_eq!(desk.taken(&state.server_id).len(), 1, "the witness is kept");
         assert_eq!(desk.taken(&state.server_id)[0].1.as_ref().map(|o| o.hlc.clone()), Some(cp1.hlc));
     }
@@ -889,8 +944,77 @@ mod tests {
         assert_eq!(unsure.stage("v", 1), Some(Stage::Points), "T unknown: only \"I don't know\"");
         assert!(unsure.due_asks("v", &named, &devices, "me", "my-dev", 1).is_empty());
     }
-}
 
-#[cfg(test)]
-#[path = "witness_review_b_tests.rs"]
-mod review_b_tests;
+    /// Part B: a v2 witness still verifies as before; a record's witness signs the v3
+    /// text over its id, names no checkpoint beside it, and its ids must recompute it.
+    #[test]
+    fn a_v2_witness_still_verifies_and_a_v3_record_binds_its_id() {
+        let me = keys(30).0;
+        let asker = keys(31).1;
+        let a = ask("n1", 3_000);
+        let v2 = CpWitness::sign("s", &asker, &a, String::new(), 0, &me).unwrap();
+        assert!(v2.verifies() && signed_text(&v2).starts_with(WITNESS_TAG), "v2 unchanged");
+        let ids = vec!["a".repeat(64), "b".repeat(64)];
+        let rec = crate::crdt::record::record_id("s", &ids);
+        let v3 = CpWitness::sign_with("s", &asker, &a, String::new(), rec.clone(), 5, &me).unwrap();
+        assert!(v3.verifies() && signed_text(&v3).starts_with(WITNESS_REC_TAG));
+        let mut swapped = v3.clone();
+        swapped.rec = crate::crdt::record::record_id("s", &ids[..1]);
+        assert!(!swapped.verifies(), "the signature binds the record");
+        let mut stripped = v3.clone();
+        stripped.rec.clear();
+        assert!(!stripped.verifies(), "nor reads as a v2 witness naming none");
+        assert!(CpWitness::sign_with("s", &asker, &a, "c".repeat(64), rec.clone(), 5, &me).is_none(), "a checkpoint and a record at once");
+        assert!(CpWitness::sign_with("s", &asker, &a, String::new(), "X".repeat(64), 5, &me).is_none(), "a record id out of shape");
+        let json = serde_json::to_string(&v2).unwrap();
+        assert!(!json.contains("\"rec\""), "a v2 witness carries no record field");
+
+        let mut desk = WitnessDesk::default();
+        assert!(desk.asked(&asker, &me.peer_id(), "s", "n1", a.t_age_ms, NOW));
+        desk.receive(&me.peer_id(), v3.clone(), None, ids[..1].to_vec(), NOW);
+        assert!(desk.taken("s").is_empty(), "ids that do not recompute the record");
+        desk.receive(&me.peer_id(), v3.clone(), None, vec![ids[1].clone(), ids[0].clone()], NOW);
+        assert!(desk.taken("s").is_empty(), "ids out of order");
+        desk.receive(&me.peer_id(), v2.clone(), None, ids.clone(), NOW);
+        assert!(desk.taken("s").is_empty(), "ids beside a witness naming no record");
+        desk.receive(&me.peer_id(), v3, None, ids.clone(), NOW);
+        assert_eq!(desk.taken("s").len(), 1);
+        assert_eq!(desk.record_ids("s", &rec), Some(ids.as_slice()));
+    }
+
+    fn rec_facts(sets: &[(&str, &[u8], &[&str])]) -> HashMap<String, CpFacts> {
+        let owned: Vec<(String, std::collections::BTreeSet<[u8; 32]>)> = sets.iter().map(|(x, ids, _)| (x.to_string(), ids.iter().map(|b| [*b; 32]).collect())).collect();
+        let lines = crate::crdt::record::record_lineage(&owned);
+        sets.iter()
+            .map(|(x, ids, members)| {
+                let f = CpFacts {
+                    generation: ids.len() as u64,
+                    hlc: crate::crdt::hlc::HlcTimestamp { physical_ms: 1, counter: 0, actor: "a".into() },
+                    lineage: lines[*x].clone(),
+                    members: members.iter().map(|m| m.to_string()).collect(),
+                };
+                (x.to_string(), f)
+            })
+            .collect()
+    }
+
+    fn named(identity: &str, cp: &str) -> Seen {
+        Seen { identity: identity.into(), cp: cp.into(), folded_age_ms: 0, received_ms: NOW }
+    }
+
+    /// Part B judging: the honest record two members name is the pick over a puppet
+    /// superset; a stale subset an honest member names leaves the dated list.
+    #[test]
+    fn one_honest_record_blocks_a_puppet_superset_and_a_stale_subset_lists() {
+        let none = |_: &str| false;
+        let facts = rec_facts(&[("h", &[1, 2], &["M", "J", "K"]), ("p", &[1, 2, 3], &["M", "J", "K", "P1", "P2"])]);
+        let seen = [named("J", "h"), named("K", "h"), named("P1", "p"), named("P2", "p")];
+        assert_eq!(judge(&seen, &facts, &none).pick.as_deref(), Some("h"), "the puppets' superset is not continuous");
+        let puppets_only = [named("P1", "p"), named("P2", "p")];
+        assert_eq!(judge(&puppets_only, &facts, &none).pick.as_deref(), Some("p"), "the known residual: only puppets answer");
+        let facts = rec_facts(&[("h", &[1, 2], &["M", "J", "K"]), ("s", &[1], &["M", "L"])]);
+        let seen = [named("J", "h"), named("K", "h"), named("L", "s")];
+        let j = judge(&seen, &facts, &none);
+        assert!(j.pick.is_none() && j.points.len() == 2, "a stale honest subset: the dated list ({:?})", j.pick);
+    }
+}

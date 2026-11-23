@@ -9348,7 +9348,8 @@ async fn handle_sync_response(
             && (server_states.contains_key(&server_id) || pending_server_joins.contains_key(&server_id))
         {
             let cp = x.as_ref().and_then(|x| x.witness_cp.as_deref()).and_then(super::sync_ext::read_base_op);
-            crdt_resync.witness.receive(peer_str, w, cp, super::types::now_ms());
+            let ids = x.as_ref().map(|x| x.witness_rec.clone()).unwrap_or_default();
+            crdt_resync.witness.receive(peer_str, w, cp, ids, super::types::now_ms());
         }
         // Rosters before ops (DEVICE_PROOF_DESIGN section 9): what the answer says about
         // rosters, from a member only.
@@ -10173,9 +10174,10 @@ async fn handle_sync_request(
             {
                 let co = |m: &str| super::server_rosters::co_member_rosters(&store, &state.server_id, m);
                 let view = super::authority_view::view_for(&store, db_path, state, &co);
-                if let Some((witness, cp)) = crdt_resync.witness.answer(&store, state, &view, w, peer_str, device_keypair, super::types::now_ms()) {
+                if let Some((witness, cp, ids)) = crdt_resync.witness.answer(&store, state, &view, w, peer_str, device_keypair, super::types::now_ms()) {
                     rx.witness = Some(witness);
                     rx.witness_cp = cp.and_then(|op| serde_json::to_string(&op).ok());
+                    rx.witness_rec = ids;
                 }
             }
             if let Some(rx) = reply_x.as_ref().filter(|r| r.base_unknown) {

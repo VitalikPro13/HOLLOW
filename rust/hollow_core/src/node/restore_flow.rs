@@ -126,13 +126,33 @@ pub(crate) fn register(desk: &mut WitnessDesk, server_states: &ServerStates, sto
 
 /// The contents the witnesses named that check as bases of the server: signed by our
 /// identity with a device proof, at most [`super::witness::CONTENTS_MAX`] and
-/// [`super::witness::CONTENT_BYTES_MAX`] in step 2's order.
-fn checked_contents(state: &ServerState, seen: &[Seen], contents: &HashMap<String, CrdtOp>, contact: &dyn Fn(&str) -> bool, me: &str) -> HashMap<String, CpFacts> {
+/// [`super::witness::CONTENT_BYTES_MAX`] in step 2's order. A record that checked
+/// (`records`, its ops) is a point too (HOL-SEC-230 part B): its generation is its size,
+/// its line the other records it holds every op of, its members those of a settling on
+/// it (`trial`, a copy of our state). A record and a checkpoint are never on one line.
+fn checked_contents(
+    state: &ServerState,
+    seen: &[Seen],
+    contents: &HashMap<String, CrdtOp>,
+    records: &HashMap<String, Vec<CrdtOp>>,
+    contact: &dyn Fn(&str) -> bool,
+    me: &str,
+) -> HashMap<String, CpFacts> {
     let mut facts = HashMap::new();
     let mut bytes = 0usize;
+    let mut trial: Option<ServerState> = None;
+    let mut sets: Vec<(String, std::collections::BTreeSet<[u8; 32]>)> = Vec::new();
     for cp in super::witness::content_order(seen, contact) {
         if facts.len() >= super::witness::CONTENTS_MAX {
             break;
+        }
+        if let Some(ops) = records.get(&cp) {
+            let ids: std::collections::BTreeSet<[u8; 32]> = ops.iter().map(CrdtOp::content_hash).collect();
+            let Some(hlc) = ops.iter().map(|o| o.hlc.clone()).max() else { continue };
+            let members = trial.get_or_insert_with(|| state.clone()).record_members(&ids);
+            facts.insert(cp.clone(), CpFacts { generation: ids.len() as u64, hlc, lineage: Vec::new(), members });
+            sets.push((cp, ids));
+            continue;
         }
         let Some(op) = contents.get(&cp) else { continue };
         if op.author != me || op.verify_author().is_err() || op.proven_device().is_none() {
@@ -147,6 +167,11 @@ fn checked_contents(state: &ServerState, seen: &[Seen], contents: &HashMap<Strin
             facts.insert(cp, CpFacts::of(&base));
         }
     }
+    for (x, line) in crate::crdt::record::record_lineage(&sets) {
+        if let Some(f) = facts.get_mut(&x) {
+            f.lineage = line;
+        }
+    }
     facts
 }
 
@@ -156,6 +181,7 @@ fn rejudge(desk: &mut WitnessDesk, state: &ServerState, store: &MessageStore, db
     let sid = state.server_id.clone();
     let mut seen = Vec::new();
     let mut contents: HashMap<String, CrdtOp> = HashMap::new();
+    let mut records: HashMap<String, Vec<CrdtOp>> = HashMap::new();
     for (w, content, at) in desk.taken(&sid) {
         let Some(identity) = super::server_rosters::place(store, db_path, state, &w.by) else { continue };
         if identity == me {
@@ -164,9 +190,25 @@ fn rejudge(desk: &mut WitnessDesk, state: &ServerState, store: &MessageStore, db
         if let Some(op) = content {
             contents.entry(w.cp.clone()).or_insert_with(|| op.clone());
         }
-        seen.push(Seen { identity, cp: w.cp.clone(), folded_age_ms: w.folded_age_ms, received_ms: *at });
+        // A record names a point once every op it lists is held here and checks; one
+        // that fails a check names none, one still syncing waits.
+        let cp = if w.rec.is_empty() {
+            w.cp.clone()
+        } else if records.contains_key(&w.rec) {
+            w.rec.clone()
+        } else {
+            match desk.record_ids(&sid, &w.rec).map(|ids| state.record_ops(ids)) {
+                Some(Ok(ops)) => {
+                    records.insert(w.rec.clone(), ops);
+                    w.rec.clone()
+                }
+                Some(Err(crate::crdt::record::RecordCheck::Void)) => String::new(),
+                Some(Err(crate::crdt::record::RecordCheck::NotHeld)) | None => continue,
+            }
+        };
+        seen.push(Seen { identity, cp, folded_age_ms: w.folded_age_ms, received_ms: *at });
     }
-    let facts = checked_contents(state, &seen, &contents, &|m| contacts.contains(m), me);
+    let facts = checked_contents(state, &seen, &contents, &records, &|m| contacts.contains(m), me);
     let mut named: Vec<String> = facts.values().flat_map(|f| f.members.iter().cloned()).collect();
     named.sort();
     named.dedup();
@@ -323,13 +365,17 @@ fn settle(
     else {
         return;
     };
-    let on = match &x {
-        Some(x) => crate::crdt::settle::SettleOn::Witnessed(Box::new(x.clone())),
-        None if choice.is_some() => {
+    let record = choice.as_ref().and_then(|cp| desk.record_ids(server_id, cp)).map(|ids| {
+        ids.iter().filter_map(|i| <[u8; 32]>::try_from(hex::decode(i).ok()?.as_slice()).ok()).collect::<std::collections::BTreeSet<[u8; 32]>>()
+    });
+    let on = match (&x, record) {
+        (Some(x), _) => crate::crdt::settle::SettleOn::Witnessed(Box::new(x.clone())),
+        (None, Some(ids)) => crate::crdt::settle::SettleOn::Record(ids),
+        (None, None) if choice.is_some() => {
             desk.unchoose(server_id);
             return;
         }
-        None => crate::crdt::settle::SettleOn::Rollback,
+        (None, None) => crate::crdt::settle::SettleOn::Rollback,
     };
     let dropped = dropped_devices(state, x.as_ref(), local_master);
     let seen = store.op_seen_ms(server_id).unwrap_or_default();

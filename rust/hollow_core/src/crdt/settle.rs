@@ -40,6 +40,9 @@ pub(crate) enum SettleOn {
     /// "I don't know" (section 8.4): a child of our base folding the newest checkpoint a
     /// device we still count wrote, else the oldest generation-0 one, else the founding op.
     Rollback,
+    /// A witnessed record (HOL-SEC-230 part B): a child of our base folding the founding
+    /// op, what we count, and the record's ops (by content id) inside the record scope.
+    Record(std::collections::BTreeSet<[u8; 32]>),
 }
 
 fn is_checkpoint(op: &CrdtOp) -> bool {
@@ -117,9 +120,20 @@ impl ServerState {
     /// The ops a settling folds on R: what counted before the removal, a dropped device's
     /// only when stored here before T (its founding op and home op aside); no checkpoint
     /// but R, no founding op but the one the fold founds on.
-    fn settling_input(&mut self, r: Option<&CrdtOp>, s: &Settling<'_>) -> Vec<CrdtOp> {
+    /// On a record, also its ops in the record scope (under the current view).
+    fn settling_input(&mut self, r: Option<&CrdtOp>, s: &Settling<'_>, record: Option<&std::collections::BTreeSet<[u8; 32]>>) -> Vec<CrdtOp> {
         let stand = self.founding_stand();
         let home = self.home_stand(s.home.as_deref());
+        let in_record: std::collections::HashSet<[u8; 32]> = match record {
+            Some(ids) => {
+                let any = |_: &str| true;
+                match self.record_scope(&any) {
+                    Some(scope) => self.op_log.iter().chain(self.stored.iter().map(|(o, _)| o)).chain(self.held.iter().map(|(o, _)| o)).filter(|o| scope(o)).map(CrdtOp::content_hash).filter(|h| ids.contains(h)).collect(),
+                    None => Default::default(),
+                }
+            }
+            None => Default::default(),
+        };
         let now_view = std::mem::replace(&mut self.authority, s.before.clone());
         let before_t = |o: &CrdtOp| s.seen.get(&(o.author.clone(), o.hlc.physical_ms, o.hlc.counter)).is_some_and(|ms| *ms < s.t_ms);
         let dropped = |o: &CrdtOp| o.dev.as_deref().is_some_and(|d| s.dropped.contains(&d.device));
@@ -131,12 +145,20 @@ impl ServerState {
             .chain(self.held.iter().map(|(o, _)| o))
             .filter(|o| !is_checkpoint(o) && !matches!(o.payload, CrdtPayload::SettleSign { .. }))
             .filter(|o| !matches!(o.payload, CrdtPayload::ServerCreated { .. }) || stand == Some(o.content_hash()))
-            .filter(|o| self.device_counts_here(o) && (!dropped(o) || before_t(o) || kept(o)))
+            .filter(|o| (self.device_counts_here(o) && (!dropped(o) || before_t(o) || kept(o))) || in_record.contains(&o.content_hash()))
             .cloned()
             .collect();
         self.authority = now_view;
         ops.extend(r.cloned());
         ops
+    }
+
+    /// What a settling on record `ids` folds from the founding op, judged by the current
+    /// view (the chooser's trial fold).
+    pub(crate) fn record_input(&mut self, ids: &std::collections::BTreeSet<[u8; 32]>) -> Vec<CrdtOp> {
+        let seen = SeenAt::new();
+        let s = Settling { before: self.authority.clone(), dropped: &[], t_ms: 0, seen: &seen, roster: Roster::default(), home: None };
+        self.settling_input(None, &s, Some(ids))
     }
 
     /// The settling checkpoint's state and its stamp (section 8.3 step 4, and rule 4 of
@@ -146,6 +168,11 @@ impl ServerState {
             SettleOn::Restore => (self.base.as_ref().map(|b| Box::new(super::fold::Base::clone(b)))?, self.restore_for(s.t_ms)),
             SettleOn::Witnessed(x) => (Box::new(self.base_of_content(x)?), Some(CrdtOp::clone(x))),
             SettleOn::Rollback => (self.base.as_ref().map(|b| Box::new(super::fold::Base::clone(b)))?, self.rollback_point(me)),
+            SettleOn::Record(_) => (self.base.as_ref().map(|b| Box::new(super::fold::Base::clone(b)))?, None),
+        };
+        let record = match on {
+            SettleOn::Record(ids) => Some(ids),
+            _ => None,
         };
         if r.is_none() && !super::anchor::is_genesis_id(&self.server_id) {
             return None;
@@ -153,7 +180,7 @@ impl ServerState {
         let mut scratch = ServerState::skeleton(self.server_id.clone());
         scratch.owner_pin = self.owner_pin.clone();
         scratch.settle_base = r.as_ref().map(|o| self.content_of(o));
-        scratch.ingest_remote(&self.settling_input(r.as_ref(), s));
+        scratch.ingest_remote(&self.settling_input(r.as_ref(), s, record));
         if scratch.base.as_ref().map(|b| b.hash) != scratch.settle_base {
             return None;
         }

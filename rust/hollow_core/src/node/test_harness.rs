@@ -73906,3 +73906,89 @@ async fn w3c1_an_owner_checkpoints_a_cut_server_soon_after_its_first_admission()
     assert!(s.is_member(&j.master_id) && s.base.as_ref().is_some_and(|b| b.state.is_member(&j.master_id)), "the checkpoint lists J");
     drop((d1, d2, j));
 }
+
+/// HOL-SEC-230 part B (F5 note test 4): a server that never checkpointed comes back to a
+/// fresh install from its members' records. J and K hold part A's hold, name the same
+/// record of what the dropped devices wrote before T, F picks it, and its settling keeps
+/// J, K and the rename from before T, never the thief's rename after T.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pr_a_a_fresh_install_restores_a_server_that_never_checkpointed_from_members_records() {
+    use crate::crdt::operations::CrdtPayload as P;
+    let _g = test_guard();
+    let [m_tag, d1_tag, d2_tag, r_tag, j_tag] = [231u8, 232, 233, 234, 235];
+    let (k_tag, f_tag) = (236u8, 237u8);
+    let W3c1Cut { relay, master, d1, d2, j, server_id, _tmp } = w3c1_cut_server([m_tag, d1_tag, d2_tag, r_tag, j_tag]).await;
+    let m_id = master.peer_id();
+    let d1_id = tag_kp(d1_tag).peer_id();
+    let (j_master, k_master) = (j.master_id.clone(), tag_kp(k_tag).peer_id());
+    let k = spawn_node_with_friends(&relay, k_tag, k_tag, &[&m_id]).await;
+    k.cmd_tx
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&server_id) })
+        .await
+        .unwrap();
+    assert!(wait_until(30, async || j.live_server_state(&server_id).await.is_some_and(|s| s.is_member(&k_master))).await, "precondition: K joined");
+    let name_at = async |n: &TestNode| n.live_server_state(&server_id).await.map(|s| s.name.read().clone());
+    let honest = w3c1_device_op(&server_id, &master, &tag_kp(d1_tag), P::ServerRenamed { new_name: "honest".into() }, 0);
+    for to in [&j, &k] {
+        carry_as(&d1, to, crdt_broadcast(&server_id, &honest)).await;
+    }
+    assert!(wait_until(15, async || name_at(&j).await.as_deref() == Some("honest") && name_at(&k).await.as_deref() == Some("honest")).await);
+    assert!(j.live_server_state(&server_id).await.is_some_and(|s| s.base.is_none()), "precondition: no checkpoint anywhere");
+    // T must fall after every store above on the members' clocks: the record is what
+    // they first stored before it (an absence of later stores has no signal).
+    sleep_ms(1200).await;
+    let t_ms = crate::crdt::hlc::wall_clock_ms() as i64;
+    sleep_ms(300).await;
+    let stolen = w3c1_device_op(&server_id, &master, &tag_kp(d1_tag), P::ServerRenamed { new_name: "stolen".into() }, 0);
+    for to in [&j, &k] {
+        carry_as(&d1, to, crdt_broadcast(&server_id, &stolen)).await;
+    }
+    assert!(wait_until(15, async || name_at(&j).await.as_deref() == Some("stolen")).await, "precondition: the thief's rename after T");
+    for n in [&d1, &d2] {
+        relay.set_online(&n.device_id, false);
+    }
+    drop(d2);
+
+    let f = spawn_node_staged_at(&relay, master.clone(), f_tag, &[], |st, db, pass| {
+        let sign = crate::api::roster::RestoreSign::Recover { lost_since_ms: t_ms, no_wait: true };
+        crate::api::roster::sign_restore(&master, &tag_kp(f_tag), &tag_kp(r_tag), sign, db, pass).expect("the restore signs");
+        let mark = super::phrase_restore::Mark { at_ms: super::roster_book::now_ms(), branch: super::phrase_restore::Branch::Recover, empty: true, device: tag_kp(f_tag).peer_id() };
+        super::phrase_restore::write(st, &mark).expect("the mark");
+    })
+    .await;
+    let f_dev = f.device_id.clone();
+    for friend in [&j_master, &k_master] {
+        f.cmd_tx.send(NodeCommand::SendFriendRequest { peer_id: friend.clone() }).await.unwrap();
+    }
+    assert!(
+        wait_until(30, async || f.friend_status(&j_master).as_deref() == Some("accepted") && f.friend_status(&k_master).as_deref() == Some("accepted")).await,
+        "the members never answered F's re-add",
+    );
+    assert!(
+        wait_until(30, async || {
+            j.live_server_state(&server_id).await.is_some_and(|s| s.authority.device_verdict(&m_id, &d1_id) == crate::crdt::authority::DeviceVerdict::Uncounted && s.in_recovery())
+        })
+        .await,
+        "J never held the server under part A's hold",
+    );
+    assert!(j.live_server_state(&server_id).await.is_some_and(|s| s.is_member(&k_master)), "part A keeps K at J meanwhile");
+    let restore = || super::restore_flow::snapshot_of(&f_dev).into_iter().find(|s| s.server_id == server_id);
+    assert!(
+        wait_until(90, async || restore().is_some_and(|r| r.stage == super::witness::Stage::Pick)).await,
+        "F is never offered the members' record: {:?}",
+        restore().map(|r| (r.stage, r.points.iter().map(|p| (p.cp.clone(), p.named_by.clone())).collect::<Vec<_>>())),
+    );
+    let pick = restore().and_then(|r| r.pick).expect("a pick");
+    assert!(pick.named_by.contains(&j_master) && pick.named_by.contains(&k_master), "both members name the record: {:?}", pick.named_by);
+    let (reply, rx) = tokio::sync::oneshot::channel();
+    f.cmd_tx.send(NodeCommand::ChooseRestore { server_id: server_id.clone(), cp: Some(pick.cp.clone()), reply }).await.unwrap();
+    rx.await.expect("an answer").expect("the choice is taken");
+    assert!(wait_until(40, async || name_at(&j).await.as_deref() == Some("honest")).await, "what the thief wrote after T stayed: {:?}", name_at(&j).await);
+    for n in [&j, &f] {
+        let s = n.live_server_state(&server_id).await.expect("the server is held");
+        assert!(s.is_member(&j_master) && s.is_member(&k_master), "the settling lists J and K");
+    }
+    assert!(wait_until(20, async || j.live_server_state(&server_id).await.is_some_and(|s| !s.in_recovery())).await, "the settling ends J's hold");
+    drop((d1, k));
+}

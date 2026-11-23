@@ -632,7 +632,7 @@ impl ServerState {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::sync::Arc;
 
     use super::super::authority::{self, AuthorityView, KeyRule};
@@ -643,24 +643,24 @@ mod tests {
     use super::*;
     use crate::identity::roster::{r_pub_of, sign_consent, sign_recovery, sign_removal, sign_vouch, Roster};
 
-    const OWNER: u8 = 1;
-    const PHONE: u8 = 2;
-    const RECOVERY: u8 = 3;
-    const LAPTOP: u8 = 4;
-    const MEMBER: u8 = 5;
-    const MEMBER_PHONE: u8 = 6;
-    const MEMBER_RECOVERY: u8 = 7;
-    const MOD: u8 = 8;
-    const MOD_PHONE: u8 = 9;
-    const MOD_RECOVERY: u8 = 10;
-    const STRANGER: u8 = 11;
-    const MEMBER_OLD: u8 = 12;
-    const LATE: u8 = 13;
-    const LATE_PHONE: u8 = 14;
-    const LATE_RECOVERY: u8 = 15;
+    pub(crate) const OWNER: u8 = 1;
+    pub(crate) const PHONE: u8 = 2;
+    pub(crate) const RECOVERY: u8 = 3;
+    pub(crate) const LAPTOP: u8 = 4;
+    pub(crate) const MEMBER: u8 = 5;
+    pub(crate) const MEMBER_PHONE: u8 = 6;
+    pub(crate) const MEMBER_RECOVERY: u8 = 7;
+    pub(crate) const MOD: u8 = 8;
+    pub(crate) const MOD_PHONE: u8 = 9;
+    pub(crate) const MOD_RECOVERY: u8 = 10;
+    pub(crate) const STRANGER: u8 = 11;
+    pub(crate) const MEMBER_OLD: u8 = 12;
+    pub(crate) const LATE: u8 = 13;
+    pub(crate) const LATE_PHONE: u8 = 14;
+    pub(crate) const LATE_RECOVERY: u8 = 15;
 
     /// The owner's roster before and after its PHONE (every checkpoint's writer) is dropped.
-    fn owner_rosters() -> (Roster, Roster) {
+    pub(crate) fn owner_rosters() -> (Roster, Roster) {
         let (master, m_id, _) = keys(OWNER);
         let mut before = Roster::genesis(&master, &keys(RECOVERY).0, &keys(PHONE).0, 1_000);
         before.add_vouch(sign_vouch(&keys(PHONE).0, &m_id, &before.base(), &keys(LAPTOP).1));
@@ -671,7 +671,7 @@ mod tests {
         (before, after)
     }
 
-    fn view(owner: &Roster) -> Arc<AuthorityView> {
+    pub(crate) fn view(owner: &Roster) -> Arc<AuthorityView> {
         let mut v = AuthorityView::judging();
         v.insert(keys(OWNER).1, authority::judge(&keys(OWNER).1, &KeyRule::FirstHeld, &[owner]));
         for (tag, phone, rec) in [(MEMBER, MEMBER_PHONE, MEMBER_RECOVERY), (MOD, MOD_PHONE, MOD_RECOVERY), (LATE, LATE_PHONE, LATE_RECOVERY)] {
@@ -681,7 +681,7 @@ mod tests {
         Arc::new(v)
     }
 
-    fn replica(sid: &str, tag: u8, device: u8, signs: bool) -> ServerState {
+    pub(crate) fn replica(sid: &str, tag: u8, device: u8, signs: bool) -> ServerState {
         let (kp, id, pk) = keys(tag);
         let (dkp, did, _) = keys(device);
         let mut s = ServerState::skeleton(sid.into());
@@ -693,7 +693,7 @@ mod tests {
         s
     }
 
-    fn admit(owner: &mut ServerState, tag: u8) -> CrdtOp {
+    pub(crate) fn admit(owner: &mut ServerState, tag: u8) -> CrdtOp {
         let ask = super::super::operations::JoinAsk::sign(&owner.server_id, 1, &keys(tag).0);
         owner.author_checked(P::MemberAdded { peer_id: keys(tag).1, display_name: "m".into(), follow: None, ask: Some(ask) }).unwrap()
     }
@@ -1497,11 +1497,11 @@ mod tests {
 
     // Part A (HOL-SEC-230, -231): the hold without a base.
 
-    const MOD_LAPTOP: u8 = 16;
+    pub(crate) const MOD_LAPTOP: u8 = 16;
 
     /// The owner's phone founds and admits MEMBER, MOD (a moderator) and LATE, and MOD's
     /// phone bans STRANGER after admitting it: no checkpoint anywhere.
-    fn baseless_world() -> (ServerState, Vec<CrdtOp>) {
+    pub(crate) fn baseless_world() -> (ServerState, Vec<CrdtOp>) {
         let (before, _) = owner_rosters();
         let (master, m_id, pk) = keys(OWNER);
         let (phone, phone_id, _) = keys(PHONE);
@@ -1523,7 +1523,7 @@ mod tests {
         (owner, log)
     }
 
-    fn baseless_replica(log: &[CrdtOp], tag: u8, device: u8, signs: bool) -> ServerState {
+    pub(crate) fn baseless_replica(log: &[CrdtOp], tag: u8, device: u8, signs: bool) -> ServerState {
         let (before, _) = owner_rosters();
         let sid = log.iter().find_map(|o| matches!(o.payload, P::ServerCreated { .. }).then(|| o.server_id.clone())).expect("the founding op");
         let mut s = replica(&sid, tag, device, signs);
@@ -1534,7 +1534,7 @@ mod tests {
 
     /// The view after the owner's phrase dropped its phone, and with `mod_dropped` the
     /// moderator's phrase dropping MOD_PHONE for MOD_LAPTOP too.
-    fn view_after(mod_dropped: bool) -> Arc<AuthorityView> {
+    pub(crate) fn view_after(mod_dropped: bool) -> Arc<AuthorityView> {
         let (_, after) = owner_rosters();
         let mut v = (*view(&after)).clone();
         if mod_dropped {
