@@ -702,8 +702,8 @@ mod tests {
     }
 
     /// HOL-SEC-229 through the shipped in-app recovery: the device it cut off asks to join
-    /// again and the Devices page names it as cut off, one of ours; a device that was
-    /// never ours stays a restored backup.
+    /// again and the Devices page names it as cut off, one of ours; a device no record
+    /// names may be one of the old ones (the master key signs an ask for any key).
     #[test]
     fn roster_status_names_a_device_the_in_app_recovery_cut_off() {
         let _g = crate::node::resolver::test_lock();
@@ -736,7 +736,7 @@ mod tests {
         let status = roster_status().unwrap();
         let row = |d: &NativeKeypair| status.devices.iter().find(|x| x.device_peer_id == d.peer_id()).map(|x| (x.state.clone(), x.cut_off_at_ms, x.cut_off.clone()));
         assert_eq!(row(&old), Some(("pending".into(), r.base_at(), Some("ours".into()))));
-        assert_eq!(row(&backup), Some(("pending".into(), None, None)), "a restored backup is not named as cut off");
+        assert_eq!(row(&backup), Some(("pending".into(), r.base_at(), Some("maybe".into()))), "a device no record names is not a maybe");
     }
 
     /// C-IDENTITY-09. The Devices page learns what removing a device keeps: the

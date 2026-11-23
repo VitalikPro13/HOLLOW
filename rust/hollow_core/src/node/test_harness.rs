@@ -73544,3 +73544,66 @@ async fn pr_a_welcome_recovery_restarted_before_the_readd_restores_the_owned_ser
     );
     drop((d1, j, f));
 }
+
+// rev229-retire
+/// HOL-SEC-229 review, item 7: D2's recovery drops D1 as lost since T and settles the
+/// server; D1 learns it and asks to join again; D2 refuses the ask. The refusal mints no
+/// retire and starts no retire round for D1, so no `DeviceRetired` of D2's ever names
+/// what D1 wrote after T or a post window past T, at once or late.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn rev229_refusing_a_device_a_recovery_cut_off_never_endorses_what_it_wrote_after_t() {
+    use crate::crdt::operations::CrdtPayload as P;
+    let _g = test_guard();
+    let [m_tag, d1_tag, d2_tag, r_tag, j_tag] = [191u8, 192, 193, 194, 195];
+    let W3c1Cut { relay: _relay, master, d1, d2, j, server_id, _tmp } = w3c1_cut_server([m_tag, d1_tag, d2_tag, r_tag, j_tag]).await;
+    let (m_id, d1_id, d2_id) = (master.peer_id(), tag_kp(d1_tag).peer_id(), tag_kp(d2_tag).peer_id());
+    let general = general_channel_of(&server_id);
+    w3c1h_post(&d1, &[&j, &d2], &server_id, &general, "rev229-before", &d1_id).await;
+    let t_ms = crate::crdt::hlc::wall_clock_ms() as i64;
+    assert!(wait_until(5, async || crate::crdt::hlc::wall_clock_ms() as i64 > t_ms).await, "the clock moves past T");
+    let stolen = w3c1_device_op(&server_id, &master, &tag_kp(d1_tag), P::ServerRenamed { new_name: "stolen".into() }, 0);
+    for to in [&d2, &j] {
+        carry_as(&d1, to, crdt_broadcast(&server_id, &stolen)).await;
+    }
+    let name_at = async |n: &TestNode| n.live_server_state(&server_id).await.map(|s| s.name.read().clone());
+    assert!(wait_until(15, async || name_at(&d2).await.as_deref() == Some("stolen")).await, "precondition: D1's rename after T reached D2");
+    w3c1h_post(&d1, &[&j, &d2], &server_id, &general, "rev229-after", &d1_id).await;
+    assert!(d2.store().newest_post_of_device(&server_id, &m_id, &d1_id).is_some_and(|p| p >= t_ms), "precondition: D2 holds D1's post after T");
+
+    // The in-app recovery's order (`api::roster::changed`): hold, sign, then the command.
+    assert!(super::authority_view::hold_own(&d2.store(), &m_id), "nothing held before this change");
+    super::roster_book::recover(&master, &tag_kp(r_tag), &tag_kp(d2_tag), &[], true, Some(t_ms), &d2.db_path, &d2.passphrase)
+        .expect("the phrase recovers");
+    // The resolver is shared and D1's own node still links D1 to M: D2 alone must not place it.
+    super::resolver::blind_for_test(&d2_id, &d1_id);
+    d2.cmd_tx.send(NodeCommand::RosterChanged { newly_revoked: vec![d1_id.clone()] }).await.unwrap();
+    let settled = |s: &ServerState| s.base.as_ref().is_some_and(|b| b.state.cp_settles.as_ref().is_some_and(|st| st.devices.contains(&d1_id)));
+    assert!(wait_until(30, async || d2.live_server_state(&server_id).await.is_some_and(|s| settled(&s))).await, "precondition: D2 settles the server");
+    assert!(wait_until(25, async || pr_left_out_by_recovery(&d1, &m_id)).await, "precondition: D1 learned the recovery");
+    assert!(wait_until(30, async || pr_ask_at(&d2, &m_id, &d1_id).0).await, "precondition: D1's ask to join again reached D2");
+
+    // Refuse, as the pop-up and the Devices row do.
+    d2.cmd_tx
+        .send(NodeCommand::RevokeDevice { device_peer_id: d1_id.clone(), mode: super::roster_book::RemoveMode::Retire, with_dependents: false })
+        .await
+        .unwrap();
+    let refused = || super::roster_book::own(&m_id, &d2.db_path, &d2.passphrase).is_some_and(|(_, s)| s.removed.contains_key(&d1_id));
+    assert!(wait_until(30, async || refused()).await, "precondition: the refusal removed D1");
+    // No round means no late mint either: that is the only one that runs after the removal.
+    assert!(!super::retire_round::round_started_for_test(&d1_id), "the refusal of a device the roster does not count started a retire round");
+    let endorses = |s: &ServerState| {
+        s.op_log.iter().any(|o| {
+            o.author == m_id
+                && matches!(&o.payload, P::DeviceRetired { device, ops, posts_until_ms, .. }
+                    if *device == d1_id && (ops.iter().any(|r| r.ms as i64 >= t_ms) || posts_until_ms.is_some_and(|p| p >= t_ms)))
+        })
+    };
+    let s = d2.live_server_state(&server_id).await.expect("the server");
+    assert!(!endorses(&s), "D2 wrote a retire of D1 that names what it wrote after T");
+    assert!(
+        !wait_until(5, async || j.live_server_state(&server_id).await.is_some_and(|s| endorses(&s))).await,
+        "J folded a retire of D1 that names what it wrote after T",
+    );
+    drop((d1, d2, j));
+}

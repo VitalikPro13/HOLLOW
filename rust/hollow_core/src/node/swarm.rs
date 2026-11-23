@@ -1876,9 +1876,20 @@ async fn run_event_loop(
                             super::roster_book::RemoveMode::Lost { t_ms } => Some(t_ms.max(0)),
                             super::roster_book::RemoveMode::Retire => None,
                         };
+                        // A device our roster does not count (a refused backup, a device a
+                        // recovery cut off) gets no retire and no round, now or late: nothing
+                        // it wrote may count through us, and only a removal can name it as one
+                        // our authority states (HOL-SEC-229).
+                        let uncounted = mode == super::roster_book::RemoveMode::Retire
+                            && !super::roster_book::own(&local_peer_str, &db_path, &db_passphrase)
+                                .is_some_and(|(_, s)| s.is_member(&target));
+                        if uncounted {
+                            retire_rounds.cancel(&target);
+                            let _ = retire_rounds.take_released(&target);
+                        }
                         // M4 and section 8.3 step 1: a removal waits for its round, unless the
                         // round released it. A retire still waiting gives way to a lost removal.
-                        if !retire_rounds.take_released(&target) {
+                        if !uncounted && !retire_rounds.take_released(&target) {
                             if lost_t_ms.is_some() {
                                 retire_rounds.cancel(&target);
                             }
@@ -1894,7 +1905,7 @@ async fn run_event_loop(
                                 continue;
                             }
                         }
-                        if mode == super::roster_book::RemoveMode::Retire {
+                        if mode == super::roster_book::RemoveMode::Retire && !uncounted {
                             let posts = crate::storage::MessageStore::lease(&db_path, &db_passphrase).ok();
                             let posts_of = |sid: &str| posts.as_ref().and_then(|s| s.newest_post_of_device(sid, &local_peer_str, &target));
                             sync_handler::retire_device_ops(

@@ -40,11 +40,14 @@ class _RosterApi implements RustLibApi {
   bool member = true;
   bool backupWait = true;
   String? cutOff;
+  bool statusFails = false;
   int refusals = 0;
 
   @override
-  Future<roster_api.RosterStatus> crateApiRosterRosterStatus() async =>
-      _status(askerState, member: member, backupWait: backupWait, cutOff: cutOff);
+  Future<roster_api.RosterStatus> crateApiRosterRosterStatus() async {
+    if (statusFails) throw Exception('the store is busy');
+    return _status(askerState, member: member, backupWait: backupWait, cutOff: cutOff);
+  }
 
   @override
   Future<void> crateApiRosterRefuseDevice({required String devicePeerId}) async => refusals++;
@@ -64,6 +67,7 @@ void main() {
     api.member = true;
     api.backupWait = true;
     api.cutOff = null;
+    api.statusFails = false;
     api.refusals = 0;
   });
 
@@ -236,5 +240,22 @@ void main() {
 
     expect(find.text('Approve'), findsNothing);
     await shown;
+  });
+
+  // HOL-SEC-229 review: a status that cannot be read says nothing about whether a
+  // recovery cut the device off, so it never opens the pop-up that offers Approve.
+  testWidgets('an unreadable roster never offers Approve for a device that may be cut off', (tester) async {
+    api.cutOff = 'ours';
+    api.statusFails = true;
+    final container = await pumpHost(tester);
+    container.read(pendingDeviceAsksProvider.notifier).add(_asker);
+
+    final shown = showPendingDeviceDialog(host, hostRef, _asker);
+    await tester.pumpAndSettle();
+
+    expect(find.byType(HollowDialog), findsNothing);
+    expect(find.text('Approve'), findsNothing);
+    expect(await shown, isFalse, reason: 'the caller must stop asking until the roster reads again');
+    expect(container.read(pendingDeviceAsksProvider), [_asker], reason: 'the ask stays queued for the next read');
   });
 }
