@@ -73394,3 +73394,153 @@ async fn pr_a_a_shared_servers_ask_refused_before_the_friend_counts_us_is_asked_
     assert!(reads_live(&mut f, "f1 from b").await, "F never read B's post");
     drop((b, f));
 }
+
+// pr-hol-sec-229
+/// Whether `n` raised the pop-up that asks the person to approve `device` within `secs`.
+async fn pr_prompted_for(n: &mut TestNode, device: &str, secs: u64) -> bool {
+    wait_event(n, std::time::Duration::from_secs(secs), |ev| {
+        matches!(ev, NetworkEvent::PendingDeviceAsking { device_peer_id } if device_peer_id == device)
+    })
+    .await
+}
+
+/// `device` as `n`'s own roster holds it: asking to join, and what `n` knows of a
+/// recovery cutting it off (`Some((recovery time, known to be one of ours))`).
+fn pr_ask_at(n: &TestNode, master: &str, device: &str) -> (bool, Option<(i64, bool)>) {
+    let st = n.store();
+    let Some(r) = super::roster_book::load(&st, master) else { return (false, None) };
+    let s = super::roster_book::fold(&st, &r);
+    (s.pending.contains(device), super::roster_book::cut_off_by_recovery(&st, &r, &s, device))
+}
+
+/// HOL-SEC-229, Yes branch on an empty install: the Welcome recovery keeps only Z and
+/// cuts off the old device L, which then asks to join again. Z holds the ask, but never
+/// raises the pop-up that offers to approve the device the person just said someone else
+/// may hold, at once or at its next start; the device list names it as cut off.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pr_c_a_recovered_device_is_not_prompted_to_approve_the_device_it_cut_off() {
+    let _g = test_guard();
+    let tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", tmp.path()); }
+    let relay = MockRelay::new();
+    let [m_tag, l_tag, z_tag] = [251u8, 252, 253];
+    let m_id = tag_kp(m_tag).peer_id();
+    let first = protected_roster(m_tag, &[l_tag], super::roster_book::now_ms() - 3_600_000);
+    let l = spawn_node_seeded(&relay, m_tag, l_tag, &[], Some(first)).await;
+    let l_dev = l.device_id.clone();
+    assert!(wait_until(20, async || relay.inbox_owners(&m_id).contains(&l_dev)).await, "precondition: L owns the inbox");
+
+    // Z is an empty install: the shared resolver must not lend it the old device.
+    super::resolver::blind_for_test(&tag_kp(z_tag).peer_id(), &l_dev);
+    let t_ms = super::roster_book::now_ms();
+    let sign = crate::api::roster::RestoreSign::Recover { lost_since_ms: t_ms, no_wait: true };
+    let mut z = pr_restored(&relay, m_tag, z_tag, &[], sign, t_ms).await;
+    let z_dev = z.device_id.clone();
+    assert!(
+        wait_until(20, async || relay.inbox_owners(&m_id) == std::collections::HashSet::from([z_dev.clone()])).await,
+        "precondition: the relay hands Z alone the inbox",
+    );
+    assert!(wait_until(20, async || pr_left_out_by_recovery(&l, &m_id)).await, "precondition: L learned the recovery");
+    assert!(wait_until(30, async || pr_ask_at(&z, &m_id, &l_dev).0).await, "precondition: L's ask to join again reached Z");
+    assert!(!pr_prompted_for(&mut z, &l_dev, 5).await, "Z was asked to approve the device its recovery cut off");
+    let base_at = super::roster_book::load(&z.store(), &m_id).and_then(|r| r.base_at());
+    assert_eq!(
+        pr_ask_at(&z, &m_id, &l_dev).1,
+        base_at.map(|at| (at, false)),
+        "Z does not name L as possibly cut off by its recovery (an empty install knew no device before it)",
+    );
+
+    let mut z = restart_node(&relay, z, m_tag, z_tag).await;
+    assert!(wait_until(20, async || relay.online_devices().contains(&z_dev)).await, "precondition: Z is back");
+    assert!(!pr_prompted_for(&mut z, &l_dev, 8).await, "Z was asked to approve the cut-off device at its next start");
+    assert!(pr_ask_at(&z, &m_id, &l_dev).0, "precondition: Z still holds L's ask");
+    drop((l, z));
+}
+
+/// HOL-SEC-229, the in-app recovery ("Remove devices with your recovery phrase", shipped
+/// since 0.12) on D, keeping only D, with backups needing approval: W, cut off, asks to
+/// join again, and D never raises the pop-up that offers to approve it; D knows W was
+/// one of its own devices.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pr_c_an_inapp_recovery_is_not_prompted_to_approve_the_device_it_cut_off() {
+    let _g = test_guard();
+    let tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", tmp.path()); }
+    let relay = MockRelay::new();
+    let [m_tag, d_tag, w_tag] = [247u8, 248, 249];
+    let m_id = tag_kp(m_tag).peer_id();
+    let first = protected_roster(m_tag, &[d_tag, w_tag], super::roster_book::now_ms() - 3_600_000);
+    let mut d = spawn_node_seeded(&relay, m_tag, d_tag, &[], Some(first.clone())).await;
+    let w = spawn_node_seeded(&relay, m_tag, w_tag, &[], Some(first)).await;
+    let (d_dev, w_dev) = (d.device_id.clone(), w.device_id.clone());
+    expect_siblings_ready(&relay, &d, &w, 30).await;
+
+    super::roster_book::recover(&tag_kp(m_tag), &recovery_kp(m_tag), &tag_kp(d_tag), &[], true, Some(super::roster_book::now_ms()), &d.db_path, &d.passphrase)
+        .expect("the phrase recovers");
+    // The resolver is shared and W's own node still links W to M: D alone must not place it.
+    super::resolver::blind_for_test(&d_dev, &w_dev);
+    drain_events(&mut d);
+    d.cmd_tx.send(NodeCommand::RosterChanged { newly_revoked: vec![w_dev.clone()] }).await.unwrap();
+    assert!(wait_until(25, async || pr_left_out_by_recovery(&w, &m_id)).await, "precondition: W learned the recovery");
+    assert!(wait_until(30, async || pr_ask_at(&d, &m_id, &w_dev).0).await, "precondition: W's ask to join again reached D");
+    assert!(!pr_prompted_for(&mut d, &w_dev, 5).await, "D was asked to approve the device its in-app recovery cut off");
+    let base_at = super::roster_book::load(&d.store(), &m_id).and_then(|r| r.base_at());
+    assert_eq!(pr_ask_at(&d, &m_id, &w_dev).1, base_at.map(|at| (at, true)), "D does not name W as one of its devices its recovery cut off");
+    drop((d, w));
+}
+
+// pr-f5-restart
+/// F5 (fleet pr4): the Welcome recovery keeps only F while the old device D1, still
+/// online, learns it and asks to join again, so the member J stops counting D1 before the
+/// person re-adds J (in the fleet, twelve minutes and a restart later). J's answer to F's
+/// shared-servers ask must still bring back the server our identity owns.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+#[ignore = "F5, open: once J stops counting D1 its fold drops D1's JoinKeySet, so the answer names no join key and F drops it; the fix needs a design call (lead)"]
+async fn pr_a_welcome_recovery_restarted_before_the_readd_restores_the_owned_server() {
+    let _g = test_guard();
+    let [m_tag, d1_tag, d2_tag, r_tag, j_tag] = [141u8, 142, 143, 144, 145];
+    let f_tag = 146u8;
+    let W3c1Cut { relay, master, d1, d2, j, server_id, _tmp } = w3c1_cut_server([m_tag, d1_tag, d2_tag, r_tag, j_tag]).await;
+    let (m_id, j_master) = (master.peer_id(), j.master_id.clone());
+    let d1_dev = d1.device_id.clone();
+    relay.set_online(&d2.device_id, false);
+    drop(d2);
+    assert!(j.live_server_state(&server_id).await.is_some_and(|s| s.join_public_text().is_some()), "precondition: J holds the join key");
+
+    // F is an empty install: the shared resolver must not lend it the old devices.
+    let f_id = tag_kp(f_tag).peer_id();
+    super::resolver::blind_for_test(&f_id, &d1_dev);
+    super::resolver::blind_for_test(&f_id, &tag_kp(d2_tag).peer_id());
+    let t_ms = super::roster_book::now_ms() - 60_000;
+    let f = spawn_node_staged_at(&relay, master.clone(), f_tag, &[], |st, db, pass| {
+        let sign = crate::api::roster::RestoreSign::Recover { lost_since_ms: t_ms, no_wait: true };
+        crate::api::roster::sign_restore(&master, &tag_kp(f_tag), &tag_kp(r_tag), sign, db, pass).expect("the restore signs");
+        let mark = super::phrase_restore::Mark { at_ms: super::roster_book::now_ms(), branch: super::phrase_restore::Branch::Recover, empty: true, device: f_id.clone() };
+        super::phrase_restore::write(st, &mark).expect("the mark");
+    })
+    .await;
+    let f_dev = f.device_id.clone();
+    assert!(wait_until(20, async || pr_left_out_by_recovery(&d1, &m_id)).await, "precondition: D1 learned the recovery");
+    assert!(
+        wait_until(40, async || {
+            j.live_server_state(&server_id).await.is_some_and(|s| s.authority.device_verdict(&m_id, &d1_dev) == crate::crdt::authority::DeviceVerdict::Uncounted)
+        })
+        .await,
+        "precondition: J learned the recovery from D1's ask before the re-add",
+    );
+    let j_key = j.live_server_state(&server_id).await.and_then(|s| s.join_public_text());
+    let f = restart_node(&relay, f, m_tag, f_tag).await;
+    assert!(wait_until(20, async || relay.online_devices().contains(&f_dev)).await, "precondition: F is back");
+
+    f.cmd_tx.send(NodeCommand::SendFriendRequest { peer_id: j_master.clone() }).await.unwrap();
+    assert!(wait_until(30, async || f.friend_status(&j_master).as_deref() == Some("accepted")).await, "the member never answered F's re-add");
+    let held = || super::restore_flow::snapshot_of(&f_dev).into_iter().any(|s| s.server_id == server_id);
+    assert!(
+        wait_until(60, async || held() || f.live_server_state(&server_id).await.is_some()).await,
+        "F never got back the server it owns once J stopped counting D1 (J's join key now: {j_key:?})",
+    );
+    drop((d1, j, f));
+}

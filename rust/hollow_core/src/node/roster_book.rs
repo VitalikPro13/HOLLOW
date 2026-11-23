@@ -699,6 +699,94 @@ pub(crate) fn recovery_lost_since(store: &MessageStore, base: &str) -> Option<i6
     store.load_setting(&recovery_lost_since_key(base)).ok().flatten().and_then(|v| v.parse().ok())
 }
 
+fn recovery_cut_off_key(base: &str) -> String {
+    format!("recovery_cut_off:{base}")
+}
+
+/// The most devices one base's record names: only the phrase holder makes bases, and a
+/// base cuts off at most the consents a roster keeps, so this is room, not a limit.
+const MAX_CUT_OFF: usize = 512;
+
+/// Which devices the recovery that made a base cut off, as this device knows it
+/// (HOL-SEC-229): device -> when it was cut off, and `unknown_at` where a recovery held
+/// no roster before it (a Welcome recovery into an empty install), so any device asking
+/// in that base may be one of the old ones. Local to this device, never sent.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct CutOff {
+    #[serde(default)]
+    devices: std::collections::BTreeMap<String, i64>,
+    #[serde(default)]
+    unknown_at: Option<i64>,
+}
+
+impl CutOff {
+    fn is_empty(&self) -> bool {
+        self.devices.is_empty() && self.unknown_at.is_none()
+    }
+
+    /// `Some((when, one of ours))` for `device`.
+    fn of(&self, device: &str) -> Option<(i64, bool)> {
+        self.devices.get(device).map(|at| (*at, true)).or_else(|| self.unknown_at.map(|at| (at, false)))
+    }
+}
+
+pub(crate) fn recovery_cut_off(store: &MessageStore, base: &str) -> CutOff {
+    store
+        .load_setting(&recovery_cut_off_key(base))
+        .ok()
+        .flatten()
+        .and_then(|v| serde_json::from_str(&v).ok())
+        .unwrap_or_default()
+}
+
+/// What a move from `prev` to a new base signed at `at` cut off: `prev`'s members the new
+/// base does not count, and whatever `prev`'s own base cut off that it does not take back.
+fn cut_by(store: &MessageStore, prev: &RosterState, at: i64, kept: impl Fn(&str) -> bool) -> CutOff {
+    let earlier = recovery_cut_off(store, &prev.base);
+    let mut devices: std::collections::BTreeMap<String, i64> =
+        earlier.devices.into_iter().filter(|(d, _)| !kept(d)).collect();
+    for d in prev.members.iter().filter(|d| !kept(d)) {
+        devices.entry(d.clone()).or_insert(at);
+    }
+    CutOff { devices, unknown_at: earlier.unknown_at }
+}
+
+/// Add `cut` to what `base`'s record holds; the earlier time of a device wins.
+fn note_cut_off(store: &MessageStore, base: &str, cut: CutOff) -> Result<(), String> {
+    let mut held = recovery_cut_off(store, base);
+    for (d, at) in cut.devices {
+        if held.devices.len() >= MAX_CUT_OFF && !held.devices.contains_key(&d) {
+            break;
+        }
+        let e = held.devices.entry(d).or_insert(at);
+        *e = (*e).min(at);
+    }
+    held.unknown_at = match (held.unknown_at, cut.unknown_at) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    };
+    if held.is_empty() {
+        return Ok(());
+    }
+    store.save_setting(&recovery_cut_off_key(base), &serde_json::to_string(&held).map_err(|e| e.to_string())?)
+}
+
+/// `device`, waiting in our own `state`, as a recovery cut it off: when, and whether this
+/// device knows it was one of ours (else the recovery knew none of the old devices).
+pub(crate) fn cut_off_by_recovery(store: &MessageStore, _roster: &Roster, state: &RosterState, device: &str) -> Option<(i64, bool)> {
+    if !state.pending.contains(device) {
+        return None;
+    }
+    recovery_cut_off(store, &state.base).of(device)
+}
+
+/// Whether the person is asked about `device`, waiting in our own `state`: a device a
+/// recovery cut off gets no pop-up where waiting cannot let it in (HOL-SEC-229), only
+/// its row in the device list; where it can, the pop-up warns and never offers Approve.
+fn asks_the_person(store: &MessageStore, state: &RosterState, device: &str) -> bool {
+    !(state.no_wait && recovery_cut_off(store, &state.base).of(device).is_some())
+}
+
 /// How a device leaves (DEVICE_PROOF_DESIGN 8.1): retiring keeps what it did, lost or
 /// stolen keeps only what this device saw from it before `t_ms`, the earliest moment
 /// the person may no longer have had it.
@@ -928,7 +1016,7 @@ pub(crate) fn recover(
     db_passphrase: &str,
 ) -> Result<(Roster, RosterState), String> {
     let mut at = 0;
-    let (roster, state) = change_own(master, device, db_path, db_passphrase, |r, _| {
+    let (roster, state) = change_own(master, device, db_path, db_passphrase, |r, s| {
         let mut keep: Vec<String> = keep.to_vec();
         keep.push(device.peer_id());
         keep.sort();
@@ -941,11 +1029,19 @@ pub(crate) fn recover(
         }
         at = phrase_time(r);
         let rec = roster::sign_recovery(master, recovery, at, &keep, no_wait);
+        let base = roster::base_id(&r.master, &roster::r_pub_of(recovery), &rec);
+        let store = MessageStore::lease(db_path, db_passphrase)?;
         if let Some(t) = lost_since_ms {
-            let base = roster::base_id(&r.master, &roster::r_pub_of(recovery), &rec);
-            let store = MessageStore::lease(db_path, db_passphrase)?;
             note_recovery_lost_since(&store, &base, t)?;
         }
+        // With no roster held before (a Welcome recovery into an empty install), every
+        // old device is unknown here.
+        let cut = if s.members.is_empty() && lost_since_ms.is_some() {
+            CutOff { unknown_at: Some(at), ..Default::default() }
+        } else {
+            cut_by(&store, s, at, |d| keep.iter().any(|k| k == d))
+        };
+        note_cut_off(&store, &base, cut)?;
         r.add_phrase_statement(&roster::r_pub_of(recovery), Some(rec), None)
     })?;
     note_own_phrase(db_path, db_passphrase, OwnPhrase { kind: PhraseKind::Recover, at_ms: at, base: state.base.clone(), no_wait });
@@ -1089,10 +1185,11 @@ async fn announce_own_state_inner(
         }
         None => note_own_removal(&store, None),
     }
-    for device in state.pending.iter().filter(|d| d.as_str() != local_device) {
-        let _ = event_tx
-            .send(NetworkEvent::PendingDeviceAsking { device_peer_id: device.clone() })
-            .await;
+    let asking: Vec<String> =
+        state.pending.iter().filter(|d| d.as_str() != local_device && asks_the_person(&store, state, d)).cloned().collect();
+    drop(store);
+    for device in asking {
+        let _ = event_tx.send(NetworkEvent::PendingDeviceAsking { device_peer_id: device }).await;
     }
 }
 
@@ -1597,7 +1694,7 @@ async fn ingest_inner(
     let added: Vec<String> = now.members.difference(&prev.members).cloned().collect();
 
     if master == local_master {
-        own_changes(event_tx, local_device, &prev, &now, db_path, db_passphrase).await;
+        own_changes(event_tx, &master, local_device, &prev, &now, db_path, db_passphrase).await;
         for (device, voucher, created_at) in own_news {
             let _ = event_tx
                 .send(NetworkEvent::SecurityAlert {
@@ -1962,6 +2059,7 @@ fn fold_in_store(
 /// What a change to our own roster means for this device: removed, back, or asked.
 async fn own_changes(
     event_tx: &mpsc::Sender<NetworkEvent>,
+    master: &str,
     local_device: &str,
     prev: &RosterState,
     now: &RosterState,
@@ -1985,11 +2083,21 @@ async fn own_changes(
         note_own_removal(&store, None);
         let _ = event_tx.send(NetworkEvent::DeviceRestored).await;
     }
-    let asking: BTreeSet<&String> = now.pending.difference(&prev.pending).collect();
-    for device in asking.into_iter().filter(|d| d.as_str() != local_device) {
-        let _ = event_tx
-            .send(NetworkEvent::PendingDeviceAsking { device_peer_id: device.clone() })
-            .await;
+    // A recovery typed on another device of ours: what it cut off, as we held it.
+    if prev.base != now.base && now.is_member(local_device) && !prev.members.is_empty() {
+        let at = load(&store, master).and_then(|r| r.base_at()).unwrap_or_else(now_ms);
+        let cut = cut_by(&store, prev, at, |d| now.is_member(d));
+        let _ = note_cut_off(&store, &now.base, cut);
+    }
+    let asking: Vec<String> = now
+        .pending
+        .difference(&prev.pending)
+        .filter(|d| d.as_str() != local_device && asks_the_person(&store, now, d))
+        .cloned()
+        .collect();
+    drop(store);
+    for device in asking {
+        let _ = event_tx.send(NetworkEvent::PendingDeviceAsking { device_peer_id: device }).await;
     }
 }
 
@@ -4705,4 +4813,107 @@ mod tests {
         assert!(may_hand_off(me, "over", 1, t0 + HAND_OFF_AGAIN + HAND_OFF_WINDOW), "the window never refilled");
         hand_offs().remove(me);
     }
+
+    /// Identity `me` with `others` counted besides it, phrase-rooted with `recovery`.
+    fn rooted_with(me: &Observer, recovery: &NativeKeypair, others: &[&NativeKeypair]) -> Roster {
+        let m = me.master.peer_id();
+        let mut r = Roster::new(&m);
+        r.r_pub = r_pub_of(recovery);
+        let mut keep = vec![me.device.peer_id()];
+        r.add_consent(sign_consent(&me.device, &m));
+        for d in others {
+            r.add_consent(sign_consent(d, &m));
+            keep.push(d.peer_id());
+        }
+        keep.sort();
+        r.recoveries.push(roster::sign_recovery(&me.master, recovery, now_ms() - 60_000, &keep, false));
+        write_bootstrap(&me.dir(), &r).unwrap();
+        me.own();
+        r
+    }
+
+    /// `device` asks to join our identity's current base.
+    async fn asks(me: &mut Observer, device: &NativeKeypair) -> Vec<NetworkEvent> {
+        let (mut r, s) = own(&me.master.peer_id(), &me.db, &me.pass).unwrap();
+        r.add_consent(sign_consent(device, &me.master.peer_id()));
+        r.add_pending(sign_pending(&me.master, &s.base, &device.peer_id()));
+        me.drain();
+        me.ingest(&device.peer_id(), &r).await;
+        assert!(me.state_of(&me.master.peer_id()).pending.contains(&device.peer_id()), "precondition: the ask landed");
+        me.drain()
+    }
+
+    fn prompted(events: &[NetworkEvent], device: &NativeKeypair) -> bool {
+        events.iter().any(|e| matches!(e, NetworkEvent::PendingDeviceAsking { device_peer_id } if *device_peer_id == device.peer_id()))
+    }
+
+    fn cut_off_here(me: &Observer, device: &NativeKeypair) -> Option<(i64, bool)> {
+        let store = me.store();
+        let r = load(&store, &me.master.peer_id()).unwrap();
+        cut_off_by_recovery(&store, &r, &fold(&store, &r), &device.peer_id())
+    }
+
+    /// HOL-SEC-229: a recovery records the members it cut off. One that asks again is
+    /// named as ours and raises no pop-up where backups need approval; a device that was
+    /// never ours stays a restored backup. A recovery into an empty install knew no
+    /// device, so any asker may be one of the old ones.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_recovery_records_the_devices_it_cut_off() {
+        let _g = guard();
+        let mut me = Observer::new(0x31, 0x32);
+        let (recovery, old, backup) = (kp(0x33), kp(0x34), kp(0x35));
+        rooted_with(&me, &recovery, &[&old]);
+        let (r, _) = recover(&me.master, &recovery, &me.device, &[], true, Some(now_ms() - 1_000), &me.db, &me.pass).unwrap();
+        let at = r.base_at().unwrap();
+        let events = asks(&mut me, &old).await;
+        assert!(!prompted(&events, &old), "the cut-off device raised the approval pop-up");
+        assert_eq!(cut_off_here(&me, &old), Some((at, true)));
+        let events = asks(&mut me, &backup).await;
+        assert!(prompted(&events, &backup), "a device that was never ours is still asked about");
+        assert_eq!(cut_off_here(&me, &backup), None, "a restored backup is not named as cut off");
+
+        let mut fresh = Observer::new(0x31, 0x36);
+        let (r, _) = recover(&fresh.master, &recovery, &fresh.device, &[], true, Some(now_ms() - 1_000), &fresh.db, &fresh.pass).unwrap();
+        let events = asks(&mut fresh, &old).await;
+        assert!(!prompted(&events, &old), "an empty install's recovery raised the approval pop-up");
+        assert_eq!(cut_off_here(&fresh, &old), Some((r.base_at().unwrap(), false)));
+        assert_eq!(cut_off_here(&fresh, &fresh.device), None, "only a device asking to join is named");
+    }
+
+    /// HOL-SEC-229 on a device the recovery kept: the new base reaches it from the device
+    /// that typed the phrase, and it records the member that base cut off.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_kept_device_records_what_a_recovery_elsewhere_cut_off() {
+        let _g = guard();
+        let mut me = Observer::new(0x41, 0x42);
+        let (recovery, typist, old) = (kp(0x43), kp(0x44), kp(0x45));
+        let mut r = rooted_with(&me, &recovery, &[&typist, &old]);
+        let mut keep = vec![me.device.peer_id(), typist.peer_id()];
+        keep.sort();
+        let at = now_ms() - 1_000;
+        r.recoveries.push(roster::sign_recovery(&me.master, &recovery, at, &keep, true));
+        me.ingest(&typist.peer_id(), &r).await;
+        assert!(!me.state_of(&me.master.peer_id()).is_member(&old.peer_id()), "precondition: the new base cut it off");
+        let events = asks(&mut me, &old).await;
+        assert!(!prompted(&events, &old), "the kept device raised the approval pop-up for the cut-off device");
+        assert_eq!(cut_off_here(&me, &old), Some((at, true)));
+    }
+
+    /// Where backups may still join by seven quiet days, a cut-off device that asks
+    /// again is put to the person (as cut off, never as a backup): silence would let it in.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_cut_off_device_still_warns_where_it_can_join_by_waiting() {
+        let _g = guard();
+        let mut me = Observer::new(0x51, 0x52);
+        let (recovery, old) = (kp(0x53), kp(0x54));
+        rooted_with(&me, &recovery, &[&old]);
+        let (r, _) = recover(&me.master, &recovery, &me.device, &[], false, Some(now_ms() - 1_000), &me.db, &me.pass).unwrap();
+        let events = asks(&mut me, &old).await;
+        assert!(prompted(&events, &old), "a cut-off device that can join by waiting went unannounced");
+        assert_eq!(cut_off_here(&me, &old), Some((r.base_at().unwrap(), true)));
+    }
 }
+

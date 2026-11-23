@@ -16877,15 +16877,22 @@ async fn handle_incoming_request_inner(
                 return;
             }
             if !super::shared_servers::recovering(master_peer_str, device_peer_id, db_path, db_passphrase) {
+                hollow_log!("[HOLLOW-SERVER] Ignored {peer_str}'s shared-servers answer: this device is not recovering");
                 return;
             }
-            let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) else { return };
+            let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) else {
+                hollow_log!("[HOLLOW-SERVER] Ignored {peer_str}'s shared-servers answer: the store did not open");
+                return;
+            };
             let ours = super::ws_client::relay_home().unwrap_or_default();
             let friend = super::resolver::resolve(peer_str);
-            for entry in super::shared_servers::accepted(&store, db_path, peer_str, &servers) {
+            let entries = super::shared_servers::accepted(&store, db_path, peer_str, &servers);
+            hollow_log!("[HOLLOW-SERVER] {peer_str} names {} shared server(s), {} we act on", servers.len(), entries.len());
+            for entry in entries {
                 crdt_resync.union.friend_named(&entry.server_id, &friend, &entry.members);
                 note_union_members(crdt_resync, &entry.server_id, master_peer_str, &store);
                 if server_states.contains_key(&entry.server_id) || pending_server_joins.contains_key(&entry.server_id) {
+                    hollow_log!("[HOLLOW-SERVER] {} is already held or joining", entry.server_id);
                     continue;
                 }
                 crdt_resync.shared_joins.offer(db_path, entry, &friend, &ours);

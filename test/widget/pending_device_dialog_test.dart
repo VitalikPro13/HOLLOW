@@ -5,19 +5,32 @@ import 'package:hollow/src/core/providers/roster_provider.dart';
 import 'package:hollow/src/rust/api/roster.dart' as roster_api;
 import 'package:hollow/src/rust/frb_generated.dart';
 import 'package:hollow/src/theme/hollow_theme_data.dart';
+import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/shell/roster_lock.dart';
 
 import '../helpers/test_app.dart';
 
 const _asker = '12D3KooWAskerAskerAskerAskerAskerAskerAskerAsker';
 
-roster_api.RosterStatus _status(String askerState, {bool backupWait = true, bool member = true}) => roster_api.RosterStatus(
+/// When a recovery cut the asker off, in [_status]: Nov 20 2026.
+const _cutAt = 1_795_000_000_000;
+
+roster_api.RosterStatus _status(String askerState, {bool backupWait = true, bool member = true, String? cutOff}) =>
+    roster_api.RosterStatus(
       member: member,
       protected: true,
       backupWait: backupWait,
       devices: [
         if (member) const roster_api.RosterDevice(devicePeerId: 'me', state: 'member', thisDevice: true, added: []),
-        roster_api.RosterDevice(devicePeerId: _asker, state: askerState, thisDevice: false, added: const []),
+        roster_api.RosterDevice(
+          devicePeerId: _asker,
+          state: askerState,
+          thisDevice: false,
+          added: const [],
+          firstSeenMs: cutOff == null ? null : _cutAt + 60000,
+          cutOffAtMs: cutOff == null ? null : _cutAt,
+          cutOff: cutOff,
+        ),
       ],
     );
 
@@ -25,10 +38,13 @@ roster_api.RosterStatus _status(String askerState, {bool backupWait = true, bool
 class _RosterApi implements RustLibApi {
   String askerState = 'pending';
   bool member = true;
+  bool backupWait = true;
+  String? cutOff;
   int refusals = 0;
 
   @override
-  Future<roster_api.RosterStatus> crateApiRosterRosterStatus() async => _status(askerState, member: member);
+  Future<roster_api.RosterStatus> crateApiRosterRosterStatus() async =>
+      _status(askerState, member: member, backupWait: backupWait, cutOff: cutOff);
 
   @override
   Future<void> crateApiRosterRefuseDevice({required String devicePeerId}) async => refusals++;
@@ -46,6 +62,8 @@ void main() {
   setUp(() {
     api.askerState = 'pending';
     api.member = true;
+    api.backupWait = true;
+    api.cutOff = null;
     api.refusals = 0;
   });
 
@@ -163,5 +181,60 @@ void main() {
     expect(find.text('A device wants to join'), findsNothing);
     await shown;
     expect(api.refusals, 0);
+  });
+
+  // HOL-SEC-229: a device a recovery cut off is the one the person said someone else
+  // may hold. No pop-up ever calls it a restored backup or offers to approve it.
+  for (final cutOff in ['ours', 'maybe']) {
+    testWidgets('a device a recovery cut off ($cutOff) is never offered as restored from a backup', (tester) async {
+      api.cutOff = cutOff;
+      api.backupWait = false;
+      final container = await pumpHost(tester, extra: [
+        rosterStatusProvider.overrideWith((ref) async => _status('pending', backupWait: false, cutOff: cutOff)),
+      ]);
+      container.read(pendingDeviceAsksProvider.notifier).add(_asker);
+
+      final shown = showPendingDeviceDialog(host, hostRef, _asker);
+      await tester.pumpAndSettle();
+
+      expect(find.byType(HollowDialog), findsNothing, reason: 'it cannot join by waiting: nothing to warn of');
+      expect(find.textContaining('restored from a backup'), findsNothing);
+      await shown;
+      expect(container.read(pendingDeviceAsksProvider), isEmpty);
+    });
+
+    testWidgets('a cut-off device ($cutOff) that can join by waiting is only warned of, never offered approval',
+        (tester) async {
+      api.cutOff = cutOff;
+      await pumpHost(tester, extra: [
+        rosterStatusProvider.overrideWith((ref) async => _status('pending', cutOff: cutOff)),
+      ]);
+      final shown = showPendingDeviceDialog(host, hostRef, _asker);
+      await tester.pumpAndSettle();
+
+      expect(find.byType(HollowDialog), findsOneWidget);
+      expect(find.text(cutOff == 'ours' ? 'A device you cut off asks to join' : 'A device asks to join'), findsOneWidget);
+      expect(find.textContaining('Your recovery phrase cut'), findsOneWidget);
+      expect(find.textContaining('restored from a backup'), findsNothing);
+      expect(find.text('Approve'), findsNothing);
+      await tester.tap(find.text('Refuse'));
+      await tester.pumpAndSettle();
+      await shown;
+      expect(api.refusals, 1);
+    });
+  }
+
+  testWidgets('an open approval ask closes once the device turns out cut off', (tester) async {
+    final container = await pumpHost(tester);
+    final shown = showPendingDeviceDialog(host, hostRef, _asker);
+    await tester.pumpAndSettle();
+    expect(find.text('Approve'), findsOneWidget);
+
+    api.cutOff = 'ours';
+    container.invalidate(rosterStatusProvider);
+    await tester.pumpAndSettle();
+
+    expect(find.text('Approve'), findsNothing);
+    await shown;
   });
 }

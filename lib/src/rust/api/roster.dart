@@ -144,12 +144,23 @@ class RosterDevice {
   /// Members this device added: removing it keeps them unless they go too.
   final List<String> added;
 
+  /// A pending device a phrase recovery cut off (HOL-SEC-229): when. Never shown as a
+  /// restored backup, and approved only from the Devices page.
+  final PlatformInt64? cutOffAtMs;
+
+  /// With `cut_off_at_ms`: `"ours"` when this device knows it was one of ours, `"maybe"`
+  /// when the recovery knew none of the old devices (a Welcome recovery on an empty
+  /// install).
+  final String? cutOff;
+
   const RosterDevice({
     required this.devicePeerId,
     required this.state,
     required this.thisDevice,
     this.firstSeenMs,
     required this.added,
+    this.cutOffAtMs,
+    this.cutOff,
   });
 
   @override
@@ -158,7 +169,9 @@ class RosterDevice {
       state.hashCode ^
       thisDevice.hashCode ^
       firstSeenMs.hashCode ^
-      added.hashCode;
+      added.hashCode ^
+      cutOffAtMs.hashCode ^
+      cutOff.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -169,7 +182,9 @@ class RosterDevice {
           state == other.state &&
           thisDevice == other.thisDevice &&
           firstSeenMs == other.firstSeenMs &&
-          added == other.added;
+          added == other.added &&
+          cutOffAtMs == other.cutOffAtMs &&
+          cutOff == other.cutOff;
 }
 
 /// What our own roster says, for the Devices page and the lock screens.

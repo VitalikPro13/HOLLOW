@@ -209,17 +209,31 @@ pub(crate) fn frame_fits(servers: &[SharedServer], pad: &str) -> bool {
 /// [`PER_FRAME`]; member ids only of a peer id's shape, each once, at most [`MAX_MEMBERS`].
 pub(crate) fn accepted(store: &MessageStore, db_path: &str, from: &str, servers: &[SharedServer]) -> Vec<SharedServer> {
     if asker_ok(store, db_path, from).is_none() {
+        if !servers.is_empty() {
+            let master = super::resolver::resolve(from);
+            let friend = store.get_friend_row(&master).ok().flatten().map(|(status, ..)| status);
+            let held = super::roster_book::load(store, &master).map(|r| r.authority().counts(from));
+            hollow_log!("[HOLLOW-SECURITY] Dropped {from}'s shared-servers answer: not a friend device we count (master {master}, friend {friend:?}, counted {held:?})");
+        }
         return Vec::new();
     }
     let mut seen = std::collections::HashSet::new();
     servers
         .iter()
         .filter(|s| {
-            super::sync_handler::joinable_server_id(&s.server_id)
-                && super::sealed_box::key_from_text(&s.join_key).is_some()
-                && (s.owner.is_empty() || super::witness::peer_id_shape(&s.owner))
-                && s.relay.len() <= RELAY_MAX
-                && s.relay.bytes().all(|b| b.is_ascii_graphic())
+            let why = if !super::sync_handler::joinable_server_id(&s.server_id) {
+                "no server id"
+            } else if super::sealed_box::key_from_text(&s.join_key).is_none() {
+                "no join key"
+            } else if !(s.owner.is_empty() || super::witness::peer_id_shape(&s.owner)) {
+                "no owner id"
+            } else if s.relay.len() > RELAY_MAX || !s.relay.bytes().all(|b| b.is_ascii_graphic()) {
+                "no relay name"
+            } else {
+                return true;
+            };
+            hollow_log!("[HOLLOW-SECURITY] Dropped {} from {from}'s shared-servers answer: {why}", s.server_id);
+            false
         })
         .filter(|s| seen.insert(s.server_id.clone()))
         .take(PER_FRAME)
@@ -368,6 +382,7 @@ impl Joins {
         let queued = Queued { entry, friend: friend.to_string() };
         let sid = &queued.entry.server_id;
         if self.started.contains_key(sid) || self.queue.iter().any(|q| q.entry.server_id == *sid) {
+            hollow_log!("[HOLLOW-SERVER] {sid} a friend says we share is already on its way");
             return;
         }
         if !queued.entry.relay.is_empty() && queued.entry.relay != our_relay {
@@ -428,6 +443,7 @@ pub(crate) fn start_reentry(
     db_passphrase: &str,
 ) {
     if pending_server_joins.contains_key(&entry.server_id) || !super::sync_handler::joinable_server_id(&entry.server_id) {
+        hollow_log!("[HOLLOW-SERVER] Not re-entering {}: a join is already pending or the id is not joinable", entry.server_id);
         return;
     }
     hollow_log!("[HOLLOW-SERVER] Re-entering {} a friend says we share", entry.server_id);

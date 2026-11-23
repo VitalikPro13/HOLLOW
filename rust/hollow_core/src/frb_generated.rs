@@ -21920,12 +21920,16 @@ impl SseDecode for crate::api::roster::RosterDevice {
         let mut var_thisDevice = <bool>::sse_decode(deserializer);
         let mut var_firstSeenMs = <Option<i64>>::sse_decode(deserializer);
         let mut var_added = <Vec<String>>::sse_decode(deserializer);
+        let mut var_cutOffAtMs = <Option<i64>>::sse_decode(deserializer);
+        let mut var_cutOff = <Option<String>>::sse_decode(deserializer);
         return crate::api::roster::RosterDevice {
             device_peer_id: var_devicePeerId,
             state: var_state,
             this_device: var_thisDevice,
             first_seen_ms: var_firstSeenMs,
             added: var_added,
+            cut_off_at_ms: var_cutOffAtMs,
+            cut_off: var_cutOff,
         };
     }
 }
@@ -27687,6 +27691,8 @@ impl flutter_rust_bridge::IntoDart for crate::api::roster::RosterDevice {
             self.this_device.into_into_dart().into_dart(),
             self.first_seen_ms.into_into_dart().into_dart(),
             self.added.into_into_dart().into_dart(),
+            self.cut_off_at_ms.into_into_dart().into_dart(),
+            self.cut_off.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -32172,6 +32178,8 @@ impl SseEncode for crate::api::roster::RosterDevice {
         <bool>::sse_encode(self.this_device, serializer);
         <Option<i64>>::sse_encode(self.first_seen_ms, serializer);
         <Vec<String>>::sse_encode(self.added, serializer);
+        <Option<i64>>::sse_encode(self.cut_off_at_ms, serializer);
+        <Option<String>>::sse_encode(self.cut_off, serializer);
     }
 }
 

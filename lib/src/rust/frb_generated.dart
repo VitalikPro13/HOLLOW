@@ -21278,14 +21278,16 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   RosterDevice dco_decode_roster_device(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 5)
-      throw Exception('unexpected arr length: expect 5 but see ${arr.length}');
+    if (arr.length != 7)
+      throw Exception('unexpected arr length: expect 7 but see ${arr.length}');
     return RosterDevice(
       devicePeerId: dco_decode_String(arr[0]),
       state: dco_decode_String(arr[1]),
       thisDevice: dco_decode_bool(arr[2]),
       firstSeenMs: dco_decode_opt_box_autoadd_i_64(arr[3]),
       added: dco_decode_list_String(arr[4]),
+      cutOffAtMs: dco_decode_opt_box_autoadd_i_64(arr[5]),
+      cutOff: dco_decode_opt_String(arr[6]),
     );
   }
 
@@ -26248,12 +26250,16 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_thisDevice = sse_decode_bool(deserializer);
     var var_firstSeenMs = sse_decode_opt_box_autoadd_i_64(deserializer);
     var var_added = sse_decode_list_String(deserializer);
+    var var_cutOffAtMs = sse_decode_opt_box_autoadd_i_64(deserializer);
+    var var_cutOff = sse_decode_opt_String(deserializer);
     return RosterDevice(
       devicePeerId: var_devicePeerId,
       state: var_state,
       thisDevice: var_thisDevice,
       firstSeenMs: var_firstSeenMs,
       added: var_added,
+      cutOffAtMs: var_cutOffAtMs,
+      cutOff: var_cutOff,
     );
   }
 
@@ -30878,6 +30884,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_bool(self.thisDevice, serializer);
     sse_encode_opt_box_autoadd_i_64(self.firstSeenMs, serializer);
     sse_encode_list_String(self.added, serializer);
+    sse_encode_opt_box_autoadd_i_64(self.cutOffAtMs, serializer);
+    sse_encode_opt_String(self.cutOff, serializer);
   }
 
   @protected

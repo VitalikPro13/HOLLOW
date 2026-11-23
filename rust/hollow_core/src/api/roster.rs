@@ -19,6 +19,13 @@ pub struct RosterDevice {
     pub first_seen_ms: Option<i64>,
     /// Members this device added: removing it keeps them unless they go too.
     pub added: Vec<String>,
+    /// A pending device a phrase recovery cut off (HOL-SEC-229): when. Never shown as a
+    /// restored backup, and approved only from the Devices page.
+    pub cut_off_at_ms: Option<i64>,
+    /// With `cut_off_at_ms`: `"ours"` when this device knows it was one of ours, `"maybe"`
+    /// when the recovery knew none of the old devices (a Welcome recovery on an empty
+    /// install).
+    pub cut_off: Option<String>,
 }
 
 /// What our own roster says, for the Devices page and the lock screens.
@@ -122,12 +129,15 @@ pub fn roster_status() -> Result<RosterStatus, String> {
     let seen = store.load_roster_seen(&roster.master, &roster.base()).unwrap_or_default();
     let mut devices: Vec<RosterDevice> = Vec::new();
     let mut push = |d: &String, kind: &str| {
+        let cut = crate::node::roster_book::cut_off_by_recovery(&store, &roster, &state, d);
         devices.push(RosterDevice {
             device_peer_id: d.clone(),
             state: kind.to_string(),
             this_device: *d == me,
             first_seen_ms: seen.get(d).copied(),
             added: if kind == "member" { roster.vouched_members_of(d, &state) } else { Vec::new() },
+            cut_off_at_ms: cut.map(|(at, _)| at),
+            cut_off: cut.map(|(_, ours)| if ours { "ours" } else { "maybe" }.to_string()),
         });
     };
     for d in &state.members {
@@ -689,6 +699,44 @@ mod tests {
         assert!(!status.member);
         assert_eq!(status.too_early, None);
         assert_eq!(status.dropped_by_recovery_at_ms, Some(at));
+    }
+
+    /// HOL-SEC-229 through the shipped in-app recovery: the device it cut off asks to join
+    /// again and the Devices page names it as cut off, one of ours; a device that was
+    /// never ours stays a restored backup.
+    #[test]
+    fn roster_status_names_a_device_the_in_app_recovery_cut_off() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = crate::api::storage::store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        // SAFETY: serialized by the locks above.
+        unsafe { std::env::set_var("HOLLOW_DATA_DIR", tmp.path()) };
+        crate::identity::encryption::clear_session_key();
+        let c = fresh_identity_on_disk(tmp.path());
+        let (old, backup) = (NativeKeypair::from_secret_bytes(&[0x61; 32]), NativeKeypair::from_secret_bytes(&[0x62; 32]));
+        let m = c.master.peer_id();
+        {
+            let store = MessageStore::open(&c.db_path, &c.db_passphrase).unwrap();
+            crate::node::roster_book::ensure_own(&store, &c.master, &c.device, &c.db_path);
+            let mut r = crate::node::roster_book::load(&store, &m).unwrap();
+            r.add_consent(crate::identity::roster::sign_consent(&old, &m));
+            crate::node::roster_book::merge_for_test(&store, &r, &m, &c.device.peer_id());
+        }
+        crate::node::roster_book::vouch(&c.master, &c.device, &old.peer_id(), &c.db_path, &c.db_passphrase).unwrap();
+        recover_with_phrase(PHRASE.to_string(), Vec::new(), crate::node::roster_book::now_ms() - 1_000).unwrap();
+        let store = MessageStore::open(&c.db_path, &c.db_passphrase).unwrap();
+        let mut r = crate::node::roster_book::load(&store, &m).unwrap();
+        let base = r.base();
+        for d in [&old, &backup] {
+            r.add_consent(crate::identity::roster::sign_consent(d, &m));
+            r.add_pending(crate::identity::roster::sign_pending(&c.master, &base, &d.peer_id()));
+        }
+        crate::node::roster_book::merge_for_test(&store, &r, &m, &c.device.peer_id());
+
+        let status = roster_status().unwrap();
+        let row = |d: &NativeKeypair| status.devices.iter().find(|x| x.device_peer_id == d.peer_id()).map(|x| (x.state.clone(), x.cut_off_at_ms, x.cut_off.clone()));
+        assert_eq!(row(&old), Some(("pending".into(), r.base_at(), Some("ours".into()))));
+        assert_eq!(row(&backup), Some(("pending".into(), None, None)), "a restored backup is not named as cut off");
     }
 
     /// C-IDENTITY-09. The Devices page learns what removing a device keeps: the

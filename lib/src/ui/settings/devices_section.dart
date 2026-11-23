@@ -218,8 +218,9 @@ String _rosterDeviceTitle(WidgetRef ref, String id) =>
         kinds: ref.watch(deviceKindProvider)) ??
     shortPeerLabel(id);
 
-/// A device restored from a backup that asks to join. Unless the phrase turned
-/// it off, it joins on its own once seven days pass with nobody refusing it.
+/// A device that asks to join: restored from a backup, or cut off by a recovery
+/// (named so). Unless the phrase turned it off, it joins on its own once seven
+/// days pass with nobody refusing it.
 class _WaitingDeviceRow extends ConsumerStatefulWidget {
   final roster_api.RosterDevice device;
   final bool joinsByWaiting;
@@ -259,14 +260,29 @@ class _WaitingDeviceRowState extends ConsumerState<_WaitingDeviceRow> {
     final joins = seen == null || !widget.joinsByWaiting
         ? null
         : DateTime.fromMillisecondsSinceEpoch(seen.toInt()).add(const Duration(days: 7));
+    final cutOff = widget.device.cutOffAtMs;
+    final String subtitle;
+    if (cutOff != null) {
+      // HOL-SEC-229: never a restored backup, and approving it here is the one way back.
+      final cut = rosterDateLabel(context, DateTime.fromMillisecondsSinceEpoch(cutOff.toInt()));
+      final again = joins == null ? '' : ' If nobody refuses it, it joins again on ${rosterDateLabel(context, joins)}.';
+      subtitle = widget.device.cutOff == 'ours'
+          ? 'Your recovery phrase cut it off on $cut. Approve it only if you '
+              'have it with you.$again'
+          : 'Your recovery phrase cut off your old devices on $cut. It may be '
+              'one of them, or a copy someone else has. Approve it only if you '
+              'have it with you.$again';
+    } else {
+      subtitle = joins == null
+          ? 'Restored from a backup. It asks to join your identity.'
+          : 'Restored from a backup. It joins on ${rosterDateLabel(context, joins)} '
+              'unless you refuse it.';
+    }
     return SettingsRow(
       title: _rosterDeviceTitle(ref, widget.device.devicePeerId),
       titleTrailing: const HollowBadge('Waiting'),
       leading: const _KindTile(LucideIcons.monitorSmartphone),
-      subtitle: joins == null
-          ? 'Restored from a backup. It asks to join your identity.'
-          : 'Restored from a backup. It joins on ${rosterDateLabel(context, joins)} '
-              'unless you refuse it.',
+      subtitle: subtitle,
       trailing: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
