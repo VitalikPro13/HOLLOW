@@ -15,6 +15,10 @@ import 'package:hollow/src/theme/hollow_theme_data.dart';
 import 'package:hollow/src/ui/components/conversation_row.dart';
 import 'package:hollow/src/ui/shell/home_inbox.dart';
 
+import 'package:hollow/src/core/device_proof_copy.dart';
+import 'package:hollow/src/rust/api/device_proof.dart' as dp;
+
+import '../helpers/device_proof_fixtures.dart';
 import '../helpers/test_app.dart';
 
 class _Alerts extends SecurityAlertsNotifier {
@@ -89,6 +93,19 @@ void main() {
     );
     expect(find.text("Your recovery phrase isn't backed up yet"),
         findsOneWidget);
+  });
+
+  testWidgets('a restore no member named a point for waits on Home until one does',
+      (tester) async {
+    await _pump(tester, const HomeAttention(),
+        extra: deviceProofOverrides(
+            restores: fixtureRestores([
+          dp.RestoreStage.waitingForMember,
+          dp.RestoreStage.pick,
+        ])));
+    expect(find.text(restoreWaitTitle('Test Server')), findsOneWidget);
+    expect(find.text(kRestoreWaitBody), findsOneWidget);
+    expect(find.text('View'), findsOneWidget, reason: 'one row: a server with a point waits on the chooser, not here');
   });
 
   testWidgets('a saved phrase needs no reminder', (tester) async {

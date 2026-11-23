@@ -8,6 +8,13 @@ import 'package:hollow/src/core/providers/channel_navigation.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/chat_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
+import 'package:hollow/src/core/device_proof_copy.dart'
+    show restoreWaitTitle, kRestoreWaitBody, kRestoreServerFallback;
+import 'package:hollow/src/core/providers/device_proof_provider.dart'
+    show restoreChoicesProvider;
+import 'package:hollow/src/rust/api/device_proof.dart' as dp;
+import 'package:hollow/src/ui/dialogs/restore_chooser.dart'
+    show showRestoreChooser;
 import 'package:hollow/src/core/providers/dm_navigation.dart';
 import 'package:hollow/src/core/providers/friends_provider.dart';
 import 'package:hollow/src/core/providers/home_setup_provider.dart';
@@ -184,6 +191,7 @@ class _HomeAttentionState extends ConsumerState<HomeAttention> {
       ..._phraseItems(),
       ..._updateItems(),
       ..._pushItems(),
+      ..._restoreWaitItems(),
     ];
     if (items.isEmpty) return const SizedBox.shrink();
 
@@ -433,6 +441,29 @@ class _HomeAttentionState extends ConsumerState<HomeAttention> {
         onPrimary: () async => widget.actions.openUpdate(context),
         failure: "Couldn't open the update",
       ),
+    ];
+  }
+
+  /// Servers a phrase recovery restores that no member who answered remembers:
+  /// they wait for one that does, and leave this list once a point is named.
+  List<_AttentionItem> _restoreWaitItems() {
+    final restores = ref.watch(restoreChoicesProvider).valueOrNull;
+    if (restores == null) return const [];
+    final names = ref.watch(serverListProvider);
+    return [
+      for (final c in restores.servers)
+        if (c.stage == dp.RestoreStage.waitingForMember)
+          _AttentionItem(
+            id: 'restore-wait:${c.serverId}',
+            leading: _GlyphTile(LucideIcons.hourglass, size: _leadingSize),
+            title: restoreWaitTitle(
+                names[c.serverId]?.name ?? kRestoreServerFallback),
+            body: kRestoreWaitBody,
+            wholeBody: true,
+            primaryLabel: 'View',
+            onPrimary: () async => showRestoreChooser(context),
+            failure: "Couldn't open the restore",
+          ),
     ];
   }
 

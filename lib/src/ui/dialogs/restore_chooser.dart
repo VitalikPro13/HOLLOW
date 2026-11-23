@@ -232,6 +232,9 @@ class _RestoreChooserDialogState extends ConsumerState<RestoreChooserDialog> {
         return waiting(restoreWaiting(server));
       case dp.RestoreStage.nobodyReachable:
         return Text(restoreNobody(server), style: body);
+      case dp.RestoreStage.waitingForMember:
+        return Text(restoreWaitingForMember(server),
+            key: ValueKey('restore-wait-${c.serverId}'), style: body);
       case dp.RestoreStage.done:
         return Text(restoreDone(server), style: body);
       case dp.RestoreStage.pick when pick != null && !_another.contains(c.serverId):

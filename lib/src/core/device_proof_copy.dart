@@ -302,6 +302,18 @@ String restoreOnlyOne(String name, String server) =>
 String restoreNobody(String server) =>
     'No members of $server are online. Hollow will ask again when they are.';
 
+/// Members answered and none remembers a point: the server waits for one that does.
+String restoreWaitingForMember(String server) =>
+    'None of the members of $server who answered remember how it looked. Hollow '
+    'keeps asking as members come online.';
+
+/// The Home row for a server [restoreWaitingForMember] speaks of.
+String restoreWaitTitle(String server) => "${_lead(server)} can't be restored yet";
+
+const kRestoreWaitBody =
+    'None of its members who answered remember how it looked. Hollow keeps '
+    'asking as members come online.';
+
 String restoreDone(String server) => '${_lead(server)} is restored.';
 
 const kRestoreNothing = 'No server is waiting to be restored.';

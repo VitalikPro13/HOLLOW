@@ -21893,7 +21893,8 @@ impl SseDecode for crate::api::device_proof::RestoreStage {
             3 => crate::api::device_proof::RestoreStage::Points,
             4 => crate::api::device_proof::RestoreStage::OnlyOne,
             5 => crate::api::device_proof::RestoreStage::NobodyReachable,
-            6 => crate::api::device_proof::RestoreStage::Done,
+            6 => crate::api::device_proof::RestoreStage::WaitingForMember,
+            7 => crate::api::device_proof::RestoreStage::Done,
             _ => unreachable!("Invalid variant for RestoreStage: {}", inner),
         };
     }
@@ -27645,7 +27646,8 @@ impl flutter_rust_bridge::IntoDart for crate::api::device_proof::RestoreStage {
             Self::Points => 3.into_dart(),
             Self::OnlyOne => 4.into_dart(),
             Self::NobodyReachable => 5.into_dart(),
-            Self::Done => 6.into_dart(),
+            Self::WaitingForMember => 6.into_dart(),
+            Self::Done => 7.into_dart(),
             _ => unreachable!(),
         }
     }
@@ -32152,7 +32154,8 @@ impl SseEncode for crate::api::device_proof::RestoreStage {
                 crate::api::device_proof::RestoreStage::Points => 3,
                 crate::api::device_proof::RestoreStage::OnlyOne => 4,
                 crate::api::device_proof::RestoreStage::NobodyReachable => 5,
-                crate::api::device_proof::RestoreStage::Done => 6,
+                crate::api::device_proof::RestoreStage::WaitingForMember => 6,
+                crate::api::device_proof::RestoreStage::Done => 7,
                 _ => {
                     unimplemented!("");
                 }

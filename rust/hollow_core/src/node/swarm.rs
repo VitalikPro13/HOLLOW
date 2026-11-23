@@ -4315,6 +4315,9 @@ async fn run_event_loop(
                             &mut crdt_resync.unsent, &server_states, &denials, &mut frame_budget, &ws_cmd_tx, &ws_room_peers,
                             &local_peer_str, &device_peer_id, &room,
                         );
+                        if was_away && !super::resolver::same_identity(&peer_id, &local_peer_str) {
+                            crdt_resync.witness.peer_arrived(&super::resolver::resolve(&peer_id));
+                        }
                         if arrived_here && peer_id != device_peer_id {
                             super::shared_servers::ask_if_recovering(
                                 &ws_cmd_tx, &mut crdt_resync.shared_asks, Some(&room), false, &peer_id, &local_peer_str, &device_peer_id, &db_path, &db_passphrase,

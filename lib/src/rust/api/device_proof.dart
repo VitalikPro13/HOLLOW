@@ -389,6 +389,10 @@ enum RestoreStage {
   /// No member reachable; Hollow asks again when they are online.
   nobodyReachable,
 
+  /// Members answered and none names a point: the server waits for one that does,
+  /// asking again as members come online. No "I don't know" here.
+  waitingForMember,
+
   /// Restored, or this device holds the server and settles it itself.
   done,
 }

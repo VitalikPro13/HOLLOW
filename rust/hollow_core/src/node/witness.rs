@@ -201,6 +201,9 @@ struct Recovery {
     /// The checked contents, by content id, for the chosen point's settling.
     contents: HashMap<String, CrdtOp>,
     done: bool,
+    /// Identities whose counted witness named nothing, to ask again now: a device of
+    /// theirs came online (item 9).
+    reask: std::collections::BTreeSet<String>,
 }
 
 /// Where a server's restore stands, as the chooser shows it (appendix A).
@@ -212,8 +215,15 @@ pub(crate) enum Stage {
     Points,
     OnlyOne,
     NobodyReachable,
+    /// Members answered and none names a point: the server waits for one that does
+    /// (Vitalik's decision for 0.14.3: never "I don't know" when nothing is named).
+    WaitingForMember,
     Done,
 }
+
+/// A counted witness that named nothing is asked again after this long while its
+/// server waits with no point, or when a device of its identity comes online.
+pub(crate) const NONE_REASK_MS: i64 = 3 * 3600 * 1000;
 
 /// W: the wait after a pick first exists, restarted by each newly counted identity.
 pub(crate) const WAIT_MS: i64 = 30_000;
@@ -461,10 +471,16 @@ impl WitnessDesk {
         }
         let t_age_ms = now_ms.saturating_sub(rec.t_ms).clamp(0, MAX_T_AGE_MS);
         let mut out = Vec::new();
+        let named_none = |j: &Judged, m: &str| j.counted.contains(m) && !j.points.iter().any(|p| p.named_by.iter().any(|n| n == m));
         for m in order {
-            if rec.judged.counted.contains(&m) || rec.asked.get(&m).is_some_and(|at| now_ms.saturating_sub(*at) < ANSWER_EVERY_MS) {
+            let since = rec.asked.get(&m).map(|at| now_ms.saturating_sub(*at));
+            let again = named_none(&rec.judged, &m)
+                && rec.judged.points.is_empty()
+                && since.is_some_and(|gap| gap >= NONE_REASK_MS || (rec.reask.contains(&m) && gap >= ANSWER_EVERY_MS));
+            if !again && (rec.judged.counted.contains(&m) || since.is_some_and(|gap| gap < ANSWER_EVERY_MS)) {
                 continue;
             }
+            rec.reask.remove(&m);
             if !rec.asked.contains_key(&m) && rec.asked.len() >= super::union_list::MAX_ASKED {
                 break;
             }
@@ -483,6 +499,16 @@ impl WitnessDesk {
         out.retain(|(d, ask)| self.asked(us, d, server_id, &ask.nonce, ask.t_age_ms, now_ms));
         self.us = device.to_string();
         out
+    }
+
+    /// A device of `identity` came online: where its counted witness named nothing and
+    /// the restore still waits with no point, ask it again (item 9).
+    pub(crate) fn peer_arrived(&mut self, identity: &str) {
+        for rec in self.recovering.values_mut().filter(|r| !r.done && r.chosen.is_none() && r.judged.points.is_empty()) {
+            if rec.judged.counted.contains(identity) && rec.reask.len() < super::union_list::MAX_ASKED {
+                rec.reask.insert(identity.to_string());
+            }
+        }
     }
 
     /// The latest judgment of `server_id`, noted for the wait (step 7).
@@ -521,6 +547,8 @@ impl WitnessDesk {
         }
         Some(if counted.is_empty() {
             Stage::NobodyReachable
+        } else if rec.judged.points.is_empty() {
+            Stage::WaitingForMember
         } else if rec.judged.pick.is_some() {
             Stage::Pick
         } else if counted.len() == 1 {
@@ -534,7 +562,10 @@ impl WitnessDesk {
     /// is over, and only a point a counted witness named.
     pub(crate) fn choose(&mut self, server_id: &str, cp: Option<String>, now_ms: i64) -> Result<(), String> {
         let stage = self.stage(server_id, now_ms).ok_or("This server is not being restored.")?;
-        if !matches!(stage, Stage::Pick | Stage::Points | Stage::OnlyOne | Stage::NobodyReachable) {
+        if matches!(stage, Stage::NobodyReachable | Stage::WaitingForMember) {
+            return Err("None of the members who answered remember how this server looked. Hollow keeps asking.".into());
+        }
+        if !matches!(stage, Stage::Pick | Stage::Points | Stage::OnlyOne) {
             return Err("Members are still answering. Try again in a moment.".into());
         }
         let rec = self.recovering.get_mut(server_id).ok_or("This server is not being restored.")?;
@@ -1049,10 +1080,38 @@ mod tests {
         let named: Vec<String> = (0..200).map(|i| format!("n{i}")).collect();
         assert_eq!(cap.due_asks("u", &named, &devices, "me", "my-dev", 10_000).len(), super::super::union_list::MAX_ASKED);
         assert!(cap.due_asks("u", &named, &devices, "me", "my-dev", 10_000 + ANSWER_EVERY_MS).len() <= super::super::union_list::MAX_ASKED);
+        assert!(lone.choose("t", None, 10_000 + WAIT_MAX_MS).is_err(), "\"I don't know\" with nobody naming anything");
         let mut unsure = WitnessDesk::default();
         unsure.recover("v", 0);
         assert_eq!(unsure.stage("v", 1), Some(Stage::Points), "T unknown: only \"I don't know\"");
         assert!(unsure.due_asks("v", &named, &devices, "me", "my-dev", 1).is_empty());
+    }
+
+    /// Item 9 (Vitalik, 0.14.3): when every member that answered named nothing, the
+    /// server waits for a member that does. "I don't know" is never offered; a member that
+    /// named nothing is asked again when a device of its comes online (once its last answer
+    /// is ten minutes old) and every few hours, and one naming a point then ends the wait.
+    #[test]
+    fn a_restore_nobody_named_a_point_for_waits_and_asks_again() {
+        let mut desk = WitnessDesk::default();
+        desk.recover("s", 5_000);
+        let devices = |m: &str| vec![format!("{m}-dev")];
+        desk.note_members("s", vec![("h1".into(), MemberSource::Contact), ("h2".into(), MemberSource::FriendEntry)]);
+        assert_eq!(desk.due_asks("s", &[], &devices, "me", "my-dev", 10_000).len(), 2);
+        let f = facts(&[("a", 1, &[], &["h1", "h2"])]);
+        desk.update("s", judge(&[seen("h1", "", 0), seen("h2", "", 0)], &f, &|_| false), 20_000);
+        assert_eq!(desk.stage("s", 20_000), Some(Stage::WaitingForMember), "every asked member named nothing");
+        assert!(desk.choose("s", None, 20_000).is_err(), "\"I don't know\" was offered with nothing named");
+        desk.peer_arrived("h1");
+        assert!(desk.due_asks("s", &[], &devices, "me", "my-dev", 30_000).is_empty(), "asked again inside the witness's ten minutes");
+        let again = desk.due_asks("s", &[], &devices, "me", "my-dev", 10_000 + ANSWER_EVERY_MS);
+        assert_eq!(again.iter().map(|(d, _)| d.as_str()).collect::<Vec<_>>(), ["h1-dev"], "a device of h1 came online: h1 is asked again, h2 not yet");
+        assert!(desk.due_asks("s", &[], &devices, "me", "my-dev", 20_000 + ANSWER_EVERY_MS).is_empty(), "one ask per arrival");
+        let later = desk.due_asks("s", &[], &devices, "me", "my-dev", 10_000 + NONE_REASK_MS);
+        assert_eq!(later.iter().map(|(d, _)| d.as_str()).collect::<Vec<_>>(), ["h2-dev"], "h2 is asked again after the long gap");
+        desk.update("s", judge(&[seen("h1", "a", 1), seen("h2", "a", 1)], &f, &|_| false), 10_000 + NONE_REASK_MS);
+        assert_eq!(desk.stage("s", 10_000 + NONE_REASK_MS), Some(Stage::Pick), "a named point ends the wait");
+        assert!(desk.due_asks("s", &[], &devices, "me", "my-dev", 10_000 + 3 * NONE_REASK_MS).is_empty(), "nobody is asked again once a point is named");
     }
 
     /// Part B: a v2 witness still verifies as before; a record's witness signs the v3
