@@ -171,6 +171,7 @@ publish() {
     noui) rm "$s/setup/deploy/lib/ui.sh" ;;
     cannotstart) printf 'false\n' >>"$s/setup/deploy/lib/questions.sh" ;;
     badsettings) printf '#!/bin/sh\nexit 7\n' >"$s/setup/deploy/harden-host.sh" ;;
+    release) rm -rf "$s/setup" && cp -R /root/official/setup "$s/setup" ;;
     esac
     name="hollow-relay-$REL-b$b-$ARCH.tar.gz"
     case "$kind" in
@@ -414,7 +415,8 @@ if [ "${FRESH_ONLY:-}" = official ]; then
     yes_ "the release build's programs are here" test -x "$OFF/hollow-relay" -a -x "$OFF/hollow-forwarder"
     lacks "its relay links no libsodium" "$(LC_ALL=C readelf -d "$OFF/hollow-relay" 2>&1)" libsodium
     eq "this system offers what the official programs need" "$(cd / && bash "$SRC/relay-uws/test/installer/fresh_box_offered.sh")" offered
-    RELAY_BIN=$OFF/hollow-relay FWD_BIN=$OFF/hollow-forwarder publish 1 setup
+    yes_ "the release build carries its setup copy" test -f "$OFF/setup/install.sh"
+    RELAY_BIN=$OFF/hollow-relay FWD_BIN=$OFF/hollow-forwarder publish 1 release
     printf '%s\n' mode=native binaries=prebuilt address=ip "public_ip=$PUBLIC_IP" "ip=$PUBLIC_IP" staging=yes turn=no push=no \
         forwarder=yes members_only=no ssh_keys=no continue_anyway=yes confirm=yes >"$W/ans_off"
     PATH="$SAFE:$PATH" bash "$SRC/relay-uws/install.sh" --answers "$W/ans_off" >"$W/off.out" 2>&1
@@ -447,6 +449,13 @@ if [ "${FRESH_ONLY:-}" = official ]; then
     has "the relay finds its libraries" "$check" "ok    hollow-relay's program /usr/local/bin/hollow-relay finds every library it needs"
     has "and the forwarder" "$check" "ok    hollow-forwarder's program /usr/local/bin/hollow-forwarder finds every library it needs"
     has "the notices of what the relay links in are installed" "$(cat "$LIB/installer/deploy/THIRD_PARTY_NOTICES.txt" 2>&1)" "crypto_core"
+    # the_release_notices_land_beside_the_programs: from the download, though
+    # this first install keeps the clone's copy, which has no forwarder notices.
+    yes_ "the clone's setup copy has no forwarder notices" test ! -e "$LIB/installer/deploy/THIRD_PARTY_NOTICES_FORWARDER.txt"
+    eq "the release's relay notices are beside the programs" "$(cmp "$LIB/THIRD_PARTY_NOTICES.txt" "$OFF/setup/deploy/THIRD_PARTY_NOTICES.txt" && echo same)" same
+    eq "and its forwarder notices" "$(cmp "$LIB/THIRD_PARTY_NOTICES_FORWARDER.txt" "$OFF/setup/deploy/THIRD_PARTY_NOTICES_FORWARDER.txt" && echo same)" same
+    has "which name the bundled SQLCipher" "$(cat "$LIB/THIRD_PARTY_NOTICES_FORWARDER.txt")" "ZETETIC LLC"
+    eq "readable by everyone, written by root" "$(stat -c '%a %U' "$LIB/THIRD_PARTY_NOTICES_FORWARDER.txt")" "644 root"
     has "the status screen says ready-made" "$(printf 'action=status\n' >"$W/ans_ostatus"; hollow-relay-setup --answers "$W/ans_ostatus" 2>&1 | tr '\n' ' ' | tr -s ' ')" "(ready-made, build 1"
     finish
 fi

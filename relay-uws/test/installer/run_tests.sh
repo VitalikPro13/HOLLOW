@@ -1206,17 +1206,54 @@ t_prebuilt_needs_build_check() {
     has "the build judges the libsodium it links in" "$(cat "$b")" 'sodium_ok "$sodium_version" ||'
     has "and the notices it ships" "$(cat "$b")" 'notices_ok "$stage" ||'
     # the_release_carries_the_notices_of_what_it_links_in (#153)
-    rm -rf "$TMP/notices_stage"
-    yes_ bash "$b" --stage-setup "$REPO" "$TMP/notices_stage/setup"
-    yes_ bash "$b" --check-notices "$TMP/notices_stage"
-    has "libsodium's ISC notice ships" "$(cat "$TMP/notices_stage/setup/deploy/THIRD_PARTY_NOTICES.txt")" "Permission to use, copy, modify, and/or distribute this software for any"
-    has "with its BSD-2-clause parts" "$(cat "$TMP/notices_stage/setup/deploy/THIRD_PARTY_NOTICES.txt")" "Copyright: 2009 Colin Percival"
-    : >"$TMP/notices_stage/setup/deploy/THIRD_PARTY_NOTICES.txt"
-    out=$(bash "$b" --check-notices "$TMP/notices_stage" 2>&1)
+    local st=$TMP/notices_stage rn fwd
+    rm -rf "$st"
+    yes_ bash "$b" --stage-setup "$REPO" "$st/setup"
+    rn=$st/setup/deploy/THIRD_PARTY_NOTICES.txt fwd=$st/setup/deploy/THIRD_PARTY_NOTICES_FORWARDER.txt
+    # The forwarder's file is written by the build from the locked tree.
+    out=$(bash "$b" --check-notices "$st" 2>&1)
+    has "a copy without the forwarder's notices stops the build" "$out" "THIRD_PARTY_NOTICES_FORWARDER.txt is missing"
+    printf '%s\n' "Mozilla Public License" "https://crates.io/crates/" "SQLCipher" "Copyright (c) 2025, ZETETIC LLC" \
+        "AWS-LC" "Eric Young" "BoringSSL" "ring, from the crate ring 0.17.14" >"$fwd"
+    yes_ bash "$b" --check-notices "$st"
+    has "libsodium's ISC notice ships" "$(cat "$rn")" "Permission to use, copy, modify, and/or distribute this software for any"
+    has "with its BSD-2-clause parts" "$(cat "$rn")" "Copyright: 2009 Colin Percival"
+    # the_relay_notices_name_what_uwebsockets_bundles: any_invocable (MoveOnlyFunction.h, on g++ 11).
+    has "with any_invocable's MIT notice" "$(cat "$rn")" "Copyright (c) 2020 Oleg Fatkhiev"
+    has "and the source of its UTF-8 check" "$(cat "$rn")" "utf8_check.c by Markus Kuhn"
+    sed -i 's/Fatkhiev/X/' "$rn"
+    out=$(bash "$b" --check-notices "$st" 2>&1)
+    has "a copy without any_invocable's stops the build" "$out" "does not name Fatkhiev"
+    : >"$rn"
+    out=$(bash "$b" --check-notices "$st" 2>&1)
     has "a copy without them stops the build" "$out" "does not name libsodium"
-    rm -f "$TMP/notices_stage/setup/deploy/THIRD_PARTY_NOTICES.txt"
-    out=$(bash "$b" --check-notices "$TMP/notices_stage" 2>&1)
+    rm -f "$rn"
+    out=$(bash "$b" --check-notices "$st" 2>&1)
     has "so does one without the file" "$out" "THIRD_PARTY_NOTICES.txt is missing"
+    cp "$REPO/relay-uws/deploy/THIRD_PARTY_NOTICES.txt" "$rn"
+    # the_forwarder_notices_carry_the_bundled_c_licenses (#153)
+    local part
+    for part in "Mozilla Public License" "https://crates.io/crates/" "ZETETIC LLC" "AWS-LC" "Eric Young" "BoringSSL" "from the crate ring "; do
+        grep -vF -- "$part" "$fwd" >"$fwd.x"; cp "$fwd" "$fwd.keep"; mv "$fwd.x" "$fwd"
+        out=$(bash "$b" --check-notices "$st" 2>&1)
+        has "a forwarder notice without $part stops the build" "$out" "does not name $part"
+        mv "$fwd.keep" "$fwd"
+    done
+    yes_ bash "$b" --check-notices "$st"
+    # Each file fits what a setup file may be, so no box refuses the release.
+    { cat "$fwd"; head -c 1048577 /dev/zero | tr '\0' '#'; } >"$fwd.x" && mv "$fwd.x" "$fwd"
+    out=$(bash "$b" --check-notices "$st" 2>&1)
+    has "an oversized notice stops the build" "$out" "is over 1048576 bytes"
+    has "the cap is the setup's own" "$(cat "$DEPLOY/lib/release_feed.sh")" "_HF_SETUP_MAX_FILE=1048576"
+    has "the build writes the forwarder's notices into each stage" "$(cat "$b")" 'install -m 0644 /work/forwarder-notices.txt "$stage/$FWD_NOTICES"'
+    has "from the locked tree, never the network" "$(cat "$b")" 'cargo about generate --frozen --features forwarder'
+    has "and checks them against the tree" "$(cat "$b")" 'notices_cover "$out.crates" "$out.tree" || return 1'
+    has "the image pins cargo-about" "$(cat "$REPO/scripts/relay_binaries.Dockerfile")" "ARG CARGO_ABOUT_VERSION=0.9.3"
+    # The setup installs what the build names.
+    has "native.sh installs the build's two notices" "$RELEASE_NOTICES" "THIRD_PARTY_NOTICES.txt THIRD_PARTY_NOTICES_FORWARDER.txt"
+    has "named as the build names them" "$(cat "$b")" "FWD_NOTICES=setup/deploy/THIRD_PARTY_NOTICES_FORWARDER.txt"
+    # Older setups (0.14.1, 0.14.2) take the forwarder's file: a plain name below deploy/.
+    yes_ _hf_setup_name_ok setup/deploy/THIRD_PARTY_NOTICES_FORWARDER.txt
     printf 'PREBUILT_NEEDS="libc.so.6 libhollow.so.1"\nLIB_PACKAGES="libc.so.6=libc6"\n' >"$TMP/needs_native.sh"
     out=$(bash "$b" --check-needed "$TMP/needs_native.sh" libc.so.6 libhollow.so.1 2>&1)
     has "a library without packages stops it" "$out" "libhollow.so.1 has no packages in LIB_PACKAGES"
@@ -1233,6 +1270,158 @@ t_prebuilt_needs_build_check() {
     done
 }
 in_sub t_prebuilt_needs_build_check
+
+# the_forwarder_notices_name_every_crate_of_the_tree (#153): cargo-about once
+# left a git crate's optional subtree out, so its output is checked against
+# cargo tree.
+t_notices_cover() {
+    local b=$REPO/scripts/build_relay_binaries.sh d=$TMP/cover out
+    mkdir -p "$d"
+    printf '%s\n' "hollow_core v0.1.0 (/src/rust/hollow_core)" "ring v0.17.14" "deep_filter v0.5.6 (https://github.com/x/y?tag=v0.5.6#978576aa)" \
+        "serde_derive v1.0.228 (proc-macro)" "ring v0.17.14" "sqlcipher-src v420.0.0+sqlcipher-4.20.0" >"$d/tree"
+    printf '%s\n' "====LICENSE_START====" "License: MIT License (MIT)" "Used by:" "  deep_filter 0.5.6 https://github.com/x/y" \
+        "  serde_derive 1.0.228 https://github.com/serde-rs/serde" "  sqlcipher-src 420.0.0+sqlcipher-4.20.0 " "---TEXT---" "MIT text naming ring 0.17.14" "====LICENSE_END====" \
+        "====LICENSE_START====" "License: ISC License (ISC)" "Used by:" "  ring 0.17.14 https://github.com/briansmith/ring" "---TEXT---" "ISC" "====LICENSE_END====" >"$d/notices"
+    yes_ bash "$b" --check-covers "$d/notices" "$d/tree"
+    sed -i '/^  ring 0.17.14/d' "$d/notices"
+    out=$(bash "$b" --check-covers "$d/notices" "$d/tree" 2>&1)
+    has "a crate named only in a license text is not covered" "$out" "name no license for: ring v0.17.14"
+    printf '%s\n' "  ring 0.17.14 x" >>"$d/notices"
+    out=$(bash "$b" --check-covers "$d/notices" "$d/tree" 2>&1)
+    has "nor one outside a Used by list" "$out" "ring v0.17.14"
+    sed -i 's/^  deep_filter 0.5.6/  deep_filter 0.5.7/' "$d/notices"
+    out=$(bash "$b" --check-covers "$d/notices" "$d/tree" 2>&1)
+    has "another version of a crate does not cover it" "$out" "deep_filter v0.5.6"
+    printf 'hollow_core v0.1.0 (/src/rust/hollow_core)\n' >"$d/tree"
+    out=$(bash "$b" --check-covers "$d/notices" "$d/tree" 2>&1)
+    has "an empty tree is refused, never passed" "$out" "no crates in"
+}
+in_sub t_notices_cover
+
+# the_release_links_the_newest_libsodium_the_archive_offers (#153): an image
+# built before a libsodium update, or kept by BuildKit's cache, stops the build.
+t_sodium_archive() {
+    local b=$REPO/scripts/build_relay_binaries.sh F=$TMP/fake_sodium out
+    export SOD_INST=1.0.18-1ubuntu0.22.04.1 SOD_CAND=1.0.18-1ubuntu0.22.04.1 SOD_SRC=http SOD_UPDATE=0 SOD_ARGS=$TMP/sod.args
+    export SOD_INST_ARM=""
+    mkfake "$F" apt-get 'printf "%s\n" "$*" >>"$SOD_ARGS"; [ "$SOD_UPDATE" = 0 ] || { echo "E: Failed to fetch http://archive.ubuntu.com/ubuntu/dists/jammy-updates/InRelease"; exit 100; }'
+    mkfake "$F" dpkg-query 'case "$3" in *:arm64) v=${SOD_INST_ARM:-$SOD_INST} ;; *) v=$SOD_INST ;; esac; [ -n "$v" ] || exit 1; printf "%s" "$v"'
+    mkfake "$F" apt-cache 'printf "%s\n  Installed: %s\n  Candidate: %s\n  Version table:\n" "$2" "$SOD_INST" "$SOD_CAND"
+if [ "$SOD_CAND" != "$SOD_INST" ]; then printf "     %s 500\n        500 http://archive.ubuntu.com/ubuntu jammy-updates/main amd64 Packages\n" "$SOD_CAND"; fi
+printf " *** %s 500\n" "$SOD_INST"
+[ "$SOD_SRC" = http ] && [ "$SOD_CAND" = "$SOD_INST" ] && printf "        500 http://security.ubuntu.com/ubuntu jammy-security/main amd64 Packages\n"
+printf "        100 /var/lib/dpkg/status\n     1.0.18-1build2 500\n        500 http://archive.ubuntu.com/ubuntu jammy/main amd64 Packages\n"'
+    PATH=$F:$PATH
+    yes_ bash "$b" --check-sodium-archive amd64 arm64
+    has "the lists are fetched fresh, any failed list failing the update" "$(cat "$SOD_ARGS")" "-o APT::Update::Error-Mode=any"
+    SOD_CAND=1.0.18-1ubuntu0.22.04.2
+    out=$(bash "$b" --check-sodium-archive amd64 2>&1)
+    has "an image older than the archive's libsodium-dev stops the build" "$out" "older than 1.0.18-1ubuntu0.22.04.2 in the Ubuntu archive. Build again with --clean"
+    SOD_INST=1.0.18-1ubuntu0.22.04.2
+    yes_ bash "$b" --check-sodium-archive amd64
+    SOD_INST_ARM=1.0.18-1ubuntu0.22.04.1
+    out=$(bash "$b" --check-sodium-archive amd64 arm64 2>&1)
+    has "each machine's is judged" "$out" "libsodium-dev:arm64 1.0.18-1ubuntu0.22.04.1, older than"
+    SOD_INST_ARM=""
+    SOD_INST=1.0.18-1ubuntu0.22.04.3
+    yes_ bash "$b" --check-sodium-archive amd64
+    # Without fresh lists apt names the installed version as the candidate,
+    # from /var/lib/dpkg/status alone: that is refused, never passed.
+    SOD_INST=1.0.18-1ubuntu0.22.04.1 SOD_CAND=1.0.18-1ubuntu0.22.04.1 SOD_SRC=status
+    out=$(bash "$b" --check-sodium-archive amd64 2>&1)
+    has "an archive that cannot be read stops the build" "$out" "apt offers no libsodium-dev:amd64 from the Ubuntu archive"
+    SOD_SRC=http SOD_CAND="(none)"
+    out=$(bash "$b" --check-sodium-archive amd64 2>&1)
+    has "so does an archive without the package" "$out" "apt offers no libsodium-dev:amd64"
+    SOD_CAND=1.0.18-1ubuntu0.22.04.1 SOD_UPDATE=1
+    out=$(bash "$b" --check-sodium-archive amd64 2>&1)
+    has "so does a failed update" "$out" "apt-get update failed"
+    has "naming what failed" "$out" "Failed to fetch"
+    SOD_UPDATE=0
+    # The floor holds whatever the archive says.
+    SOD_INST=1.0.18-1build2 SOD_CAND=1.0.18-1build2
+    out=$(bash "$b" --check-sodium-archive amd64 2>&1)
+    has "an archive offering only an unpatched libsodium stops it" "$out" "1.0.18-1build2, older than 1.0.18-1ubuntu0.22.04.1. Build again with --clean once the archive has the fix"
+    SOD_INST=""
+    SOD_CAND=1.0.18-1ubuntu0.22.04.1
+    out=$(bash "$b" --check-sodium-archive amd64 2>&1)
+    has "and no libsodium-dev at all" "$out" "libsodium-dev:amd64 (none)"
+    # the_libsodium_judged_is_the_one_linked: dpkg -S names the archive's owner.
+    local A=$TMP/sodium_lib
+    mkdir -p "$A/real" && : >"$A/real/libsodium.a" && ln -sf "$A/real/libsodium.a" "$A/libsodium.a"
+    export SOD_OWNER="libsodium-dev:amd64"
+    mkfake "$F" dpkg 'if [ "$1" = -S ]; then [ -n "$SOD_OWNER" ] || exit 1; printf "%s: %s\n" "$SOD_OWNER" "$2"; else exec /usr/bin/dpkg "$@"; fi'
+    yes_ bash "$b" --check-sodium-owner "$A/libsodium.a" amd64
+    out=$(bash "$b" --check-sodium-owner "$A/libsodium.a" arm64 2>&1)
+    has "another machine's archive is refused" "$out" "belongs to libsodium-dev:amd64, not libsodium-dev:arm64"
+    SOD_OWNER="libsodium-dev:amd64, other:amd64"
+    no_ bash "$b" --check-sodium-owner "$A/libsodium.a" amd64
+    SOD_OWNER=""
+    out=$(bash "$b" --check-sodium-owner "$A/libsodium.a" amd64 2>&1)
+    has "an archive no package owns is refused" "$out" "belongs to no package"
+    out=$(bash "$b" --check-sodium-owner "$A/none.a" amd64 2>&1)
+    has "so is a missing one" "$out" "no libsodium archive at"
+    # Wiring: judged before anything is built, the owner after the relay links.
+    has "the build judges the archive first" "$(cat "$b")" 'sodium_current $debs || exit 1'
+    has "and the archive it linked" "$(cat "$b")" 'sodium_archive_owned "$sodium_archive" "$deb_arch" || exit 1'
+    has "--clean builds the image without its layer cache" "$(cat "$b")" 'docker_build_fresh=(--no-cache --pull)'
+    has "which the image build uses" "$(cat "$b")" 'docker build -q -t "$IMAGE" ${docker_build_fresh[@]+"${docker_build_fresh[@]}"}'
+}
+in_sub t_sodium_archive
+
+# the_release_notices_land_beside_the_programs (#153): from the verified
+# download, also on a first install that keeps an older clone's setup copy.
+t_release_notices() {
+    local d=$TMP/rnotes f
+    mkdir -p "$d/dl/setup/deploy" "$d/lib"
+    : >"$d/dl/hollow-relay"; : >"$d/dl/hollow-forwarder"; printf 'version=0.14.3\nbuild=0\n' >"$d/dl/VERSION"
+    echo relay-notes >"$d/dl/setup/deploy/THIRD_PARTY_NOTICES.txt"
+    echo fwd-notes >"$d/dl/setup/deploy/THIRD_PARTY_NOTICES_FORWARDER.txt"
+    LIB_DIR=$d/lib BUILT_FROM_FILE=$d/lib/BUILT_FROM VERSION_FILE=$d/lib/VERSION PREVIOUS_DIR=$d/lib/previous DRY_RUN=0 CFG_FORWARDER=yes PROGRAMS_DIR=$d/bin UPDATE_MARK=$d/no-update
+    put_file() { cat >"$1"; }
+    install() { :; }
+    mv() { :; }
+    install_programs "$d/dl" prebuilt >/dev/null
+    eq "the relay's notices are installed" "$(cat "$d/lib/THIRD_PARTY_NOTICES.txt")" relay-notes
+    eq "and the forwarder's" "$(cat "$d/lib/THIRD_PARTY_NOTICES_FORWARDER.txt")" fwd-notes
+    echo fwd-new >"$d/dl/setup/deploy/THIRD_PARTY_NOTICES_FORWARDER.txt"
+    install_programs "$d/dl" mixed "relay built here" >/dev/null
+    eq "a mixed pair keeps the release's" "$(cat "$d/lib/THIRD_PARTY_NOTICES_FORWARDER.txt")" fwd-new
+    rm -rf "$d/dl/setup"
+    install_programs "$d/dl" prebuilt >/dev/null
+    yes_ test ! -e "$d/lib/THIRD_PARTY_NOTICES_FORWARDER.txt"
+    mkdir -p "$d/dl/setup/deploy" && echo relay-notes >"$d/dl/setup/deploy/THIRD_PARTY_NOTICES.txt"
+    echo fwd-notes >"$d/dl/setup/deploy/THIRD_PARTY_NOTICES_FORWARDER.txt"
+    install_programs "$d/dl" prebuilt >/dev/null
+    install_programs "$d/dl" source >/dev/null
+    yes_ test ! -e "$d/lib/THIRD_PARTY_NOTICES.txt"
+    yes_ test ! -e "$d/lib/THIRD_PARTY_NOTICES_FORWARDER.txt"
+    # A rollback puts back the notices the earlier programs came with.
+    mkdir -p "$d/lib/previous" && : >"$d/lib/previous/hollow-relay" && chmod 0755 "$d/lib/previous/hollow-relay"
+    echo old-relay-notes >"$d/lib/previous/THIRD_PARTY_NOTICES.txt"
+    echo stale >"$d/lib/THIRD_PARTY_NOTICES_FORWARDER.txt"
+    yes_ restore_previous_programs
+    eq "the earlier relay notices come back" "$(cat "$d/lib/THIRD_PARTY_NOTICES.txt")" old-relay-notes
+    yes_ test ! -e "$d/lib/THIRD_PARTY_NOTICES_FORWARDER.txt"
+    # An update keeps the notices of the pair it replaces, for that rollback.
+    rm -rf "$d/lib/previous"
+    mkdir -p "$d/bin" && : >"$d/bin/hollow-relay" && chmod 0755 "$d/bin/hollow-relay"
+    echo kept-relay-notes >"$d/lib/THIRD_PARTY_NOTICES.txt"
+    echo kept-fwd-notes >"$d/lib/THIRD_PARTY_NOTICES_FORWARDER.txt"
+    install() { if [ "$1" = -d ]; then mkdir -p "${@: -1}"; fi; }
+    install_programs "$d/dl" prebuilt >/dev/null
+    eq "the replaced relay notices are kept" "$(cat "$d/lib/previous/THIRD_PARTY_NOTICES.txt")" kept-relay-notes
+    eq "and the replaced forwarder notices" "$(cat "$d/lib/previous/THIRD_PARTY_NOTICES_FORWARDER.txt")" kept-fwd-notes
+    eq "while the new ones are installed" "$(cat "$d/lib/THIRD_PARTY_NOTICES.txt")" relay-notes
+    install() { :; }
+    # A dry run changes nothing.
+    echo keep >"$d/lib/THIRD_PARTY_NOTICES_FORWARDER.txt"
+    DRY_RUN=1
+    put_file() { cat >/dev/null; }
+    install_programs "$d/dl" source >/dev/null
+    eq "a dry run removes nothing" "$(cat "$d/lib/THIRD_PARTY_NOTICES_FORWARDER.txt")" keep
+}
+in_sub t_release_notices
 
 # prebuilt_without_its_libraries_builds_from_source (#153): before the download
 # and after it, never installing programs that cannot start.

@@ -1,0 +1,23 @@
+Third-party notices for the Hollow media forwarder program
+
+The ready-made hollow-forwarder program is built from the Rust crates listed
+below, at the versions Hollow's Cargo.lock pins, for 64-bit x86 and ARM Linux.
+Each license text is followed by the crates it covers, with each crate's
+source repository. The source code of every crate, including those under the
+Mozilla Public License 2.0, is available unchanged at
+https://crates.io/crates/<name>/<version> or, for a crate taken from git, in
+the repository named beside it. The C libraries three crates build in follow
+at the end. OpenSSL's libcrypto is not built in: the program uses the copy
+this system installs, under its own license.
+
+{{#each licenses}}
+====LICENSE_START====
+License: {{{name}}} ({{{id}}})
+Used by:
+{{#each used_by}}
+  {{{crate.name}}} {{{crate.version}}} {{{crate.repository}}}
+{{/each}}
+---TEXT---
+{{{text}}}
+====LICENSE_END====
+{{/each}}

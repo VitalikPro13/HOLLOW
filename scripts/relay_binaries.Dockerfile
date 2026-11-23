@@ -36,3 +36,11 @@ RUN curl --proto '=https' --tlsv1.2 -sSf -o /tmp/rustup-init \
     && rm /tmp/rustup-init \
     && rustup target add aarch64-unknown-linux-gnu \
     && chmod -R a+rwX /opt/cargo /opt/rustup
+
+# cargo-about writes the forwarder's third-party notices from the locked tree
+# (build_relay_binaries.sh). Pinned, built from its own lockfile; the registry
+# it leaves goes, so a build starts with no crate cache.
+ARG CARGO_ABOUT_VERSION=0.9.3
+RUN cargo install --locked --features cli --version "$CARGO_ABOUT_VERSION" cargo-about \
+    && rm -rf /opt/cargo/registry /opt/cargo/git \
+    && chmod -R a+rwX /opt/cargo
