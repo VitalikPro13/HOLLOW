@@ -73992,3 +73992,47 @@ async fn pr_a_a_fresh_install_restores_a_server_that_never_checkpointed_from_mem
     assert!(wait_until(20, async || j.live_server_state(&server_id).await.is_some_and(|s| !s.in_recovery())).await, "the settling ends J's hold");
     drop((d1, k));
 }
+
+/// The key rule, shipped in-app path (F5 note test 13, Q1): a recovery typed on the
+/// device holding the server cuts the old device off, and its settling sets a fresh
+/// invite key from the kept device, so an invite link the old device knew dies.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn w3c1_an_in_app_recovery_resets_each_owned_servers_invite_key_in_its_settling() {
+    let _g = test_guard();
+    let [m_tag, d1_tag, d2_tag, r_tag, j_tag] = [238u8, 239, 240, 241, 242];
+    let W3c1Cut { relay, master, d1, d2, j, server_id, _tmp } = w3c1_cut_server([m_tag, d1_tag, d2_tag, r_tag, j_tag]).await;
+    let m_id = master.peer_id();
+    let (d1_id, d2_id) = (tag_kp(d1_tag).peer_id(), tag_kp(d2_tag).peer_id());
+    let key_at = async |n: &TestNode| n.live_server_state(&server_id).await.and_then(|s| s.join_public_text());
+    let old_key = key_at(&j).await.expect("precondition: J holds the join key");
+    assert_eq!(key_at(&d2).await, Some(old_key.clone()), "precondition: one key");
+    // T after every store above (a "not sure" T settles from the oldest restore point,
+    // which a server with no checkpoint does not hold).
+    sleep_ms(1200).await;
+    let t_ms = crate::crdt::hlc::wall_clock_ms() as i64;
+    relay.set_online(&d1.device_id, false);
+    drop(d1);
+    let roster = d2.store().load_roster(&m_id).ok().flatten().expect("the identity's roster");
+    let mut recovered = roster.clone();
+    recovered
+        .add_phrase_statement(
+            &crate::identity::roster::r_pub_of(&tag_kp(r_tag)),
+            Some(crate::identity::roster::sign_recovery(&master, &tag_kp(r_tag), super::roster_book::now_ms(), std::slice::from_ref(&d2_id), false)),
+            None,
+        )
+        .expect("the phrase signs the recovery");
+    assert!(super::authority_view::hold_own(&d2.store(), &m_id), "nothing held before this change");
+    super::roster_book::merge_for_test(&d2.store(), &recovered, &m_id, &d2_id);
+    super::roster_book::note_recovery_lost_since(&d2.store(), &recovered.base(), t_ms).unwrap();
+    d2.cmd_tx.send(NodeCommand::RosterChanged { newly_revoked: vec![d1_id.clone()] }).await.unwrap();
+    let settled = |s: &ServerState| s.base.as_ref().is_some_and(|b| b.state.cp_settles.as_ref().is_some_and(|st| st.devices.contains(&d1_id)));
+    assert!(wait_until(30, async || j.live_server_state(&server_id).await.is_some_and(|s| settled(&s))).await, "J takes the settling");
+    let new_key = key_at(&j).await.expect("a key after the settling");
+    assert_ne!(new_key, old_key, "the settling left the key the cut-off device knew in force");
+    assert_eq!(key_at(&d2).await, Some(new_key.clone()), "one key on both");
+    let s = j.live_server_state(&server_id).await.unwrap();
+    let base_key = s.base.as_ref().and_then(|b| b.state.join_public_text());
+    assert_eq!(base_key, Some(new_key), "the fresh key is in the settled state itself");
+    drop((d2, j));
+}

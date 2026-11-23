@@ -359,7 +359,8 @@ class _PhraseDialogState extends ConsumerState<_PhraseDialog>
             const SizedBox(height: HollowSpacing.xs),
             Text(
               "Devices you don't keep are treated as lost or stolen. Changes "
-              'they made in your servers after this time can be undone.',
+              'they made in your servers after this time can be undone, and '
+              'invite links to the servers you own stop working.',
               style: secondary,
             ),
             const SizedBox(height: HollowSpacing.sm),

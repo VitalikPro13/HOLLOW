@@ -3140,7 +3140,8 @@ pub(crate) fn settle_lost_devices(
                 );
             }
             let Some(roster) = roster.clone() else { continue };
-            let settling = crate::crdt::settle::Settling { before: view.clone(), dropped, t_ms, seen: &seen, roster, home: super::ws_client::relay_home() };
+            let keys_after_ms = super::roster_book::keys_after_ms(&store, &roster, dropped);
+            let settling = crate::crdt::settle::Settling { before: view.clone(), dropped, t_ms, seen: &seen, roster, home: super::ws_client::relay_home(), keys_after_ms };
             let counted = super::floor::counted_members(state);
             let written = write_settling(state, server_id, &settling, local_peer_str, device_keypair, crdt_store);
             settled.push((server_id.clone(), super::floor::settled_newcomers(&counted, state, local_peer_str), written.clone()));
@@ -3217,7 +3218,8 @@ pub(crate) fn merge_rival_settlings(
         let Some(roster) = store.load_roster(local_peer_str).ok().flatten() else { return };
         let seen = store.op_seen_ms(server_id).unwrap_or_default();
         let before = state.view_counting(local_peer_str, &dropped);
-        let settling = crate::crdt::settle::Settling { before, dropped: &dropped, t_ms, seen: &seen, roster, home: super::ws_client::relay_home() };
+        let keys_after_ms = super::roster_book::keys_after_ms(&store, &roster, &dropped);
+        let settling = crate::crdt::settle::Settling { before, dropped: &dropped, t_ms, seen: &seen, roster, home: super::ws_client::relay_home(), keys_after_ms };
         for op in write_settling(state, server_id, &settling, local_peer_str, device_keypair, crdt_store) {
             broadcast_op_mls_first(mls, ws_cmd_tx, ws_room_peers, gossip_overlays, event_tx, state, local_peer_str, server_id, &op, crypto_store);
         }

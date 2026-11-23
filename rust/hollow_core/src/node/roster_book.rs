@@ -779,6 +779,16 @@ fn note_cut_off(store: &MessageStore, base: &str, cut: CutOff) -> Result<(), Str
     store.save_setting(&recovery_cut_off_key(base), &serde_json::to_string(&held).map_err(|e| e.to_string())?)
 }
 
+/// The latest moment our current base's recovery cut off any of `devices` (the
+/// HOL-SEC-229 record, its "maybe" mark included): a join key set before it may be
+/// held by one of them. `None` when one of them is not named, or the record cannot be
+/// read: then no key stands (the key rule).
+pub(crate) fn keys_after_ms(store: &MessageStore, roster: &Roster, devices: &[String]) -> Option<u64> {
+    let cut = read_cut_off(store, &roster.base()).ok()?;
+    let ats = devices.iter().map(|d| cut.of(d).map(|(at, _)| at)).collect::<Option<Vec<i64>>>()?;
+    ats.into_iter().max().and_then(|at| u64::try_from(at).ok())
+}
+
 /// `device`, waiting in our own `state`, as a recovery cut it off: when, and whether this
 /// device knows it was one of ours (else it may be). An unreadable record reads as maybe.
 pub(crate) fn cut_off_by_recovery(store: &MessageStore, roster: &Roster, state: &RosterState, device: &str) -> Option<(i64, bool)> {

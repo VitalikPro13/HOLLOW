@@ -28,6 +28,9 @@ pub(crate) struct Settling<'a> {
     pub(crate) roster: Roster,
     /// The relay this device dials (`ws_client::relay_home`), HOL-SEC-223.
     pub(crate) home: Option<String>,
+    /// The latest moment a device this settling drops was cut off (`None` = not known
+    /// here): a join key set before it may be held by that device (the key rule).
+    pub(crate) keys_after_ms: Option<u64>,
 }
 
 /// Where a settling stands and which checkpoint's state it folds.
@@ -157,13 +160,34 @@ impl ServerState {
     /// view (the chooser's trial fold).
     pub(crate) fn record_input(&mut self, ids: &std::collections::BTreeSet<[u8; 32]>) -> Vec<CrdtOp> {
         let seen = SeenAt::new();
-        let s = Settling { before: self.authority.clone(), dropped: &[], t_ms: 0, seen: &seen, roster: Roster::default(), home: None };
+        let s = Settling { before: self.authority.clone(), dropped: &[], t_ms: 0, seen: &seen, roster: Roster::default(), home: None, keys_after_ms: None };
         self.settling_input(None, &s, Some(ids))
+    }
+
+    /// The key rule (F5 note 4, review items 8 and 12): the join key a settling of a
+    /// server we own leaves in force stands only when our master set it, proven by a
+    /// device our view counts, stamped after `after_ms`; any other key (or none) a device
+    /// the settling drops may hold, so the settling sets a fresh one.
+    fn key_stands(&self, settled: &ServerState, me: &str, after_ms: Option<u64>) -> bool {
+        let (Some(reg), Some(after)) = (settled.join_secret.as_ref(), after_ms) else { return false };
+        self.held_ops().any(|o| {
+            o.hlc == *reg.hlc()
+                && matches!(&o.payload, CrdtPayload::JoinKeySet { secret } if secret == reg.read())
+                && o.author == me
+                && o.proven_device().is_some_and(|d| self.authority.counts(me, d))
+                && o.hlc.physical_ms > after
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn key_stands_for_test(&self, settled: &ServerState, me: &str, after_ms: Option<u64>) -> bool {
+        self.key_stands(settled, me, after_ms)
     }
 
     /// The settling checkpoint's state and its stamp (section 8.3 step 4, and rule 4 of
     /// section 8.2 for the carried sets), standing where `on` says (sections 8.3, 8.4).
-    pub(crate) fn settling_json_on(&mut self, me: &str, by: &str, s: &Settling<'_>, now_ms: u64, on: &SettleOn) -> Option<(String, SettleStamp)> {
+    /// With the fresh `JoinKeySet` the key rule wrote into the state, to publish.
+    pub(crate) fn settling_json_on(&mut self, me: &str, by: &str, s: &Settling<'_>, now_ms: u64, on: &SettleOn) -> Option<(String, SettleStamp, Option<CrdtOp>)> {
         let (current, r) = match on {
             SettleOn::Restore => (self.base.as_ref().map(|b| Box::new(super::fold::Base::clone(b)))?, self.restore_for(s.t_ms)),
             SettleOn::Witnessed(x) => (Box::new(self.base_of_content(x)?), Some(CrdtOp::clone(x))),
@@ -184,6 +208,17 @@ impl ServerState {
         if scratch.base.as_ref().map(|b| b.hash) != scratch.settle_base {
             return None;
         }
+        // The key and the lock move inside the settled state itself (item 12): no member
+        // folding the settling holds a key from before it.
+        let key = if self.anchor_owner().as_deref() == Some(me) && !self.key_stands(&scratch, me, s.keys_after_ms) {
+            let mut secret = [0u8; 32];
+            getrandom::fill(&mut secret).ok()?;
+            let op = self.create_op(CrdtPayload::JoinKeySet { secret: super::operations::JoinSecret(hex::encode(secret)) });
+            scratch.ingest_remote(std::slice::from_ref(&op));
+            Some(op)
+        } else {
+            None
+        };
         let mut state: ServerState = serde_json::from_str(&scratch.checkpoint_json(me, &[], now_ms)?).ok()?;
         let mut devices = s.dropped.to_vec();
         devices.sort();
@@ -225,7 +260,7 @@ impl ServerState {
             state.cp_refolded.clear();
         }
         let json = serde_json::to_string(&state).ok()?;
-        super::fold::checkpoint_fits(&json).then_some((json, stamp))
+        super::fold::checkpoint_fits(&json).then_some((json, stamp, key))
     }
 
     /// Write the settling as our new base and sign its stamp with `device` (the device
@@ -264,7 +299,11 @@ impl ServerState {
             ops.push(first);
             changed.push(ingested);
         }
-        let (state, stamp) = self.settling_json_on(me, &device.peer_id(), s, now, on)?;
+        let (state, stamp, key) = self.settling_json_on(me, &device.peer_id(), s, now, on)?;
+        if let Some(key) = key {
+            changed.push(self.ingest_remote(std::slice::from_ref(&key)));
+            ops.push(key);
+        }
         let covers = self.checkpoint_covers();
         // The mark first: a held mark keeps every settling but its line's ineligible.
         let (sign, ingested) = self.author_settle_sign(&stamp, device)?;
@@ -485,7 +524,7 @@ pub(crate) mod tests {
 
     fn settle(w: &mut World) -> (CrdtOp, CrdtOp) {
         let (before, after) = rosters();
-        let s = Settling { before: view_of(&[&before]), dropped: &[keys(LAPTOP).1], t_ms: 3_000, seen: &w.seen, roster: after.clone(), home: None };
+        let s = Settling { before: view_of(&[&before]), dropped: &[keys(LAPTOP).1], t_ms: 3_000, seen: &w.seen, roster: after.clone(), home: None, keys_after_ms: None };
         judged_by(&mut w.owner, after);
         let (mut ops, _) = w.owner.author_settling(&keys(OWNER).1, &s, &keys(PHONE).0).expect("the settling is written");
         let settling = ops.pop().unwrap();
@@ -511,7 +550,7 @@ pub(crate) mod tests {
         assert_eq!((devices.clone(), t_ms), (both.clone(), 2_000));
 
         let generation = phone.base.as_ref().map(|b| b.generation).unwrap();
-        let st = Settling { before: phone.view_counting(&m_id, &devices), dropped: &devices, t_ms, seen: &seen, roster: after.clone(), home: None };
+        let st = Settling { before: phone.view_counting(&m_id, &devices), dropped: &devices, t_ms, seen: &seen, roster: after.clone(), home: None, keys_after_ms: None };
         phone.author_settling(&m_id, &st, &phone_kp).expect("the merged settling");
         let base = phone.base.as_ref().expect("a base");
         assert_eq!(base.generation, generation + 1, "a child of the winner");
@@ -558,7 +597,7 @@ pub(crate) mod tests {
         let seen: SeenAt = [((early.author.clone(), early.hlc.physical_ms, early.hlc.counter), 1_500)].into_iter().collect();
         let lost = |s: &mut ServerState, gone: u8, t_ms: u64, signer: u8| {
             let dropped = [keys(gone).1];
-            let st = Settling { before: view_of(&[&before]), dropped: &dropped, t_ms, seen: &seen, roster: after.clone(), home: None };
+            let st = Settling { before: view_of(&[&before]), dropped: &dropped, t_ms, seen: &seen, roster: after.clone(), home: None, keys_after_ms: None };
             judged_by(s, after.clone());
             s.author_settling(&m_id, &st, &keys(signer).0).expect("a settling").0
         };
@@ -707,7 +746,7 @@ pub(crate) mod tests {
         }
         let seen = SeenAt::default();
         let lost = |s: &mut ServerState, gone: &[String], signer: u8, roster: &Roster| {
-            let st = Settling { before: view_of(&[&before]), dropped: gone, t_ms: 2_000, seen: &seen, roster: roster.clone(), home: None };
+            let st = Settling { before: view_of(&[&before]), dropped: gone, t_ms: 2_000, seen: &seen, roster: roster.clone(), home: None, keys_after_ms: None };
             judged_by(s, roster.clone());
             s.author_settling(&m_id, &st, &keys(signer).0).expect("a settling").0
         };
@@ -815,7 +854,7 @@ pub(crate) mod tests {
         let (before, after) = rosters();
         let t_ms = phone.lost_t(0);
         assert_eq!(t_ms, 3_000, "precondition: \"not sure\" reads T as the first fold of the phone's oldest restore point");
-        let s = Settling { before: view_of(&[&before]), dropped: &[keys(LAPTOP).1], t_ms, seen, roster: after.clone(), home: home.map(str::to_string) };
+        let s = Settling { before: view_of(&[&before]), dropped: &[keys(LAPTOP).1], t_ms, seen, roster: after.clone(), home: home.map(str::to_string), keys_after_ms: None };
         judged_by(phone, after);
         phone.author_settling(&keys(OWNER).1, &s, &keys(PHONE).0).map(|(mut ops, _)| ops.pop().unwrap())
     }
@@ -1390,7 +1429,7 @@ pub(crate) mod tests {
         judged_by(&mut w.owner, after.clone());
         let seen = SeenAt::new();
         let dropped = [keys(LAPTOP).1];
-        let s = Settling { before: w.owner.authority.clone(), dropped: &dropped, t_ms: 3_000, seen: &seen, roster: after, home: None };
+        let s = Settling { before: w.owner.authority.clone(), dropped: &dropped, t_ms: 3_000, seen: &seen, roster: after, home: None, keys_after_ms: None };
         let on = SettleOn::Witnessed(Box::new(w.cp1.clone()));
         let (ops, _) = w.owner.author_settling_on(&keys(OWNER).1, &s, &keys(PHONE).0, &on).expect("the settling is written");
         let settling = ops.last().unwrap();
@@ -1420,7 +1459,7 @@ pub(crate) mod tests {
         judged_by(&mut w.owner, after.clone());
         let seen = SeenAt::new();
         let dropped = [keys(LAPTOP).1];
-        let s = Settling { before: w.owner.authority.clone(), dropped: &dropped, t_ms: 0, seen: &seen, roster: after, home: None };
+        let s = Settling { before: w.owner.authority.clone(), dropped: &dropped, t_ms: 0, seen: &seen, roster: after, home: None, keys_after_ms: None };
         assert_eq!(w.owner.rollback_point(&keys(OWNER).1).map(|o| o.hlc), Some(w.cp1.hlc.clone()), "R is the phone's checkpoint");
         let parent = w.owner.base.as_ref().map(|b| b.hash_hex());
         let (ops, _) = w.owner.author_settling_on(&keys(OWNER).1, &s, &keys(PHONE).0, &SettleOn::Rollback).expect("the rollback is written");

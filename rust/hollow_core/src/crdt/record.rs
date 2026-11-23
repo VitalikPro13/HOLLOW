@@ -105,7 +105,7 @@ impl ServerState {
         })
     }
 
-    fn held_ops(&self) -> impl Iterator<Item = &CrdtOp> {
+    pub(super) fn held_ops(&self) -> impl Iterator<Item = &CrdtOp> {
         self.op_log.iter().chain(self.stored.iter().map(|(o, _)| o)).chain(self.held.iter().map(|(o, _)| o))
     }
 
@@ -348,7 +348,7 @@ pub(crate) mod tests {
         let (_, after) = crate::crdt::hold::tests::owner_rosters();
         let seen = SeenAt::new();
         let dropped = [keys(PHONE).1];
-        let s = super::super::settle::Settling { before: f.authority.clone(), dropped: &dropped, t_ms: T, seen: &seen, roster: after, home: None };
+        let s = super::super::settle::Settling { before: f.authority.clone(), dropped: &dropped, t_ms: T, seen: &seen, roster: after, home: None, keys_after_ms: None };
         let (ops, _) = f.author_settling_on(&keys(OWNER).1, &s, &keys(LAPTOP).0, &super::super::settle::SettleOn::Record(ids.clone())).expect("the settling is written");
         let P::ServerCheckpoint { state, .. } = &ops.last().unwrap().payload else { panic!("a checkpoint") };
         let st = crate::crdt::server_state::parse_state(state).expect("a state");
@@ -380,5 +380,62 @@ pub(crate) mod tests {
         let mut forged = rename.clone();
         forged.server_id = f.server_id.clone();
         assert!(forged.verify_author().is_err() || !f.held_ops().any(|o| o.content_hash() == forged.content_hash()), "a re-addressed op is not the one signed, nor held");
+    }
+
+    /// The key rule (F5 note 4): a settling of a server we own leaves in force a key our
+    /// master set from a counted device after every dropped device's cut-off, inside the
+    /// settled state. A key that already passes stands, so a second owner device that
+    /// settles after the first rotates nothing.
+    #[test]
+    fn a_settling_of_an_owned_server_sets_a_fresh_key_unless_ours_stands() {
+        let w = recorded_world();
+        let mut f = baseless_replica(&w.log, OWNER, LAPTOP, true);
+        f.authority = view_after(false);
+        let _ = f.rebuild_now();
+        let P::JoinKeySet { secret: old } = &w.key.payload else { unreachable!() };
+        let old = old.clone();
+        let (_, after) = crate::crdt::hold::tests::owner_rosters();
+        let seen = SeenAt::new();
+        let dropped = [keys(PHONE).1];
+        let ids: BTreeSet<[u8; 32]> = BTreeSet::new();
+        let settle = |f: &mut ServerState, keys_after_ms: Option<u64>| {
+            let s = super::super::settle::Settling { before: f.authority.clone(), dropped: &dropped, t_ms: T, seen: &seen, roster: after.clone(), home: None, keys_after_ms };
+            f.author_settling_on(&keys(OWNER).1, &s, &keys(LAPTOP).0, &super::super::settle::SettleOn::Record(ids.clone())).expect("the settling is written")
+        };
+        let (ops, _) = settle(&mut f, Some(T));
+        let key = ops.iter().find(|o| matches!(o.payload, P::JoinKeySet { .. })).expect("a fresh key rides the settling");
+        assert_eq!((key.author.as_str(), key.proven_device()), (keys(OWNER).1.as_str(), Some(keys(LAPTOP).1.as_str())), "ours, from the counted laptop");
+        let P::ServerCheckpoint { state, .. } = &ops.last().unwrap().payload else { panic!("the settling last") };
+        let st = crate::crdt::server_state::parse_state(state).unwrap();
+        let P::JoinKeySet { secret } = &key.payload else { unreachable!() };
+        assert!(st.join_secret.as_ref().is_some_and(|r| r.read() == secret), "the settled state holds the fresh key itself");
+        assert!(st.join_secret.as_ref().is_some_and(|r| *r.read() != old));
+        let fresh = secret.clone();
+        // A settling again (another owner device, or a rival merge): our key stands.
+        let (again, _) = settle(&mut f, Some(T));
+        assert!(!again.iter().any(|o| matches!(o.payload, P::JoinKeySet { .. })), "a key we set after the cut-off stands");
+        assert!(f.join_secret.as_ref().is_some_and(|r| *r.read() == fresh));
+        let (late, _) = settle(&mut f, Some(u64::MAX - 1));
+        assert!(late.iter().any(|o| matches!(o.payload, P::JoinKeySet { .. })), "a key set before a dropped device's cut-off is replaced");
+        let (unknown, _) = settle(&mut f, None);
+        assert!(unknown.iter().any(|o| matches!(o.payload, P::JoinKeySet { .. })), "an unknown cut-off never lets a key stand");
+    }
+
+    /// The key rule's other clauses: a key the dropped phone set never stands, nor one a
+    /// member's view does not count as ours; a member's own settling writes no key.
+    #[test]
+    fn a_key_the_dropped_device_set_never_stands() {
+        let w = recorded_world();
+        let mut f = baseless_replica(&w.log, OWNER, LAPTOP, true);
+        f.authority = view_after(false);
+        let _ = f.rebuild_now();
+        let phone_key = w.key.clone();
+        let counted = baseless_replica(&w.log, OWNER, LAPTOP, true);
+        let settled = counted.clone();
+        assert!(settled.join_secret.as_ref().is_some_and(|r| *r.hlc() == phone_key.hlc), "precondition: the phone's key in force");
+        assert!(!f.key_stands_for_test(&settled, &keys(OWNER).1, Some(0)), "the dropped phone's key");
+        assert!(counted.key_stands_for_test(&settled, &keys(OWNER).1, Some(0)), "control: the same key while the phone counts");
+        assert!(!counted.key_stands_for_test(&settled, &keys(MEMBER).1, Some(0)), "never another identity's");
+        assert!(!counted.key_stands_for_test(&settled, &keys(OWNER).1, Some(phone_key.hlc.physical_ms)), "stamped at the cut-off is not after it");
     }
 }

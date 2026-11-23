@@ -13,8 +13,9 @@ Built on `feat/phrase-restore-f5` (5c166763, ade6c0ef): part A with review items
 (HOL-SEC-231), 4 (HOL-SEC-232), 11 and 13; part C with items 5 and 6; item 1 in the
 chooser. Round 2 built part B (`crdt/record.rs`, one `record_scope` for the build, the
 receipt check, the trial fold and the settling; item 14 by riding the ops on the digest
-sync and only the ids beside the witness). Not built yet: the invite key rule (items 8
-and 12), the F5 sync re-entry (3.2, 3.3), the waiting card (item 9), the item 15 rows for
+sync and only the ids beside the witness) and the invite key rule (items 8 and 12:
+`key_stands`, the fresh key folded into the settled state; the cut-off is the
+HOL-SEC-229 record's, `keys_after_ms`). Not built yet: the F5 sync re-entry (3.2, 3.3), the waiting card (item 9), the item 15 rows for
 those. `.team/HANDOFF.md` lists the next steps.
 
 One deliberate change from 2.3: part A keeps the FOLD, not only the seats. When a
