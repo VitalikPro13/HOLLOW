@@ -5,12 +5,13 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 
-// The call notification's buttons (#154). Not exported; reached only through the explicit,
+// The call notification's buttons and its swipe-away (#154). Not exported; reached only through the explicit,
 // immutable PendingIntents built here.
 class CallActionReceiver : BroadcastReceiver() {
     companion object {
         const val ACTION_HANG_UP = "com.anonlisten.hollow.call.HANG_UP"
         const val ACTION_MUTE = "com.anonlisten.hollow.call.MUTE"
+        const val ACTION_DISMISSED = "com.anonlisten.hollow.call.DISMISSED"
 
         fun pendingIntent(context: Context, action: String): PendingIntent {
             val intent = Intent(context, CallActionReceiver::class.java).setAction(action)
@@ -24,6 +25,7 @@ class CallActionReceiver : BroadcastReceiver() {
         when (intent.action) {
             ACTION_HANG_UP -> OsCallBridge.onUserHangUp()
             ACTION_MUTE -> OsCallBridge.onUserToggleMute()
+            ACTION_DISMISSED -> HollowCallService.repost()
         }
     }
 }

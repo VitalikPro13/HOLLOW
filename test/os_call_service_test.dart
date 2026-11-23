@@ -3,6 +3,8 @@
 /// paths, the hold guard, the fallback and reset paths, and the title rule.
 library;
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -20,6 +22,7 @@ import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/age_gate.dart';
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
+import 'package:hollow/src/core/services/os_call_avatar.dart';
 import 'package:hollow/src/core/services/os_call_service.dart';
 import 'package:hollow/src/rust/api/identity.dart' as identity_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
@@ -195,6 +198,9 @@ const _withPassword = identity_api.ProtectionStatus(
 
 const _confId = 'c0ffee';
 
+/// What the avatar source hands the service for Ada: 2 x 2 pixels.
+final _adaFace = OsCallAvatar(2, Uint8List.fromList(List.filled(16, 7)));
+
 CallState _outgoing(String id, {bool video = false}) => CallState(
     status: CallStatus.ringing,
     direction: CallDirection.outgoing,
@@ -257,6 +263,7 @@ Future<_Rig> _rig({
   identity_api.ProtectionStatus protection = _noPassword,
   Set<String> ageHidden = const {},
   bool startOnSpeaker = true,
+  OsCallAvatarSource? faces,
 }) async {
   final native = _Native();
   final callN = _Call(call);
@@ -273,6 +280,8 @@ Future<_Rig> _rig({
     profileProvider.overrideWith(() => profiles),
     identityProtectionProvider.overrideWith((ref) async => protection),
     startCallsOnSpeakerProvider.overrideWith(() => _Speaker(startOnSpeaker)),
+    osCallAvatarSourceProvider
+        .overrideWithValue(faces ?? (_) async => _adaFace),
     keptServersProvider.overrideWithValue(
         {'s1': const ServerInfo(serverId: 's1', name: 'Den')}),
     serverAgeHiddenProvider
@@ -952,6 +961,257 @@ void main() {
       expect(r.native.lastOf('update'),
           containsPair('title', 'Lounge · Den'));
       expect(r.native.lastOf('update'), containsPair('video', true));
+    });
+  });
+
+  group('Android call notification face', () {
+    setUp(() {
+      debugOsCallAvatars = true;
+      debugOsCallRingOutService = true;
+    });
+    tearDown(() {
+      debugOsCallAvatars = null;
+      debugOsCallRingOutService = null;
+      OsCallService.avatarTimeout = const Duration(seconds: 1);
+    });
+
+    Map<String, Object?> face(OsCallAvatar a) =>
+        {'avatar': a.rgba, 'avatarSide': a.side};
+
+    test('an answered DM call shows the friend\'s face beside the name',
+        () async {
+      final asked = <String>[];
+      final r = await _rig(faces: (m) async {
+        asked.add(m);
+        return _adaFace;
+      });
+      r.call.set(_placed('c1'));
+      await r.settle();
+      final begin = r.native.lastOf('begin');
+      expect(begin['title'], 'Ada');
+      expect(begin, containsPair('avatar', _adaFace.rgba));
+      expect(begin, containsPair('avatarSide', 2));
+      expect(asked, ['ada'], reason: 'the face is the MASTER\'s');
+    });
+
+    test('the ring-out shows the face too', () async {
+      final r = await _rig();
+      r.call.set(_outgoing('c1'));
+      await r.settle();
+      expect(r.native.lastOf('ringOut'),
+          {'on': true, 'title': 'Ada', ...face(_adaFace)});
+    });
+
+    test('a launch password hides the face with the name, and loads none',
+        () async {
+      var asked = 0;
+      final r = await _rig(
+          protection: _withPassword,
+          faces: (_) async {
+            asked++;
+            return _adaFace;
+          });
+      r.call.set(_outgoing('c1'));
+      await r.settle();
+      expect(r.native.lastOf('ringOut'),
+          {'on': true, 'title': kHiddenNotificationTitle});
+      r.call.set(_placed('c1'));
+      await r.settle();
+      expect(r.native.lastOf('begin'), isNot(contains('avatar')));
+      expect(r.native.lastOf('begin')['title'], kHiddenNotificationTitle);
+      expect(asked, 0);
+    });
+
+    test('a face that loaded before the lock rose still never shows',
+        () async {
+      final r = await _rig(faces: (_) async {
+        // The lock rises while the face is being drawn.
+        await Future<void>.delayed(Duration.zero);
+        return _adaFace;
+      });
+      final pending = r.call;
+      pending.set(_placed('c1'));
+      await pumpEventQueue(times: 1);
+      r.lock.set(true);
+      await r.settle();
+      expect(r.native.lastOf('begin')['title'], kHiddenNotificationTitle);
+      expect(r.native.lastOf('begin'), isNot(contains('avatar')));
+    });
+
+    test('a lock that rises while the ring-out face loads shows neither',
+        () async {
+      final r = await _rig(faces: (_) async {
+        await Future<void>.delayed(Duration.zero);
+        return _adaFace;
+      });
+      r.call.set(_outgoing('c1'));
+      await pumpEventQueue(times: 1);
+      r.lock.set(true);
+      await r.settle();
+      expect(r.native.of('ringOut').first,
+          {'on': true, 'title': kHiddenNotificationTitle});
+    });
+
+    test('App Lock blanks the face with the name, for good', () async {
+      final r = await _rig(call: _placed('c1'));
+      expect(r.native.lastOf('begin'), contains('avatar'));
+      r.native.clear();
+      r.lock.set(true);
+      await r.settle();
+      expect(r.native.methods, ['update']);
+      expect(r.native.lastOf('update')['title'], kHiddenNotificationTitle);
+      expect(r.native.lastOf('update'), isNot(contains('avatar')));
+      r.lock.set(false);
+      r.call.set(_placed('c1', video: true));
+      await r.settle();
+      expect(r.native.lastOf('update'), isNot(contains('avatar')));
+      expect(r.native.lastOf('update')['title'], kHiddenNotificationTitle);
+    });
+
+    test('App Lock during the ring blanks the ring-out, face and all',
+        () async {
+      final r = await _rig(call: _outgoing('c1'));
+      expect(r.native.lastOf('ringOut'), contains('avatar'));
+      r.native.clear();
+      r.lock.set(true);
+      await r.settle();
+      expect(r.native.methods, ['ringOut']);
+      expect(r.native.lastOf('ringOut'),
+          {'on': true, 'title': kHiddenNotificationTitle});
+      r.lock.set(false);
+      await r.settle();
+      expect(r.native.methods, ['ringOut'], reason: 'never named again');
+    });
+
+    test('a video update carries the face again', () async {
+      final r = await _rig(call: _placed('c1'));
+      r.native.clear();
+      r.call.set(_placed('c1', video: true));
+      await r.settle();
+      expect(r.native.lastOf('update'), containsPair('avatar', _adaFace.rgba));
+      expect(r.native.lastOf('update'), containsPair('title', 'Ada'));
+    });
+
+    test('a name not known yet shows no face either', () async {
+      final r = await _rig();
+      r.call.set(_placed('c1').copyWith(peerId: 'stranger-id'));
+      await r.settle();
+      expect(r.native.lastOf('begin')['title'], kHiddenNotificationTitle);
+      expect(r.native.lastOf('begin'), isNot(contains('avatar')));
+    });
+
+    test('no face: the notification stays as it was', () async {
+      final r = await _rig(faces: (_) async => null);
+      r.call.set(_placed('c1'));
+      await r.settle();
+      expect(r.native.lastOf('begin')['title'], 'Ada');
+      expect(r.native.lastOf('begin'), isNot(contains('avatar')));
+    });
+
+    test('a face source that throws or hangs never holds the call up',
+        () async {
+      OsCallService.avatarTimeout = const Duration(milliseconds: 20);
+      final hang = await _rig(faces: (_) => Completer<OsCallAvatar?>().future);
+      hang.call.set(_placed('c1'));
+      await Future<void>.delayed(const Duration(milliseconds: 60));
+      await hang.settle();
+      expect(hang.native.methods, contains('begin'));
+      expect(hang.native.lastOf('begin'), isNot(contains('avatar')));
+      final boom = await _rig(faces: (_) async => throw StateError('no rust'));
+      boom.call.set(_placed('c2'));
+      await boom.settle();
+      expect(boom.native.lastOf('begin')['title'], 'Ada');
+    });
+
+    test('a call that ends while its face loads begins nothing', () async {
+      final gate = Completer<OsCallAvatar?>();
+      final r = await _rig(faces: (_) => gate.future);
+      r.call.set(_placed('c1'));
+      await pumpEventQueue();
+      r.call.set(const CallState());
+      gate.complete(_adaFace);
+      await r.settle();
+      expect(r.native.methods, isNot(contains('begin')));
+    });
+
+    test('a DM that turns into a room while its face loads gives the room '
+        'no face', () async {
+      final gate = Completer<OsCallAvatar?>();
+      final r = await _rig(faces: (_) => gate.future);
+      r.call.set(_placed('c1'));
+      await pumpEventQueue();
+      r.call.set(const CallState());
+      r.voice.set(_room());
+      gate.complete(_adaFace);
+      await r.settle();
+      expect(r.native.of('begin'), hasLength(1));
+      expect(r.native.lastOf('begin')['kind'], 'room');
+      expect(r.native.lastOf('begin'), isNot(contains('avatar')));
+    });
+
+    test('a room joined while a DM rings in gets no face', () async {
+      var asked = 0;
+      final r = await _rig(
+          call: _incoming('c1'),
+          faces: (_) async {
+            asked++;
+            return _adaFace;
+          });
+      r.voice.set(_room());
+      await r.settle();
+      expect(r.native.lastOf('begin')['kind'], 'room');
+      expect(r.native.lastOf('begin'), isNot(contains('avatar')));
+      expect(asked, 0);
+    });
+
+    test('a ring answered while its face loads never rings out', () async {
+      final gate = Completer<OsCallAvatar?>();
+      final r = await _rig(faces: (_) => gate.future);
+      r.native.clear();
+      r.call.set(_outgoing('c1'));
+      await pumpEventQueue();
+      r.call.set(_placed('c1'));
+      gate.complete(_adaFace);
+      await r.settle();
+      expect(r.native.methods, ['begin']);
+      expect(r.native.lastOf('begin'), contains('avatar'));
+    });
+
+    test('rooms and meetings show no face and load none', () async {
+      var asked = 0;
+      final r = await _rig(faces: (_) async {
+        asked++;
+        return _adaFace;
+      });
+      r.voice.set(_room());
+      await r.settle();
+      expect(r.native.lastOf('begin'), isNot(contains('avatar')));
+      final m = await _rig(
+          voice: _meetingSeat(),
+          conference: const ConferenceState(
+              activeConfId: _confId,
+              hostName: 'Ada',
+              lobbyStatus: ConferenceLobbyStatus.inCall),
+          faces: (_) async {
+            asked++;
+            return _adaFace;
+          });
+      expect(m.native.lastOf('begin'), isNot(contains('avatar')));
+      expect(asked, 0);
+    });
+
+    test('iPhones never get a face', () async {
+      debugOsCallAvatars = false;
+      debugOsCallRingOutService = false;
+      var asked = 0;
+      final r = await _rig(faces: (_) async {
+        asked++;
+        return _adaFace;
+      });
+      r.call.set(_placed('c1'));
+      await r.settle();
+      expect(r.native.lastOf('begin'), isNot(contains('avatar')));
+      expect(asked, 0);
     });
   });
 

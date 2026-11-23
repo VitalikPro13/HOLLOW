@@ -87,6 +87,28 @@ bool? debugOsCallRingOutService;
 bool get osCallRingOutService =>
     debugOsCallRingOutService ?? Platform.isAndroid;
 
+/// Lets host tests stand in for an Android phone's call notification.
+@visibleForTesting
+bool? debugOsCallAvatars;
+
+/// Only Android's call notification shows the DM friend's face; CallKit has
+/// no place for one.
+bool get osCallAvatars => debugOsCallAvatars ?? Platform.isAndroid;
+
+/// Whether a DM call titled [title] may carry the friend's face: on Android,
+/// and only while its title is a name. Whatever hides the name (HOL-SEC-155,
+/// a name not known yet) hides the face.
+bool osCallShowsAvatar(String title) =>
+    osCallAvatars &&
+    title.trim().isNotEmpty &&
+    title != kHiddenNotificationTitle;
+
+/// The MASTER of the DM call's peer, or null.
+String? osCallPeerMaster(ProviderRead read) {
+  final peer = read(callProvider).peerId;
+  return peer == null ? null : read(deviceLinkProvider).identityOf(peer);
+}
+
 /// A call we placed that still rings out (never an OS call, decision Q2).
 bool ringsOut(CallState call) =>
     call.callId != null &&
@@ -199,9 +221,8 @@ String osRingOutTitle(ProviderRead read) => osCallTitle(
         outgoing: true));
 
 String? _dmName(ProviderRead read) {
-  final peer = read(callProvider).peerId;
-  if (peer == null) return null;
-  final master = read(deviceLinkProvider).identityOf(peer);
+  final master = osCallPeerMaster(read);
+  if (master == null) return null;
   final nick = read(localNicknameProvider)[master];
   if (nick != null && nick.trim().isNotEmpty) return nick;
   return read(profileProvider)[master]?.displayName;

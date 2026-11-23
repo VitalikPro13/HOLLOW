@@ -16,6 +16,8 @@ import '../providers/settings_provider.dart';
 import '../providers/shell_tab.dart' show ProviderRead;
 import '../providers/voice_channel_provider.dart';
 import '../../rust/api/network.dart' as network_api;
+import '../../rust/api/storage.dart' as storage_api;
+import 'os_call_avatar.dart';
 
 /// The `hollow/os_call` channel (DESIGN_OS_CALLS 1.2), behind an interface so
 /// tests can stand in for CallKit and Telecom.
@@ -48,6 +50,19 @@ class MethodOsCallChannel implements OsCallChannel {
 
 final osCallChannelProvider =
     Provider<OsCallChannel>((_) => const MethodOsCallChannel());
+
+/// A master's avatar as the Android call notification shows it, or null.
+typedef OsCallAvatarSource = Future<OsCallAvatar?> Function(String master);
+
+/// Reads the still through `image_gate` (`getAvatar` = `shown`: a full
+/// pure-Rust decode first, AR-28) and redraws it as pixels of our own.
+final osCallAvatarSourceProvider = Provider<OsCallAvatarSource>((_) {
+  return (master) async {
+    final bytes = await storage_api.getAvatar(peerId: master);
+    if (bytes == null || bytes.isEmpty) return null;
+    return renderOsCallAvatar(bytes);
+  };
+});
 
 /// The OS call mirror, or null where nothing is mirrored (desktops).
 final osCallServiceProvider = Provider<OsCallService?>((ref) {
@@ -92,6 +107,9 @@ class _Mirror {
   final OsCallKind kind;
   String uuid;
   String title;
+
+  /// Shown beside [title] only, and dropped with it for good (HOL-SEC-155).
+  OsCallAvatar? avatar;
   bool connected = false;
   bool sentMuted = false;
   bool sentVideo;
@@ -102,7 +120,8 @@ class _Mirror {
   bool held = false;
   ({bool muted, bool deafened})? beforeHold;
 
-  _Mirror(this.key, this.kind, this.uuid, this.title, this.sentVideo);
+  _Mirror(this.key, this.kind, this.uuid, this.title, this.sentVideo,
+      this.avatar);
 }
 
 /// Mirrors the one live call, voice room or meeting to the OS (#154,
@@ -146,8 +165,15 @@ class OsCallService {
 
   _Mirror? _live;
 
+  /// How long a face may hold up a begin or a ring-out; then it goes without.
+  @visibleForTesting
+  static Duration avatarTimeout = const Duration(seconds: 1);
+
   /// Whether native was last told a call we placed rings out.
   bool _ringOut = false;
+
+  /// Whether that ring-out was sent a name (and maybe a face) still to blank.
+  bool _ringOutNamed = false;
 
   /// Every uuid begun and not yet ended, oldest first: `begin` hands native the
   /// set so it can drop anything it still holds outside it (N2).
@@ -224,15 +250,62 @@ class OsCallService {
   Future<void> _reconcileRingOut(OsSession? want) async {
     if (!ringOutService) return;
     final ringing = want == null && ringsOut(_read(callProvider));
-    if (ringing == _ringOut) return;
-    _ringOut = ringing;
+    if (ringing == _ringOut) {
+      // One way, like a session's title: a name that may no longer show
+      // blanks, its face with it.
+      if (ringing && _ringOutNamed && !_read(osContentAllowedProvider)) {
+        _ringOutNamed = false;
+        await _send(
+            'ringOut', {'on': true, 'title': kHiddenNotificationTitle});
+      }
+      return;
+    }
+    if (!ringing) {
+      _ringOut = false;
+      _ringOutNamed = false;
+      await _send('ringOut', {'on': false});
+      return;
+    }
+    OsCallAvatar? face;
+    if (osCallAvatars) {
+      face = await _face();
+      // The ring can end or be answered while the face loads; the change
+      // queued its own reconcile.
+      if (_read(osSessionProvider) != null || !ringsOut(_read(callProvider))) {
+        return;
+      }
+    }
+    final title = osRingOutTitle(_read);
+    _ringOut = true;
+    _ringOutNamed = title != kHiddenNotificationTitle;
     await _send('ringOut', {
-      'on': ringing,
-      if (ringing) 'title': osRingOutTitle(_read),
+      'on': true,
+      'title': title,
+      if (osCallShowsAvatar(title)) ..._avatarArgs(face),
     });
   }
 
-  Future<void> _reconcileSession(OsSession? want) async {
+  /// The DM peer's face, or null: not while a name may not show, and never
+  /// longer than [avatarTimeout].
+  Future<OsCallAvatar?> _face() async {
+    try {
+      if (!_read(osContentAllowedProvider)) return null;
+      final master = osCallPeerMaster(_read);
+      if (master == null) return null;
+      return await _read(osCallAvatarSourceProvider)(master)
+          .timeout(avatarTimeout);
+    } catch (e) {
+      log('[HOLLOW-OSCALL] no face for the call notification: $e');
+      return null;
+    }
+  }
+
+  static Map<String, Object?> _avatarArgs(OsCallAvatar? face) => face == null
+      ? const {}
+      : {'avatar': face.rgba, 'avatarSide': face.side};
+
+  Future<void> _reconcileSession(OsSession? wanted) async {
+    var want = wanted;
     var mirror = _live;
     if (mirror != null && (want == null || want.key != mirror.key)) {
       _live = null;
@@ -240,7 +313,18 @@ class OsCallService {
       mirror = null;
     }
     if (want == null) return;
-    mirror ??= await _begin(want);
+    if (mirror == null) {
+      OsCallAvatar? face;
+      if (osCallAvatars && want.kind == OsCallKind.dm) {
+        face = await _face();
+        // The session can end or change while the face loads; the change
+        // queued its own reconcile.
+        final now = _read(osSessionProvider);
+        if (now == null || now.key != want.key) return;
+        want = now;
+      }
+      mirror = await _begin(want, face);
+    }
     if (want.live && !mirror.connected) {
       mirror.connected = true;
       await _send('connected', {'uuid': mirror.uuid});
@@ -255,18 +339,25 @@ class OsCallService {
     if (mirror.title != kHiddenNotificationTitle &&
         !_read(osContentAllowedProvider)) {
       mirror.title = kHiddenNotificationTitle;
+      mirror.avatar = null;
       retitle = true;
     }
     if (retitle || want.video != mirror.sentVideo) {
       mirror.sentVideo = want.video;
-      await _send('update',
-          {'uuid': mirror.uuid, 'title': mirror.title, 'video': want.video});
+      // Native keeps a face only while each look carries it.
+      await _send('update', {
+        'uuid': mirror.uuid,
+        'title': mirror.title,
+        'video': want.video,
+        ..._avatarArgs(mirror.avatar),
+      });
     }
   }
 
-  Future<_Mirror> _begin(OsSession want) async {
-    final mirror = _Mirror(want.key, want.kind, _mintUuid(),
-        osCallTitle(_read, want), want.video);
+  Future<_Mirror> _begin(OsSession want, OsCallAvatar? face) async {
+    final title = osCallTitle(_read, want);
+    final mirror = _Mirror(want.key, want.kind, _mintUuid(), title, want.video,
+        osCallShowsAvatar(title) ? face : null);
     _live = mirror;
     await _sendBegin(mirror, outgoing: want.outgoing);
     return mirror;
@@ -282,6 +373,7 @@ class OsCallService {
       'outgoing': outgoing,
       'loud': _startsLoud(mirror),
       'live': List<String>.of(_open),
+      ..._avatarArgs(mirror.avatar),
     });
     if (answer is! Map || answer['ok'] != true) {
       mirror.unmirrored = true;

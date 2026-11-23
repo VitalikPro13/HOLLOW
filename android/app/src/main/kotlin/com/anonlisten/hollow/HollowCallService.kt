@@ -70,6 +70,15 @@ class HollowCallService : Service() {
             current?.post(next)
         }
 
+        /** Main thread. The person swiped the notification away: it comes back while we run. */
+        fun repost() {
+            val service = current ?: return
+            val next = look
+            if (!OsCallRules.repostsAfterDismiss(hasLook = next != null, foregroundTypes = grantedTypes)) return
+            Log.i(TAG, "call notification dismissed: posted again")
+            service.post(next ?: return)
+        }
+
         /** Main thread, in the foreground: adds the microphone type once RECORD_AUDIO is granted. */
         fun addMicIfGranted() {
             val service = current ?: return

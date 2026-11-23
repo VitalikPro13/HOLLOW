@@ -58,7 +58,14 @@ object OsCallBridge {
     /** The last call's Telecom teardown: the next addCall waits for it. */
     private var teardown: Job? = null
 
-    private class Call(val uuid: String, var title: String, val video: Boolean, val loud: Boolean, telecom: Boolean) {
+    private class Call(
+        val uuid: String,
+        var title: String,
+        var avatar: CallAvatar?,
+        val video: Boolean,
+        val loud: Boolean,
+        telecom: Boolean,
+    ) {
         val session = OsCallSession(uuid, telecom)
         val mute = MuteMirror()
         var control: CallControlScope? = null
@@ -72,7 +79,7 @@ object OsCallBridge {
         var addedAt = 0L
 
         val telecomLive get() = control != null && session.path == OsCallSession.Path.TELECOM
-        fun look() = CallLook(title, mute.appMuted, connectedAt)
+        fun look() = CallLook(title, mute.appMuted, connectedAt, avatar = avatar)
     }
 
     private var call: Call? = null
@@ -122,21 +129,27 @@ object OsCallBridge {
             "begin" -> begin(
                 uuid ?: return mapOf("ok" to false),
                 c.argument<String>("kind"),
-                c.argument<String>("title") ?: "Hollow",
+                c.argument<String>("title") ?: OsCallRules.HIDDEN_TITLE,
+                c,
                 c.argument<Boolean>("video") ?: false,
                 c.argument<Boolean>("loud") ?: true,
             )
             "ringOut" -> {
-                ringOut(c.argument<Boolean>("on") == true, c.argument<String>("title") ?: "Hollow"); null
+                val title = c.argument<String>("title") ?: OsCallRules.HIDDEN_TITLE
+                ringOut(c.argument<Boolean>("on") == true, title, avatarOf(title, c)); null
             }
             "connected" -> { connected(uuid); null }
             "setMuted" -> { setMuted(uuid, c.argument<Boolean>("muted") ?: false); null }
             "requestUnhold" -> { requestUnhold(uuid); null }
-            "update" -> { update(uuid, c.argument<String>("title")); null }
+            "update" -> { update(uuid, c.argument<String>("title"), c); null }
             "end" -> { if (uuid != null) endCall(uuid, c.argument<String>("reason") ?: "local"); null }
             else -> null
         }
     }
+
+    // Every look carries its avatar afresh: one left out of a call is gone from the notification.
+    private fun avatarOf(title: String, c: MethodCall): CallAvatar? =
+        OsCallRules.avatarFor(title, c.argument<Int>("avatarSide"), c.argument<ByteArray>("avatar"))
 
     @SuppressLint("MissingPermission")
     private fun register() {
@@ -193,12 +206,15 @@ object OsCallBridge {
 
     // No OS call while a call we place rings: only the call service, so the mic can be
     // taken while the app is still in front.
-    private fun ringOut(on: Boolean, title: String) {
+    private fun ringOut(on: Boolean, title: String, avatar: CallAvatar?) {
         val ctx = app ?: return
         if (on) {
+            val look = CallLook(title, muted = false, connectedAt = null, ringing = true, avatar = avatar)
             if (ringOut.on(sessionHeld = call != null)) {
-                HollowCallService.start(ctx, CallLook(title, muted = false, connectedAt = null, ringing = true))
+                HollowCallService.start(ctx, look)
                 debugStatus("ring-out")
+            } else if (ringOut.repost(sessionHeld = call != null)) {
+                HollowCallService.update(look)
             }
         } else if (ringOut.off(sessionHeld = call != null)) {
             HollowCallService.stop()
@@ -206,14 +222,21 @@ object OsCallBridge {
         }
     }
 
-    private fun begin(uuid: String, kind: String?, title: String, video: Boolean, loud: Boolean): Map<String, Boolean> {
+    private fun begin(
+        uuid: String,
+        kind: String?,
+        title: String,
+        args: MethodCall,
+        video: Boolean,
+        loud: Boolean,
+    ): Map<String, Boolean> {
         val ctx = app ?: return mapOf("ok" to false)
         call?.let { held ->
             if (held.uuid == uuid) return mapOf("ok" to (held.session.path != OsCallSession.Path.FALLBACK))
         }
         for (stale in OsCallRules.endAtBegin(listOfNotNull(call?.uuid), uuid)) endCall(stale, "local")
         val telecom = offersTelecom(kind)
-        val c = Call(uuid, title, video, loud, telecom)
+        val c = Call(uuid, title, avatarOf(title, args), video, loud, telecom)
         call = c
         ringOut.onBegin()
         HollowCallService.start(ctx, c.look())
@@ -394,9 +417,10 @@ object OsCallBridge {
 
     // Only the CallStyle can be renamed: core-telecom 1.1.0 has no way to change a live call's
     // display name, so a headset or car keeps the name it was given at begin.
-    private fun update(uuid: String?, title: String?) {
+    private fun update(uuid: String?, title: String?, args: MethodCall) {
         val c = callFor(uuid) ?: return
         if (title != null) c.title = title
+        c.avatar = avatarOf(c.title, args)
         HollowCallService.update(c.look())
     }
 

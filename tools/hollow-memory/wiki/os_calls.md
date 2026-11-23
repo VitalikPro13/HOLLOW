@@ -48,6 +48,17 @@ decisions in its section 11. Android: `OsCallBridge.kt`, `HollowCallService.kt` 
   `system_notification_provider`); never an id ("Hollow" for anything not known yet); an 18+
   server the phone hides is never named. App Lock raised mid-call blanks it one way (defence
   only: the lock cannot rise during a call, `appLockBusyProvider`).
+- Face (Android only, `osCallAvatars`): a DM's `begin`, `update` and the ring-out carry the
+  friend's avatar as `avatar` (raw premultiplied RGBA) + `avatarSide` (160), and only beside a
+  name (`osCallShowsAvatar`: a DM on Android whose title is not "Hollow"), so whatever hides the
+  name (HOL-SEC-155, a name not known yet) hides the face. The face is loaded BEFORE the title is
+  read (`_face`, at most `avatarTimeout` 1 s, then the call goes without), so a lock that rises
+  during the load wins; a session or ring that changed meanwhile begins nothing (its change
+  queued a reconcile). The one-way blank drops it for good (`mirror.avatar = null`; the ring-out
+  is re-sent `{on: true, title: "Hollow"}`, native re-posts it). Bytes: `getAvatar` (image_gate
+  `shown`), then `renderOsCallAvatar` draws the first frame (an animated avatar gives a still),
+  centre-cropped, into pixels of our own: Android never decodes a peer's encoded image. Rooms,
+  meetings and iOS (CallKit has no avatar) get none.
 - OS actions go through the app's own paths: `osEnd` -> `endCall()` or
   `leaveVoiceForDmCall` (a meeting guest leaves the meeting, a HOST STEPS OUT, never "end for
   everyone"); `osMute` -> the provider's `toggleMute()`, then the OS is told the truth
@@ -208,7 +219,18 @@ decisions in its section 11. Android: `OsCallBridge.kt`, `HollowCallService.kt` 
   LOW may hide the status-bar call chip): Person = the title, Hang up + Mute/Unmute through
   `CallActionReceiver` (not exported, explicit immutable PendingIntents) -> `osEnd` / `osMute`
   (a ring-out's plain notification has Hang up only -> `osRingOutEnd`); a chronometer from
-  `connected`. A stop that
+  `connected`. The face: `OsCallRules.avatarFor` keeps an `avatar` only beside a name that is
+  not "Hollow" and only when it is exactly `side * side * 4` bytes (side 1..256), and
+  `CallNotification` copies those pixels into a bitmap (no decoder) as the CallStyle Person's
+  icon, or the ring-out's large icon. Every look carries its face afresh: an `update` without
+  one removes it. Swipe-away: Android 14+ lets the person dismiss any `setOngoing` foreground
+  notification EXCEPT a CallStyle (or media) one (Android 14 behaviour changes, "non-dismissable
+  notifications"), so the answered call and the room notification stay, and the plain ring-out
+  can be swiped. Every look sets a delete intent (`ACTION_DISMISSED`): while the service still
+  carries a look and runs in the foreground (`repostsAfterDismiss`) it posts the same
+  notification again, so the ring-out comes straight back and the ring never stopped (the
+  service keeps running when only its notification is dismissed). A CallStyle for the ring-out
+  is not an option: SystemUI shows the status-bar call chip for any ongoing CallStyle. A stop that
   lands before `startForeground` still calls it first, then stops.
 - The fork's `CallForegroundService` stands down once the bridge hears `available`
   (`appOwnsCallService`, cleared on detach), so a build without the Dart service keeps it.
@@ -253,3 +275,5 @@ decisions in its section 11. Android: `OsCallBridge.kt`, `HollowCallService.kt` 
 - The Android emulator has only the speaker endpoint and a silent mic: earpiece, wired,
   Bluetooth and audibility are Pixel proofs (design section 7, R3).
 - What only a phone settles is the design's section 7 (R1-R17).
+- Android: never give the call notification a peer's encoded image (`setLargeIcon` from bytes,
+  `IconCompat.createWithData`): only the pixels Dart drew (`avatarFor`).

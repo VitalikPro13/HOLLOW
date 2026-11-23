@@ -2,6 +2,7 @@ package com.anonlisten.hollow
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -309,5 +310,58 @@ class OsCallRulesTest {
         val untouched = MuteMirror()
         untouched.fromApp(false, telecomLive = false, globalNow = true)
         assertFalse(untouched.clearAtEnd(globalNow = true))
+    }
+
+    // ---- the call notification's avatar (HOL-SEC-155: a hidden name hides the face too) ----
+
+    private fun pixels(side: Int) = ByteArray(side * side * 4) { 0x7f }
+
+    @Test
+    fun anAvatarRidesOnlyWithAName() {
+        assertNotNull(OsCallRules.avatarFor("Ada", 2, pixels(2)))
+        assertNull(OsCallRules.avatarFor(OsCallRules.HIDDEN_TITLE, 2, pixels(2)))
+        assertNull(OsCallRules.avatarFor("", 2, pixels(2)))
+        assertNull(OsCallRules.avatarFor("  ", 2, pixels(2)))
+    }
+
+    @Test
+    fun anAvatarIsExactlyTheSquareOfPixelsItClaims() {
+        assertNull(OsCallRules.avatarFor("Ada", null, pixels(2)))
+        assertNull(OsCallRules.avatarFor("Ada", 2, null))
+        assertNull(OsCallRules.avatarFor("Ada", 2, ByteArray(15)))
+        assertNull(OsCallRules.avatarFor("Ada", 2, ByteArray(17)))
+        assertNull(OsCallRules.avatarFor("Ada", 0, ByteArray(0)))
+        assertNull(OsCallRules.avatarFor("Ada", -2, pixels(2)))
+        assertNotNull(OsCallRules.avatarFor("Ada", OsCallRules.AVATAR_MAX_SIDE, pixels(OsCallRules.AVATAR_MAX_SIDE)))
+        val over = OsCallRules.AVATAR_MAX_SIDE + 1
+        assertNull(OsCallRules.avatarFor("Ada", over, pixels(over)))
+        // A side whose square overflows an Int never matches a real array.
+        assertNull(OsCallRules.avatarFor("Ada", 46_341, ByteArray(4)))
+    }
+
+    @Test
+    fun theHiddenTitleIsDartsHiddenTitle() {
+        assertEquals("Hollow", OsCallRules.HIDDEN_TITLE)
+    }
+
+    // ---- a swiped-away call notification (Android 14+ lets the person dismiss a plain one) ----
+
+    @Test
+    fun aDismissedNotificationComesBackWhileTheServiceCarriesALook() {
+        assertTrue(OsCallRules.repostsAfterDismiss(hasLook = true, foregroundTypes = 0x84))
+        assertTrue(OsCallRules.repostsAfterDismiss(hasLook = true, foregroundTypes = -1))
+        assertFalse(OsCallRules.repostsAfterDismiss(hasLook = false, foregroundTypes = 0x84))
+        assertFalse(OsCallRules.repostsAfterDismiss(hasLook = true, foregroundTypes = 0))
+    }
+
+    @Test
+    fun aRingOutAskedAgainWhileRingingIsReposted() {
+        val r = RingOut()
+        assertFalse(r.repost(sessionHeld = false))
+        assertTrue(r.on(sessionHeld = false))
+        assertTrue(r.repost(sessionHeld = false))
+        assertFalse(r.repost(sessionHeld = true))
+        r.onBegin()
+        assertFalse(r.repost(sessionHeld = false))
     }
 }

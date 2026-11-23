@@ -47,7 +47,36 @@ object OsCallRules {
      * upgrade keeps the phoneCall foreground the call already runs on.
      */
     fun finishWhenRefused(upgrade: Boolean): Boolean = !upgrade
+
+    /** Dart's `kHiddenNotificationTitle`: the title of a call whose name may not show. */
+    const val HIDDEN_TITLE = "Hollow"
+
+    /** The largest avatar side Dart sends; a call notification shows it at about 64 dp. */
+    const val AVATAR_MAX_SIDE = 256
+
+    /**
+     * The avatar the notification may show: raw RGBA pixels Dart drew (never peer-encoded bytes,
+     * so no Android decoder sees them), exactly [side] squared, and only beside a name. A hidden
+     * title hides the face too (HOL-SEC-155), whatever Dart sent.
+     */
+    fun avatarFor(title: String, side: Int?, rgba: ByteArray?): CallAvatar? {
+        if (side == null || rgba == null) return null
+        if (title.isBlank() || title == HIDDEN_TITLE) return null
+        if (side !in 1..AVATAR_MAX_SIDE || rgba.size != side * side * 4) return null
+        return CallAvatar(side, rgba)
+    }
+
+    /**
+     * Whether a notification the person swiped away is posted again. Android 14+ lets a plain
+     * foreground-service notification (the ring-out's) be dismissed whatever `setOngoing` says;
+     * while the service still carries a call or ring it comes back.
+     */
+    fun repostsAfterDismiss(hasLook: Boolean, foregroundTypes: Int): Boolean =
+        hasLook && foregroundTypes != 0
 }
+
+/** A square avatar as premultiplied RGBA bytes, row by row ([OsCallRules.avatarFor]). */
+class CallAvatar(val side: Int, val rgba: ByteArray)
 
 /**
  * A call we place keeps the call service up while it rings out (Dart's `ringOut`), with no OS
@@ -71,6 +100,9 @@ class RingOut {
         ringing = false
         return !sessionHeld
     }
+
+    /** Ring-out asked again with a new look (its name blanked). True = re-post the notification. */
+    fun repost(sessionHeld: Boolean): Boolean = ringing && !sessionHeld
 
     /** A session began: it takes the running service over. */
     fun onBegin() {
