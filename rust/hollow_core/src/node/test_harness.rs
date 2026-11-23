@@ -73544,3 +73544,117 @@ async fn pr_a_welcome_recovery_restarted_before_the_readd_restores_the_owned_ser
     );
     drop((d1, j, f));
 }
+
+// f5-hol-sec-230
+/// HOL-SEC-230 (DEVICE_PROOF_DESIGN 8.7, 8.8): on a phrase-rooted server that never wrote
+/// a checkpoint, members that hear of a recovery dropping the owner device that admitted
+/// them keep their seats, their server and their MLS leaves while the owner's kept device
+/// is away, and the kept device's settling (the shipped in-app recovery) keeps everyone
+/// it folded before T.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+#[ignore = "HOL-SEC-230: RED until the baseless hold (F5 design part A)"]
+async fn w3c1_a_recovery_on_a_server_without_a_checkpoint_keeps_its_members() {
+    use crate::crdt::hold::Hold;
+    use crate::crdt::operations::CrdtPayload as P;
+    let _g = test_guard();
+    let [m_tag, d1_tag, d2_tag, r_tag, j_tag, k_tag] = [31u8, 32, 33, 34, 35, 36];
+    let W3c1Cut { relay, master, d1, d2, j, server_id, _tmp } = w3c1_cut_server([m_tag, d1_tag, d2_tag, r_tag, j_tag]).await;
+    let m_id = master.peer_id();
+    let (j_master, k_master) = (j.master_id.clone(), tag_kp(k_tag).peer_id());
+    let admitted_by = |s: &ServerState, who: &str| {
+        s.op_log.iter().find(|o| matches!(&o.payload, P::MemberAdded { peer_id, .. } if peer_id == who)).and_then(|o| o.proven_device().map(str::to_string))
+    };
+    let j_by = j.live_server_state(&server_id).await.and_then(|s| admitted_by(&s, &j_master)).expect("J's admission is proven");
+    let (lost, kept, kept_tag) = if j_by == d1.device_id { (d1, d2, d2_tag) } else { (d2, d1, d1_tag) };
+    let kept_id = tag_kp(kept_tag).peer_id();
+
+    // K joins while J and the kept device are away, so the device the recovery drops admits it.
+    relay.set_online(&j.device_id, false);
+    relay.set_online(&kept.device_id, false);
+    let k = spawn_node_with_friends(&relay, k_tag, k_tag, &[&m_id]).await;
+    sleep_ms(1500).await;
+    k.cmd_tx
+        .send(NodeCommand::JoinServer { server_id: server_id.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&server_id) })
+        .await
+        .unwrap();
+    assert!(wait_until(30, async || k.live_server_state(&server_id).await.is_some_and(|s| s.is_member(&k_master))).await, "precondition: K joined");
+    relay.set_online(&j.device_id, true);
+    relay.set_online(&kept.device_id, true);
+    let holds_both = async |n: &TestNode| n.live_server_state(&server_id).await.is_some_and(|s| s.is_member(&j_master) && s.is_member(&k_master));
+    assert!(wait_until(30, async || holds_both(&j).await && holds_both(&k).await && holds_both(&kept).await).await, "precondition: J, K and the kept device hold both members");
+    let k_by = k.live_server_state(&server_id).await.and_then(|s| admitted_by(&s, &k_master));
+    assert_eq!(k_by.as_deref(), Some(lost.device_id.as_str()), "precondition: the device the recovery drops admitted K");
+    expect_mls_leaf(&j, &server_id, &k.device_id, 30).await;
+    expect_mls_leaf(&k, &server_id, &j.device_id, 30).await;
+    for n in [&j, &k, &kept] {
+        assert!(n.live_server_state(&server_id).await.is_some_and(|s| s.base.is_none()), "precondition: no checkpoint at {}", n.device_id);
+    }
+    sleep_ms(1200).await;
+    let t_ms = crate::crdt::hlc::wall_clock_ms() as i64;
+    sleep_ms(300).await;
+
+    // The kept device is away; the phrase dropped the other one, and the members hear of it.
+    relay.set_online(&kept.device_id, false);
+    let roster = kept.store().load_roster(&m_id).ok().flatten().expect("the identity's roster");
+    relay.set_online(&lost.device_id, false);
+    drop(lost);
+    let recovered = {
+        let mut r = roster.clone();
+        r.add_phrase_statement(
+            &crate::identity::roster::r_pub_of(&tag_kp(r_tag)),
+            Some(crate::identity::roster::sign_recovery(&master, &tag_kp(r_tag), super::roster_book::now_ms(), std::slice::from_ref(&kept_id), false)),
+            None,
+        )
+        .expect("the phrase signs the recovery");
+        r
+    };
+    for n in [&j, &k] {
+        super::roster_book::merge_for_test(&n.store(), &recovered, &n.master_id, &n.device_id);
+    }
+    super::server_rosters::touched();
+    sleep_ms(12_000).await;
+
+    let seat = |s: &ServerState, m: &str| s.is_member(m) || s.recovery_hold(None, m) >= Hold::Keep;
+    let facts = async |n: &TestNode| {
+        n.live_server_state(&server_id).await.map(|s| {
+            format!(
+                "member(J)={} member(K)={} in_recovery={} hold(J)={:?} hold(K)={:?} members={}",
+                s.is_member(&j_master),
+                s.is_member(&k_master),
+                s.in_recovery(),
+                s.recovery_hold(None, &j_master),
+                s.recovery_hold(None, &k_master),
+                s.members.len()
+            )
+        })
+    };
+    let mut away_ok = true;
+    let mut away = Vec::new();
+    for n in [&j, &k] {
+        let held = n.live_server_state(&server_id).await;
+        away_ok &= held.as_ref().is_some_and(|s| seat(s, &j_master) && seat(s, &k_master));
+        away.push((n.device_id[n.device_id.len() - 6..].to_string(), facts(n).await));
+    }
+    let leaves = (j.mls_members(&server_id).await.iter().any(|m| *m == k.device_id), k.mls_members(&server_id).await.iter().any(|m| *m == j.device_id));
+    away_ok &= leaves == (true, true);
+
+    // The kept device takes the recovery (the shipped in-app path) and settles.
+    relay.set_online(&kept.device_id, true);
+    assert!(super::authority_view::hold_own(&kept.store(), &m_id), "nothing held before this change");
+    super::roster_book::merge_for_test(&kept.store(), &recovered, &m_id, &kept_id);
+    super::roster_book::note_recovery_lost_since(&kept.store(), &recovered.base(), t_ms).unwrap();
+    kept.cmd_tx.send(NodeCommand::RosterChanged { newly_revoked: vec![j_by.clone()] }).await.unwrap();
+    let settled_ok = wait_until(45, async || holds_both(&j).await && holds_both(&k).await && holds_both(&kept).await).await;
+    let mut after = Vec::new();
+    for n in [&j, &k, &kept] {
+        after.push((n.device_id[n.device_id.len() - 6..].to_string(), facts(n).await));
+    }
+    let reseated = wait_until(60, async || {
+        j.mls_members(&server_id).await.iter().any(|m| *m == k.device_id) && k.mls_members(&server_id).await.iter().any(|m| *m == j.device_id)
+    })
+    .await;
+    assert!(away_ok, "HOL-SEC-230: members lost seats while the owner's kept device was away: {away:?} leaves (K at J, J at K)={leaves:?}; after the settling ok={settled_ok} reseated={reseated} {after:?}");
+    assert!(settled_ok, "the settling did not bring both members back: {after:?}");
+    assert!(reseated, "the members' MLS leaves did not come back after the settling");
+}
