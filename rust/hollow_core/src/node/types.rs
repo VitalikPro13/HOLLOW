@@ -946,12 +946,25 @@ pub(crate) struct PendingJoin {
     /// A friend said we share this server (`shared_servers`): it signs no ask, so only a
     /// member's state that already lists us completes it, and it keeps no row.
     pub(crate) reentry: bool,
+    /// A keyless re-entry (F5): the friend devices whose digest sync alone may complete
+    /// it, in ask order; no lock read and no join box. RAM only.
+    pub(crate) sync_from: Vec<String>,
+    /// Its asks so far, and when the last went (or an answer last arrived).
+    pub(crate) sync_asks: u8,
+    pub(crate) sync_asked_at: Option<std::time::Instant>,
+    /// No state of the server was held when it started: an end drops the one it built.
+    pub(crate) sync_fresh: bool,
 }
 
 impl PendingJoin {
     /// Nobody asked on this device: the join signs no ask, keeps no row, shows no refusal.
     pub(crate) fn unasked(&self) -> bool {
         self.from_sibling || self.reentry
+    }
+
+    /// A keyless re-entry, completed only by a sync from `sync_from` (F5).
+    pub(crate) fn sync_reentry(&self) -> bool {
+        self.reentry && !self.sync_from.is_empty()
     }
 }
 

@@ -287,6 +287,14 @@ impl OpSync {
         msg
     }
 
+    /// Whether `reply` from `device` ends our open digest round with it for `server`: it
+    /// answers the round we asked and leaves no range to split.
+    pub(crate) fn ends_round(&self, server: &str, device: &str, reply: &DigestReply) -> bool {
+        self.asks.get(&(server.to_string(), device.to_string())).is_some_and(|a| a.id == reply.ask && a.round == reply.round)
+            && !reply.vector
+            && (reply.groups.is_empty() || reply.round >= digest::MAX_ROUNDS)
+    }
+
     /// The next step for a digest answer from `device` about `state`; `epoch_now` is our
     /// MLS epoch of it.
     pub(crate) fn answered(

@@ -15,8 +15,15 @@ chooser. Round 2 built part B (`crdt/record.rs`, one `record_scope` for the buil
 receipt check, the trial fold and the settling; item 14 by riding the ops on the digest
 sync and only the ids beside the witness) and the invite key rule (items 8 and 12:
 `key_stands`, the fresh key folded into the settled state; the cut-off is the
-HOL-SEC-229 record's, `keys_after_ms`). Not built yet: the F5 sync re-entry (3.2, 3.3), the waiting card (item 9), the item 15 rows for
-those. `.team/HANDOFF.md` lists the next steps.
+HOL-SEC-229 record's, `keys_after_ms`). Round 3 built the F5 sync re-entry (3.2, 3.3) with the review gates, and fixed a race test
+4 met under load: a witness whose fold had not rebuilt under the roster the ask carried
+named "none", which counts for good; it now holds the ask until its rebuild
+(`ServerState::fold_lags`, at most 30 s). Two widenings over the note: an entry names no
+key whenever the key in force was set by a device the answerer's FRESH view no longer
+counts (part A's hold or a fold not yet rebuilt, `join_key_dropped`), and members refuse a
+newcomer's ask under such a key until the settling (the old link no longer admits
+strangers meanwhile). Not built yet: the waiting card (item 9) and the rest of the item 15
+rows. `.team/HANDOFF.md` lists the next steps.
 
 One deliberate change from 2.3: part A keeps the FOLD, not only the seats. When a
 rebuild stops folding ops whose device the view stopped counting (Uncounted, never

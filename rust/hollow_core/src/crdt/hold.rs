@@ -222,6 +222,20 @@ impl ServerState {
 
     /// 8.8 class 3, a peer's side: the fold counts it or KEEP holds it (a shell is never
     /// answered: it is out of KEEP once removed).
+    /// Whether the join key in force was set by a device `view` does not count and no
+    /// retire endorses: one a recovery cut off, which part A's hold (or a fold that has not
+    /// rebuilt under `view` yet) still counts. That device knows the key, so it admits
+    /// nobody new and no entry names it (F5); the settling sets a fresh one.
+    pub(crate) fn join_key_dropped(&self, view: &super::authority::AuthorityView) -> bool {
+        let Some(reg) = self.join_secret.as_ref().filter(|_| self.cut && view.is_set()) else { return false };
+        self.op_log.iter().any(|o| {
+            o.hlc == *reg.hlc()
+                && matches!(&o.payload, CrdtPayload::JoinKeySet { secret } if secret == reg.read())
+                && o.dev.as_deref().is_some_and(|d| !view.counts(&o.author, &d.device))
+                && !self.is_endorsed(o)
+        })
+    }
+
     pub(crate) fn keeps_peer(&self, peer: &str) -> bool {
         self.is_member(peer) || self.recovery_hold(None, peer) != Hold::Out
     }

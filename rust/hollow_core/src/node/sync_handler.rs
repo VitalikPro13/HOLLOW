@@ -2455,6 +2455,10 @@ fn ask_join_lock(
     server_id: &str,
     pending: &mut PendingJoin,
 ) {
+    // A sync re-entry never reads a lock: the door it would open is the cut-off device's.
+    if pending.sync_reentry() {
+        return;
+    }
     let now = std::time::Instant::now();
     pending.lock_asked_at = Some(now);
     if pending.lock_asks.len() >= MAX_LOCK_ASKS {

@@ -237,6 +237,9 @@ pub(crate) fn tick(
     db_passphrase: &str,
 ) {
     let now_ms = super::types::now_ms();
+    if crdt_resync.witness.has_deferred() {
+        answer_deferred(crdt_resync, server_states, frame_budget, ws_cmd_tx, device, db_path, db_passphrase, now_ms);
+    }
     let due = crdt_resync.witness.register_due(now_ms, REGISTER_EVERY_MS);
     if !due && crdt_resync.witness.all().is_empty() {
         return;
@@ -287,6 +290,37 @@ pub(crate) fn tick(
         }
     }
     publish(&crdt_resync.witness, &store, &device_id, now_ms);
+}
+
+/// The witness asks our fold could not answer when heard (`WitnessDesk::answer`), now
+/// that this tick's rebuilds ran: each answered alone, beside no ops, or held again.
+#[allow(clippy::too_many_arguments)]
+fn answer_deferred(
+    crdt_resync: &mut super::crdt_resync::CrdtResync,
+    server_states: &ServerStates,
+    frame_budget: &mut super::frame_budget::FrameBudget,
+    ws_cmd_tx: &WsCmdTx,
+    device: &crate::identity::native_identity::NativeKeypair,
+    db_path: &str,
+    db_passphrase: &str,
+    now_ms: i64,
+) {
+    let Ok(store) = MessageStore::lease(db_path, db_passphrase) else { return };
+    let device_id = device.peer_id();
+    for d in crdt_resync.witness.take_deferred() {
+        let Some(state) = server_states.get(&d.server) else { continue };
+        let co = |m: &str| super::server_rosters::co_member_rosters(&store, &state.server_id, m);
+        let view = super::authority_view::view_for(&store, db_path, state, &co);
+        let Some((witness, cp, ids)) = crdt_resync.witness.answer_heard(&store, state, &view, &d.ask, &d.asker, device, d.heard_ms, now_ms) else { continue };
+        let x = super::sync_ext::ReplyExt {
+            witness: Some(witness),
+            witness_cp: cp.and_then(|op| serde_json::to_string(&op).ok()),
+            witness_rec: ids,
+            ..Default::default()
+        };
+        let msg = crate::node::types::HavenMessage::SyncResponse { server_id: d.server.clone(), ops_json: "[]".into(), nonce: None, page: None, digest: None, x: x.boxed() };
+        super::frame_budget::pace_carried(frame_budget, ws_cmd_tx, &device_id, &d.asker, &msg);
+    }
 }
 
 /// The person chose for `server_id` (`None` = "I don't know"): the round that fetches

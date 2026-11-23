@@ -73502,13 +73502,14 @@ async fn pr_c_an_inapp_recovery_is_not_prompted_to_approve_the_device_it_cut_off
 }
 
 // pr-f5-restart
-/// F5 (fleet pr4): the Welcome recovery keeps only F while the old device D1, still
-/// online, learns it and asks to join again, so the member J stops counting D1 before the
-/// person re-adds J (in the fleet, twelve minutes and a restart later). J's answer to F's
-/// shared-servers ask must still bring back the server our identity owns.
+/// F5 (fleet pr4, note test 6): the Welcome recovery keeps only F while the old device D1,
+/// still online, learns it and asks to join again, so the member J stops counting D1
+/// before the person re-adds J. J's entry names no key (part A keeps D1's), so F
+/// re-enters by sync from J alone, restores from J's record, and the settling makes F the
+/// owner device everywhere: J keeps its seat, F gets a leaf, posts flow both ways, the key
+/// and the relay's door are F's and D1 sees the room no more.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)]
-#[ignore = "F5, open: once J stops counting D1 its fold drops D1's JoinKeySet, so the answer names no join key and F drops it; the fix needs a design call (lead)"]
 async fn pr_a_welcome_recovery_restarted_before_the_readd_restores_the_owned_server() {
     let _g = test_guard();
     let [m_tag, d1_tag, d2_tag, r_tag, j_tag] = [141u8, 142, 143, 144, 145];
@@ -73516,15 +73517,21 @@ async fn pr_a_welcome_recovery_restarted_before_the_readd_restores_the_owned_ser
     let W3c1Cut { relay, master, d1, d2, j, server_id, _tmp } = w3c1_cut_server([m_tag, d1_tag, d2_tag, r_tag, j_tag]).await;
     let (m_id, j_master) = (master.peer_id(), j.master_id.clone());
     let d1_dev = d1.device_id.clone();
+    let general = general_channel_of(&server_id);
     relay.set_online(&d2.device_id, false);
     drop(d2);
-    assert!(j.live_server_state(&server_id).await.is_some_and(|s| s.join_public_text().is_some()), "precondition: J holds the join key");
+    let old_key = j.live_server_state(&server_id).await.and_then(|s| s.join_public_text());
+    assert!(old_key.is_some(), "precondition: J holds the join key");
+    assert!(j.live_server_state(&server_id).await.is_some_and(|s| s.base.is_none()), "precondition: no checkpoint (part C off)");
+    // T after everything J stored (the record is what J first stored before T).
+    let stored = j.store().op_seen_ms(&server_id).unwrap_or_default().into_values().max().unwrap_or(0);
+    assert!(wait_until(5, async || crate::crdt::hlc::wall_clock_ms() > stored).await);
+    let t_ms = crate::crdt::hlc::wall_clock_ms() as i64;
 
     // F is an empty install: the shared resolver must not lend it the old devices.
     let f_id = tag_kp(f_tag).peer_id();
     super::resolver::blind_for_test(&f_id, &d1_dev);
     super::resolver::blind_for_test(&f_id, &tag_kp(d2_tag).peer_id());
-    let t_ms = super::roster_book::now_ms() - 60_000;
     let f = spawn_node_staged_at(&relay, master.clone(), f_tag, &[], |st, db, pass| {
         let sign = crate::api::roster::RestoreSign::Recover { lost_since_ms: t_ms, no_wait: true };
         crate::api::roster::sign_restore(&master, &tag_kp(f_tag), &tag_kp(r_tag), sign, db, pass).expect("the restore signs");
@@ -73536,22 +73543,52 @@ async fn pr_a_welcome_recovery_restarted_before_the_readd_restores_the_owned_ser
     assert!(wait_until(20, async || pr_left_out_by_recovery(&d1, &m_id)).await, "precondition: D1 learned the recovery");
     assert!(
         wait_until(40, async || {
-            j.live_server_state(&server_id).await.is_some_and(|s| s.authority.device_verdict(&m_id, &d1_dev) == crate::crdt::authority::DeviceVerdict::Uncounted)
+            j.live_server_state(&server_id).await.is_some_and(|s| s.authority.device_verdict(&m_id, &d1_dev) == crate::crdt::authority::DeviceVerdict::Uncounted && s.in_recovery())
         })
         .await,
-        "precondition: J learned the recovery from D1's ask before the re-add",
+        "precondition: J learned the recovery from D1's ask before the re-add, and holds",
     );
-    let j_key = j.live_server_state(&server_id).await.and_then(|s| s.join_public_text());
     let f = restart_node(&relay, f, m_tag, f_tag).await;
     assert!(wait_until(20, async || relay.online_devices().contains(&f_dev)).await, "precondition: F is back");
 
     f.cmd_tx.send(NodeCommand::SendFriendRequest { peer_id: j_master.clone() }).await.unwrap();
     assert!(wait_until(30, async || f.friend_status(&j_master).as_deref() == Some("accepted")).await, "the member never answered F's re-add");
-    let held = || super::restore_flow::snapshot_of(&f_dev).into_iter().any(|s| s.server_id == server_id);
+    let restore = || super::restore_flow::snapshot_of(&f_dev).into_iter().find(|s| s.server_id == server_id);
     assert!(
-        wait_until(60, async || held() || f.live_server_state(&server_id).await.is_some()).await,
-        "F never got back the server it owns once J stopped counting D1 (J's join key now: {j_key:?})",
+        wait_until(60, async || f.live_server_state(&server_id).await.is_some() && restore().is_some()).await,
+        "F never got back the server it owns once J stopped counting D1 (J's join key: {old_key:?})",
     );
+    assert!(f.live_server_state(&server_id).await.is_some_and(|s| !s.is_member(&j_master)), "a keyless re-entry seats nobody before the settling");
+    let offered = async || restore().is_some_and(|r| matches!(r.stage, super::witness::Stage::Pick | super::witness::Stage::OnlyOne) && !r.points.is_empty());
+    assert!(
+        wait_until(60, offered).await,
+        "F is never offered J's record: {:?}",
+        restore().map(|r| (r.stage, r.points.iter().map(|p| (p.cp.clone(), p.named_by.clone())).collect::<Vec<_>>())),
+    );
+    let point = restore().and_then(|r| r.points.first().cloned()).expect("a point");
+    assert!(point.named_by.contains(&j_master), "J names the record");
+    let (reply, rx) = tokio::sync::oneshot::channel();
+    f.cmd_tx.send(NodeCommand::ChooseRestore { server_id: server_id.clone(), cp: Some(point.cp.clone()), reply }).await.unwrap();
+    rx.await.expect("an answer").expect("the choice is taken");
+
+    let settled = async |n: &TestNode| n.live_server_state(&server_id).await.is_some_and(|s| s.is_member(&j_master) && !s.in_recovery() && s.base.as_ref().is_some_and(|b| b.state.cp_settles.is_some()));
+    assert!(wait_until(40, async || settled(&j).await && settled(&f).await).await, "the settling never reached J and F with J's seat");
+    let key_at = async |n: &TestNode| n.live_server_state(&server_id).await.and_then(|s| s.join_public_text());
+    let new_key = key_at(&f).await.expect("F's key");
+    assert_ne!(Some(new_key.clone()), old_key, "the key D1 knew is still in force");
+    assert!(wait_until(20, async || key_at(&j).await.as_deref() == Some(new_key.as_str())).await, "J never took F's key");
+    expect_mls_leaf(&j, &server_id, &f_dev, 60).await;
+    expect_mls_leaf(&f, &server_id, &j.device_id, 30).await;
+    w3c1h_post(&f, &[&j], &server_id, &general, "f5-from-f", &f_dev).await;
+    w3c1h_post(&j, &[&f], &server_id, &general, "f5-from-j", &j.device_id).await;
+    let f_door = async || f.live_server_state(&server_id).await.and_then(|s| s.join_lock.chain().last().map(|l| l.door.clone()));
+    assert!(
+        wait_until(30, async || f_door().await.is_some() && relay.lock_chain(&server_id, "").last().map(|l| l.door.clone()) == f_door().await).await,
+        "the relay's newest door is not F's: relay {:?}, F {:?}",
+        relay.lock_chain(&server_id, "").last().map(|l| l.n),
+        f.live_server_state(&server_id).await.and_then(|s| s.join_lock.chain().last().map(|l| l.n)),
+    );
+    assert!(wait_until(90, async || !relay.sees_room(&server_id, &d1_dev) && relay.sees_room(&server_id, &j.device_id)).await, "D1 still sees the room, or J lost it");
     drop((d1, j, f));
 }
 
@@ -73916,10 +73953,24 @@ async fn w3c1_an_owner_checkpoints_a_cut_server_soon_after_its_first_admission()
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)]
 async fn pr_a_a_fresh_install_restores_a_server_that_never_checkpointed_from_members_records() {
-    use crate::crdt::operations::CrdtPayload as P;
     let _g = test_guard();
-    let [m_tag, d1_tag, d2_tag, r_tag, j_tag] = [231u8, 232, 233, 234, 235];
-    let (k_tag, f_tag) = (236u8, 237u8);
+    pr_a_records_restore([231, 232, 233, 234, 235, 236, 237], false).await;
+}
+
+/// The VM's race in test 4, made deterministic: K's event loop takes F's carried roster
+/// (its view counts F) but has not rebuilt its fold under it when F's witness ask
+/// lands. K must not name "none" from the fold the roster is about to change: it
+/// answers once its fold holds part A's hold, and both members name the record.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pr_a_a_witness_whose_fold_lags_its_roster_names_its_record_once_it_folded() {
+    let _g = test_guard();
+    pr_a_records_restore([171, 172, 173, 174, 175, 176, 177], true).await;
+}
+
+async fn pr_a_records_restore(tags: [u8; 7], k_lags: bool) {
+    use crate::crdt::operations::CrdtPayload as P;
+    let [m_tag, d1_tag, d2_tag, r_tag, j_tag, k_tag, f_tag] = tags;
     let W3c1Cut { relay, master, d1, d2, j, server_id, _tmp } = w3c1_cut_server([m_tag, d1_tag, d2_tag, r_tag, j_tag]).await;
     let m_id = master.peer_id();
     let d1_id = tag_kp(d1_tag).peer_id();
@@ -73937,6 +73988,9 @@ async fn pr_a_a_fresh_install_restores_a_server_that_never_checkpointed_from_mem
     }
     assert!(wait_until(15, async || name_at(&j).await.as_deref() == Some("honest") && name_at(&k).await.as_deref() == Some("honest")).await);
     assert!(j.live_server_state(&server_id).await.is_some_and(|s| s.base.is_none()), "precondition: no checkpoint anywhere");
+    if k_lags {
+        super::authority_view::hold_rebuilds_for_test(&k.db_path, true);
+    }
     // T must fall after every store above on the members' clocks: the record is what
     // they first stored before it (an absence of later stores has no signal).
     sleep_ms(1200).await;
@@ -73975,6 +74029,11 @@ async fn pr_a_a_fresh_install_restores_a_server_that_never_checkpointed_from_mem
         "J never held the server under part A's hold",
     );
     assert!(j.live_server_state(&server_id).await.is_some_and(|s| s.is_member(&k_master)), "part A keeps K at J meanwhile");
+    if k_lags {
+        assert!(wait_until(60, async || super::witness::asks_heard_for_test(&k.device_id) > 0).await, "precondition: F's witness ask reached K");
+        assert!(k.live_server_state(&server_id).await.is_some_and(|s| !s.in_recovery()), "precondition: K's fold has not taken the roster");
+        super::authority_view::hold_rebuilds_for_test(&k.db_path, false);
+    }
     let restore = || super::restore_flow::snapshot_of(&f_dev).into_iter().find(|s| s.server_id == server_id);
     assert!(
         wait_until(90, async || restore().is_some_and(|r| r.stage == super::witness::Stage::Pick)).await,

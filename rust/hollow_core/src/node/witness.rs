@@ -38,6 +38,20 @@ const WITNESS_REC_TAG: &str = "hollow-cp-witness3\n";
 const TAKEN_PER_SERVER: usize = 256;
 const TAKEN_SERVERS: usize = 64;
 
+#[cfg(test)]
+static ASKS_HEARD: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Harness: the device `by` heard a witness ask (answered, deferred or refused).
+#[cfg(test)]
+pub(crate) fn heard_ask_for_test(by: &str) {
+    ASKS_HEARD.lock().unwrap_or_else(|e| e.into_inner()).push(by.to_string());
+}
+
+#[cfg(test)]
+pub(crate) fn asks_heard_for_test(by: &str) -> usize {
+    ASKS_HEARD.lock().unwrap_or_else(|e| e.into_inner()).iter().filter(|d| *d == by).count()
+}
+
 /// A peer id as the relay's `is_peer_id_shape` reads one.
 pub(crate) fn peer_id_shape(id: &str) -> bool {
     (40..=64).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric() && !matches!(b, b'0' | b'O' | b'I' | b'l'))
@@ -152,7 +166,23 @@ pub(crate) struct WitnessDesk {
     members: HashMap<String, Vec<(String, MemberSource)>>,
     recovering: HashMap<String, Recovery>,
     registered_at: i64,
+    deferred: Vec<Deferred>,
 }
+
+/// A witness ask heard while our fold lagged our view (`ServerState::fold_lags`).
+#[derive(Debug, Clone)]
+pub(crate) struct Deferred {
+    pub(crate) server: String,
+    pub(crate) asker: String,
+    pub(crate) ask: WitnessAsk,
+    pub(crate) heard_ms: i64,
+}
+
+/// Asks held at once for a rebuild: the owner's devices that ask, times its servers.
+const DEFERRED_MAX: usize = 64;
+/// The longest an ask waits for our rebuild (`REBUILD_GAP` plus a busy tick); past it we
+/// answer from the fold as it stands, as before the wait existed.
+pub(crate) const DEFER_MAX_MS: i64 = 30_000;
 
 /// A server this fresh install restores from witnesses (section 8.4).
 #[derive(Debug, Clone, Default)]
@@ -200,7 +230,8 @@ impl WitnessDesk {
     /// Our witness for `ask` from `asker` (a device the view counts for the server's
     /// OWNER), signed by our `device` key, with the named checkpoint op, or when we name
     /// none before T, the content ids of our record (`ServerState::witness_record`; its
-    /// ops ride the digest sync); `None` when we answer nothing.
+    /// ops ride the digest sync); `None` when we answer nothing now. An ask our fold
+    /// cannot answer yet (`ServerState::fold_lags`) waits in [`Self::take_deferred`].
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn answer(
         &mut self,
@@ -210,6 +241,22 @@ impl WitnessDesk {
         ask: &WitnessAsk,
         asker: &str,
         device: &NativeKeypair,
+        now_ms: i64,
+    ) -> Option<(CpWitness, Option<CrdtOp>, Vec<String>)> {
+        self.answer_heard(store, state, view, ask, asker, device, now_ms, now_ms)
+    }
+
+    /// [`Self::answer`] for an ask heard at `heard_ms`: T is placed on our clock as of then.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn answer_heard(
+        &mut self,
+        store: &MessageStore,
+        state: &ServerState,
+        view: &AuthorityView,
+        ask: &WitnessAsk,
+        asker: &str,
+        device: &NativeKeypair,
+        heard_ms: i64,
         now_ms: i64,
     ) -> Option<(CpWitness, Option<CrdtOp>, Vec<String>)> {
         let owner = state.current_owner()?;
@@ -226,8 +273,13 @@ impl WitnessDesk {
                 return None;
             }
         }
-        let t_w = u64::try_from(now_ms.saturating_sub(ask.t_age_ms)).unwrap_or(0);
+        let t_w = u64::try_from(heard_ms.saturating_sub(ask.t_age_ms)).unwrap_or(0);
         let named = named_before(state, t_w);
+        // A "none" counts at the asker for good: never name one from a fold the roster we
+        // already hold is about to change (the hold it opens names a record).
+        if named.is_none() && state.fold_lags(view) && now_ms.saturating_sub(heard_ms) < DEFER_MAX_MS && self.defer(&state.server_id, asker, ask, heard_ms) {
+            return None;
+        }
         let record = match &named {
             None => state.witness_record(t_w, &store.op_seen_ms(&state.server_id).unwrap_or_default()),
             Some(_) => None,
@@ -241,6 +293,28 @@ impl WitnessDesk {
         let witness = CpWitness::sign_with(&state.server_id, asker, ask, cp, rec, folded_age_ms, device)?;
         self.answered.insert(key, now_ms);
         Some((witness, named.map(|(op, _)| op), record.map(|(ids, _)| ids).unwrap_or_default()))
+    }
+
+    /// Hold `ask` for the rebuild our fold waits for: one per (server, asker), the newest;
+    /// false when the book is full (then it is answered from the fold as it stands).
+    fn defer(&mut self, server: &str, asker: &str, ask: &WitnessAsk, heard_ms: i64) -> bool {
+        self.deferred.retain(|d| !(d.server == server && d.asker == asker));
+        if self.deferred.len() >= DEFERRED_MAX {
+            return false;
+        }
+        self.deferred.push(Deferred { server: server.to_string(), asker: asker.to_string(), ask: ask.clone(), heard_ms });
+        hollow_log!("[HOLLOW-CRDT] Holding {asker}'s witness ask for {server} until our fold takes the rosters we hold");
+        true
+    }
+
+    /// The asks held for a rebuild, to answer again on the batch tick (each defers again
+    /// while the fold still lags, at most [`DEFER_MAX_MS`] after it was heard).
+    pub(crate) fn take_deferred(&mut self) -> Vec<Deferred> {
+        std::mem::take(&mut self.deferred)
+    }
+
+    pub(crate) fn has_deferred(&self) -> bool {
+        !self.deferred.is_empty()
     }
 
     /// Note a witness ask we send to `device` for `server` (a fresh install's recovery);
@@ -712,6 +786,42 @@ mod tests {
 
     fn store() -> MessageStore {
         MessageStore::open(":memory:", &"ab".repeat(32)).expect("store")
+    }
+
+    /// A witness whose fold still counts the device a roster it already holds dropped
+    /// (the rebuild comes on a later tick) names nothing yet: a "none" counts at the
+    /// asker for good. Once the rebuild formed part A's hold it answers, and an ask held
+    /// past [`DEFER_MAX_MS`] is answered from the fold as it stands.
+    #[test]
+    fn a_witness_whose_fold_lags_its_view_answers_once_it_rebuilt() {
+        use crate::crdt::hold::tests::{baseless_replica, baseless_world, view_after, LAPTOP, MEMBER, MEMBER_PHONE};
+        let (_, log) = baseless_world();
+        let mut m = baseless_replica(&log, MEMBER, MEMBER_PHONE, true);
+        let fresh = view_after(false);
+        let asker = keys(LAPTOP).1;
+        let me = keys(MEMBER_PHONE).0;
+        assert!(!m.fold_lags(&m.authority.clone()), "precondition: a fold never lags its own view");
+        assert!(m.fold_lags(&fresh), "the fold still holds the dropped phone's admissions");
+        let mut desk = WitnessDesk::default();
+        assert!(desk.answer(&store(), &m, &fresh, &ask("n1", 3_000), &asker, &me, NOW).is_none(), "no answer from a lagging fold");
+        assert!(desk.has_deferred(), "the ask waits for the rebuild");
+        let held = desk.take_deferred();
+        assert_eq!(held.len(), 1);
+        assert!(
+            desk.answer_heard(&store(), &m, &fresh, &held[0].ask, &held[0].asker, &me, held[0].heard_ms, NOW + 1_000).is_none() && desk.has_deferred(),
+            "still lagging: held again",
+        );
+        let late = desk.take_deferred();
+        assert!(
+            desk.answer_heard(&store(), &m, &fresh, &late[0].ask, &late[0].asker, &me, late[0].heard_ms, NOW + DEFER_MAX_MS).is_some(),
+            "past the wait the fold as it stands answers",
+        );
+        let mut desk = WitnessDesk::default();
+        m.authority = fresh.clone();
+        let _ = m.rebuild_now();
+        assert!(m.in_recovery() && !m.fold_lags(&fresh), "precondition: the rebuild formed part A's hold");
+        assert!(desk.answer(&store(), &m, &fresh, &ask("n2", 3_000), &asker, &me, NOW).is_some(), "a rebuilt fold answers at once");
+        assert!(!desk.has_deferred());
     }
 
     /// Section 8.4: a witness names the newest checkpoint whose content it holds that it

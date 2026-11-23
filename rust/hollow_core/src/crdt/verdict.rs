@@ -414,6 +414,24 @@ impl ServerState {
         !self.cut || clause_exempt(op) || (self.verdict(op) == Verdict::Counted && self.lock_maker_counts(op))
     }
 
+    /// Whether the fold still holds an owner op that `view` (a fresh read of the stored
+    /// rosters) no longer counts and neither a retire nor the hold keeps: a roster saved
+    /// since the last rebuild, which the next one takes (`ViewDirty`). What a witness
+    /// names waits for that rebuild, else it names none where part A will hold a record.
+    pub(crate) fn fold_lags(&self, view: &super::authority::AuthorityView) -> bool {
+        let Some(owner) = self.anchor_owner() else { return false };
+        let Some(entry) = view.entry(&owner).cloned().filter(|_| self.cut && view.is_set()) else { return false };
+        let entry = self.round_entry(&owner, entry);
+        let Some(auth) = entry.auth.as_ref() else { return false };
+        self.op_log.iter().any(|o| {
+            o.author == owner
+                && !clause_exempt(o)
+                && o.dev.as_deref().is_some_and(|d| !auth.counts(&d.device))
+                && !self.is_endorsed(o)
+                && !self.recovery.as_ref().is_some_and(|r| r.keeps(o))
+        })
+    }
+
     /// A new join lock link counts only from a device the view counts (t14-lock R3).
     fn lock_maker_counts(&self, op: &CrdtOp) -> bool {
         let CrdtPayload::JoinLock { link, .. } = &op.payload else { return true };

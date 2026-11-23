@@ -6411,6 +6411,9 @@ async fn run_event_loop(
                 // The join lock: made, moved, put back, compacted and granted where due.
                 let keys = super::lock_keeper::LockKeys { master: &master_keypair, device: &device_keypair };
                 let leaves = |s: &str| super::lock_keeper::server_leaves(mls.as_ref(), s);
+                lock_keeper.set_restoring(
+                    crdt_resync.witness.restoring().into_iter().chain(pending_server_joins.iter().filter(|(_, p)| p.sync_reentry()).map(|(s, _)| s.clone())).collect(),
+                );
                 let due_ops = lock_keeper.tick(&server_states, keys, &ws_room_peers, &ws_cmd_tx, &leaves);
                 for (server_id, payload) in due_ops {
                     sync_handler::author_join_lock_op(
@@ -7027,21 +7030,25 @@ async fn run_event_loop(
             _ = sync_dispatch_timer.tick() => {
                 arm_started = Some(("timer", "sync_dispatch", std::time::Instant::now()));
                 let now = std::time::Instant::now();
-                for entry in crdt_resync.shared_joins.due(now) {
-                    let sid = entry.server_id.clone();
+                for queued in crdt_resync.shared_joins.due(now) {
+                    let sid = queued.entry.server_id.clone();
                     super::shared_servers::start_reentry(
-                        &mut pending_server_joins, &ws_cmd_tx, entry, &local_peer_str, &device_peer_id, &db_path, &db_passphrase,
+                        &mut pending_server_joins, &ws_cmd_tx, queued, &local_peer_str, &device_peer_id, &db_path, &db_passphrase,
                     );
+                    if let Some(p) = pending_server_joins.get_mut(&sid) {
+                        p.sync_fresh = !server_states.contains_key(&sid);
+                    }
                     if pending_server_joins.contains_key(&sid) {
                         crdt_resync.room_notices.start(&sid, now);
                     }
                 }
+                ask_sync_reentries(&mut crdt_resync, &server_states, &mut pending_server_joins, &mut frame_budget, &ws_cmd_tx, &device_peer_id, now);
                 let notices = crdt_resync.room_notices.due(now);
                 super::shared_servers::send_room_notices(&ws_cmd_tx, &notices, &local_peer_str, &db_path, &db_passphrase);
-                for sid in crdt_resync.shared_joins.lapsed(&db_path, now, &|sid| server_states.contains_key(sid)) {
+                let lapsed = crdt_resync.shared_joins.lapsed(&db_path, now, &|sid| server_states.contains_key(sid) && !pending_server_joins.contains_key(sid));
+                for sid in lapsed {
                     if pending_server_joins.get(&sid).is_some_and(|p| p.reentry) {
-                        pending_server_joins.remove(&sid);
-                        let _ = ws_cmd_tx.send(super::ws_client::WsCommand::LeaveRoom { room_code: sid });
+                        end_sync_reentry_or_leave(&mut pending_server_joins, &mut server_states, &crdt_store, &ws_cmd_tx, &sid);
                     }
                 }
                 if crdt_resync.rosters_aged_at.is_none_or(|at| at.elapsed() >= Duration::from_secs(3600))
@@ -9351,6 +9358,17 @@ async fn handle_sync_response(
             let ids = x.as_ref().map(|x| x.witness_rec.clone()).unwrap_or_default();
             crdt_resync.witness.receive(peer_str, w, cp, ids, super::types::now_ms());
         }
+        // A sync re-entry (F5) hears only the friend devices it asked (finding 5), and its
+        // join completes only on the answer that ends that device's digest round.
+        let sync_reentry = pending_server_joins.get(&server_id).filter(|p| p.sync_reentry()).map(|p| p.sync_from.iter().any(|d| d == peer_str));
+        if sync_reentry == Some(false) {
+            hollow_log!("[HOLLOW-SECURITY] Dropped a SyncResponse for {server_id} from {peer_str}: our sync re-entry never asked that device");
+            return;
+        }
+        let sync_round_ends = sync_reentry == Some(true) && digest.as_ref().is_some_and(|r| crdt_resync.op_sync.ends_round(&server_id, peer_str, r));
+        if let Some(p) = pending_server_joins.get_mut(&server_id).filter(|_| sync_reentry == Some(true)) {
+            p.sync_asked_at = Some(std::time::Instant::now());
+        }
         // Rosters before ops (DEVICE_PROOF_DESIGN section 9): what the answer says about
         // rosters, from a member only.
         if let Some(x) = x.as_deref()
@@ -9421,7 +9439,7 @@ async fn handle_sync_response(
         let crate::crdt::operations::TolerantParse { ops: incoming_ops, unread, .. } =
             crate::crdt::operations::parse_ops_tolerant(&ops_json);
         let unread_in = (!unread.is_empty()).then(|| server_id.clone());
-        if !incoming_ops.is_empty() {
+        if !incoming_ops.is_empty() || (sync_round_ends && server_states.contains_key(&server_id)) {
             let state = server_states.entry(server_id.clone()).or_insert_with(|| {
                 // Skeleton for a pending join: ownerless, so only the anchor can
                 // found it (the op a self-certifying id proves, or the invite's
@@ -9473,6 +9491,13 @@ async fn handle_sync_response(
                 keep(&i);
                 refolded = Some(i.wanted);
             }
+            // A sync re-entry is for a server we own (finding 8): a founding op for anyone
+            // else ends it before anything is kept.
+            if sync_reentry == Some(true) && state.anchor_owner().is_some_and(|o| o != local_peer_str) {
+                hollow_log!("[HOLLOW-SECURITY] Ended the sync re-entry of {server_id}: it was founded for another owner");
+                end_sync_reentry_or_leave(pending_server_joins, server_states, crdt_store, ws_cmd_tx, &server_id);
+                return;
+            }
             // A join folds in our identity's own leave of the server: a membership from
             // before the leave answers no join of ours.
             let left_here = match leave_book.left_op(&server_id).filter(|_| pending_server_joins.contains_key(&server_id)) {
@@ -9522,6 +9547,7 @@ async fn handle_sync_response(
                 // batch that founds nothing or admits someone else is no join.
                 Ok(report) if (report.applied > 0 || pending_server_joins.contains_key(&server_id))
                     && !left_here
+                    && (sync_reentry != Some(true) || (sync_round_ends && state.anchor_owner().as_deref() == Some(local_peer_str)))
                     && (!pending_server_joins.contains_key(&server_id)
                         || state.anchor() == crate::crdt::server_state::Anchor::Legacy
                         || state.is_member(local_peer_str)) => {
@@ -10039,6 +10065,57 @@ fn emit_boxed(event_tx: &mpsc::Sender<NetworkEvent>, event: NetworkEvent) -> Box
     })
 }
 
+/// Sync re-entries (F5) due an ask: the first at once, then the next source after
+/// [`super::shared_servers::SYNC_ASK_EVERY`] of silence, at most
+/// [`super::shared_servers::SYNC_ASKS_MAX`] in all. Every ask carries our roster: an
+/// answerer that cannot place us serves nothing.
+fn ask_sync_reentries(
+    crdt_resync: &mut super::crdt_resync::CrdtResync,
+    server_states: &HashMap<String, ServerState>,
+    pending_server_joins: &mut HashMap<String, PendingJoin>,
+    frame_budget: &mut super::frame_budget::FrameBudget,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    device_peer_id: &str,
+    now: std::time::Instant,
+) {
+    for (sid, p) in pending_server_joins.iter_mut().filter(|(_, p)| p.sync_reentry()) {
+        if p.sync_asks >= super::shared_servers::SYNC_ASKS_MAX || p.sync_asked_at.is_some_and(|at| now.saturating_duration_since(at) < super::shared_servers::SYNC_ASK_EVERY) {
+            continue;
+        }
+        let to = p.sync_from[usize::from(p.sync_asks) % p.sync_from.len()].clone();
+        p.sync_asks += 1;
+        p.sync_asked_at = Some(now);
+        crdt_resync.op_sync.resend_roster_to(&to);
+        let skeleton;
+        let state = match server_states.get(sid) {
+            Some(s) => s,
+            None => {
+                skeleton = ServerState::skeleton(sid.clone());
+                &skeleton
+            }
+        };
+        hollow_log!("[HOLLOW-SERVER] Asking {to} for {sid}'s ops: a sync re-entry");
+        let ask = crdt_resync.sync_ask(state, &to, None, None);
+        super::frame_budget::pace_carried(frame_budget, ws_cmd_tx, device_peer_id, &to, &ask);
+    }
+}
+
+/// End the re-entry of `sid`: the room is left and, for a sync re-entry, the state it
+/// built (never one held before it) goes with its rows.
+fn end_sync_reentry_or_leave(
+    pending_server_joins: &mut HashMap<String, PendingJoin>,
+    server_states: &mut HashMap<String, ServerState>,
+    crdt_store: &super::crdt_store::CrdtStore,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    sid: &str,
+) {
+    let Some(p) = pending_server_joins.remove(sid) else { return };
+    if p.sync_reentry() && p.sync_fresh && server_states.remove(sid).is_some() {
+        crdt_store.delete_server(sid.to_string());
+    }
+    let _ = ws_cmd_tx.send(super::ws_client::WsCommand::LeaveRoom { room_code: sid.to_string() });
+}
+
 /// A `SyncRequest`: out of line for the same reason as [`handle_sync_response`].
 #[allow(clippy::too_many_arguments)]
 async fn handle_sync_request(
@@ -10174,6 +10251,8 @@ async fn handle_sync_request(
             {
                 let co = |m: &str| super::server_rosters::co_member_rosters(&store, &state.server_id, m);
                 let view = super::authority_view::view_for(&store, db_path, state, &co);
+                #[cfg(test)]
+                super::witness::heard_ask_for_test(device_peer_id);
                 if let Some((witness, cp, ids)) = crdt_resync.witness.answer(&store, state, &view, w, peer_str, device_keypair, super::types::now_ms()) {
                     rx.witness = Some(witness);
                     rx.witness_cp = cp.and_then(|op| serde_json::to_string(&op).ok());
@@ -12245,9 +12324,11 @@ async fn handle_incoming_request_inner(
                 // its own from `peer_str`, the device whose ratchet decrypted it.
                 Ok(MessageEnvelope::Carried { msg, .. }) => {
                     // The answer to a join of ours comes only from our reply key: over Olm,
-                    // anyone we share a session with could hand us a server state.
+                    // anyone we share a session with could hand us a server state. A sync
+                    // re-entry's answers ride Olm by design; its handler hears only the
+                    // devices it asked.
                     let answers_our_join = matches!(&*msg, HavenMessage::SyncResponse { server_id, .. }
-                        if pending_server_joins.contains_key(server_id));
+                        if pending_server_joins.get(server_id).is_some_and(|p| !p.sync_reentry()));
                     if answers_our_join {
                         hollow_log!("[HOLLOW-SECURITY] Dropped a sync answer over Olm from {peer_str} for a server we are still joining");
                     } else if msg.lane() == Lane::Carried {
@@ -16899,16 +16980,23 @@ async fn handle_incoming_request_inner(
             };
             let ours = super::ws_client::relay_home().unwrap_or_default();
             let friend = super::resolver::resolve(peer_str);
-            let entries = super::shared_servers::accepted(&store, db_path, peer_str, &servers);
+            let entries = super::shared_servers::accepted(&store, db_path, peer_str, &servers, master_peer_str);
             hollow_log!("[HOLLOW-SERVER] {peer_str} names {} shared server(s), {} we act on", servers.len(), entries.len());
             for entry in entries {
                 crdt_resync.union.friend_named(&entry.server_id, &friend, &entry.members);
                 note_union_members(crdt_resync, &entry.server_id, master_peer_str, &store);
-                if server_states.contains_key(&entry.server_id) || pending_server_joins.contains_key(&entry.server_id) {
+                // A second friend's keyless entry is one more source for the sync (finding 6).
+                if let Some(p) = pending_server_joins.get_mut(&entry.server_id).filter(|p| p.sync_reentry())
+                    && entry.join_key.is_empty()
+                {
+                    super::shared_servers::add_source(&mut p.sync_from, peer_str);
+                    continue;
+                }
+                if super::shared_servers::held_skips(server_states.get(&entry.server_id), &entry, master_peer_str) || pending_server_joins.contains_key(&entry.server_id) {
                     hollow_log!("[HOLLOW-SERVER] {} is already held or joining", entry.server_id);
                     continue;
                 }
-                crdt_resync.shared_joins.offer(db_path, entry, &friend, &ours);
+                crdt_resync.shared_joins.offer(db_path, entry, &friend, peer_str, &ours);
             }
         }
 
