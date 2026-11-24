@@ -127,11 +127,11 @@ fn an_answer_is_taken_only_from_a_counted_friend_and_within_bounds() {
     list[0].join_key.clear();
     list[0].server_id = uuid_sid(0);
     list[1].server_id = "../x".into();
-    let got = accepted(&store, &node.db, &device.peer_id(), &list, US);
+    let got = accepted(&store, &node.db, &device.peer_id(), &list);
     assert!(got.len() <= PER_FRAME);
     assert!(got.iter().all(|e| !e.join_key.is_empty() && e.members.len() <= MAX_MEMBERS), "a keyless entry for a server someone else owns was taken");
     assert!(!got.iter().any(|e| e.server_id == "../x"), "an id that is no server id was taken");
-    assert!(accepted(&store, &node.db, &kp(165).peer_id(), &list, US).is_empty(), "a stranger's answer was taken");
+    assert!(accepted(&store, &node.db, &kp(165).peer_id(), &list).is_empty(), "a stranger's answer was taken");
     assert!(!got.is_empty(), "control: well-formed entries are taken");
 }
 
@@ -151,13 +151,13 @@ fn review_b_an_answer_names_each_server_once_with_well_formed_fields() {
     let mut same = entry(5);
     same.members = vec![pid(1), pid(1), "0".repeat(52), "x".repeat(500), pid(2)];
     let list = vec![same.clone(); PER_FRAME];
-    let got = accepted(&store, &node.db, &device.peer_id(), &list, US);
+    let got = accepted(&store, &node.db, &device.peer_id(), &list);
     assert_eq!(got.len(), 1, "one server repeated in every entry was taken more than once");
     assert_eq!(got[0].members, vec![pid(1), pid(2)], "member ids are taken once each and only of a peer id's shape");
     let bad = |f: &dyn Fn(&mut SharedServer)| {
         let mut e = entry(6);
         f(&mut e);
-        accepted(&store, &node.db, &device.peer_id(), &[e], US).is_empty()
+        accepted(&store, &node.db, &device.peer_id(), &[e]).is_empty()
     };
     assert!(!bad(&|_| {}), "control: the entry is taken");
     assert!(bad(&|e| e.owner = "x".repeat(5000)), "an owner pin of no peer id's shape was taken");
@@ -398,12 +398,14 @@ fn a_keyless_entry_from_a_counted_friend_is_a_sync_reentry() {
     super::super::server_rosters::touched();
     super::super::resolver::update_many(&friend, [device.peer_id().as_str()]);
     let keyless = |sid: String, owner: &str| SharedServer { server_id: sid, owner: owner.into(), join_key: String::new(), ..entry(7) };
-    let took = |e: SharedServer| !accepted(&store, &node.db, &device.peer_id(), &[e], US).is_empty();
+    let took = |e: SharedServer| !accepted(&store, &node.db, &device.peer_id(), &[e]).is_empty();
     assert!(took(keyless(format!("{:040x}", 7), "")), "a keyless self-certifying id was dropped");
-    assert!(took(keyless(uuid_sid(7), US)), "a keyless server pinned to us was dropped");
+    // Finding 5 (review F5c): a pinned id syncs by state vector, which never shows a
+    // caught-up fold, so its keyless entry is dropped, ours included.
+    assert!(!took(keyless(uuid_sid(7), US)), "a keyless pinned server was taken: its re-entry could never complete");
     assert!(!took(keyless(uuid_sid(8), &"o".repeat(52))), "a keyless entry for a server another identity owns was taken");
     assert!(!took(SharedServer { join_key: "not a key".into(), ..keyless(uuid_sid(9), US) }), "a malformed key was taken");
-    assert!(!accepted(&store, &node.db, &kp(170).peer_id(), &[keyless(uuid_sid(7), US)], US).iter().any(|_| true), "a device we do not count was heard");
+    assert!(!accepted(&store, &node.db, &kp(170).peer_id(), &[keyless(format!("{:040x}", 7), "")]).iter().any(|_| true), "a device we do not count was heard");
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let mut pending = HashMap::new();
@@ -444,6 +446,49 @@ fn a_second_friends_entry_adds_its_device_to_the_reentry_and_a_lapsed_one_is_not
     let lapsed = joins.lapsed(&db, t0 + SYNC_REENTRY_WAIT, &|_| false);
     assert_eq!(lapsed, vec![keyless.server_id.clone()]);
     assert!(!held_shares(&db).iter().any(|h| h.server_id == keyless.server_id), "a keyless re-entry was held for the person");
+}
+
+/// Review F5c item 2: an answer to the open round starts a sync re-entry's wait again
+/// (a keyed one's never), and a lapsed one's sources are asked again on their next
+/// arrival, once per arrival.
+#[test]
+fn a_sync_reentry_waits_from_its_last_answer_and_a_lapsed_ones_sources_are_asked_again() {
+    let db = format!("sync-progress-{}", std::process::id());
+    let mut joins = Joins::default();
+    let keyless = SharedServer { join_key: String::new(), ..queued_entry(12, "") };
+    let keyed = queued_entry(13, "");
+    joins.offer(&db, keyless.clone(), "f1", "d1", "ours");
+    joins.offer(&db, keyed.clone(), "f1", "d1", "ours");
+    let t0 = Instant::now();
+    assert_eq!(joins.due(t0).len(), 2);
+    let half = t0 + SYNC_REENTRY_WAIT / 2;
+    joins.progressed(&keyless.server_id, half);
+    // Late enough that a keyed one's own wait would not have run out yet, had it moved.
+    joins.progressed(&keyed.server_id, t0 + SYNC_REENTRY_WAIT - REENTRY_WAIT / 2);
+    let lapsed = joins.lapsed(&db, t0 + SYNC_REENTRY_WAIT, &|_| false);
+    assert_eq!(lapsed, vec![keyed.server_id.clone()], "an answered round did not restart the sync re-entry's wait, or a keyed one's moved");
+    assert_eq!(joins.lapsed(&db, half + SYNC_REENTRY_WAIT, &|_| false), vec![keyless.server_id.clone()], "the wait is bounded from the last answer");
+
+    let mut asks = Asks::default();
+    assert!(asks.may_ask("d1", t0, false));
+    assert!(asks.take_frame("d1"));
+    let later = t0 + ASK_AGAIN * 3;
+    assert!(!asks.may_ask("d1", later, false), "precondition: an answered device is not asked again");
+    asks.forget_answered(&["d1".to_string()]);
+    assert!(asks.may_ask("d1", later, false), "a lapsed re-entry's source was never asked again on its arrival");
+    assert!(!asks.may_ask("d1", later, false), "one ask per arrival");
+}
+
+/// Review F5c item 3: a completed sync re-entry holds the lock keeper only until its
+/// restore registers or a settling is held, whatever the fold seats.
+#[test]
+fn a_reentered_server_waits_only_until_its_restore_or_settling() {
+    let mut joins = Joins::default();
+    joins.note_reentered("s1");
+    joins.note_reentered("s2");
+    assert_eq!(joins.reentered(&|_| true), vec!["s1".to_string(), "s2".to_string()]);
+    assert_eq!(joins.reentered(&|sid| sid != "s1"), vec!["s2".to_string()]);
+    assert_eq!(joins.reentered(&|_| true), vec!["s2".to_string()], "a forgotten re-entry came back");
 }
 
 /// Finding 8: a keyless entry skips a held state only with our own span or our own

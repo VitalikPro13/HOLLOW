@@ -240,7 +240,7 @@ pub(crate) fn tick(
     if crdt_resync.witness.has_deferred() {
         answer_deferred(crdt_resync, server_states, frame_budget, ws_cmd_tx, device, db_path, db_passphrase, now_ms);
     }
-    let due = crdt_resync.witness.register_due(now_ms, REGISTER_EVERY_MS);
+    let due = crdt_resync.witness.register_due(now_ms, REGISTER_EVERY_MS) && !register_held(&device.peer_id());
     if !due && crdt_resync.witness.all().is_empty() {
         return;
     }
@@ -491,6 +491,31 @@ fn publish(desk: &WitnessDesk, store: &MessageStore, device_id: &str, now_ms: i6
 /// Every restore as the running node last judged it.
 pub(crate) fn snapshot() -> Vec<RestoreSnap> {
     SNAPSHOT.lock().unwrap_or_else(|e| e.into_inner()).values().flatten().cloned().collect()
+}
+
+#[cfg(test)]
+static REGISTER_HELD: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Harness: `device` registers no witness restore while `on` (a register tick that
+/// comes late, past several batch ticks).
+#[cfg(test)]
+pub(crate) fn hold_register_for_test(device: &str, on: bool) {
+    let mut held = REGISTER_HELD.lock().unwrap_or_else(|e| e.into_inner());
+    held.retain(|d| d != device);
+    if on {
+        held.push(device.to_string());
+    }
+}
+
+#[cfg(test)]
+fn register_held(device: &str) -> bool {
+    REGISTER_HELD.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|d| d == device)
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+fn register_held(_device: &str) -> bool {
+    false
 }
 
 /// [`snapshot`] of one local device (the harness runs several nodes).

@@ -31,6 +31,22 @@ does now, so the nonce-less deferred witness answer cannot stall it; it needs no
 variant). Test 12 has two owner devices each type the recovery, the only way two
 settlings of one recovery happen.
 
+Review round F5c (hostile review of 447cfab4..27a5da97) changed five things: part A's
+hold keeps the dropped device's `JoinLock` op too (`lock_maker_counts` accepts exactly the
+kept op), so members keep the door the relay's lock names until the settling (3.3 said D1
+keeps seeing the room; so do the members now); a lapsed sync re-entry forgets its sources
+as answered, so each one's next arrival asks again, and an answered round restarts its
+105 s wait; the lock keeper's wait after a completed re-entry ends when the witness restore
+registers or a settling is held, never by seats (an "I don't know" rollback seats only F);
+a keyless entry is taken only for a self-certifying id (a pinned id syncs by state vector
+and could never complete), so 3.2's "a pinned owner must be ours" is gone; a sync
+re-entry keeps no answer's roster before the founding op shows a server we own; the lock
+keeper's wait covers a KEYED re-entry of a server we own too (a 0.14.2 friend names the
+cut-off device's key, and with members keeping its door that re-entry completes into a fold
+that seats only us). A
+settling whose key in force is not its fresh key is not written (fail closed), and a
+retire is committed before the roster drops its device.
+
 One deliberate change from 2.3: part A keeps the FOLD, not only the seats. When a
 rebuild stops folding ops whose device the view stopped counting (Uncounted, never
 Missing, another identity's), the replica records those (master, device) pairs and
@@ -253,8 +269,8 @@ Trigger (F only; all must hold):
   (`shared_asks.take_frame`) from a device `asker_ok` counts for an accepted, unblocked
   friend; the entry passes `accepted`'s shape checks. An EMPTY `join_key` now marks it
   `Reentry::Sync` (RAM, never on the wire); a malformed key still drops it.
-- Owned servers only (finding 8). A non-genesis entry whose `owner` is not our master is
-  dropped. A genesis entry (entries carry no owner for one) is checked at the first
+- Owned servers only (finding 8). A non-genesis entry is dropped (review F5c: its
+  sync reads the state vector and never ends a digest round). A genesis entry (entries carry no owner for one) is checked at the first
   answer: its founding op must found it for our master, else the re-entry ends there
   (pending removed, room left, the skeleton and its rows dropped, nothing persisted).
 - Skip rule (finding 8, narrowed): skip only when we hold the server with a member span
@@ -322,6 +338,9 @@ and moves the lock), minted after our `Hlc` observes `at_ms`.
 - No dependency on `sets_missing_join_key` (finding 4): one device writes a settling
   (the one that ran the recovery or the restore, on screen by construction), and its
   batch carries the key. The missing-key tick stays for servers that never had a key.
+  As built, on a keyless path F's fold holds no key it counts, so F's own missing-key
+  tick can set a fresh key BEFORE the settling; that key is ours, counted and after the
+  cut-off, so it stands and the settling adds none (members get it from that op).
 - A witnessed or record content may carry the pre-T key; the fresh `JoinKeySet` is a
   later op in the same batch and wins the register, so there is no re-check at `done_key`
   and no `rekeyed:{sid}` row (revision 1's row is dropped, with its restore-half test).

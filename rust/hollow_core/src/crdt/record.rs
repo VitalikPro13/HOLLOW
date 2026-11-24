@@ -426,6 +426,54 @@ pub(crate) mod tests {
         assert!(unknown.iter().any(|o| matches!(o.payload, P::JoinKeySet { .. })), "an unknown cut-off never lets a key stand");
     }
 
+    /// Review F5c item 8 (fail closed): the fresh key must be the key in force in the
+    /// settled state. A key of ours stamped ahead of our clock (a clock that stepped back
+    /// since) would outrank it there: no settling is written rather than one that keeps
+    /// a key from before the cut-off.
+    #[test]
+    fn a_settling_whose_fresh_key_would_not_win_is_never_written() {
+        let w = recorded_world();
+        let mut f = baseless_replica(&w.log, OWNER, LAPTOP, true);
+        f.authority = view_after(false);
+        let _ = f.rebuild_now();
+        let wall = crate::crdt::hlc::wall_clock_ms();
+        f.set_hlc(crate::crdt::hlc::Hlc::for_device_at(keys(OWNER).1, &keys(LAPTOP).1, wall + 120_000));
+        let ahead = f.author_checked(P::JoinKeySet { secret: JoinSecret(hex::encode([6u8; 32])) }).expect("a key of ours, ahead");
+        f.set_hlc(crate::crdt::hlc::Hlc::for_device(keys(OWNER).1, &keys(LAPTOP).1));
+        let (_, after) = crate::crdt::hold::tests::owner_rosters();
+        let seen = SeenAt::new();
+        let dropped = [keys(PHONE).1];
+        let s = super::super::settle::Settling { before: f.authority.clone(), dropped: &dropped, t_ms: T, seen: &seen, roster: after, home: None, keys_after_ms: Some(u64::MAX - 1) };
+        let out = f.author_settling_on(&keys(OWNER).1, &s, &keys(LAPTOP).0, &super::super::settle::SettleOn::Record(BTreeSet::new()));
+        if let Some((ops, _)) = out {
+            let key = ops.iter().find(|o| matches!(o.payload, P::JoinKeySet { .. })).expect("a settling past the cut-off sets a key");
+            let P::ServerCheckpoint { state, .. } = &ops.last().unwrap().payload else { panic!("the settling last") };
+            let st = crate::crdt::server_state::parse_state(state).unwrap();
+            assert!(
+                ServerState::fresh_key_holds_for_test(&st, key),
+                "a settling was written whose key in force is not its fresh one (ours ahead: {:?})",
+                st.join_secret.as_ref().map(|r| *r.hlc() == ahead.hlc)
+            );
+        }
+        // The rule itself, on a fold no checkpoint clamped (a checkpoint clamps its
+        // registers to its own time, which is why the settling above passes): only the
+        // register's winner holds.
+        let mut g = baseless_replica(&w.log, OWNER, LAPTOP, true);
+        let fresh = g.create_op(P::JoinKeySet { secret: JoinSecret(hex::encode([8u8; 32])) });
+        let P::JoinKeySet { secret } = &fresh.payload else { unreachable!() };
+        let owner = crate::crdt::operations::MemberRole::Owner.priority();
+        g.join_secret = Some(crate::crdt::admin_lww::AdminLwwReg::new(secret.clone(), fresh.hlc.clone(), owner));
+        assert!(ServerState::fresh_key_holds_for_test(&g, &fresh), "control: the key in force holds");
+        let later = g.create_op(P::JoinKeySet { secret: JoinSecret(hex::encode([7u8; 32])) });
+        let P::JoinKeySet { secret: other } = &later.payload else { unreachable!() };
+        g.join_secret = Some(crate::crdt::admin_lww::AdminLwwReg::new(other.clone(), later.hlc.clone(), owner));
+        assert!(!ServerState::fresh_key_holds_for_test(&g, &fresh), "another key in force is not ours");
+        g.join_secret = Some(crate::crdt::admin_lww::AdminLwwReg::new(secret.clone(), later.hlc.clone(), owner));
+        assert!(!ServerState::fresh_key_holds_for_test(&g, &fresh), "our secret under another op's clock is not our op");
+        g.join_secret = None;
+        assert!(!ServerState::fresh_key_holds_for_test(&g, &fresh), "no key in force");
+    }
+
     /// The key rule's other clauses: a key the dropped phone set never stands, nor one a
     /// member's view does not count as ours; a member's own settling writes no key.
     #[test]

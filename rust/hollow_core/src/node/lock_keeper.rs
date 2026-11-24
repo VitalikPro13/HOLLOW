@@ -494,12 +494,12 @@ impl LockKeeper {
     }
 
     /// The servers our witness restore holds open now (`WitnessDesk::restoring`), and
-    /// those a sync re-entry of ours is still fetching.
+    /// those a re-entry of ours is still fetching or completed before that restore.
     pub(crate) fn set_restoring(&mut self, servers: Vec<String>) {
         self.restoring = servers.into_iter().collect();
     }
 
-    /// A sync re-entry of `server_id` starts now: the wait holds at once, not from the
+    /// A re-entry of `server_id` starts now: the wait holds at once, not from the
     /// next batch tick (a relay chain answer ticks the server before that one).
     pub(crate) fn note_restoring(&mut self, server_id: &str) {
         self.restoring.insert(server_id.to_string());
@@ -604,8 +604,9 @@ impl LockKeeper {
         }
         let owner = lookup_owner(state)?;
         let is_owner = owner == local;
-        // A keyless re-entry's fold seats only us until the settling: a lock of ours now
-        // would hide the members behind a door we cannot grant them yet (F5 note 3.3).
+        // A re-entry's fold of a server no member checkpointed seats only us until the
+        // settling: a lock of ours now would hide the members behind a door we cannot
+        // grant them yet (F5 note 3.3).
         if is_owner && self.restoring.contains(server_id) && state.members.keys().all(|m| m == local) {
             return None;
         }

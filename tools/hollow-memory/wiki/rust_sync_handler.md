@@ -239,14 +239,19 @@ Design: `design_A_frame_authority.md` "BUILT (session 16, the join lock)"; memor
 ## Re-entry after a phrase recovery (shared servers, F5, 0.14.3)
 
 A recovering fresh install learns its servers from friends (`shared_servers`). A keyed entry
-re-enters through the join lock like an invite, signing no ask. A KEYLESS entry (the friend's
+re-enters through the join lock like an invite, signing no ask. A KEYLESS entry is taken only
+for a self-certifying id (a pinned one syncs by state vector, which never ends a digest round,
+so it could never complete). A keyless entry (the friend's
 fold keeps the key only because part A's hold counts a cut-off device's `JoinKeySet`, or its
 fold has not rebuilt under the roster yet: `ServerState::join_key_dropped`) is a SYNC re-entry:
 `PendingJoin.sync_from` lists the friend devices that named it, `ask_join_lock` returns at once
 for it (no lock, no join box), swarm `ask_sync_reentries` sends a digest ask over the skeleton
-Carried to one source (next source after 15 s of silence, 6 asks), and the `SyncResponse` arm
+Carried to one source (next source after 15 s of silence, 6 asks; an answer to the open round
+restarts its 105 s lapse clock, `Joins::progressed`; a lapsed one forgets its sources as answered,
+`Asks::forget_answered`, so each one's next arrival asks again), and the `SyncResponse` arm
 takes answers only from those devices, ends the re-entry on a founding op for another owner
-(`end_sync_reentry_or_leave`, nothing kept), and completes only on the answer that ends that
+(`end_sync_reentry_or_leave`, nothing kept, the answer's rosters included: they are kept only once
+the fold shows the server is ours), and completes only on the answer that ends that
 device's digest round (`OpSync::ends_round`); only an answer to the open round
 (`OpSync::answers_round`) puts the next ask off, so a source sending bare answers (a deferred
 witness answer rides a nonce-less `SyncResponse` with no ops and no digest) cannot stall it. Traps: the Olm `Carried` gate drops every OTHER
@@ -255,8 +260,13 @@ that syncs must pass that gate on purpose; the skeleton sits in `server_states` 
 so `Joins::lapsed`'s "joined" means held AND no join pending, and the lock keeper is told to
 wait (`set_restoring`) or it mints an owner base for a fold that seats only us. The witness
 restore registers only on a later tick (5 s, after the store rows land), so a COMPLETED sync
-re-entry stays in that wait (`Joins::reentered`) until the settling seats the members; without
-it the lock keeper minted F's lock over the members' door on the completion tick. Rows:
+re-entry stays in that wait (`Joins::reentered`) until that restore registers or a settling is
+held; without it the lock keeper minted F's lock over the members' door on the completion tick.
+Never judge that wait by seats: an "I don't know" rollback settles on a state that seats only us,
+and the lock must then come (review F5c). The wait covers keyed re-entries of servers we own as
+well: a 0.14.2 friend still names the cut-off device's key, and that re-entry ends in the same
+fold that seats only us. Members keep the cut-off device's door meanwhile
+(part A keeps its `JoinLock` op, `lock_maker_counts`), so they stay visible in the room. Rows:
 `security_write_gates` §64.
 
 ## send_join_rejection()

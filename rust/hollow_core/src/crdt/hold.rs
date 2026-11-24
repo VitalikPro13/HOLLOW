@@ -1812,4 +1812,96 @@ pub(crate) mod tests {
         assert_eq!(r.base.as_deref(), Some(hex::encode(w.cp1.content_hash()).as_str()), "the step back records the saved base");
         assert!(!r.keeps_fold() && restored.recovery.is_some(), "a base step-back, saved");
     }
+
+    /// The baseless world with the owner's phone holding the first join lock, and the
+    /// lock (its change key mints successors).
+    fn locked_world() -> (ServerState, Vec<CrdtOp>, crate::node::join_lock::NewLock) {
+        let (mut owner, mut log) = baseless_world();
+        let nonce = owner.founding_nonce().expect("a self-certifying founding");
+        let lock = crate::node::join_lock::mint_owner_base(&owner.server_id, 1, &keys(OWNER).0, Some(&nonce), &keys(PHONE).0).expect("a lock");
+        let door = Some(super::super::operations::JoinSecret(hex::encode(lock.door.as_slice())));
+        log.push(owner.author_checked(P::JoinLock { link: lock.link.clone(), door, grants: Default::default() }).expect("the phone makes the first lock"));
+        (owner, log, lock)
+    }
+
+    fn door_of(s: &ServerState) -> Option<(u64, String)> {
+        s.join_lock.newest_door_id().map(|(n, d)| (n, d.to_string()))
+    }
+
+    /// Review F5c finding 1: the founding phone made the server's first join lock. Part
+    /// A's hold keeps every seat and the phone's ops, so it keeps that lock's door too:
+    /// members prove it to the relay on every (re)join and open join boxes sealed to it.
+    #[test]
+    fn rev_f5c_a_part_a_hold_keeps_the_door_the_dropped_device_made() {
+        let (_, log, _) = locked_world();
+        let mut m = baseless_replica(&log, MEMBER, MEMBER_PHONE, true);
+        assert!(m.join_lock.newest_door_id().is_some(), "precondition: the member holds the phone's door");
+        m.authority = view_after(false);
+        let _ = m.rebuild_now();
+        assert!(m.in_recovery() && m.is_member(&keys(MEMBER).1), "precondition: part A's hold keeps the member seated");
+        let door = door_of(&m);
+        let liveness = door_of(m.liveness_state(&keys(MEMBER).1));
+        assert!(
+            door.is_some() && liveness.is_some(),
+            "part A kept the seats but dropped the door the relay's lock names: fold door {door:?}, liveness door {liveness:?} (door_room::sync sends SetDoor None, answer_ask has nothing to hand)"
+        );
+    }
+
+    /// The door part A keeps is the one the fold held before the recovery (the dropped
+    /// phone made it, so it learns nothing), and the phone mints no new link meanwhile:
+    /// neither in its own op nor in one a counted device carries.
+    #[test]
+    fn a_part_a_hold_keeps_only_the_pre_trigger_door_and_takes_no_new_link_from_the_dropped_device() {
+        let (mut owner, log, lock) = locked_world();
+        let mut m = baseless_replica(&log, MEMBER, MEMBER_PHONE, true);
+        let before = door_of(&m);
+        m.authority = view_after(false);
+        let _ = m.rebuild_now();
+        let pre = m.recovery.as_ref().map(|r| door_of(&r.pre)).expect("precondition: held");
+        assert!(before.is_some() && door_of(&m) == before && pre == before, "the kept door is the pre-trigger one: {:?} {pre:?} {before:?}", door_of(&m));
+        let sid = owner.server_id.clone();
+        // The phone after the notice moves the lock with the change key it holds.
+        let next = crate::node::join_lock::mint_successor(&sid, &lock.link, &lock.change, &keys(OWNER).1, &keys(PHONE).0).expect("a successor");
+        let secret = || Some(super::super::operations::JoinSecret(hex::encode(next.door.as_slice())));
+        let own = owner.author_checked(P::JoinLock { link: next.link.clone(), door: secret(), grants: Default::default() }).expect("the phone moves its lock");
+        let mut a = m.clone();
+        a.ingest_remote(std::slice::from_ref(&own));
+        assert_eq!(door_of(&a), before, "the dropped phone's own new link never folds");
+        // A counted moderator's op carrying the phone's link: the lock layer alone refuses.
+        let mut moderator = baseless_replica(&log, MOD, MOD_PHONE, true);
+        let carried = moderator.create_op(P::JoinLock { link: next.link.clone(), door: secret(), grants: Default::default() });
+        let mut b = m.clone();
+        b.ingest_remote(std::slice::from_ref(&carried));
+        assert_eq!(door_of(&b), before, "a link the dropped phone made never folds, whoever carries it");
+        // Control: the moderator's own successor of the kept lock folds.
+        let mine = crate::node::join_lock::mint_successor(&sid, &lock.link, &lock.change, &keys(MOD).1, &keys(MOD_PHONE).0).expect("a successor");
+        let ok = moderator.create_op(P::JoinLock {
+            link: mine.link.clone(),
+            door: Some(super::super::operations::JoinSecret(hex::encode(mine.door.as_slice()))),
+            grants: Default::default(),
+        });
+        let mut c = m.clone();
+        c.ingest_remote(std::slice::from_ref(&ok));
+        assert_eq!(door_of(&c).map(|(n, _)| n), Some(2), "control: a counted device's move of the kept lock folds");
+    }
+
+    /// Once the hold ends, the kept lock op counts by the view again: a lock the dropped
+    /// device made holds no door here.
+    #[test]
+    fn the_door_part_a_kept_ends_with_the_hold() {
+        let (_, log, _) = locked_world();
+        let mut m = baseless_replica(&log, MEMBER, MEMBER_PHONE, true);
+        m.authority = view_removed();
+        let _ = m.rebuild_now();
+        assert!(m.in_recovery() && door_of(&m).is_some(), "precondition: held with the phone's door");
+        let mut laptop = baseless_replica(&log, OWNER, LAPTOP, true);
+        laptop.authority = view_removed();
+        let named: Vec<CrdtOp> = log.iter().filter(|o| o.proven_device() == Some(keys(PHONE).1.as_str())).cloned().collect();
+        let mut refs: Vec<super::super::operations::OpRef> = named.iter().map(super::super::operations::OpRef::of).collect();
+        refs.sort();
+        let dr = laptop.create_op(P::DeviceRetired { device: keys(PHONE).1, ops: refs, posts_until_ms: None, restore: None });
+        m.ingest_remote(std::slice::from_ref(&dr));
+        assert!(!m.in_recovery() && m.is_member(&keys(MEMBER).1), "precondition: the retire ends the hold");
+        assert_eq!(door_of(&m), None, "the dropped phone's lock holds no door once the hold ended");
+    }
 }

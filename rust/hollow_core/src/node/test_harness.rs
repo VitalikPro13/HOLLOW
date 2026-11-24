@@ -28232,6 +28232,8 @@ fn harness_fixed_sleep_budget_does_not_grow() {
     // ban, and the restart test's join stagger and T margin (8.4 s; scan 1303.75 s).
     // F5 round 2: the T margins after the members' last store in the record, early
     // checkpoint and in-app key tests (3.9 s; scan 1310.1 s).
+    // F5 review fix round: the retire test's wait for the leaves to reach the remover
+    // (0.5 s; scan 1310.6 s).
     const BUDGET_MS: u64 = 1_312_600;
 
     let src = include_str!("test_harness.rs");
@@ -74358,6 +74360,14 @@ async fn pr_f5_a_server_that_never_checkpointed_comes_back_by_sync_and_records()
         assert!(seat(&s, &j_master) && seat(&s, &k_master), "{} lost a seat while the owner was away", n.device_id);
     }
     assert!(j.mls_members(&sid).await.contains(&k.device_id) && k.mls_members(&sid).await.contains(&j.device_id), "a member's leaf went while the owner was away");
+    // Review F5c item 1: the hold keeps the door the relay's lock names (D1 made it).
+    let d1_door = relay.lock_chain(&sid, "").last().map(|l| l.door.clone());
+    assert!(
+        d1_door.is_some() && pr_f5_door(&j, &sid).await == d1_door && pr_f5_door(&k, &sid).await == d1_door,
+        "part A dropped the door the relay's lock names: relay {d1_door:?}, J {:?}, K {:?}",
+        pr_f5_door(&j, &sid).await,
+        pr_f5_door(&k, &sid).await
+    );
 
     let pick = pr_f5_choose_pick(&f, &sid, 90).await;
     assert!(pick.named_by.contains(&j_master) && pick.named_by.contains(&k_master), "both members name the record: {:?}", pick.named_by);
@@ -74380,6 +74390,11 @@ async fn pr_f5_a_server_that_never_checkpointed_comes_back_by_sync_and_records()
         .await,
         "F's door never reached the relay, J and K",
     );
+    let newest = |s: Option<ServerState>| s.and_then(|s| s.join_lock.newest_door_id().map(|(_, d)| d.to_string()));
+    for n in [&j, &k] {
+        let door = newest(n.live_server_state(&sid).await);
+        assert!(door.is_some() && door != d1_door, "{}'s current door is still the one the cut-off device made", n.device_id);
+    }
     expect_mls_leaf(&j, &sid, &f_dev, 60).await;
     expect_mls_leaf(&k, &sid, &f_dev, 60).await;
     expect_mls_leaf(&f, &sid, &k.device_id, 30).await;
@@ -74793,12 +74808,231 @@ async fn pr_f5_a_genesis_reentry_founded_for_another_owner_ends_at_the_first_ans
     }
     assert!(started, "precondition: the entry started a sync re-entry that asked J");
     let log = j.live_server_state(&theirs).await.expect("J holds its server").op_log.clone();
-    carry_as(&j, &f, sync_response(&theirs, &log)).await;
-    assert!(wait_until(20, async || super::op_sync::responses_for_test(&f_dev, &theirs, &j_dev) > 0).await, "precondition: J's answer reached F's handler");
+    // Review F5c item 7: the answer carries its owner's roster, as a member's answer to a
+    // joiner does; none of it is kept for a server founded for someone else.
+    let j_roster = super::roster_book::load(&j.store(), &j_master).expect("J's own roster");
+    assert!(f.store().load_server_rosters(&j_master).unwrap_or_default().is_empty(), "precondition: F keeps no server roster of J");
+    let with_roster = |ops: &[crate::crdt::operations::CrdtOp]| {
+        let mut answer = sync_response(&theirs, ops);
+        if let super::types::HavenMessage::SyncResponse { x, .. } = &mut answer {
+            *x = super::sync_ext::ReplyExt { rosters: vec![j_roster.clone()], ..Default::default() }.boxed();
+        }
+        answer
+    };
+    // First an answer without the founding op: its ops wait, their author joins the
+    // authority set, and nothing yet shows whose server it is.
+    let unfounded: Vec<_> = log.iter().filter(|o| !matches!(o.payload, crate::crdt::operations::CrdtPayload::ServerCreated { .. })).cloned().collect();
+    carry_as(&j, &f, with_roster(&unfounded)).await;
+    assert!(wait_until(20, async || super::op_sync::responses_for_test(&f_dev, &theirs, &j_dev) > 0).await, "precondition: J's first answer reached F's handler");
+    let kept = || !f.store().load_server_rosters(&j_master).unwrap_or_default().is_empty();
+    assert!(!wait_until(3, async || kept()).await, "F kept an answer's rosters before it knew whose server it is");
+    carry_as(&j, &f, with_roster(&log)).await;
+    assert!(wait_until(20, async || super::op_sync::responses_for_test(&f_dev, &theirs, &j_dev) > 1).await, "precondition: J's answer reached F's handler");
     // ABSENCE: a kept state would stay right after the answer that built it.
     assert!(
         !wait_until(5, async || f.live_server_state(&theirs).await.is_some()).await,
         "F kept a server founded for another identity",
     );
+    assert!(!kept(), "F kept the rosters of an answer for a server founded for another identity");
+    drop((d1, j, k, f));
+}
+// rev-f5c (hostile review, scratch only)
+/// Part A keeps the members seated while the owner restores, so a member that drops its
+/// socket and comes back (a phone backgrounded, a network change) must still see its own
+/// server's room: the relay's lock is the one the cut-off phone made, and a member proves
+/// its door on every join.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn rev_f5c_a_member_that_reconnects_during_the_owners_hold_still_sees_its_server() {
+    let _g = test_guard();
+    let PrF5 { relay, master: _m, d1, j, k, f, server_id: sid, old_key: _o, _tmp } = pr_f5_keyless([171, 172, 173, 174, 175, 176, 177]).await;
+    let (j_master, k_master) = (j.master_id.clone(), k.master_id.clone());
+    // Nobody answers F's syncs: no re-entry completes, nothing settles, the hold lasts.
+    for n in [&j, &k] {
+        super::op_sync::mute_answers_for_test(&n.device_id, &sid, true);
+    }
+    pr_f5_readd(&f, &[&j_master, &k_master]).await;
+    let held = async |n: &TestNode| n.live_server_state(&sid).await.is_some_and(|s| s.in_recovery() && s.is_member(&j_master) && s.is_member(&k_master));
+    assert!(wait_until(60, async || held(&j).await && held(&k).await).await, "precondition: part A holds at J and K");
+    let door_at = async |n: &TestNode| n.live_server_state(&sid).await.and_then(|s| s.liveness_state(&n.master_id).join_lock.newest_door_id().map(|(n, d)| (n, d.to_string())));
+    // ABSENCE without the fix: the doors never come back while the hold lasts.
+    let _ = wait_until(30, async || door_at(&j).await.is_some() && door_at(&k).await.is_some()).await;
+    let (j_door, k_door) = (door_at(&j).await, door_at(&k).await);
+    let tip = relay.lock_chain(&sid, "").last().map(|l| (l.n, l.door.clone()));
+    assert!(relay.sees_room(&sid, &k.device_id), "precondition: K sees the room before it reconnects");
+    relay.set_online(&k.device_id, false);
+    assert!(wait_until(10, async || !relay.online_devices().contains(&k.device_id)).await, "precondition: K left");
+    relay.set_online(&k.device_id, true);
+    let sees = wait_until(30, async || relay.sees_room(&sid, &k.device_id)).await;
+    assert!(
+        sees && j_door.is_some() && k_door.is_some(),
+        "a member reconnecting during part A's hold is hidden in its own server's room: K sees it {sees}, relay tip {tip:?}, J's door {j_door:?}, K's door {k_door:?}"
+    );
+    drop((d1, j, k, f));
+}
+
+/// A sync re-entry that lapses (its only source quiet past SYNC_REENTRY_WAIT) must be
+/// asked again when that friend comes back: the design says the next friend arrival asks
+/// again, and the owner has no other way back to a server whose members hold no key.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn rev_f5c_a_lapsed_sync_reentry_is_asked_again_when_its_friend_returns() {
+    let _g = test_guard();
+    let PrF5 { relay, master: _m, d1, j, k, mut f, server_id: sid, old_key: _o, _tmp } = pr_f5_keyless([181, 182, 183, 184, 185, 186, 187]).await;
+    let (j_master, j_dev, f_dev) = (j.master_id.clone(), j.device_id.clone(), f.device_id.clone());
+    super::op_sync::mute_answers_for_test(&j_dev, &sid, true);
+    pr_f5_readd(&f, &[&j_master]).await;
+    assert!(wait_until(60, async || super::op_sync::swallowed_for_test(&j_dev, &sid, &f_dev) > 0).await, "precondition: F asked J for the server");
+    // Past 6 asks 15 s apart and the 105 s wait: the re-entry lapses and F leaves the room.
+    assert!(
+        wait_until(150, async || super::op_sync::heard_for_test(&j_dev, &sid, &f_dev) >= 6 && !relay.room_devices(&sid).contains(&f_dev)).await,
+        "precondition: the re-entry lapsed"
+    );
+    let asks_before = super::op_sync::heard_for_test(&j_dev, &sid, &f_dev);
+    assert!(f.live_server_state(&sid).await.is_none(), "precondition: the lapsed re-entry dropped the state it built");
+    super::op_sync::mute_answers_for_test(&j_dev, &sid, false);
+    drain_events(&mut f);
+    // J answers one asking device once per 10 minutes: the arrival below comes after that.
+    super::shared_servers::answer_gap_passed_for_test(&j_dev);
+    // J goes away and comes back: a friend arrival.
+    relay.set_online(&j_dev, false);
+    assert!(wait_until(10, async || !relay.online_devices().contains(&j_dev)).await, "precondition: J left");
+    relay.set_online(&j_dev, true);
+    let joined = expect_joined(&mut f, &sid, 90).await;
+    assert!(
+        joined,
+        "the owner's lapsed sync re-entry was never asked again after its friend returned (J heard {} asks before, {} after)",
+        asks_before,
+        super::op_sync::heard_for_test(&j_dev, &sid, &f_dev)
+    );
+    drop((d1, j, k, f));
+}
+
+/// After a keyless re-entry the owner may answer "I don't know": the rollback settles on
+/// the owner's own first checkpoint, so the settled state seats only the owner. The
+/// owner must then put a lock of its own on the relay, or nobody can join the server
+/// with the fresh invite link the settling set (the relay still holds the cut-off
+/// phone's lock, whose door no fold here holds).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn rev_f5c_an_owner_alone_after_its_restore_still_makes_a_lock() {
+    let _g = test_guard();
+    let PrF5 { relay, master: _m, d1, j, k, f, server_id: sid, old_key: _o, _tmp } = pr_f5_keyless([191, 192, 193, 194, 195, 196, 197]).await;
+    let (j_master, k_master, f_master) = (j.master_id.clone(), k.master_id.clone(), f.master_id.clone());
+    pr_f5_readd(&f, &[&j_master, &k_master]).await;
+    assert!(pr_f5_back(&f, &sid, 60).await, "precondition: F holds the server by sync");
+    assert!(
+        wait_until(90, async || pr_f5_restore(&f, &sid).is_some_and(|r| matches!(r.stage, super::witness::Stage::Pick | super::witness::Stage::Points | super::witness::Stage::OnlyOne))).await,
+        "precondition: F is offered points: {:?}",
+        pr_f5_restore(&f, &sid).map(|r| r.stage)
+    );
+    let before = relay.lock_chain(&sid, "").last().map(|l| l.door.clone());
+    let (reply, rx) = tokio::sync::oneshot::channel();
+    f.cmd_tx.send(NodeCommand::ChooseRestore { server_id: sid.clone(), cp: None, reply }).await.unwrap();
+    rx.await.expect("an answer").expect("\"I don't know\" is taken");
+    assert!(
+        wait_until(40, async || f.live_server_state(&sid).await.is_some_and(|s| s.base.as_ref().is_some_and(|b| b.state.cp_settles.is_some()))).await,
+        "precondition: F settled"
+    );
+    let alone = f.live_server_state(&sid).await.is_some_and(|s| s.members.keys().all(|m| *m == f_master));
+    assert!(alone, "precondition: the rollback seats only the owner");
+    let made = wait_until(60, async || {
+        let door = pr_f5_door(&f, &sid).await;
+        door.is_some() && relay.lock_chain(&sid, "").last().map(|l| l.door.clone()) == door
+    })
+    .await;
+    assert!(
+        made,
+        "an owner alone after its restore never made a lock: relay tip still the cut-off phone's {} (F door {:?})",
+        relay.lock_chain(&sid, "").last().map(|l| l.door.clone()) == before,
+        pr_f5_door(&f, &sid).await
+    );
+    drop((d1, j, k, f));
+}
+// rev-f5c-fix
+/// Review F5c item 6 (HOL-SEC-229): a retire is on disk before the roster drops its
+/// device. A stop in between would leave a removal no retire endorses, and a restart then
+/// mints none (the roster no longer counts the device).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn rev_f5c_fix_a_retire_is_on_disk_before_the_roster_drops_its_device() {
+    let _g = test_guard();
+    let [m_tag, d1_tag, d2_tag, r_tag, j_tag] = [216u8, 217, 218, 219, 220];
+    let W3c1Cut { relay, master, d1, d2, j, server_id, _tmp } = w3c1_cut_server([m_tag, d1_tag, d2_tag, r_tag, j_tag]).await;
+    let (m_id, d1_id) = (master.peer_id(), tag_kp(d1_tag).peer_id());
+    // Nobody to ask: the round releases at once, inside the command that started it.
+    for n in [&d1, &j] {
+        relay.set_online(&n.device_id, false);
+    }
+    assert!(
+        wait_until(10, async || !relay.online_devices().iter().any(|d| *d == d1.device_id || *d == j.device_id)).await,
+        "precondition: nobody else is online"
+    );
+    // D2 hears the leaves right after the relay drops them (counted in BUDGET_MS).
+    sleep_ms(500).await;
+    let removed = || d2.store().load_roster(&m_id).ok().flatten().is_some_and(|r| r.authority().removed.contains_key(&d1_id));
+    assert!(!removed(), "precondition: D2's roster counts D1");
+    super::crdt_store::pause_for_test(&d2.db_path, true);
+    d2.cmd_tx
+        .send(NodeCommand::RevokeDevice { device_peer_id: d1_id.clone(), mode: super::roster_book::RemoveMode::Retire, with_dependents: false })
+        .await
+        .unwrap();
+    let early = wait_until(6, async || removed()).await;
+    super::crdt_store::pause_for_test(&d2.db_path, false);
+    assert!(!early, "the roster dropped D1 while its retire was not on disk");
+    assert!(wait_until(30, async || removed()).await, "the removal goes on once the retire is written");
+    assert!(
+        d2.live_server_state(&server_id).await.is_some_and(|s| {
+            s.op_log.iter().any(|o| matches!(&o.payload, crate::crdt::operations::CrdtPayload::DeviceRetired { device, .. } if *device == d1_id))
+        }),
+        "and the retire was minted",
+    );
+    drop((d1, j));
+}
+
+/// Review F5c, the race it left unproven: a friend whose fold has not rebuilt (a 0.14.2
+/// one) names the cut-off phone's key in a keyed entry, and it lands first; a member's
+/// keyless entry for the same server arrives after. The owner still gets the server
+/// back, and the members keep seeing their room while it restores.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn rev_f5c_fix_a_stale_friends_keyed_entry_does_not_block_a_members_keyless_one() {
+    let _g = test_guard();
+    let PrF5 { relay, master: _m, d1, j, k, mut f, server_id: sid, old_key, _tmp } = pr_f5_keyless([221, 222, 223, 224, 225, 226, 227]).await;
+    let (j_master, k_master, j_dev, k_dev, f_dev) = (j.master_id.clone(), k.master_id.clone(), j.device_id.clone(), k.device_id.clone(), f.device_id.clone());
+    for d in [&j_dev, &k_dev] {
+        super::shared_servers::silence_for_test(d);
+    }
+    pr_f5_readd(&f, &[&j_master, &k_master]).await;
+    assert!(
+        wait_until(30, async || super::shared_servers::refused_for_test(&j_dev, &f_dev) > 0 && super::shared_servers::refused_for_test(&k_dev, &f_dev) > 0).await,
+        "precondition: F asked J and K which servers they share"
+    );
+    let entry = |key: &str| super::shared_servers::SharedServer {
+        server_id: sid.clone(),
+        owner: String::new(),
+        join_key: key.to_string(),
+        relay: String::new(),
+        members: vec![j_master.clone(), k_master.clone()],
+    };
+    let frame = |e| super::types::HavenMessage::SharedServers { ask: false, servers: vec![e], part: 0, pad: String::new() };
+    let tip = || relay.lock_chain(&sid, "").last().map(|l| l.door.clone());
+    let d1_door = tip();
+    assert!(d1_door.is_some(), "precondition: the relay holds the cut-off device's lock");
+    // The restore registers late, so the re-entry alone must hold the lock keeper.
+    super::restore_flow::hold_register_for_test(&f_dev, true);
+    drain_events(&mut f);
+    carry_as(&j, &f, frame(entry(&old_key))).await;
+    assert!(wait_until(10, async || relay.room_devices(&sid).contains(&f_dev)).await, "precondition: J's keyed entry started a re-entry");
+    carry_as(&k, &f, frame(entry(""))).await;
+    let joined = expect_joined(&mut f, &sid, 90).await;
+    // ABSENCE: a lock of F's would move the relay's lock off the members' door within a
+    // few batch ticks (about 10 s in a run without the wait).
+    let moved = wait_until(20, async || tip() != d1_door).await;
+    let (j_sees, k_sees) = (relay.sees_room(&sid, &j_dev), relay.sees_room(&sid, &k_dev));
+    super::restore_flow::hold_register_for_test(&f_dev, false);
+    assert!(joined, "a stale friend's keyed entry kept the owner from its server");
+    assert!(!moved && j_sees && k_sees, "F's lock hid the members in their own room while the owner restores: moved {moved}, J {j_sees}, K {k_sees}");
+    assert!(pr_f5_back(&f, &sid, 60).await, "the restore registers once it may");
     drop((d1, j, k, f));
 }

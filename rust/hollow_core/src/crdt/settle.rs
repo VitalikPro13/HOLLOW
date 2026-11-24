@@ -48,6 +48,12 @@ pub(crate) enum SettleOn {
     Record(std::collections::BTreeSet<[u8; 32]>),
 }
 
+/// Whether `settled` holds the fresh key `op` sets as the key in force.
+fn fresh_key_holds(settled: &ServerState, op: &CrdtOp) -> bool {
+    let CrdtPayload::JoinKeySet { secret } = &op.payload else { return false };
+    settled.join_secret.as_ref().is_some_and(|r| *r.hlc() == op.hlc && r.read() == secret)
+}
+
 fn is_checkpoint(op: &CrdtOp) -> bool {
     matches!(op.payload, CrdtPayload::ServerCheckpoint { .. })
 }
@@ -180,6 +186,11 @@ impl ServerState {
     }
 
     #[cfg(test)]
+    pub(crate) fn fresh_key_holds_for_test(settled: &ServerState, op: &CrdtOp) -> bool {
+        fresh_key_holds(settled, op)
+    }
+
+    #[cfg(test)]
     pub(crate) fn key_stands_for_test(&self, settled: &ServerState, me: &str, after_ms: Option<u64>) -> bool {
         self.key_stands(settled, me, after_ms)
     }
@@ -215,6 +226,11 @@ impl ServerState {
             getrandom::fill(&mut secret).ok()?;
             let op = self.create_op(CrdtPayload::JoinKeySet { secret: super::operations::JoinSecret(hex::encode(secret)) });
             scratch.ingest_remote(std::slice::from_ref(&op));
+            // Fail closed: a settled state whose key is not the fresh one keeps a key a
+            // dropped device may hold.
+            if !fresh_key_holds(&scratch, &op) {
+                return None;
+            }
             Some(op)
         } else {
             None

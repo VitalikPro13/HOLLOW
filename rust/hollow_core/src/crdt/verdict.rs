@@ -432,11 +432,16 @@ impl ServerState {
         })
     }
 
-    /// A new join lock link counts only from a device the view counts (t14-lock R3).
+    /// A new join lock link counts only from a device the view counts (t14-lock R3). The
+    /// one exception is a lock op part A's hold keeps, made by the device it dropped: the
+    /// relay's lock still names that door, which members prove and open join boxes with
+    /// until the settling moves the lock; that device knew the door already.
     fn lock_maker_counts(&self, op: &CrdtOp) -> bool {
         let CrdtPayload::JoinLock { link, .. } = &op.payload else { return true };
-        self.anchor_owner()
-            .is_some_and(|owner| self.join_lock.link_allowed(&self.server_id, link, &owner, &|m: &str, d: &str| self.authority.counts(m, d)))
+        let kept = |m: &str, d: &str| self.recovery.as_ref().is_some_and(|r| r.keeps(op) && r.dropped.iter().any(|(rm, rd)| rm == m && rd == d));
+        self.anchor_owner().is_some_and(|owner| {
+            self.join_lock.link_allowed(&self.server_id, link, &owner, &|m: &str, d: &str| self.authority.counts(m, d) || kept(m, d))
+        })
     }
 
     /// Whether the device clause under `cut` refuses `op` for a reason a roster can end

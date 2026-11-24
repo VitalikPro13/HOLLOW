@@ -1187,3 +1187,7 @@ mod tests {
         assert!(j.pick.is_none() && j.points.len() == 2, "a stale honest subset: the dated list ({:?})", j.pick);
     }
 }
+
+#[cfg(test)]
+#[path = "witness_review_b_tests.rs"]
+mod review_b_tests;

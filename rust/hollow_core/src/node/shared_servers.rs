@@ -81,6 +81,15 @@ fn may_answer(local_device: &str, asker: &str, now: Instant) -> bool {
     true
 }
 
+/// Harness: `local_device` may answer every asker again, as once its 10-minute gap
+/// (`ANSWER_EVERY`) has passed.
+#[cfg(test)]
+pub(crate) fn answer_gap_passed_for_test(local_device: &str) {
+    if let Some(map) = ANSWERED.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+        map.retain(|(d, _), _| d != local_device);
+    }
+}
+
 #[cfg(test)]
 static REFUSED: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
 
@@ -238,9 +247,9 @@ pub(crate) fn frame_fits(servers: &[SharedServer], pad: &str) -> bool {
 /// The entries of an answer from `from` we act on: only from a friend device we count,
 /// only joinable ids with a well-formed key, pin and relay, each server once, at most
 /// [`PER_FRAME`]; member ids only of a peer id's shape, each once, at most [`MAX_MEMBERS`].
-/// An entry with NO key is a sync re-entry (F5), only of a server `local_master` owns:
-/// a pinned owner must be ours, a self-certifying id is checked at the first answer.
-pub(crate) fn accepted(store: &MessageStore, db_path: &str, from: &str, servers: &[SharedServer], local_master: &str) -> Vec<SharedServer> {
+/// An entry with NO key is a sync re-entry (F5), only of a self-certifying id, whose
+/// first answer must found it for us; a pinned (legacy) id comes back only keyed.
+pub(crate) fn accepted(store: &MessageStore, db_path: &str, from: &str, servers: &[SharedServer]) -> Vec<SharedServer> {
     if asker_ok(store, db_path, from).is_none() {
         if !servers.is_empty() {
             let master = super::resolver::resolve(from);
@@ -259,8 +268,10 @@ pub(crate) fn accepted(store: &MessageStore, db_path: &str, from: &str, servers:
                 "no server id"
             } else if !s.join_key.is_empty() && super::sealed_box::key_from_text(&s.join_key).is_none() {
                 "no join key"
-            } else if s.join_key.is_empty() && !genesis && s.owner != local_master {
-                "no key, and not a server we own"
+            } else if s.join_key.is_empty() && !genesis {
+                // A pinned id syncs by state vector, whose answer never shows a caught-up
+                // fold (no digest round), so a sync re-entry of it could never complete.
+                "no key, and not a self-certifying id"
             } else if !(s.owner.is_empty() || super::witness::peer_id_shape(&s.owner)) {
                 "no owner id"
             } else if s.relay.len() > RELAY_MAX || !s.relay.bytes().all(|b| b.is_ascii_graphic()) {
@@ -313,6 +324,14 @@ impl Asks {
             self.answered.insert(device.to_string());
         }
         true
+    }
+
+    /// A sync re-entry these devices named lapsed: the next arrival of each asks again
+    /// (one ask per arrival, as `may_ask` allows), since only a new answer starts it anew.
+    pub(crate) fn forget_answered(&mut self, devices: &[String]) {
+        for d in devices {
+            self.answered.remove(d);
+        }
     }
 
     /// `accepted`: the device's accept of our friend request just landed. It answers the
@@ -433,24 +452,34 @@ const JOINS_PER_TICK: usize = 4;
 pub(crate) struct Joins {
     queue: std::collections::VecDeque<Queued>,
     started: HashMap<String, (Queued, Instant)>,
-    /// Sync re-entries that completed while our fold still seats only us: the lock
-    /// keeper waits on them as on an open restore (F5 note 3.3), which registers later.
+    /// Re-entries of servers we own that completed before their witness restore
+    /// registered: the lock keeper waits on them as on an open restore (F5 note 3.3).
     reentered: std::collections::BTreeSet<String>,
 }
 
 impl Joins {
-    /// A sync re-entry of `sid` completed.
+    /// A re-entry of `sid`, a server we own, completed.
     pub(crate) fn note_reentered(&mut self, sid: &str) {
         if self.reentered.len() < MAX_SERVERS {
             self.reentered.insert(sid.to_string());
         }
     }
 
-    /// The completed sync re-entries whose fold still `seats_only_us`; the others are
-    /// forgotten (the settling seated the members, or the server is gone).
-    pub(crate) fn reentered(&mut self, seats_only_us: &dyn Fn(&str) -> bool) -> Vec<String> {
-        self.reentered.retain(|sid| seats_only_us(sid));
+    /// The completed re-entries still `waiting` for their witness restore to
+    /// register; the others are forgotten (the restore holds the lock keeper from then,
+    /// a settling is held, or the server is gone). Never by seats: a settling that seats
+    /// only us (an "I don't know" rollback) still needs a lock.
+    pub(crate) fn reentered(&mut self, waiting: &dyn Fn(&str) -> bool) -> Vec<String> {
+        self.reentered.retain(|sid| waiting(sid));
         self.reentered.iter().cloned().collect()
+    }
+
+    /// A source of the sync re-entry of `sid` answered our open round: its wait starts
+    /// again, so a server still arriving round by round does not lapse.
+    pub(crate) fn progressed(&mut self, sid: &str, now: Instant) {
+        if let Some((_, at)) = self.started.get_mut(sid).filter(|(q, _)| q.entry.join_key.is_empty()) {
+            *at = now;
+        }
     }
 
     /// Queue `entry` from `friend`'s `device`, unless it is already on its way or held; at
@@ -494,8 +523,9 @@ impl Joins {
 
     /// Re-entries no member answered within [`REENTRY_WAIT`]: they wait for the person.
     /// `joined` tells a server we now hold with no join of it pending. A sync re-entry
-    /// gets its asks' time and is never held (finding 7: the person cannot join a server
-    /// by hand with no key); the next friend arrival asks again.
+    /// gets its asks' time from its last answered round and is never held (finding 7: the
+    /// person cannot join a server by hand with no key); the next friend arrival asks
+    /// again (`Asks::forget_answered`).
     pub(crate) fn lapsed(&mut self, db_path: &str, now: Instant, joined: &dyn Fn(&str) -> bool) -> Vec<String> {
         let mut out = Vec::new();
         self.started.retain(|sid, (q, at)| {
