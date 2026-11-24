@@ -72117,3 +72117,86 @@ async fn fms_a_crafted_file_sent_on_is_refused_or_cleaned_in_time() {
     b.cmd_tx.send(send(&clean, "holiday-1")).await.unwrap();
     assert!(wait_event(&mut a, wait, header("holiday")).await, "the node lives on and sends the next file");
 }
+
+// fix-media-strip-308
+/// HOL-SEC-308: a motion photo received and sent on leaves without its clip's
+/// location: a HEIC's `mpvd` clip is cleaned as a video, a JPEG leaves as its
+/// still alone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn fms308_a_motion_photo_sent_on_leaves_without_its_clips_location() {
+    use super::media_strip::fixtures::LOCATION;
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    const A_MASTER: u8 = 191;
+    const B_MASTER: u8 = 196;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&b_master]).await;
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[&a_master]).await;
+    expect_dm_pair_ready(&relay, &a, &b, 15).await;
+    drain_events(&mut a);
+    drain_events(&mut b);
+
+    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/node/image_check_fixtures");
+    let wait = std::time::Duration::from_secs(20);
+    for name in ["motion_photo.heic", "motion_photo.jpg"] {
+        let original = std::fs::read(fixtures.join(name)).expect("fixture");
+        assert!(original.windows(LOCATION.len()).any(|w| w == LOCATION), "precondition: {name} names a place");
+        let path = b.data_root.join("files").join(name);
+        super::at_rest::write_all(&path, &original).expect("kept at rest");
+        b.cmd_tx
+            .send(NodeCommand::SendFile(Box::new(super::types::SendFilePayload {
+                peer_id: Some(a.master_id.clone()),
+                server_id: None,
+                channel_id: None,
+                file_path: path.to_str().unwrap().to_string(),
+                message_id: format!("motion-{name}"),
+                message_text: String::new(),
+                vthumb: None,
+                override_width: None,
+                override_height: None,
+                share_ref: None,
+                voice: false,
+                poster: None,
+                album: None,
+            })))
+            .await
+            .unwrap();
+        let mut fid = None;
+        assert!(
+            wait_event(&mut a, wait, |ev| match ev {
+                NetworkEvent::FileHeaderReceived { file_id, file_name, .. } if file_name.starts_with("motion_photo") => {
+                    fid = Some(file_id.clone());
+                    true
+                }
+                _ => false,
+            })
+            .await,
+            "{name}: the header arrives"
+        );
+        let fid = fid.unwrap();
+        let mut stored = None;
+        assert!(
+            wait_event(&mut a, wait, |ev| match ev {
+                NetworkEvent::FileCompleted { file_id, disk_path } if *file_id == fid => {
+                    stored = Some(disk_path.clone());
+                    true
+                }
+                _ => false,
+            })
+            .await,
+            "{name}: the transfer completes"
+        );
+        let got = super::at_rest::read_all(std::path::Path::new(&stored.unwrap())).expect("receiver reads its copy");
+        assert!(!got.windows(LOCATION.len()).any(|w| w == LOCATION), "{name}: the receiver holds no location");
+        if name.ends_with("heic") {
+            assert_eq!(got, super::media_strip::strip_for_send("heic", original).unwrap(), "{name}: the cleaned copy");
+        } else {
+            assert!(!got.windows(4).any(|w| w == b"ftyp"), "{name}: no clip arrives");
+        }
+    }
+}

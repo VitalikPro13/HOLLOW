@@ -77,7 +77,10 @@ stay in CLAUDE.md. Wiki `rust_file_handler`, `emotes`, `hollowpack`.
   `vthumb.size` and the share manifest still match. A timed GPS track goes with its
   samples; in a fragmented file it keeps its `trak` and loses the samples its own tables
   list (ffmpeg's `frag_keyframe` first fragment) and its `moof` runs (HOL-SEC-305); a HEIF
-  holding a movie has the movie walked too (HOL-SEC-307); `camm` tracks, `gps ` boxes and
+  holding a movie has the movie walked too (HOL-SEC-307), and so is a HEIC motion photo's clip
+  (top-level `mpvd`, offsets from the clip's start, one budget, unparseable = refused); a JPEG
+  motion photo's clip after EOI never leaves (WebP decode, or `strip_jpeg` ends the file at the
+  first EOI) (HOL-SEC-308); `camm` tracks, `gps ` boxes and
   Matroska attached files that are not fonts go too, fonts and Chapters STAY (Vitalik,
   HOL-SEC-306). Residuals: subtitle tracks, dashcam GPS blocks inside `mdat`, chapter
   titles. Media that does not parse is REFUSED

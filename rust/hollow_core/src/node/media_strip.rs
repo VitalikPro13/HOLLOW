@@ -252,24 +252,29 @@ impl Budget {
 }
 
 fn strip_isobmff_video(d: &mut [u8]) -> Result<(), String> {
+    strip_movie(d, &mut Budget::for_file(d.len()))
+}
+
+/// Strips a movie laid out from the start of `d`, a whole file or a motion
+/// photo's clip, charging what it zeroes to the file's `budget`.
+fn strip_movie(d: &mut [u8], budget: &mut Budget) -> Result<(), String> {
     let top = boxes(d, 0..d.len(), true)?;
     // A fragmented file keeps most samples in `moof` runs, which
     // `strip_fragments` walks for the timed-metadata tracks.
     let fragmented = find(&top, b"moof").is_some();
     let meta = fragment_tracks(d, &top)?;
-    let mut budget = Budget::for_file(d.len());
     let mut saw_moov = false;
     for b in top.iter() {
         match &b.kind {
             b"moov" => {
                 saw_moov = true;
-                strip_moov(d, &b, fragmented, &mut budget)?;
+                strip_moov(d, &b, fragmented, budget)?;
             }
             b"udta" | b"meta" | b"uuid" | b"gps " => to_free(d, &b),
             _ => {}
         }
     }
-    strip_fragments(d, &top, &meta, &mut budget)?;
+    strip_fragments(d, &top, &meta, budget)?;
     if saw_moov { Ok(()) } else { Err("no movie box".into()) }
 }
 
@@ -686,6 +691,7 @@ fn is_heif(d: &[u8]) -> bool {
 
 /// Zeroes the Exif and XMP items of a HEIF or AVIF in place. The picture's own
 /// rotation lives in item properties, so nothing about how it shows changes.
+/// A movie beside the items, or a motion photo's clip, is stripped as a video.
 fn strip_heif(d: &mut [u8]) -> Result<(), String> {
     let top = boxes(d, 0..d.len(), true)?;
     for b in top.iter() {
@@ -701,6 +707,12 @@ fn strip_heif(d: &mut [u8]) -> Result<(), String> {
         let tracks = fragment_tracks(d, &top)?;
         strip_moov(d, &moov, fragmented, &mut budget)?;
         strip_fragments(d, &top, &tracks, &mut budget)?;
+    }
+    // A motion photo keeps its clip, a whole movie whose offsets count from
+    // its own start, in a top-level `mpvd` box, which 0.14 sent with the
+    // clip's location (HOL-SEC-308). A clip that does not parse refuses.
+    for clip in top.iter().filter(|b| &b.kind == b"mpvd") {
+        strip_movie(&mut d[clip.body..clip.end], &mut budget)?;
     }
     let meta = find(&top, b"meta").ok_or("no meta box")?;
     let kids = boxes(d, meta.body + 4..meta.end, false)?;
@@ -2590,6 +2602,120 @@ mod tests {
         assert!(holds(&out, b"TRUETYPE-FONT-BYTES") && holds(&out, b"Opening"));
         let at = nth(&fonts, &[0x19, 0x41, 0xA4, 0x69], 1);
         assert_eq!(out[at..at + 0x97 + 6], fonts[at..at + 0x97 + 6], "nothing voided, its CRC-32 stays");
+    }
+
+    // HOL-SEC-308: motion photos. The made samples are a sips HEIC and JPEG
+    // with an ffmpeg clip whose `udta` names LOCATION: in a top-level `mpvd`
+    // box (Samsung and Google HEIC), and appended after the JPEG's end with
+    // Google's Motion Photo XMP (Pixel).
+
+    /// A motion HEIC's still, its `mpvd` header and the clip it holds.
+    fn motion_parts(d: &[u8]) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        let at = box_at(d, b"mpvd", 0).start;
+        // Google writes the box with a 64-bit size.
+        let b = next_box(d, at, d.len(), true).unwrap().unwrap();
+        (d[..b.start].to_vec(), d[b.start..b.body].to_vec(), d[b.body..b.end].to_vec())
+    }
+
+    /// Where a motion JPEG's appended clip starts.
+    fn clip_start(jpg: &[u8]) -> usize {
+        nth(jpg, b"ftyp", 0) - 4
+    }
+
+    #[test]
+    fn a_heic_motion_photo_clip_loses_its_location() {
+        let heic = fixture("motion_photo.heic");
+        assert!(holds(&heic, LOCATION), "precondition: the clip names a place");
+        let (still, head, clip) = motion_parts(&heic);
+        let want = [strip_for_send("heic", still).unwrap(), head, strip_for_send("mp4", clip).unwrap()].concat();
+        let out = strip_for_send("heic", heic.clone()).expect("strips");
+        assert!(!holds(&out, LOCATION), "the clip's location is gone");
+        assert_eq!(out, want, "only the clip's metadata changes");
+        assert_eq!(strip_for_send("heic", out.clone()).unwrap(), out, "stripping twice changes nothing");
+        // A clip's offsets count from its own start: its GPS samples, listed
+        // in its tables or in fragment runs, are zeroed where they lie.
+        for clip in [mp4_with_location(), fragmented_mp4_with_gps(0).0, fragmented_mp4_with_gps(2).0] {
+            let d = [heic_with_gps(), bx(b"mpvd", &clip)].concat();
+            let want = [strip_for_send("heic", heic_with_gps()).unwrap(), bx(b"mpvd", &strip_for_send("mp4", clip).unwrap())].concat();
+            assert_eq!(strip_for_send("heic", d).unwrap(), want);
+        }
+    }
+
+    /// A real motion photo without a location: androidx/media's test file
+    /// `libraries/test_data/src/test/assets/media/heif/sample_MP.heic`
+    /// (Apache-2.0). It strips, its clip as a video, and nothing else changes.
+    #[test]
+    fn a_real_heic_motion_photo_strips_its_clip_as_a_video() {
+        let heic = fixture("androidx_sample_MP.heic");
+        let (still, head, clip) = motion_parts(&heic);
+        let movie = strip_for_send("mp4", clip.clone()).expect("the clip strips as a video");
+        assert_ne!(movie, clip, "the clip's times are zeroed");
+        let want = [strip_for_send("heic", still).unwrap(), head, movie].concat();
+        assert_eq!(strip_for_send("heic", heic).expect("strips"), want);
+    }
+
+    #[test]
+    fn a_motion_clip_that_does_not_parse_is_refused() {
+        let mut cut = mp4_with_location();
+        cut.truncate(cut.len() - 30);
+        let no_movie = [bx(b"ftyp", b"isom\0\0\0\0"), bx(b"mdat", LOCATION)].concat();
+        for clip in [Vec::new(), LOCATION.to_vec(), no_movie, cut] {
+            assert!(strip_for_send("heic", [heic_with_gps(), bx(b"mpvd", &clip)].concat()).is_err());
+        }
+    }
+
+    /// The clip's samples and the photo's Exif extents share the one budget a
+    /// file has (HOL-SEC-269): each may cover the file twice, not both.
+    #[test]
+    fn a_motion_clip_shares_the_photos_budget() {
+        let s = 1u32 << 20;
+        let file = |pad: usize, chunks: u32, sample: u32, extents: u16, len: u32| {
+            let clip = mp4_with_shared_chunk_offsets(chunks, sample);
+            [heic_with_overlapping_exif_extents(1, extents, len, pad), bx(b"mpvd", &clip)].concat()
+        };
+        assert!(strip_for_send("heic", file(16, 2, s, 1, 1)).is_ok(), "the clip twice");
+        assert!(strip_for_send("heic", file(s as usize, 1, 1, 3, s * 2 / 3)).is_ok(), "the Exif twice");
+        assert!(strip_for_send("heic", file(16, 2, s, 3, s * 2 / 3)).is_err(), "both twice");
+    }
+
+    #[test]
+    fn a_jpeg_motion_photo_leaves_as_its_still_alone() {
+        let jpg = fixture("motion_photo.jpg");
+        assert!(holds(&jpg, LOCATION) && holds(&jpg, b"GCamera:MicroVideoOffset"), "precondition");
+        let still = jpg[..clip_start(&jpg)].to_vec();
+        let alone = strip_for_send("jpg", still.clone()).unwrap();
+        assert!(!holds(&alone, b"MicroVideo"), "the XMP naming the clip goes");
+        assert_eq!(strip_for_send("jpg", jpg.clone()).unwrap(), alone, "Pixel: nothing after the picture's end leaves");
+        // Samsung's shape: a marker, the clip, and a trailer indexing both.
+        let samsung = [&still[..], b"MotionPhoto_Data", &jpg[clip_start(&jpg)..], b"\0\0\0\0SEFH\0\0\0\0SEFT"].concat();
+        assert_eq!(strip_for_send("jpg", samsung.clone()).unwrap(), alone, "Samsung");
+        // The photo path converts it, and the decode keeps only pixels.
+        for d in [jpg, samsung] {
+            let (webp, ..) = crate::node::image_convert::convert_to_webp_with_quality(&d, Default::default()).expect("converts");
+            assert!(!holds(&webp, LOCATION) && !holds(&webp, b"ftyp"));
+        }
+    }
+
+    /// A HEIC or JPEG without a clip strips to the bytes it gave before
+    /// HOL-SEC-308 (digests taken on 539f05d5).
+    #[test]
+    fn a_photo_without_a_clip_strips_as_before() {
+        let digest = |ext: &str, d: Vec<u8>| hex::encode(<sha2::Sha256 as sha2::Digest>::digest(strip_for_send(ext, d).unwrap()));
+        let heic = fixture("motion_photo.heic");
+        let jpg = fixture("motion_photo.jpg");
+        let got = (digest("heic", motion_parts(&heic).0), digest("jpg", jpg[..clip_start(&jpg)].to_vec()));
+        assert_eq!(got, ("b480913dc67850a0c51c609a9759d202c26f855161a6898907b814e3eb9af770".into(), "e3d0f3642e03fdb04b074620b3a531a70a410ceb1b7f609b60246ba703154b2e".into()));
+    }
+
+    /// A motion photo received and sent on leaves without its clip's location.
+    #[test]
+    fn a_forwarded_motion_photo_loses_its_clips_location() {
+        let dir = crate::test_tmp::tempdir().expect("tmp");
+        for name in ["motion_photo.heic", "motion_photo.jpg"] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, fixture(name)).expect("write");
+            assert!(!holds(&read_for_send(&path).expect(name), LOCATION), "{name}");
+        }
     }
 }
 
