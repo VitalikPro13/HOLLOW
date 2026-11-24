@@ -200,7 +200,7 @@ server group or subgroup never creates one while another device of its identity 
 `mls_authority::may_found_group` lets the lowest online device of ours found, and only once every
 other online device of ours asked it for a leaf there within 70 s (`MlsManager::sibling_asks`).
 Gated at the `MlsKeyPackage` arm (`founds_on_key_package`), the parked-admission lazy creation and
-`reconcile_subgroups_for_server`; a lone device founds as before. Presence-based by decision: a
+`reconcile_subgroups_for_server`; a lone device founds as before. An owner device whose own phrase recovery still owes the server its settling founds no server group at the `MlsKeyPackage` arm, even a lone one or on a sibling's package (`leaf_ask_waits_for_settling`, F5 3.3): the members hold the group. Presence-based by decision: a
 backgrounded sibling holding the group is invisible, so a rare fork remains for the heal below. An
 owner device asks its OWN siblings for its leaf first (`send_join_leaf_ask`; the Welcome-grace re-ask
 is `request_server_leaf`), and `MemberAdded` also goes to our own devices.

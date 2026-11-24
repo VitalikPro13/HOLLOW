@@ -611,6 +611,11 @@ pub(crate) fn founds_on_key_package(
                 crate::hollow_log!("[HOLLOW-MLS] No MLS group for {group_key} and not owner, skipping KeyPackage");
                 return false;
             }
+            // The members hold the group; a copy founded before our settling forks it.
+            if super::crypto_handler::leaf_ask_waits_for_settling(state, local_master) {
+                crate::hollow_log!("[HOLLOW-MLS] No copy of {group_key} here and our settling is owed, not founding one");
+                return false;
+            }
         }
     }
     may_found_here(mls, group_key, local_master, ws_room_peers)
@@ -1374,5 +1379,50 @@ mod tests {
         assert!(matches!(v(Some(Placed::Ask), Some(Placed::Removed)), Some(Verdict::Refuse(_))), "any removed leaf is refused");
         assert!(matches!(v(None, Some(Placed::Removed)), Some(Verdict::Refuse(_))), "a removal outranks a wait");
         assert!(matches!(v(Some(Placed::Ask), Some(Placed::Conflict)), Some(Verdict::Hold(_))), "a key conflict waits, never refuses");
+    }
+
+    /// F5 3.3 (review of the settled-leaf gate): while our own recovery owes an owned
+    /// server its settling, no device of ours founds a copy of the group, on a sibling's
+    /// KeyPackage either (two fresh owner devices: the lower one would found), nor
+    /// answers a member's KeyPackage request: the members hold the group, with seats our
+    /// view drops until the settling.
+    #[test]
+    fn a_leafless_owner_device_founds_and_answers_nothing_until_its_recovery_settles() {
+        use crate::crdt::hold::tests::{baseless_replica, baseless_world, view_after, LAPTOP, MEMBER, MEMBER_PHONE, OWNER};
+        use crate::crdt::testkeys::keys;
+        use crate::identity::native_identity::NativeKeypair;
+        let _g = crate::node::resolver::test_lock();
+        crate::node::resolver::clear_all();
+        let (_, log) = baseless_world();
+        let settled = baseless_replica(&log, OWNER, LAPTOP, true);
+        let mut owed = settled.clone();
+        owed.authority = view_after(false);
+        let _ = owed.rebuild_now();
+        let (master, me, _) = keys(OWNER);
+        assert!(owed.settle_owed(&me) && !settled.settle_owed(&me), "precondition: only one fold owes its settling");
+        let sid = settled.server_id.clone();
+        let (a, b) = (NativeKeypair::from_secret_bytes(&[51; 32]), NativeKeypair::from_secret_bytes(&[52; 32]));
+        let (low, high) = if a.peer_id() < b.peer_id() { (a, b) } else { (b, a) };
+        let (member, member_dev) = (keys(MEMBER).1, keys(MEMBER_PHONE).1);
+        crate::node::resolver::update_many(&me, [low.peer_id().as_str(), high.peer_id().as_str()]);
+        crate::node::resolver::update_many(&member, [member_dev.as_str()]);
+        let mut rooms = std::collections::HashMap::new();
+        rooms.insert(sid.clone(), std::collections::HashSet::from([low.peer_id(), high.peer_id(), member_dev.clone()]));
+        let mut mls = MlsManager::new(&low, &master).unwrap();
+        mls.note_sibling_ask(&sid, &high.peer_id());
+        let sibling = LeafIdentity { device: high.peer_id(), master: me.clone() };
+        let joiner = LeafIdentity { device: member_dev.clone(), master: member.clone() };
+        let founds = |s: &ServerState, l: &LeafIdentity, from_sibling: bool| founds_on_key_package(&mls, s, &sid, None, l, from_sibling, &me, &rooms);
+        assert!(founds(&settled, &sibling, true) && founds(&settled, &joiner, false), "precondition: a settled lower owner device founds");
+        assert!(!founds(&owed, &sibling, true), "the lower of two leafless owner devices founds a copy before the settling");
+        assert!(!founds(&owed, &joiner, false), "an owner device founds a copy on a member's KeyPackage before the settling");
+        let answers = |s: &ServerState, who: &str| super::super::crypto_handler::leafless_may_answer_request(&mls, s, &sid, None, &me, &rooms, who);
+        assert!(answers(&settled, &member) && answers(&settled, &me), "precondition: a settled leafless device answers its walk target and the owner");
+        assert!(!answers(&owed, &me), "a KeyPackage request is answered before the settling, even the owning identity's");
+        assert!(!answers(&owed, &member), "a member's KeyPackage request is answered before the settling");
+        let mut meeting = owed.clone();
+        meeting.server_id = crate::node::conference::conf_server_id("m");
+        assert!(!super::super::crypto_handler::leaf_ask_waits_for_settling(&meeting, &me), "a meeting never waits for a settling");
+        crate::node::resolver::clear_all();
     }
 }

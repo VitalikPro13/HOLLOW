@@ -12730,6 +12730,12 @@ async fn handle_incoming_request_inner(
                 hollow_log!("[HOLLOW-CRDT] ServerJoinRequest for unknown server {server_id}");
                 return;
             }
+            // A device whose own fold no longer counts our identity (a recovery's settling
+            // dropped us, though our own hold may never end) does not speak for the server.
+            if server_states.get(&server_id).is_some_and(|s| !s.is_member(local_peer_str)) {
+                hollow_log!("[HOLLOW-CRDT] Ignoring a join ask for {server_id}: our fold no longer counts us a member");
+                return;
+            }
 
             // ATTRIBUTION FIRST, before anything reads the joiner's identity.
             //

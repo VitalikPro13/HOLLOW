@@ -28236,7 +28236,8 @@ fn harness_fixed_sleep_budget_does_not_grow() {
     // (0.5 s; scan 1310.6 s).
     // F5 settled leaf: two absence proofs, a dropped member reading nothing posted after
     // the settling (1.0 s; scan 1311.6 s).
-    const BUDGET_MS: u64 = 1_313_600;
+    // F5 leaf round 2: the gap of F's reconnect before the settling (0.5 s; scan 1312.1 s).
+    const BUDGET_MS: u64 = 1_314_100;
 
     let src = include_str!("test_harness.rs");
     // Built from pieces so this scan does not count its own source text.
@@ -75118,6 +75119,13 @@ async fn f5sl_world(tags: [u8; 6], secret: bool) -> F5sl {
 /// restores the server from the checkpoint the members hold (the fleet tapped that
 /// point). Returns F once J and F folded the settling, which drops K.
 async fn f5sl_restore(w: &F5sl, tags: (u8, u8)) -> TestNode {
+    let f = f5sl_offered(w, tags).await;
+    f5sl_choose(w, &f).await;
+    f
+}
+
+/// [`f5sl_restore`] up to F's chooser offering the checkpoint, nothing chosen yet.
+async fn f5sl_offered(w: &F5sl, tags: (u8, u8)) -> TestNode {
     let (r_tag, f_tag) = tags;
     let (j, k, sid, master) = (&w.j, &w.k, &w.sid, &w.master);
     let stored = [j, k].iter().filter_map(|n| n.store().op_seen_ms(sid).ok()).flat_map(|m| m.into_values()).max().unwrap_or(0);
@@ -75152,18 +75160,24 @@ async fn f5sl_restore(w: &F5sl, tags: (u8, u8)) -> TestNode {
     let early = recorded_key_packages(&w.relay, &f.device_id, sid);
     w.relay.set_recording(&f.device_id, false);
     assert!(early.is_empty(), "F handed out {} KeyPackage(s) before its settling", early.len());
+    f
+}
+
+/// F picks the checkpoint; returns once J and F folded the settling, which drops K.
+async fn f5sl_choose(w: &F5sl, f: &TestNode) {
+    let (j, k, sid) = (&w.j, &w.k, &w.sid);
+    let point = hex::encode(w.cp);
     let (reply, rx) = tokio::sync::oneshot::channel();
     f.cmd_tx.send(NodeCommand::ChooseRestore { server_id: sid.clone(), cp: Some(point), reply }).await.unwrap();
     rx.await.expect("an answer").expect("the choice is taken");
     let j_master = j.master_id.as_str();
     assert!(
-        wait_until(40, async || pr_f5_settled(j, sid, &[j_master]).await && pr_f5_settled(&f, sid, &[j_master]).await).await,
+        wait_until(40, async || pr_f5_settled(j, sid, &[j_master]).await && pr_f5_settled(f, sid, &[j_master]).await).await,
         "the settling never reached J and F",
     );
-    for n in [j, &f] {
+    for n in [j, f] {
         assert!(n.live_server_state(sid).await.is_some_and(|s| !s.is_member(&k.master_id)), "the settling on the checkpoint keeps K (the residual changed)");
     }
-    f
 }
 
 /// Fleet F5 (Nov 24): F restores the owner's server from a checkpoint that predates K's
@@ -75227,4 +75241,197 @@ async fn pr_f5_a_dropped_member_loses_its_restricted_channel_leaf_too() {
     }
     assert_ne!(k.mls_epoch_state(&sub).await, j.mls_epoch_state(&sub).await, "K still holds J's epoch of the subgroup");
     drop((f, w));
+}
+
+// f5-leaf-r2
+/// F5 3.3, the answer path: a member coordinating the group asks an unseated member
+/// device for its KeyPackage on every PeerJoined (`MlsKeyPackageRequest`). A reconnect
+/// of F before its settling must hand J no package (H1b waits as the walk does), or the
+/// treadmill's first step is back.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn rev_leaf_a_reconnect_before_the_settling_hands_no_member_a_key_package() {
+    let _g = test_guard();
+    let w = f5sl_world([231, 232, 233, 234, 235, 236], false).await;
+    let (j, k, sid, master) = (&w.j, &w.k, &w.sid, &w.master);
+    let (r_tag, f_tag) = (234u8, 237u8);
+    let stored = [j, k].iter().filter_map(|n| n.store().op_seen_ms(sid).ok()).flat_map(|m| m.into_values()).max().unwrap_or(0);
+    assert!(wait_until(5, async || crate::crdt::hlc::wall_clock_ms() > stored).await);
+    let t_ms = crate::crdt::hlc::wall_clock_ms() as i64;
+    for n in [&w.d1, &w.d2] {
+        w.relay.set_online(&n.device_id, false);
+    }
+    let f = spawn_node_staged_at(&w.relay, master.clone(), f_tag, &[], |st, db, pass| {
+        let sign = crate::api::roster::RestoreSign::Recover { lost_since_ms: t_ms, no_wait: true };
+        crate::api::roster::sign_restore(master, &tag_kp(f_tag), &tag_kp(r_tag), sign, db, pass).expect("the restore signs");
+        let mark = super::phrase_restore::Mark { at_ms: super::roster_book::now_ms(), branch: super::phrase_restore::Branch::Recover, empty: true, device: tag_kp(f_tag).peer_id() };
+        super::phrase_restore::write(st, &mark).expect("the mark");
+    })
+    .await;
+    pr_f5_readd(&f, &[&j.master_id, &k.master_id]).await;
+    assert!(pr_f5_back(&f, sid, 60).await, "precondition: F holds the server again and restores it");
+    let m_id = master.peer_id();
+    assert!(
+        wait_until(30, async || f.live_server_state(sid).await.is_some_and(|s| s.is_member(&j.master_id) && s.settle_owed(&m_id))).await,
+        "precondition: F's fold lists J and its settling is owed",
+    );
+    w.relay.set_recording(&f.device_id, true);
+    // J takes the cut-off devices' leaves out, so the owner holds no leaf in J's tree.
+    expect_no_mls_leaf(j, sid, &w.d1.device_id, 30).await;
+    expect_no_mls_leaf(j, sid, &w.d2.device_id, 30).await;
+    assert!(recorded_key_packages(&w.relay, &f.device_id, sid).is_empty(), "precondition: the walk gate holds before the reconnect");
+    // One ordinary reconnect of F (a mobile resume, a Wi-Fi drop).
+    w.relay.set_online(&f.device_id, false);
+    sleep_ms(500).await;
+    w.relay.set_online(&f.device_id, true);
+    let leaked = wait_until(30, async || !recorded_key_packages(&w.relay, &f.device_id, sid).is_empty()).await;
+    let still_owed = f.live_server_state(sid).await.is_some_and(|s| s.settle_owed(&m_id));
+    assert!(still_owed, "precondition: nothing settled meanwhile");
+    assert!(
+        !leaked,
+        "F handed out {} KeyPackage(s) before its settling, answering a member's MlsKeyPackageRequest",
+        recorded_key_packages(&w.relay, &f.device_id, sid).len(),
+    );
+    drop((f, w));
+}
+
+/// F5 3.3, the founding path: while the walk waits for the settling F is a leafless
+/// owner device with no sibling online. A member admitted meanwhile walks to the owner
+/// first, and F must not found a second copy of the group the members hold.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn rev_leaf_a_member_admitted_before_the_settling_never_makes_the_owner_found_a_second_group() {
+    let _g = test_guard();
+    let w = f5sl_world([241, 242, 243, 244, 245, 246], false).await;
+    let (j, k, sid, master) = (&w.j, &w.k, &w.sid, &w.master);
+    let (r_tag, f_tag, n_tag) = (244u8, 247u8, 248u8);
+    let stored = [j, k].iter().filter_map(|n| n.store().op_seen_ms(sid).ok()).flat_map(|m| m.into_values()).max().unwrap_or(0);
+    assert!(wait_until(5, async || crate::crdt::hlc::wall_clock_ms() > stored).await);
+    let t_ms = crate::crdt::hlc::wall_clock_ms() as i64;
+    for n in [&w.d1, &w.d2] {
+        w.relay.set_online(&n.device_id, false);
+    }
+    let f = spawn_node_staged_at(&w.relay, master.clone(), f_tag, &[], |st, db, pass| {
+        let sign = crate::api::roster::RestoreSign::Recover { lost_since_ms: t_ms, no_wait: true };
+        crate::api::roster::sign_restore(master, &tag_kp(f_tag), &tag_kp(r_tag), sign, db, pass).expect("the restore signs");
+        let mark = super::phrase_restore::Mark { at_ms: super::roster_book::now_ms(), branch: super::phrase_restore::Branch::Recover, empty: true, device: tag_kp(f_tag).peer_id() };
+        super::phrase_restore::write(st, &mark).expect("the mark");
+    })
+    .await;
+    pr_f5_readd(&f, &[&j.master_id, &k.master_id]).await;
+    assert!(pr_f5_back(&f, sid, 60).await, "precondition: F holds the server again and restores it");
+    let m_id = master.peer_id();
+    assert!(
+        wait_until(30, async || f.live_server_state(sid).await.is_some_and(|s| s.is_member(&j.master_id) && s.settle_owed(&m_id))).await,
+        "precondition: F's fold lists J and its settling is owed",
+    );
+    // A new member joins, on the key in force at J and F, while the owner's settling is owed.
+    assert!(
+        wait_until(30, async || { let fk = live_join_key(&f, sid).await; fk.is_some() && fk == live_join_key(j, sid).await }).await,
+        "precondition: F and J hold one invite key",
+    );
+    let key = live_join_key(&f, sid).await;
+    let n = spawn_node_with_friends(&w.relay, n_tag, n_tag, &[&m_id]).await;
+    n.cmd_tx
+        .send(NodeCommand::JoinServer { server_id: sid.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: key })
+        .await
+        .unwrap();
+    let joined = wait_until(40, async || f.live_server_state(sid).await.is_some_and(|s| s.is_member(&n.master_id))).await;
+    assert!(joined, "precondition: F's fold lists the new member");
+    // Its walk asks the owner first; F must not found a group of its own meanwhile.
+    let founded = wait_until(40, async || f.mls_epoch(sid).await.is_some()).await;
+    let still_owed = f.live_server_state(sid).await.is_some_and(|s| s.settle_owed(&m_id));
+    assert!(still_owed, "precondition: nothing settled meanwhile");
+    assert!(
+        !founded,
+        "F, leafless before its settling, holds a group of its own (epoch {:?}, leaves {:?}) while J holds the members' (epoch {:?}, leaves {:?})",
+        f.mls_epoch(sid).await, f.mls_members_checked(sid).await, j.mls_epoch(sid).await, j.mls_members_checked(sid).await,
+    );
+    drop((n, f, w));
+}
+
+/// A member a settling dropped (K, the fleet's ghost server) can write no leave there:
+/// its fold no longer counts it, and only a member authors (its own recovery hold never
+/// ends, since the settling goes only to the settled state's members). Its leave drops the
+/// server here with no op: gone from the node and the store, after a restart too. A
+/// member's leave still writes its op: J's reaches the owner.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn f5lr_a_member_a_settling_dropped_leaves_the_server_without_an_op() {
+    let _g = test_guard();
+    let k_tag = 186u8;
+    let w = f5sl_world([181, 182, 183, 184, 185, k_tag], false).await;
+    let f = f5sl_restore(&w, (184, 187)).await;
+    let (j, k, sid) = (&w.j, &w.k, w.sid.clone());
+    let k_master = k.master_id.clone();
+    let stored = |n: &TestNode| n.store().load_all_servers().unwrap_or_default().into_iter().any(|(s, _)| s == sid);
+    assert!(
+        wait_until(30, async || k.live_server_state(&sid).await.is_some_and(|s| !s.is_member(&k_master))).await,
+        "precondition: K's fold no longer counts K: {:?}",
+        f5lr_view(k, &sid).await,
+    );
+    k.cmd_tx.send(NodeCommand::LeaveServer { server_id: sid.clone() }).await.unwrap();
+    assert!(wait_until(20, async || k.live_server_state(&sid).await.is_none()).await, "K keeps a server the settling dropped it from");
+    assert!(wait_until(10, async || !stored(k)).await, "K's stored server outlived its leave");
+    // A member's leave is the signed op, never the silent drop.
+    j.cmd_tx.send(NodeCommand::LeaveServer { server_id: sid.clone() }).await.unwrap();
+    assert!(
+        wait_until(30, async || f.live_server_state(&sid).await.is_some_and(|s| !s.is_member(&j.master_id))).await,
+        "J, a member, left without its leave op reaching the owner",
+    );
+    let F5sl { relay, master: _m, d1: _d1, d2: _d2, j: _j, k, sid: _s, cp: _cp, secret: _sec, _tmp } = w;
+    let k = restart_node(&relay, k, k_tag, k_tag).await;
+    let back = wait_until(10, async || k.live_server_state(&sid).await.is_some()).await;
+    assert!(!back && !stored(&k), "the server K left came back after a restart");
+    drop((k, f, relay, _tmp));
+}
+
+/// A device whose own fold no longer counts its identity (K, dropped by the settling) does
+/// not speak for the server: with the members it could defer to away, a newcomer's ask on
+/// the invite link from before the recovery (which K still opens, and refused in the
+/// fleet as `invite_reset`) gets neither an answer nor a join resolution from K.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn f5lr_a_member_a_settling_dropped_answers_no_join_ask() {
+    let _g = test_guard();
+    let w = f5sl_world([191, 192, 193, 194, 195, 196], false).await;
+    let f = f5sl_restore(&w, (194, 197)).await;
+    let (j, k, sid) = (&w.j, &w.k, &w.sid);
+    let k_master = k.master_id.clone();
+    assert!(
+        wait_until(30, async || k.live_server_state(sid).await.is_some_and(|s| !s.is_member(&k_master))).await,
+        "precondition: K's fold no longer counts K: {:?}",
+        f5lr_view(k, sid).await,
+    );
+    let key = invite_key(sid);
+    assert!(live_join_key(&f, sid).await.is_some_and(|k| Some(k) != key), "precondition: the settling set a new invite key");
+    for n in [j, &f] {
+        w.relay.set_online(&n.device_id, false);
+    }
+    w.relay.start_wiretap();
+    let m_id = w.master.peer_id();
+    let n = spawn_node_with_friends(&w.relay, 198, 198, &[&m_id]).await;
+    n.cmd_tx
+        .send(NodeCommand::JoinServer { server_id: sid.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: key })
+        .await
+        .unwrap();
+    let k_dev = k.device_id.clone();
+    let answered = wait_until(20, async || {
+        w.relay.wiretap().frames.iter().any(|fr| {
+            fr.from == k_dev
+                && fr.room == *sid
+                && (fr.to.as_deref() == Some(n.device_id.as_str()) || fr.topic.as_deref().is_some_and(|t| t.ends_with(super::types::JOIN_TOPIC)))
+        })
+    })
+    .await;
+    assert!(!answered, "K, dropped by the settling, answered a join ask for the server");
+    drop((n, f, w));
+}
+
+/// How `n`'s fold of `sid` places its own identity: (member, kept, seated, in recovery, settled base).
+async fn f5lr_view(n: &TestNode, sid: &str) -> Option<(bool, bool, bool, bool, bool)> {
+    let me = n.master_id.clone();
+    n.live_server_state(sid).await.map(|s| {
+        (s.is_member(&me), s.keeps_peer(&me), s.seats_peer(&me), s.in_recovery(), s.base.as_ref().is_some_and(|b| b.state.cp_settles.is_some()))
+    })
 }

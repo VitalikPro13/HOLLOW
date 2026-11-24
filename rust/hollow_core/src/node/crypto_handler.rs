@@ -2284,8 +2284,12 @@ fn leaf_ask_target_in(
 /// (PHRASE_RESTORE_F5 3.3): members keep seats our view drops until then (8.8), so a
 /// leaf they seat us in names a member we would refuse to join beside, and each re-ask
 /// would cost an epoch. A leafless device of ours asks no member until it settles.
+/// It also holds our answers to KeyPackage requests and our founding of the group on
+/// any KeyPackage, a sibling's too. Never a meeting: no fold settles there.
 pub(crate) fn leaf_ask_waits_for_settling(server: &crate::crdt::server_state::ServerState, local_master: &str) -> bool {
-    server.current_owner().as_deref() == Some(local_master) && server.settle_owed(local_master)
+    !super::conference::is_conference_sid(&server.server_id)
+        && server.current_owner().as_deref() == Some(local_master)
+        && server.settle_owed(local_master)
 }
 
 /// Send our server-group KeyPackage to the next member of the walk. Outside a Legacy
@@ -3872,6 +3876,10 @@ pub(crate) fn leafless_may_answer_request(
     }
     match channel_id {
         None => {
+            // A member's Welcome before our settling would seat a leaf our view drops.
+            if leaf_ask_waits_for_settling(state, local_peer) {
+                return false;
+            }
             mls.lead.settle_walk(server_id, super::standing::membership_span(state, local_peer));
             let target = mls
                 .lead

@@ -3397,6 +3397,21 @@ pub(crate) async fn handle_leave_server(
             return deny(event_tx, "You own this server, so you can't leave it, only delete it.").await;
         }
 
+        // A settling that dropped us leaves a fold that no longer counts us, where our own
+        // rules refuse any leave op (only a member authors), so we drop the server here
+        // alone: nobody can be told. A member always writes its leave.
+        if !state.is_member(local_peer_str) {
+            hollow_log!("[HOLLOW-CRDT] Our fold of {server_id} no longer counts us: dropping it here without a leave op");
+            if let Some(mls_mgr) = mls {
+                mls_mgr.remove_group(&server_id);
+                for cid in state.subgroup_channel_ids() {
+                    mls_mgr.remove_group(&crate::crypto::subgroup_id(&server_id, &cid));
+                }
+                persist_mls_state(mls_mgr, crypto_store);
+            }
+            return drop_left_server(server_states, event_tx, ws_cmd_tx, crdt_store, leave_book, server_id).await;
+        }
+
         hollow_log!("[HOLLOW-CRDT] Leaving server {server_id}");
         // Collect broadcast targets BEFORE apply_op removes us.
         let targets = other_member_targets(state, local_peer_str);
@@ -3442,6 +3457,19 @@ pub(crate) async fn handle_leave_server(
         }
     }
 
+    drop_left_server(server_states, event_tx, ws_cmd_tx, crdt_store, leave_book, server_id).await
+}
+
+/// The local half of a leave: the state, its room (unless a leave still to hand on keeps
+/// it) and its stored rows go, and the UI drops the server.
+async fn drop_left_server(
+    server_states: &mut HashMap<String, ServerState>,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    crdt_store: &CrdtStore,
+    leave_book: &super::leave_book::LeaveBook,
+    server_id: String,
+) -> bool {
     server_states.remove(&server_id);
     if !leave_book.holds_room(&server_id) {
         let _ = ws_cmd_tx.send(super::ws_client::WsCommand::LeaveRoom {

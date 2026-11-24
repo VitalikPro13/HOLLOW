@@ -328,7 +328,36 @@ Steps:
   every minute until F's identity spent its repair budget, and after the settling J left
   its sweep of K's leaf to the owner because F's never-joined leaf sat in J's tree. Waiting
   for the settling gives ONE commit that takes K out and seats F. Until then F reads the
-  members' posts through the Olm copy to leafless members.
+  members' posts through the Olm copy to leafless members. The same wait closes the two
+  other ways F could get or make a leaf before the settling (review of fb1a1b274): F
+  answers no member's `MlsKeyPackageRequest` for the server group
+  (`leafless_may_answer_request`; a coordinating member asks on every PeerJoined, so one
+  reconnect handed J a package), and no device of ours founds the server group on any
+  KeyPackage (`founds_on_key_package`; a member admitted meanwhile walks to the owner
+  first, and a fresh F that links a phone P before choosing has two leafless owner devices
+  asking each other, the lower of which would found). Siblings are still asked. Meetings
+  never wait (no fold).
+- Known cost: on a Welcome restore the wait holds for every owned server until the person
+  picks in the chooser (the settling needs that choice), and in WaitingForMember it holds
+  until a member who remembers a point answers. A restart keeps the wait (`settle_owed`
+  is read from the stored ops) but forgets an in-memory choice not yet settled. Meanwhile F
+  holds no server-group leaf: no voice SFrame key (no voice channels), no restricted-channel
+  subgroup leaf, and its posts and the members' reach each other only through the Olm
+  copies to leafless devices. How the person reaches the chooser: it opens by itself once
+  after a "Yes, or I'm not sure" phrase restore; a later start offers it again only while
+  a server waits for a pick; Home shows a row ("{server} can't be restored yet", button
+  "View") only in WaitingForMember; otherwise Settings > Security > Recovery > "Restore
+  your servers" > Open.
+- The member the settling drops (K, fleet F5b): the settling goes only to the settled
+  state's members, so K never folds it; K's fold no longer counts K while K's own recovery
+  hold stays open and seats it (the harness shows member false, seated true, in recovery,
+  for good). So K answers no join ask for the server while its fold does not count it (it
+  was refusing newcomers as `invite_reset` and publishing that), and its Leave, which only
+  a member may author, drops the server on that device with no op (R-CR-19). 0.15: tell a
+  dropped member its settling so its hold ends and the ghost goes without a Leave.
+- 0.15 idea, not built: narrow the wait to the servers where it matters, for example only
+  while a witness keeps a member our fold drops (the members' 8.8 KEEP set is non-empty
+  for us), so an owner whose members all sit in its fold gets its leaf at once.
 
 ## 4. The invite key after a recovery (findings 3, 4; Q1)
 
