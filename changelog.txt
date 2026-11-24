@@ -1,3 +1,58 @@
+v0.14.3 - Phrase Restore, Phone Servers, System Calls & Sticker Previews
+
+No breaking changes, so 0.14.2 and 0.14.3 work together. Self-hosters, update your relay too, so access-key seats come back when a device disconnects, a members-only relay stays shut while its key file cannot be read, and the ready-made relay now also runs on Ubuntu 26.10.
+
+SECURITY
+
+- Important security fixes for your own devices, account recovery, servers after a recovery and media files you send
+- Photos and videos you send also lose the location kept in motion photo clips, fragmented videos and Samsung's extra data
+
+RECOVERY
+
+- You can restore your account from its recovery phrase on the Welcome screen (#155)
+- Home shows what a phrase restore brings back by itself and what needs an invite link
+- You get the servers you own back after a recovery, and their old invite links stop working
+- Home points to each restored server still waiting for you to pick how it looked
+
+PHONES
+
+- Servers have their own tab and page on phones (#154)
+- Calls start on the speaker, and a setting switches voice calls back to the earpiece
+- Android shows DM calls to the system, so they appear on the lock screen and in headsets, watches and cars
+- DM calls on iPhone use the system call screen
+- Android call notifications show your friend's avatar, with Hang up, Speaker and Mute
+- Fixed Android calls falling back to the earpiece, and the Ongoing call notification staying after a call
+- The DM mute bell is now in the profile sheet
+- Switching relays on a phone no longer hangs or leaves Hollow on the old relay
+
+VOICE & CALLS
+
+- Undeafening brings your mic back as it was, and Unmute while deafened also undeafens
+- Calls show Unstable connection, Reconnecting or Connection lost instead of Weak connection
+
+MESSAGES
+
+- Hold a sticker, GIF, emote or emoji in the picker to preview it (#159)
+- Fixed the chat scrollbar resizing and flickering in a voice room's chat (#158)
+
+PROFILES
+
+- Name colors you pick show exactly as picked unless hard to read, and the editor says when one was changed (#140)
+
+SERVERS
+
+- Two categories with the same name no longer fold together on desktop
+
+SELF-HOSTING
+
+- The relay setup also works on Ubuntu 25.10 to 26.10, and the ready-made relay now brings its own libsodium so it runs there too
+- A members-only relay gives each access-key seat back when its connection closes, and stays shut while its key file cannot be read
+- Hollow says Access key full when a relay's key has no seat left, and lets you enter another key
+
+MACOS, IOS & LINUX
+
+- Fixed a rare crash at startup when many connections open at once
+
 v0.14.2 - Name Colors Everywhere, File Paste, DM Catch-Up & Safer Updates
 
 No breaking changes, so 0.14.1 and 0.14.2 work together. Self-hosters, update your relay too, so its online figure counts people, its setup works on Linux Mint and similar systems, and TURN follows a changed public address.

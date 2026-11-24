@@ -20,6 +20,11 @@
   <launchable type="desktop-id">com.anonlisten.Hollow.desktop</launchable>
   <content_rating type="oars-1.1" />
   <releases>
+    <release version="0.14.3" date="2026-11-24">
+      <description>
+        <p>Phrase restore, phone servers, system calls and sticker previews</p>
+      </description>
+    </release>
     <release version="0.14.2" date="2026-11-21">
       <description>
         <p>Name colors everywhere, file paste, DM catch-up and safer updates</p>

@@ -59,10 +59,10 @@ If you find a vulnerability, please report it privately as described in [SECURIT
 
 | Platform | Links |
 |----------|------|
-| Windows (10+) | [.exe](https://anonlisten.com/hollow/releases/hollow-0.14.2-win64-setup.exe) / [.zip](https://anonlisten.com/hollow/releases/hollow-0.14.2-win64.zip) |
-| macOS (12+) | [.dmg](https://anonlisten.com/hollow/releases/hollow-0.14.2.dmg) |
-| Linux | [Flatpak](https://anonlisten.com/hollow/releases/hollow-0.14.2-linux-x86_64.flatpak) / [.tar.gz](https://anonlisten.com/hollow/releases/hollow-0.14.2-linux.tar.gz) |
-| Android (7+) | [.apk](https://anonlisten.com/hollow/releases/hollow-0.14.2-android.apk) |
+| Windows (10+) | [.exe](https://anonlisten.com/hollow/releases/hollow-0.14.3-win64-setup.exe) / [.zip](https://anonlisten.com/hollow/releases/hollow-0.14.3-win64.zip) |
+| macOS (12+) | [.dmg](https://anonlisten.com/hollow/releases/hollow-0.14.3.dmg) |
+| Linux | [Flatpak](https://anonlisten.com/hollow/releases/hollow-0.14.3-linux-x86_64.flatpak) / [.tar.gz](https://anonlisten.com/hollow/releases/hollow-0.14.3-linux.tar.gz) |
+| Android (7+) | [.apk](https://anonlisten.com/hollow/releases/hollow-0.14.3-android.apk) |
 | iOS (15+) | [App Store](https://apps.apple.com/app/id6777748033) |
 
 What changed in each version is on the [releases page](https://github.com/VitalikPro13/HOLLOW/releases).
