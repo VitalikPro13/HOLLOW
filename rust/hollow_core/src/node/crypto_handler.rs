@@ -2280,6 +2280,14 @@ fn leaf_ask_target_in(
     super::standing::next_walk_target(&order, &mls.lead.walk_asked(server_id))
 }
 
+/// Whether our identity owns `server` and our own recovery still owes it its settling
+/// (PHRASE_RESTORE_F5 3.3): members keep seats our view drops until then (8.8), so a
+/// leaf they seat us in names a member we would refuse to join beside, and each re-ask
+/// would cost an epoch. A leafless device of ours asks no member until it settles.
+pub(crate) fn leaf_ask_waits_for_settling(server: &crate::crdt::server_state::ServerState, local_master: &str) -> bool {
+    server.current_owner().as_deref() == Some(local_master) && server.settle_owed(local_master)
+}
+
 /// Send our server-group KeyPackage to the next member of the walk. Outside a Legacy
 /// server every target of one pass gets the same package, so two of them can never seat
 /// us twice; a new pass mints a fresh one. True when a KeyPackage reached a device.
@@ -2305,6 +2313,10 @@ pub(crate) fn walk_leaf_ask(
             mls.lead.keep_walk_package(server_id, kp, span);
         }
     };
+    if leaf_ask_waits_for_settling(server, local_master) {
+        park(&mut minted);
+        return false;
+    }
     // A target the relay's copy does not confirm counts as asked and the next one is
     // tried, within one pass.
     for _ in 0..=server.members.len() {

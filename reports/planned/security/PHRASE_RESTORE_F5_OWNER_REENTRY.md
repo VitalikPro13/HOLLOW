@@ -321,6 +321,14 @@ Steps:
   settling, as in revision 1 until F was back; its lock links are dead at the relay
   already (`join_lock.h` 199-207), so it moves nothing.
 - MLS: once members fold the settling, F is a leafless member and the walk seats it.
+  F asks nobody before that (`crypto_handler::leaf_ask_waits_for_settling`: we own the
+  server and `settle_owed`). Fleet F5 (Nov 24) showed why: on the keyed path F's fold drops
+  a member D1 admitted past the checkpoint (K) while J's 8.8 hold keeps K, so J's Welcome
+  seated K, F's judge held it (rightly), the held Welcome lapsed into a remove + re-add of F
+  every minute until F's identity spent its repair budget, and after the settling J left
+  its sweep of K's leaf to the owner because F's never-joined leaf sat in J's tree. Waiting
+  for the settling gives ONE commit that takes K out and seats F. Until then F reads the
+  members' posts through the Olm copy to leafless members.
 
 ## 4. The invite key after a recovery (findings 3, 4; Q1)
 

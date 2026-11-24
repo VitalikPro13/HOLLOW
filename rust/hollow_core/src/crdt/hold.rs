@@ -1791,6 +1791,22 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_leafless_owner_device_asks_members_for_a_leaf_only_once_its_recovery_settles() {
+        use crate::node::crypto_handler::leaf_ask_waits_for_settling as waits;
+        let (_, log) = baseless_world();
+        let mut laptop = baseless_replica(&log, OWNER, LAPTOP, true);
+        let owner = keys(OWNER).1;
+        assert!(!waits(&laptop, &owner), "an owner whose devices all count asks at once");
+        laptop.authority = view_after(false);
+        let _ = laptop.rebuild_now();
+        assert!(laptop.settle_owed(&owner), "precondition: the phone proved ops of ours nothing settled");
+        assert!(waits(&laptop, &owner), "members still keep seats this fold drops until the settling");
+        let mut not_ours = laptop.clone();
+        not_ours.roles.remove(&owner);
+        assert!(!waits(&not_ours, &owner), "only the identity owning the server waits; nobody else's settling reaches members' holds");
+    }
+
+    #[test]
     fn a_restart_judges_the_base_trigger_against_the_saved_base() {
         let w = world();
         let m = member_of(&w, MEMBER, MEMBER_PHONE, true);

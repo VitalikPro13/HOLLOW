@@ -28234,7 +28234,9 @@ fn harness_fixed_sleep_budget_does_not_grow() {
     // checkpoint and in-app key tests (3.9 s; scan 1310.1 s).
     // F5 review fix round: the retire test's wait for the leaves to reach the remover
     // (0.5 s; scan 1310.6 s).
-    const BUDGET_MS: u64 = 1_312_600;
+    // F5 settled leaf: two absence proofs, a dropped member reading nothing posted after
+    // the settling (1.0 s; scan 1311.6 s).
+    const BUDGET_MS: u64 = 1_313_600;
 
     let src = include_str!("test_harness.rs");
     // Built from pieces so this scan does not count its own source text.
@@ -75035,4 +75037,194 @@ async fn rev_f5c_fix_a_stale_friends_keyed_entry_does_not_block_a_members_keyles
     assert!(!moved && j_sees && k_sees, "F's lock hid the members in their own room while the owner restores: moved {moved}, J {j_sees}, K {k_sees}");
     assert!(pr_f5_back(&f, &sid, 60).await, "the restore registers once it may");
     drop((d1, j, k, f));
+}
+
+// f5-settled-leaf
+/// What [`f5sl_world`] sets up: J admitted before D1's only checkpoint, K after it.
+struct F5sl {
+    relay: MockRelay,
+    master: NativeKeypair,
+    d1: TestNode,
+    d2: TestNode,
+    j: TestNode,
+    k: TestNode,
+    sid: String,
+    cp: [u8; 32],
+    /// The restricted channel J (and later K) moderate, when asked for.
+    secret: Option<String>,
+    _tmp: crate::test_tmp::TestDir,
+}
+
+/// The fleet's S2: the owner's phone D1 checkpoints the server listing J, then admits K.
+/// With `secret`, D1 first makes J a moderator of a moderators-only channel (in the
+/// checkpoint), then K a moderator after it, so both hold that channel's subgroup leaf.
+async fn f5sl_world(tags: [u8; 6], secret: bool) -> F5sl {
+    let [m_tag, d1_tag, d2_tag, r_tag, j_tag, k_tag] = tags;
+    let m_id = tag_kp(m_tag).peer_id();
+    let early_off = |on: bool| {
+        let mut set = crate::crdt::fold::EARLY_OFF_OWNERS.lock().unwrap_or_else(|e| e.into_inner());
+        if on { set.insert(m_id.clone()); } else { set.remove(&m_id); }
+    };
+    if secret {
+        early_off(true);
+    }
+    let W3c1Cut { relay, master, d1, d2, j, server_id: sid, _tmp } = w3c1_cut_server_with([m_tag, d1_tag, d2_tag, r_tag, j_tag], None, false).await;
+    let (j_master, k_master) = (j.master_id.clone(), tag_kp(k_tag).peer_id());
+    let make_mod = async |m: &str| {
+        d1.cmd_tx.send(NodeCommand::ChangeRole { server_id: sid.clone(), peer_id: m.to_string(), new_role: "moderator".into() }).await.unwrap();
+        assert!(wait_until(20, async || j.live_role(&sid, m).await == crate::crdt::operations::MemberRole::Moderator).await, "precondition: {m} is a moderator");
+    };
+    let mut cid = None;
+    if secret {
+        make_mod(&j_master).await;
+        let id = crate::node::new_channel_id(&sid);
+        d1.cmd_tx
+            .send(NodeCommand::CreateChannel { server_id: sid.clone(), channel_id: id.clone(), name: "secret".into(), category: None, channel_type: "text".into() })
+            .await
+            .unwrap();
+        assert!(wait_until(20, async || j.live_server_state(&sid).await.is_some_and(|s| s.channels.contains_key(&id))).await, "precondition: J holds the channel");
+        d1.cmd_tx.send(NodeCommand::SetChannelVisibility { server_id: sid.clone(), channel_id: id.clone(), visibility: "moderator".into() }).await.unwrap();
+        expect_mls_leaf(&j, &crate::crypto::subgroup_id(&sid, &id), &j.device_id, 40).await;
+        cid = Some(id);
+        early_off(false);
+    }
+    let base_of = async |n: &TestNode| {
+        n.live_server_state(&sid).await.and_then(|s| {
+            s.base
+                .as_ref()
+                .filter(|b| b.state.is_member(&j_master) && cid.as_ref().is_none_or(|c| b.state.can_see_channel(&j_master, c)))
+                .map(|b| (b.hash, b.state.is_member(&k_master)))
+        })
+    };
+    assert!(wait_until(60, async || base_of(&j).await.is_some()).await, "precondition: D1's first checkpoint lists J");
+    let cp = base_of(&j).await.unwrap().0;
+    let k = spawn_node_with_friends(&relay, k_tag, k_tag, &[&m_id]).await;
+    k.cmd_tx
+        .send(NodeCommand::JoinServer { server_id: sid.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&sid) })
+        .await
+        .unwrap();
+    assert!(wait_until(30, async || j.live_server_state(&sid).await.is_some_and(|s| s.is_member(&k_master))).await, "precondition: K joined");
+    expect_mls_leaf(&j, &sid, &k.device_id, 30).await;
+    expect_mls_leaf(&k, &sid, &j.device_id, 30).await;
+    if let Some(c) = &cid {
+        make_mod(&k_master).await;
+        expect_mls_leaf(&j, &crate::crypto::subgroup_id(&sid, c), &k.device_id, 60).await;
+    }
+    assert_eq!(base_of(&j).await, Some((cp, false)), "precondition: K's admission is past the only checkpoint");
+    F5sl { relay, master, d1, d2, j, k, sid, cp, secret: cid, _tmp }
+}
+
+/// The phrase cuts D1 and D2 off after everything J and K stored; F, a fresh install,
+/// restores the server from the checkpoint the members hold (the fleet tapped that
+/// point). Returns F once J and F folded the settling, which drops K.
+async fn f5sl_restore(w: &F5sl, tags: (u8, u8)) -> TestNode {
+    let (r_tag, f_tag) = tags;
+    let (j, k, sid, master) = (&w.j, &w.k, &w.sid, &w.master);
+    let stored = [j, k].iter().filter_map(|n| n.store().op_seen_ms(sid).ok()).flat_map(|m| m.into_values()).max().unwrap_or(0);
+    assert!(wait_until(5, async || crate::crdt::hlc::wall_clock_ms() > stored).await);
+    let t_ms = crate::crdt::hlc::wall_clock_ms() as i64;
+    for n in [&w.d1, &w.d2] {
+        w.relay.set_online(&n.device_id, false);
+    }
+    let f = spawn_node_staged_at(&w.relay, master.clone(), f_tag, &[], |st, db, pass| {
+        let sign = crate::api::roster::RestoreSign::Recover { lost_since_ms: t_ms, no_wait: true };
+        crate::api::roster::sign_restore(master, &tag_kp(f_tag), &tag_kp(r_tag), sign, db, pass).expect("the restore signs");
+        let mark = super::phrase_restore::Mark { at_ms: super::roster_book::now_ms(), branch: super::phrase_restore::Branch::Recover, empty: true, device: tag_kp(f_tag).peer_id() };
+        super::phrase_restore::write(st, &mark).expect("the mark");
+    })
+    .await;
+    pr_f5_readd(&f, &[&j.master_id, &k.master_id]).await;
+    assert!(pr_f5_back(&f, sid, 60).await, "precondition: F holds the server again and restores it");
+    // Until its settling F asks no member for a leaf.
+    w.relay.set_recording(&f.device_id, true);
+    // One supporter leaves the chooser short of a pick: the person taps the point.
+    let point = hex::encode(w.cp);
+    assert!(
+        wait_until(180, async || {
+            pr_f5_restore(&f, sid).is_some_and(|r| {
+                matches!(r.stage, super::witness::Stage::Pick | super::witness::Stage::Points | super::witness::Stage::OnlyOne) && r.points.iter().any(|p| p.cp == point)
+            })
+        })
+        .await,
+        "F is never offered the checkpoint: {:?}",
+        pr_f5_restore(&f, sid).map(|r| (r.stage, r.points.iter().map(|p| (p.cp.clone(), p.named_by.clone())).collect::<Vec<_>>())),
+    );
+    let early = recorded_key_packages(&w.relay, &f.device_id, sid);
+    w.relay.set_recording(&f.device_id, false);
+    assert!(early.is_empty(), "F handed out {} KeyPackage(s) before its settling", early.len());
+    let (reply, rx) = tokio::sync::oneshot::channel();
+    f.cmd_tx.send(NodeCommand::ChooseRestore { server_id: sid.clone(), cp: Some(point), reply }).await.unwrap();
+    rx.await.expect("an answer").expect("the choice is taken");
+    let j_master = j.master_id.as_str();
+    assert!(
+        wait_until(40, async || pr_f5_settled(j, sid, &[j_master]).await && pr_f5_settled(&f, sid, &[j_master]).await).await,
+        "the settling never reached J and F",
+    );
+    for n in [j, &f] {
+        assert!(n.live_server_state(sid).await.is_some_and(|s| !s.is_member(&k.master_id)), "the settling on the checkpoint keeps K (the residual changed)");
+    }
+    f
+}
+
+/// Fleet F5 (Nov 24): F restores the owner's server from a checkpoint that predates K's
+/// admission, so the settling drops K. F asks for its leaf only once that settling is
+/// in, when J's view drops K as F's does: J takes K's leaf out and seats F in ONE
+/// commit, F joins that Welcome (no 60 s hold and re-add per minute), posts flow both
+/// ways and K reads nothing posted after the settling.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pr_f5_a_member_admitted_after_the_first_checkpoint_does_not_block_the_owners_leaf() {
+    let _g = test_guard();
+    let w = f5sl_world([201, 202, 203, 204, 205, 206], false).await;
+    let e0 = w.j.mls_epoch(&w.sid).await.expect("J's epoch before the recovery");
+    let f = f5sl_restore(&w, (204, 207)).await;
+    let (j, k, sid, f_dev) = (&w.j, &w.k, &w.sid, f.device_id.clone());
+    let general = general_channel_of(sid);
+    // Posted the moment J folds the settling, whether or not K's leaf is out yet.
+    w3c1h_post(j, &[], sid, &general, "f5sl-at-settle", &j.device_id).await;
+    expect_no_mls_leaf(j, sid, &k.device_id, 30).await;
+    expect_mls_leaf(j, sid, &f_dev, 60).await;
+    expect_mls_leaf(&f, sid, &j.device_id, 30).await;
+    w3c1h_post(j, &[&f], sid, &general, "f5sl-from-j", &j.device_id).await;
+    w3c1h_post(&f, &[j], sid, &general, "f5sl-from-f", &f_dev).await;
+    // F's ONE add: the roster change takes D1 and D2 out, then K goes and F comes in (one
+    // commit, or two when F asks before J's sweep). A held Welcome re-asked costs more.
+    let (je, fe) = (j.mls_epoch(sid).await.expect("J's epoch"), f.mls_epoch(sid).await.expect("F's epoch"));
+    assert_eq!(je, fe, "F and J agree on the group");
+    assert!(je <= e0 + 3, "F was removed and added again: epoch {e0} before the recovery, {je} now");
+    // ABSENCE: the dropped member reads nothing posted after the settling and keeps no
+    // epoch secret. Its copies of the last two posts would have landed with F's and J's.
+    sleep_ms(500).await;
+    for mid in ["f5sl-at-settle", "f5sl-from-j", "f5sl-from-f"] {
+        assert!(k.store().channel_post_proofs(&[mid]).is_empty(), "K, dropped by the settling, still reads {mid}");
+    }
+    assert_ne!(k.mls_epoch_state(sid).await, j.mls_epoch_state(sid).await, "K still holds J's epoch of the group");
+    drop((f, w));
+}
+
+/// The same drop for a member holding a restricted channel's subgroup leaf: J, the
+/// channel's other moderator and its only other leaf, takes K's subgroup leaf out at
+/// the settling, and K reads nothing posted there after it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn pr_f5_a_dropped_member_loses_its_restricted_channel_leaf_too() {
+    let _g = test_guard();
+    let w = f5sl_world([211, 212, 213, 214, 215, 216], true).await;
+    let (j, k, sid) = (&w.j, &w.k, &w.sid);
+    let secret = w.secret.clone().expect("the restricted channel");
+    let sub = crate::crypto::subgroup_id(sid, &secret);
+    let e0 = j.mls_epoch(&sub).await.expect("J's subgroup epoch before the recovery");
+    let f = f5sl_restore(&w, (214, 217)).await;
+    w3c1h_post(j, &[], sid, &secret, "f5sl-sub-at-settle", &j.device_id).await;
+    expect_no_mls_leaf(j, &sub, &k.device_id, 30).await;
+    let after = j.mls_epoch(&sub).await.expect("J's subgroup epoch");
+    assert!(after > e0, "K's subgroup leaf left without a commit");
+    w3c1h_post(j, &[], sid, &secret, "f5sl-sub-after-removal", &j.device_id).await;
+    // ABSENCE: nothing in the channel reaches K, MLS or Olm.
+    sleep_ms(500).await;
+    for mid in ["f5sl-sub-at-settle", "f5sl-sub-after-removal"] {
+        assert!(k.store().channel_post_proofs(&[mid]).is_empty(), "K, dropped by the settling, still reads {mid}");
+    }
+    assert_ne!(k.mls_epoch_state(&sub).await, j.mls_epoch_state(&sub).await, "K still holds J's epoch of the subgroup");
+    drop((f, w));
 }
