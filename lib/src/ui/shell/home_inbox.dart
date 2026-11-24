@@ -8,6 +8,19 @@ import 'package:hollow/src/core/providers/channel_navigation.dart';
 import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/chat_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
+import 'package:hollow/src/core/device_proof_copy.dart'
+    show
+        restoreWaitTitle,
+        kRestoreWaitBody,
+        kRestoreServerFallback,
+        restorePickTitle,
+        kRestorePickBody,
+        kRestorePickAction;
+import 'package:hollow/src/core/providers/device_proof_provider.dart'
+    show restoreChoicesProvider, restoreNeedsChoice;
+import 'package:hollow/src/rust/api/device_proof.dart' as dp;
+import 'package:hollow/src/ui/dialogs/restore_chooser.dart'
+    show showRestoreChooser;
 import 'package:hollow/src/core/providers/dm_navigation.dart';
 import 'package:hollow/src/core/providers/friends_provider.dart';
 import 'package:hollow/src/core/providers/home_setup_provider.dart';
@@ -80,6 +93,7 @@ abstract class HomeActions {
   void editProfile(BuildContext context);
   void openNotificationSettings(BuildContext context);
   void openDevices(BuildContext context);
+  void openSecurity(BuildContext context);
 }
 
 class DesktopHomeActions extends HomeActions {
@@ -117,6 +131,11 @@ class DesktopHomeActions extends HomeActions {
   void openDevices(BuildContext context) => openSettings(
       ProviderScope.containerOf(context, listen: false).read,
       category: SettingsCategory.devices);
+
+  @override
+  void openSecurity(BuildContext context) => openSettings(
+      ProviderScope.containerOf(context, listen: false).read,
+      category: SettingsCategory.security);
 }
 
 // ---------------------------------------------------------------------------
@@ -136,6 +155,9 @@ class _AttentionItem {
   /// Toast text when an action throws.
   final String failure;
 
+  /// The body says what to do, so it is never cut short.
+  final bool wholeBody;
+
   const _AttentionItem({
     required this.id,
     required this.leading,
@@ -146,6 +168,7 @@ class _AttentionItem {
     required this.failure,
     this.secondaryLabel,
     this.onSecondary,
+    this.wholeBody = false,
   });
 }
 
@@ -174,6 +197,8 @@ class _HomeAttentionState extends ConsumerState<HomeAttention> {
       ..._phraseItems(),
       ..._updateItems(),
       ..._pushItems(),
+      ..._restorePickItems(),
+      ..._restoreWaitItems(),
     ];
     if (items.isEmpty) return const SizedBox.shrink();
 
@@ -284,7 +309,29 @@ class _HomeAttentionState extends ConsumerState<HomeAttention> {
         deviceGivenName(id, labels: labels, kinds: kinds) ?? shortPeerLabel(id);
     return [
       for (final a in alerts)
-        if (ownDeviceAddedDetail(a) case final added?)
+        if (ownDeviceAddedDetail(a) case final added? when added.byPhrase)
+          // HOL-SEC-215: another machine typed the phrase. Only the phrase's
+          // own removal undoes that, so the item points there.
+          _AttentionItem(
+            id: 'own-device:${a.alertId}',
+            leading: _GlyphTile(LucideIcons.keyRound, size: _leadingSize),
+            title: 'A device was added with your recovery phrase',
+            // One row per device: its name and time tell two restores apart.
+            body: '${name(added.device)} joined your identity '
+                '${_addedLabel(a.createdAt.toInt())}. '
+                "If that wasn't you, someone else has your recovery phrase. "
+                'Go to Settings, under Security, and use Remove devices with '
+                'your recovery phrase.',
+            secondaryLabel: 'Dismiss',
+            onSecondary: () => ref
+                .read(securityAlertsProvider.notifier)
+                .acknowledge(a.alertId),
+            primaryLabel: 'Review',
+            onPrimary: () async => widget.actions.openSecurity(context),
+            failure: "Couldn't update the alert",
+            wholeBody: true,
+          )
+        else if (ownDeviceAddedDetail(a) case final added?)
           _AttentionItem(
             id: 'own-device:${a.alertId}',
             leading:
@@ -404,6 +451,53 @@ class _HomeAttentionState extends ConsumerState<HomeAttention> {
     ];
   }
 
+  /// Servers a phrase recovery restores that wait for the person's pick, one
+  /// row each, so a closed chooser still has a way back before the next start.
+  List<_AttentionItem> _restorePickItems() {
+    final restores = ref.watch(restoreChoicesProvider).valueOrNull;
+    if (restores == null) return const [];
+    final names = ref.watch(serverListProvider);
+    return [
+      for (final c in restores.servers)
+        if (restoreNeedsChoice(c))
+          _AttentionItem(
+            id: 'restore-pick:${c.serverId}',
+            leading: _GlyphTile(LucideIcons.history, size: _leadingSize),
+            title: restorePickTitle(
+                names[c.serverId]?.name ?? kRestoreServerFallback),
+            body: kRestorePickBody,
+            wholeBody: true,
+            primaryLabel: kRestorePickAction,
+            onPrimary: () async =>
+                showRestoreChooser(context, serverId: c.serverId),
+            failure: "Couldn't open the restore",
+          ),
+    ];
+  }
+
+  /// Servers a phrase recovery restores that no member who answered remembers:
+  /// they wait for one that does, and leave this list once a point is named.
+  List<_AttentionItem> _restoreWaitItems() {
+    final restores = ref.watch(restoreChoicesProvider).valueOrNull;
+    if (restores == null) return const [];
+    final names = ref.watch(serverListProvider);
+    return [
+      for (final c in restores.servers)
+        if (c.stage == dp.RestoreStage.waitingForMember)
+          _AttentionItem(
+            id: 'restore-wait:${c.serverId}',
+            leading: _GlyphTile(LucideIcons.hourglass, size: _leadingSize),
+            title: restoreWaitTitle(
+                names[c.serverId]?.name ?? kRestoreServerFallback),
+            body: kRestoreWaitBody,
+            wholeBody: true,
+            primaryLabel: 'View',
+            onPrimary: () async => showRestoreChooser(context),
+            failure: "Couldn't open the restore",
+          ),
+    ];
+  }
+
   /// The chosen push service is broken past its grace; gone once it heals.
   List<_AttentionItem> _pushItems() {
     final push = ref.watch(pushAttentionProvider);
@@ -512,8 +606,8 @@ class _AttentionRowState extends State<_AttentionRow> {
         ),
         Text(
           item.body,
-          maxLines: 2,
-          overflow: TextOverflow.ellipsis,
+          maxLines: item.wholeBody ? null : 2,
+          overflow: item.wholeBody ? null : TextOverflow.ellipsis,
           style: (touch ? HollowTypography.body : HollowTypography.bodySmall)
               .copyWith(color: hollow.textSecondary),
         ),

@@ -6,6 +6,7 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hollow/src/core/providers/home_setup_provider.dart';
 import 'package:hollow/src/rust/api/device_proof.dart' as dp;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -16,6 +17,7 @@ import 'package:hollow/src/ui/components/hollow_divider.dart';
 import 'package:hollow/src/ui/dialogs/restore_chooser.dart';
 import 'package:hollow/src/ui/server_settings/pages/lost_devices_page.dart';
 import 'package:hollow/src/ui/settings/settings_kit.dart';
+import 'package:hollow/src/ui/shell/home_inbox.dart';
 
 import '../helpers/device_proof_fixtures.dart';
 import '../helpers/test_app.dart';
@@ -250,6 +252,7 @@ void main() {
       dp.RestoreStage.onlyOne,
       dp.RestoreStage.waiting,
     ],
+    'waiting_for_member': [dp.RestoreStage.waitingForMember],
     'checking_nobody_done': [
       dp.RestoreStage.checking,
       dp.RestoreStage.nobodyReachable,
@@ -282,4 +285,36 @@ void main() {
               restores: after ? fixtureRestores(e.value) : null));
     });
   }
+  for (final (light, touch) in [(false, false), (true, false), (false, true)]) {
+    final label = touch ? 'phone' : (light ? 'desktop_light' : 'desktop_dark');
+    testWidgets('home restore wait $label', (tester) async {
+      await shoot(tester, 'home_restore_wait_$label',
+          paneWidth: touch ? 375 : 800,
+          height: touch ? 440 : 320,
+          light: light,
+          touch: touch,
+          pane: (_) => SingleChildScrollView(
+              padding: const EdgeInsets.all(HollowSpacing.lg),
+              child: HomeAttention(
+                  actions: touch ? const _TouchHome() : const DesktopHomeActions())),
+          overrides: (after) => [
+                homeSetupProvider.overrideWith(_SavedSetup.new),
+                ...deviceProofOverrides(
+                    restores: after
+                        ? fixtureRestores([dp.RestoreStage.waitingForMember])
+                        : null),
+              ]);
+    });
+  }
+}
+
+class _SavedSetup extends HomeSetupNotifier {
+  @override
+  HomeSetupState build() => const HomeSetupState(loaded: true, phraseSaved: true);
+}
+
+class _TouchHome extends DesktopHomeActions {
+  const _TouchHome();
+  @override
+  bool get touch => true;
 }

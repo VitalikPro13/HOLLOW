@@ -287,6 +287,17 @@ impl OpSync {
         msg
     }
 
+    /// Whether `reply` from `device` answers the round of our open digest ask for `server`.
+    pub(crate) fn answers_round(&self, server: &str, device: &str, reply: &DigestReply) -> bool {
+        self.asks.get(&(server.to_string(), device.to_string())).is_some_and(|a| a.id == reply.ask && a.round == reply.round)
+    }
+
+    /// Whether `reply` from `device` ends our open digest round with it for `server`: it
+    /// answers the round we asked and leaves no range to split.
+    pub(crate) fn ends_round(&self, server: &str, device: &str, reply: &DigestReply) -> bool {
+        self.answers_round(server, device, reply) && !reply.vector && (reply.groups.is_empty() || reply.round >= digest::MAX_ROUNDS)
+    }
+
     /// The next step for a digest answer from `device` about `state`; `epoch_now` is our
     /// MLS epoch of it.
     pub(crate) fn answered(
@@ -486,6 +497,81 @@ impl OpSync {
     pub(crate) fn open_asks(&self) -> usize {
         self.asks.len()
     }
+}
+
+/// Harness switches for a member's sync answers, per (answering device, server, asker).
+#[cfg(test)]
+#[derive(Default)]
+struct AnswerHooks {
+    muted: std::collections::HashSet<(String, String)>,
+    heard: HashMap<(String, String, String), usize>,
+    swallowed: HashMap<(String, String, String), usize>,
+    served: HashMap<(String, String, String), usize>,
+    responses: HashMap<(String, String, String), usize>,
+}
+
+#[cfg(test)]
+static ANSWER_HOOKS: std::sync::LazyLock<std::sync::Mutex<AnswerHooks>> = std::sync::LazyLock::new(Default::default);
+
+/// Harness: `device` answers no sync ask for `server` (a member gone quiet, or every
+/// answer of its lost on the way) until unmuted.
+#[cfg(test)]
+pub(crate) fn mute_answers_for_test(device: &str, server: &str, muted: bool) {
+    let mut h = ANSWER_HOOKS.lock().unwrap_or_else(|e| e.into_inner());
+    let key = (device.to_string(), server.to_string());
+    if muted {
+        h.muted.insert(key);
+    } else {
+        h.muted.remove(&key);
+    }
+}
+
+/// `device` heard `asker`'s sync ask for `server`: whether it leaves it unanswered now.
+#[cfg(test)]
+pub(crate) fn answer_muted_for_test(device: &str, server: &str, asker: &str) -> bool {
+    let mut h = ANSWER_HOOKS.lock().unwrap_or_else(|e| e.into_inner());
+    *h.heard.entry((device.to_string(), server.to_string(), asker.to_string())).or_default() += 1;
+    if !h.muted.contains(&(device.to_string(), server.to_string())) {
+        return false;
+    }
+    *h.swallowed.entry((device.to_string(), server.to_string(), asker.to_string())).or_default() += 1;
+    true
+}
+
+/// How many of `asker`'s sync asks for `server` the muted `device` left unanswered.
+#[cfg(test)]
+pub(crate) fn swallowed_for_test(device: &str, server: &str, asker: &str) -> usize {
+    ANSWER_HOOKS.lock().unwrap_or_else(|e| e.into_inner()).swallowed.get(&(device.to_string(), server.to_string(), asker.to_string())).copied().unwrap_or(0)
+}
+
+/// How many of `asker`'s sync asks for `server` reached `device`'s handler.
+#[cfg(test)]
+pub(crate) fn heard_for_test(device: &str, server: &str, asker: &str) -> usize {
+    ANSWER_HOOKS.lock().unwrap_or_else(|e| e.into_inner()).heard.get(&(device.to_string(), server.to_string(), asker.to_string())).copied().unwrap_or(0)
+}
+
+/// Harness: `device` answered `asker`'s sync of `server` as a member's (ops or a digest reply).
+#[cfg(test)]
+pub(crate) fn note_served_for_test(device: &str, server: &str, asker: &str) {
+    *ANSWER_HOOKS.lock().unwrap_or_else(|e| e.into_inner()).served.entry((device.to_string(), server.to_string(), asker.to_string())).or_default() += 1;
+}
+
+/// Harness: `device`'s handler took a sync answer for `server` from `from`.
+#[cfg(test)]
+pub(crate) fn note_response_for_test(device: &str, server: &str, from: &str) {
+    *ANSWER_HOOKS.lock().unwrap_or_else(|e| e.into_inner()).responses.entry((device.to_string(), server.to_string(), from.to_string())).or_default() += 1;
+}
+
+/// How many sync answers for `server` from `from` reached `device`'s handler.
+#[cfg(test)]
+pub(crate) fn responses_for_test(device: &str, server: &str, from: &str) -> usize {
+    ANSWER_HOOKS.lock().unwrap_or_else(|e| e.into_inner()).responses.get(&(device.to_string(), server.to_string(), from.to_string())).copied().unwrap_or(0)
+}
+
+/// How many sync answers carrying ops or a digest reply of `server` `device` sent `asker`.
+#[cfg(test)]
+pub(crate) fn served_for_test(device: &str, server: &str, asker: &str) -> usize {
+    ANSWER_HOOKS.lock().unwrap_or_else(|e| e.into_inner()).served.get(&(device.to_string(), server.to_string(), asker.to_string())).copied().unwrap_or(0)
 }
 
 #[cfg(test)]

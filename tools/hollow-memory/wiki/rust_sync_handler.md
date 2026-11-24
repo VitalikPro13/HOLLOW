@@ -236,6 +236,39 @@ Design: `design_A_frame_authority.md` "BUILT (session 16, the join lock)"; memor
 - **Invite reset (2f06e8ed).** The owner's `JoinKeySet` retires the old key (newest 8 kept) and moves the lock at once. The joiner's ask names its invite key (`hollow-join-ask2`); `join_verdict::link_refusal` refuses an old link FIRST, before any gate that names the server (`invite_reset`; a pre-reset joiner build gets `invite_outdated`); a box a retired key opens is refused as reset whatever it asks. `sets_missing_join_key` lets only the lowest caught-up owner device in the room, not away, with no join or whole-log fetch under way, set a missing key.
 - **Join lock writes are device-bound (5af8f7b7, 898b145c).** Every lock link carries a device proof (`hollow-lock-dev1`); change keys are sealed to the devices the stored roster counts (8 per identity, closest to the phrase first) once the fold accepts device grants. Removing any member identity's device moves the lock (a mod remover moves first; settled only by a door minted after no MLS group of the server lists the removed leaf, at most once per identity and server per 10 min). An owner whose offers the relay never keeps (a 0.13 relay drops the proof) backs off after each miss up to 10 min. A recovery that drops a device moves the lock in every server of that identity. A stranger joiner of a cut server parks the lock op until the owner's roster lands (92c504bf); a hidden member's door ask waits for the relay's chain read (or 15 s), re-reads the chain every 20 s and asks again when it shows a lock past its door (9dca9022).
 
+## Re-entry after a phrase recovery (shared servers, F5, 0.14.3)
+
+A recovering fresh install learns its servers from friends (`shared_servers`). A keyed entry
+re-enters through the join lock like an invite, signing no ask. A KEYLESS entry is taken only
+for a self-certifying id (a pinned one syncs by state vector, which never ends a digest round,
+so it could never complete). A keyless entry (the friend's
+fold keeps the key only because part A's hold counts a cut-off device's `JoinKeySet`, or its
+fold has not rebuilt under the roster yet: `ServerState::join_key_dropped`) is a SYNC re-entry:
+`PendingJoin.sync_from` lists the friend devices that named it, `ask_join_lock` returns at once
+for it (no lock, no join box), swarm `ask_sync_reentries` sends a digest ask over the skeleton
+Carried to one source (next source after 15 s of silence, 6 asks; an answer to the open round
+restarts its 105 s lapse clock, `Joins::progressed`; a lapsed one forgets its sources as answered,
+`Asks::forget_answered`, so each one's next arrival asks again), and the `SyncResponse` arm
+takes answers only from those devices, ends the re-entry on a founding op for another owner
+(`end_sync_reentry_or_leave`, nothing kept, the answer's rosters included: they are kept only once
+the fold shows the server is ours), and completes only on the answer that ends that
+device's digest round (`OpSync::ends_round`); only an answer to the open round
+(`OpSync::answers_round`) puts the next ask off, so a source sending bare answers (a deferred
+witness answer rides a nonce-less `SyncResponse` with no ops and no digest) cannot stall it. Traps: the Olm `Carried` gate drops every OTHER
+pending join's `SyncResponse` (answers come from the reply key), so a new pending-join kind
+that syncs must pass that gate on purpose; the skeleton sits in `server_states` while pending,
+so `Joins::lapsed`'s "joined" means held AND no join pending, and the lock keeper is told to
+wait (`set_restoring`) or it mints an owner base for a fold that seats only us. The witness
+restore registers only on a later tick (5 s, after the store rows land), so a COMPLETED sync
+re-entry stays in that wait (`Joins::reentered`) until that restore registers or a settling is
+held; without it the lock keeper minted F's lock over the members' door on the completion tick.
+Never judge that wait by seats: an "I don't know" rollback settles on a state that seats only us,
+and the lock must then come (review F5c). The wait covers keyed re-entries of servers we own as
+well: a 0.14.2 friend still names the cut-off device's key, and that re-entry ends in the same
+fold that seats only us. Members keep the cut-off device's door meanwhile
+(part A keeps its `JoinLock` op, `lock_maker_counts`), so they stay visible in the room. Rows:
+`security_write_gates` §64.
+
 ## send_join_rejection()
 
 `sync_handler.rs:send_join_rejection(ws_cmd_tx, server_id, joiner_device, joiner_master, requested_at, reason, catchup_secs)`: refuses a join on BOTH legs. The targeted leg goes to the joiner's DETERMINISTIC server room (`send_message_to_peer_in_room`), not through presence lookup, so the relay buffers it for an absent joiner and replays it on that device's next join of that room. When `requested_at != 0 && !is_interactive_reason(reason) && catchup_secs > 0`, also calls `publish_join_resolution(.., admitted: false, ..)`. Interactive reasons are deliberately NEVER written into the ring (see `is_interactive_reason`).

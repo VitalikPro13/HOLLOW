@@ -305,6 +305,11 @@ pub struct CpWitness {
     pub folded_age_ms: i64,
     /// The witness device.
     pub by: String,
-    /// `by`'s device key over `hollow-cp-witness2\n` + the fields above.
+    /// `by`'s device key over `hollow-cp-witness2\n` + the fields above, or with a
+    /// record over `hollow-cp-witness3\n` + them + `rec`.
     pub sig: String,
+    /// A record's id (`crdt::record::record_id`) when no checkpoint was held before T and
+    /// the recovery's dropped ops were (HOL-SEC-230 part B); empty = none.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub rec: String,
 }

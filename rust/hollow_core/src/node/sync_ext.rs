@@ -65,6 +65,10 @@ pub(crate) struct ReplyExt {
     pub witness: Option<CpWitness>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub witness_cp: Option<String>,
+    /// The content ids of the record the witness names (HOL-SEC-230 part B); the ops
+    /// themselves ride the digest sync.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub witness_rec: Vec<String>,
 }
 
 impl AskExt {

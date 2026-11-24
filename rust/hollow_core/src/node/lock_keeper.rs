@@ -221,6 +221,8 @@ pub(crate) struct LockKeeper {
     /// at the first of them, and when the last one's wait ends.
     misses: HashMap<String, (u32, u64, Instant)>,
     authorities: Authorities,
+    /// Servers a fresh install of ours restores from witnesses (F5 note 3.3).
+    restoring: BTreeSet<String>,
 }
 
 /// Server authority per identity over its stored roster (`Roster::authority`): who the
@@ -491,6 +493,18 @@ impl LockKeeper {
         }
     }
 
+    /// The servers our witness restore holds open now (`WitnessDesk::restoring`), and
+    /// those a re-entry of ours is still fetching or completed before that restore.
+    pub(crate) fn set_restoring(&mut self, servers: Vec<String>) {
+        self.restoring = servers.into_iter().collect();
+    }
+
+    /// A re-entry of `server_id` starts now: the wait holds at once, not from the
+    /// next batch tick (a relay chain answer ticks the server before that one).
+    pub(crate) fn note_restoring(&mut self, server_id: &str) {
+        self.restoring.insert(server_id.to_string());
+    }
+
     /// One batch tick: what is due for each server we are in. Returns the ops to write.
     pub(crate) fn tick(
         &mut self,
@@ -590,6 +604,12 @@ impl LockKeeper {
         }
         let owner = lookup_owner(state)?;
         let is_owner = owner == local;
+        // A re-entry's fold of a server no member checkpointed seats only us until the
+        // settling: a lock of ours now would hide the members behind a door we cannot
+        // grant them yet (F5 note 3.3).
+        if is_owner && self.restoring.contains(server_id) && state.members.keys().all(|m| m == local) {
+            return None;
+        }
         let nonce = state.founding_nonce();
         let lock = &state.join_lock;
         let Some((view, seen)) = self.views.get(server_id).cloned() else {

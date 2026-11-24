@@ -247,7 +247,18 @@ prove the door, and post as the identity through backfill. AR-02 closed the rost
    the key that judges this author) or `ProofLess`.
 4. The CUT is in force once the replica holds any owner-signed `cp_stamped` checkpoint,
    eligible or not, or a founding op that commits to a key. From then on `op_allowed`
-   admits only `Counted` ops; the core drops dominated ops before `op_allowed`.
+   admits only `Counted` ops; the core drops dominated ops before `op_allowed`. The
+   founding op and checkpoints are judged by their own rules instead (a removed founder's
+   founding op still anchors its server), so a replica founds on ONE founding op per id,
+   chosen by content and its view alone, never by arrival (HOL-SEC-222, `founding_kept`):
+   a counted device's first, then one the view lists, then the earliest clock, then the
+   content id; one clocked after a counted op of the owner's own is refuted. It keeps at
+   most one other per listed device (4 in all) as runner-ups, so a view change chooses
+   again without sync. Residual: while the founding device is uncounted and unendorsed,
+   it (or another listed device holding the master key) can found again on an earlier op
+   of its own, which changes the founding name only, and only where nothing renamed the
+   server later; it never refuses an owner op. Planned (0.15): a founding nonce that
+   commits to the founding clock and name, for new servers.
 5. Evaluation is stratified (section 10): owner key, owner view, owner endorsements and
    settlings, checkpoint eligibility, base, member views, fold.
 6. Removing a device (section 8):
@@ -736,6 +747,13 @@ T is the EARLIEST moment of the answer, so a vague answer undoes more, never les
 | Pick a date and time | that moment |
 | Longer ago, or not sure | the first-fold time of the oldest restore point held, per server; on a fresh install, which holds none, 0, and every server's outcome is "I don't know" without a chooser (R3-8; T = 0 for posts too, decided 2026-11-01, section 20) |
 
+- "Longer ago, or not sure" never stands on that oldest restore point: R must have
+  first folded before T (8.3), and none did, so the settling folds from the founding op.
+  On a server the lost device FOUNDED, with no restore point before T, everything that
+  device did there is undone, members it admitted included (decided by Vitalik,
+  2026-11-22: a vague answer undoes more). Standing on the oldest restore point instead
+  would keep those members but trust a checkpoint the lost device may have signed after
+  it was lost, on every server. HOL-SEC-221.
 - A phrase recovery asks the same question once for every device it does not keep
   ("When did you last have your other devices?"). It never asks retire or lost: every
   dropped device is lost or stolen.
@@ -840,7 +858,12 @@ checkpoint. Order:
      rows) with `first_fold_ms < T`, else the founding op or generation 0.
    - **State** = the core's fold of R as the base plus every op this device holds or got in
      step 1, judged by the ordinary rules, except that an op proofed by a dropped device
-     counts only if its `seen_ms < T` here.
+     counts only if its `seen_ms < T` here. The founding op of a server a dropped device
+     founded is the exception (HOL-SEC-221): the one the fold founds on (HOL-SEC-222,
+     `founding_kept`) always counts, since R stands on it or names its owner, and the
+     settling folds no other founding op. So does the owner's op naming the relay this
+     device dials as the server's home (HOL-SEC-223): else the home reads missing until
+     the owner names it again; a home op naming another relay keeps the rule.
    - **Shape** = a child of our CURRENT base (generation plus one, `cp_parent` and
      `cp_lineage` from it, `cp_cut` from it), so it is the greatest eligible checkpoint and
      every checkpoint on its line stays eligible by descent.
@@ -1488,7 +1511,8 @@ only lets members judge F's device by F's roster, which the phrase signed.
      removed thief) nothing. F starts the ordinary join for each entry, as from an invite.
      The relay never reads it.
    - `SharedServers` is `live_only`, so F re-asks each time a friend device arrives in the
-     DM room until that device has answered (LOW). An answer is always 4 frames of 16
+     DM room until that device has answered (LOW), and once more when that device's accept
+     of F's re-add lands: the request carried F's roster, which F's first ask can outrun. An answer is always 4 frames of 16
      entries, each padded to the size of 16 full entries, so the relay learns nothing from
      its size (LOW).
 3. **F's roster into each server room, as a hidden sender.** As soon as F learns a server

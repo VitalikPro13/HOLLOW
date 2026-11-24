@@ -6,6 +6,7 @@ library;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hollow/src/core/peer_id_label.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/home_setup_provider.dart';
 import 'package:hollow/src/core/providers/security_alerts_provider.dart';
@@ -14,6 +15,10 @@ import 'package:hollow/src/theme/hollow_theme_data.dart';
 import 'package:hollow/src/ui/components/conversation_row.dart';
 import 'package:hollow/src/ui/shell/home_inbox.dart';
 
+import 'package:hollow/src/core/device_proof_copy.dart';
+import 'package:hollow/src/rust/api/device_proof.dart' as dp;
+
+import '../helpers/device_proof_fixtures.dart';
 import '../helpers/test_app.dart';
 
 class _Alerts extends SecurityAlertsNotifier {
@@ -90,6 +95,24 @@ void main() {
         findsOneWidget);
   });
 
+  testWidgets('a restore no member named a point for waits on Home until one does',
+      (tester) async {
+    await _pump(tester, const HomeAttention(),
+        extra: deviceProofOverrides(
+            restores: fixtureRestores([
+          dp.RestoreStage.waitingForMember,
+          dp.RestoreStage.pick,
+        ])));
+    // The pick row comes first, so the wait row sits past the fold.
+    await tester.tap(find.textContaining('Show all'));
+    await tester.pump();
+    expect(find.text(restoreWaitTitle('Test Server')), findsOneWidget);
+    expect(find.text(kRestoreWaitBody), findsOneWidget);
+    expect(find.text('View'), findsOneWidget,
+        reason: 'a server with a point has its own row, which says Choose');
+    expect(find.text(restorePickTitle('Dev Hangout')), findsOneWidget);
+  });
+
   testWidgets('a saved phrase needs no reminder', (tester) async {
     await _pump(
       tester,
@@ -157,5 +180,60 @@ void main() {
     expect(find.textContaining('added a device and removed it again'), findsOneWidget);
     expect(find.textContaining('added a new device'), findsNothing,
         reason: 'a device removed since is not a new device');
+  });
+
+  // HOL-SEC-215: a device the recovery phrase added names no device of ours,
+  // and the way out is the phrase's own removal under Security.
+  testWidgets('a device the phrase added says so and points to Security',
+      (tester) async {
+    const own = verification_api.SecurityAlertFfi(
+      alertId: 'own_device_added:me:$_added:phrase',
+      peerId: 'me',
+      kind: SecurityAlertKind.ownDeviceAdded,
+      detail: '$_added:$kAddedByPhrase',
+      createdAt: 0,
+    );
+    await _pump(tester, const HomeAttention(), extra: [
+      securityAlertsProvider.overrideWith(() => _Alerts(const [own])),
+      deviceKindProvider.overrideWith(_Kinds.new),
+    ]);
+    expect(find.text('A device was added with your recovery phrase'), findsOneWidget);
+    expect(
+        find.textContaining(RegExp("^Phone joined your identity .+\\. If that "
+            "wasn't you, someone else has your recovery phrase\\. Go to "
+            'Settings, under Security, and use Remove devices with your '
+            r'recovery phrase\.$')),
+        findsOneWidget);
+    expect(find.textContaining('phrase added a device'), findsNothing,
+        reason: 'the phrase is not a device to name');
+    expect(find.text('Review'), findsOneWidget);
+    expect(find.text('Dismiss'), findsOneWidget);
+  });
+
+  // Fleet, Nov 22: two devices the phrase added showed two identical rows. Each
+  // names its own device, so they read apart.
+  testWidgets('each device the phrase added names itself', (tester) async {
+    const other = '12D3KooWOtherOtherOtherOtherOtherOtherOther';
+    const phone = verification_api.SecurityAlertFfi(
+      alertId: 'own_device_added:me:$_added:phrase',
+      peerId: 'me',
+      kind: SecurityAlertKind.ownDeviceAdded,
+      detail: '$_added:$kAddedByPhrase',
+      createdAt: 0,
+    );
+    const unnamed = verification_api.SecurityAlertFfi(
+      alertId: 'own_device_added:me:$other:phrase',
+      peerId: 'me',
+      kind: SecurityAlertKind.ownDeviceAdded,
+      detail: '$other:$kAddedByPhrase',
+      createdAt: 0,
+    );
+    await _pump(tester, const HomeAttention(), extra: [
+      securityAlertsProvider.overrideWith(() => _Alerts(const [phone, unnamed])),
+      deviceKindProvider.overrideWith(_Kinds.new),
+    ]);
+    expect(find.text('A device was added with your recovery phrase'), findsNWidgets(2));
+    expect(find.textContaining('Phone joined your identity'), findsOneWidget);
+    expect(find.textContaining('${shortPeerLabel(other)} joined your identity'), findsOneWidget);
   });
 }

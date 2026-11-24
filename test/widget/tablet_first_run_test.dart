@@ -11,6 +11,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/rust/api/identity.dart';
+import 'package:hollow/src/rust/api/recovery.dart';
 import 'package:hollow/src/rust/frb_generated.dart';
 import 'package:hollow/src/theme/hollow_theme_data.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
@@ -61,6 +62,9 @@ class _BootApi implements RustLibApi {
 
   @override
   Future<String?> crateApiRecoveryRelinkWelcome() async => null;
+
+  @override
+  Future<SetAsideWelcome?> crateApiRecoverySetAsideWelcome() async => null;
 
   // Anything else the launch asks waits forever: nothing past Welcome runs.
   @override

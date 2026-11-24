@@ -19,6 +19,13 @@ pub struct RosterDevice {
     pub first_seen_ms: Option<i64>,
     /// Members this device added: removing it keeps them unless they go too.
     pub added: Vec<String>,
+    /// A pending device a phrase recovery cut off (HOL-SEC-229): when. Never shown as a
+    /// restored backup, and approved only from the Devices page.
+    pub cut_off_at_ms: Option<i64>,
+    /// With `cut_off_at_ms`: `"ours"` when this device knows it was one of ours, `"maybe"`
+    /// when the recovery knew none of the old devices (a Welcome recovery on an empty
+    /// install).
+    pub cut_off: Option<String>,
 }
 
 /// What our own roster says, for the Devices page and the lock screens.
@@ -37,6 +44,41 @@ pub struct RosterStatus {
     pub removed_by: Option<String>,
     pub wipe_at_ms: Option<i64>,
     pub devices: Vec<RosterDevice>,
+    /// This device is not a member although the phrase admitted it (`"admit"`) or a
+    /// recovery kept it (`"recover"`): that statement is dated at or before the current
+    /// base (a clock behind, or a later change). The lock's button runs
+    /// `join_with_phrase`, or `recover_with_phrase(keep: [], too_early_lost_since_ms)`.
+    pub too_early: Option<String>,
+    /// For `too_early == "recover"`: when that recovery said the person last had the
+    /// devices it dropped.
+    pub too_early_lost_since_ms: Option<i64>,
+    /// This device is not a member because a recovery typed elsewhere left it out:
+    /// that recovery's time.
+    pub dropped_by_recovery_at_ms: Option<i64>,
+}
+
+/// What a Welcome phrase restore that minted this device left for the Home card.
+pub struct WelcomeRestoreState {
+    pub at_ms: i64,
+    /// `"admit"` (No) or `"recover"` (Yes).
+    pub branch: String,
+    /// The restore found no roster here (a fresh install).
+    pub empty: bool,
+    /// The identity's roster says a device restored from a backup joins only when
+    /// approved.
+    pub no_wait: bool,
+}
+
+/// The Home card's state, `None` when no Welcome restore minted THIS device or its 30
+/// days are over.
+#[frb]
+pub fn welcome_restore_state() -> Result<Option<WelcomeRestoreState>, String> {
+    let c = ctx()?;
+    let store = MessageStore::open(&c.db_path, &c.db_passphrase)?;
+    let now = crate::node::roster_book::now_ms();
+    let Some(mark) = crate::node::phrase_restore::current(&store, &c.device.peer_id(), now) else { return Ok(None) };
+    let no_wait = chosen_no_wait(&c);
+    Ok(Some(WelcomeRestoreState { at_ms: mark.at_ms, branch: mark.branch.as_str().to_string(), empty: mark.empty, no_wait }))
 }
 
 struct Ctx {
@@ -78,18 +120,24 @@ pub fn roster_status() -> Result<RosterStatus, String> {
             removed_by: None,
             wipe_at_ms: None,
             devices: Vec::new(),
+            too_early: None,
+            too_early_lost_since_ms: None,
+            dropped_by_recovery_at_ms: None,
         });
     };
     let state = crate::node::roster_book::fold(&store, &roster);
     let seen = store.load_roster_seen(&roster.master, &roster.base()).unwrap_or_default();
     let mut devices: Vec<RosterDevice> = Vec::new();
     let mut push = |d: &String, kind: &str| {
+        let cut = crate::node::roster_book::cut_off_by_recovery(&store, &roster, &state, d);
         devices.push(RosterDevice {
             device_peer_id: d.clone(),
             state: kind.to_string(),
             this_device: *d == me,
             first_seen_ms: seen.get(d).copied(),
             added: if kind == "member" { roster.vouched_members_of(d, &state) } else { Vec::new() },
+            cut_off_at_ms: cut.map(|(at, _)| at),
+            cut_off: cut.map(|(_, ours)| if ours { "ours" } else { "maybe" }.to_string()),
         });
     };
     for d in &state.members {
@@ -103,6 +151,12 @@ pub fn roster_status() -> Result<RosterStatus, String> {
     }
     devices.sort_by_key(|d| !d.this_device);
     let removal = crate::node::roster_book::own_removal(&store);
+    let outdated = crate::node::roster_book::own_phrase_outdated(&store, &roster, &state, &me);
+    let too_early_lost_since_ms = outdated
+        .as_ref()
+        .filter(|o| o.kind == crate::node::roster_book::PhraseKind::Recover)
+        .and_then(|o| crate::node::roster_book::recovery_lost_since(&store, &o.base));
+    let dropped_by_recovery_at_ms = crate::node::roster_book::dropped_by_recovery_at(&store, &roster, &state, &me);
     Ok(RosterStatus {
         member: state.is_member(&me),
         protected: state.protected,
@@ -117,6 +171,12 @@ pub fn roster_status() -> Result<RosterStatus, String> {
             .then(|| removal.map(|(_, at)| at.saturating_add(REMOVAL_GRACE_MS)))
             .flatten(),
         devices,
+        too_early: outdated.map(|o| match o.kind {
+            crate::node::roster_book::PhraseKind::Admit => "admit".to_string(),
+            crate::node::roster_book::PhraseKind::Recover => "recover".to_string(),
+        }),
+        too_early_lost_since_ms,
+        dropped_by_recovery_at_ms,
     })
 }
 
@@ -147,6 +207,38 @@ fn changed(c: &Ctx, f: impl FnOnce(&Ctx) -> Result<(), String>) -> Result<(), St
     Ok(())
 }
 
+/// What a phrase restore signs (PHRASE_RESTORE_DESIGN 1.2 step 9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RestoreSign {
+    /// The phrase admits the minted device into whatever base is current.
+    Admit,
+    /// A recovery keeping only the minted device; devices dropped as lost since then.
+    Recover { lost_since_ms: i64, no_wait: bool },
+}
+
+/// A phrase restore signs into the database through the same path the in-app phrase
+/// changes take: stamped past every held statement (`phrase_time`, HOL-SEC-218), with
+/// what a recovery over a kept database drops owed a settling (HOL-SEC-216).
+pub(crate) fn sign_restore(
+    master: &NativeKeypair,
+    device: &NativeKeypair,
+    recovery: &NativeKeypair,
+    sign: RestoreSign,
+    db_path: &str,
+    db_passphrase: &str,
+) -> Result<(), String> {
+    let c = Ctx { master: master.clone(), device: device.clone(), db_path: db_path.to_string(), db_passphrase: db_passphrase.to_string() };
+    changed(&c, |c| match sign {
+        RestoreSign::Admit => {
+            crate::node::roster_book::admit_by_phrase(&c.master, recovery, &c.device, &c.db_path, &c.db_passphrase).map(|_| ())
+        }
+        RestoreSign::Recover { lost_since_ms, no_wait } => crate::node::roster_book::recover(
+            &c.master, recovery, &c.device, &[], no_wait, Some(lost_since_ms), &c.db_path, &c.db_passphrase,
+        )
+        .map(|_| ()),
+    })
+}
+
 /// The phrase is never kept once it has been typed on 0.12.
 fn erase_stored_phrase(db_path: &str, db_passphrase: &str) {
     if let Ok(store) = MessageStore::open(db_path, db_passphrase) {
@@ -161,14 +253,24 @@ fn erase_stored_phrase(db_path: &str, db_passphrase: &str) {
 pub fn recover_with_phrase(phrase: String, keep: Vec<String>, lost_since_ms: i64) -> Result<(), String> {
     let c = ctx()?;
     let (master, recovery) = crate::identity::recovery::recovery_key_for(&c.master.peer_id(), &phrase)?;
-    let no_wait = crate::node::roster_book::own(&c.master.peer_id(), &c.db_path, &c.db_passphrase)
-        .is_some_and(|(_, s)| s.no_wait);
+    let no_wait = chosen_no_wait(&c);
     changed(&c, |c| {
-        let (_, state) =
-            crate::node::roster_book::recover(&master, &recovery, &c.device, &keep, no_wait, &c.db_path, &c.db_passphrase)?;
-        let store = MessageStore::open(&c.db_path, &c.db_passphrase)?;
-        crate::node::roster_book::note_recovery_lost_since(&store, &state.base, lost_since_ms)
+        crate::node::roster_book::recover(&master, &recovery, &c.device, &keep, no_wait, Some(lost_since_ms), &c.db_path, &c.db_passphrase)
+            .map(|_| ())
     })
+}
+
+/// Whether a restored backup needs approval, as the person last chose it: a recovery of
+/// ours that a later base outdated keeps its own choice (signed again with it), else
+/// the held base decides.
+fn chosen_no_wait(c: &Ctx) -> bool {
+    let Ok(store) = MessageStore::open(&c.db_path, &c.db_passphrase) else { return false };
+    let Some(roster) = crate::node::roster_book::load(&store, &c.master.peer_id()) else { return false };
+    let state = crate::node::roster_book::fold(&store, &roster);
+    match crate::node::roster_book::own_phrase_outdated(&store, &roster, &state, &c.device.peer_id()) {
+        Some(own) if own.kind == crate::node::roster_book::PhraseKind::Recover => own.no_wait,
+        _ => state.no_wait,
+    }
 }
 
 /// The other devices a recovery keeps unless unticked, for devices last had at
@@ -197,7 +299,7 @@ pub fn set_backup_wait(phrase: String, allowed: bool) -> Result<(), String> {
     }
     let keep: Vec<String> = state.members.into_iter().collect();
     changed(&c, |c| {
-        crate::node::roster_book::recover(&master, &recovery, &c.device, &keep, !allowed, &c.db_path, &c.db_passphrase)
+        crate::node::roster_book::recover(&master, &recovery, &c.device, &keep, !allowed, None, &c.db_path, &c.db_passphrase)
             .map(|_| ())
     })
 }
@@ -246,7 +348,7 @@ pub fn confirm_stored_phrase(phrase: String) -> Result<(), String> {
         .map(|(_, s)| (s.members.into_iter().collect::<Vec<_>>(), s.no_wait))
         .unwrap_or_default();
     changed(&c, |c| {
-        crate::node::roster_book::recover(&master, &recovery, &c.device, &keep, no_wait, &c.db_path, &c.db_passphrase)
+        crate::node::roster_book::recover(&master, &recovery, &c.device, &keep, no_wait, None, &c.db_path, &c.db_passphrase)
             .map(|_| ())
     })
 }
@@ -437,6 +539,204 @@ mod tests {
         let (held, _) = crate::node::roster_book::own(&c.master.peer_id(), &c.db_path, &c.db_passphrase).unwrap();
         assert_eq!(held, upgraded, "the confirmation signed a new recovery");
         assert_eq!(stored_phrase_for_upgrade().unwrap(), None, "the confirmation kept the stored phrase");
+    }
+
+    /// An identity on disk from `PHRASE` with no stored phrase and an empty database.
+    fn fresh_identity_on_disk(dir: &std::path::Path) -> Ctx {
+        let (master, _) = crate::identity::recovery::keys_from_phrase(PHRASE).unwrap();
+        let device = NativeKeypair::from_secret_bytes(&[0x5b; 32]);
+        for (name, kp) in [("identity.key", &master), ("identity.device", &device)] {
+            std::fs::write(dir.join(name), kp.to_protobuf_encoding().unwrap()).unwrap();
+        }
+        ctx().unwrap()
+    }
+
+    /// A recovery signed elsewhere, dated `at`, keeping only another device.
+    fn recovery_elsewhere(c: &Ctx, at: i64) {
+        let (master, recovery) = crate::identity::recovery::keys_from_phrase(PHRASE).unwrap();
+        let other = NativeKeypair::from_secret_bytes(&[0x5f; 32]);
+        let store = MessageStore::open(&c.db_path, &c.db_passphrase).unwrap();
+        let mut r = crate::node::roster_book::load(&store, &master.peer_id()).unwrap();
+        r.add_consent(crate::identity::roster::sign_consent(&other, &master.peer_id()));
+        let rec = crate::identity::roster::sign_recovery(&master, &recovery, at, &[other.peer_id()], false);
+        r.add_phrase_statement(&crate::identity::roster::r_pub_of(&recovery), Some(rec), None).unwrap();
+        crate::node::roster_book::merge_for_test(&store, &r, &master.peer_id(), &c.device.peer_id());
+    }
+
+    /// HOL-SEC-218: our phrase admission, then a base dated after it (a clock behind, or
+    /// a change made elsewhere): the lock asks for the phrase again, not "restored from
+    /// a backup".
+    #[test]
+    fn roster_status_says_too_early_for_an_admission_the_base_outdated() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = crate::api::storage::store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        // SAFETY: serialized by the locks above.
+        unsafe { std::env::set_var("HOLLOW_DATA_DIR", tmp.path()) };
+        crate::identity::encryption::clear_session_key();
+        let c = fresh_identity_on_disk(tmp.path());
+        join_with_phrase(PHRASE.into()).unwrap();
+        assert!(roster_status().unwrap().member, "precondition: the phrase admitted this device");
+        recovery_elsewhere(&c, crate::node::roster_book::now_ms() + 5 * 60 * 1000);
+
+        let status = roster_status().unwrap();
+
+        assert!(!status.member);
+        assert_eq!(status.too_early.as_deref(), Some("admit"));
+        assert_eq!(status.dropped_by_recovery_at_ms, None, "too early wins over left out");
+        join_with_phrase(PHRASE.into()).unwrap();
+        assert!(roster_status().unwrap().member, "typing the phrase again dates it past the base");
+    }
+
+    /// Review finding 6: a base signed long after our own admission is a deliberate
+    /// change made elsewhere, not a clock behind: the lock says the phrase was used on
+    /// another device (D3b), never "type it again", whose recovery would drop that device.
+    #[test]
+    fn a_base_signed_long_after_our_admission_says_left_out_not_too_early() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = crate::api::storage::store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        // SAFETY: serialized by the locks above.
+        unsafe { std::env::set_var("HOLLOW_DATA_DIR", tmp.path()) };
+        crate::identity::encryption::clear_session_key();
+        let c = fresh_identity_on_disk(tmp.path());
+        join_with_phrase(PHRASE.into()).unwrap();
+        assert!(roster_status().unwrap().member, "precondition: the phrase admitted this device");
+        {
+            let store = MessageStore::open(&c.db_path, &c.db_passphrase).unwrap();
+            let key = crate::node::roster_book::OWN_PHRASE;
+            let mut own: crate::node::roster_book::OwnPhrase = serde_json::from_str(&store.load_setting(key).unwrap().unwrap()).unwrap();
+            own.at_ms -= 60 * 60 * 1000;
+            store.save_setting(key, &serde_json::to_string(&own).unwrap()).unwrap();
+        }
+        let at = crate::node::roster_book::now_ms();
+        recovery_elsewhere(&c, at);
+
+        let status = roster_status().unwrap();
+
+        assert!(!status.member);
+        assert_eq!(status.too_early, None, "an hour-old admission was called too early");
+        assert_eq!(status.dropped_by_recovery_at_ms, Some(at));
+    }
+
+    /// Review (Dart half, b): our recovery said "backups need approval"; a base dated
+    /// after it says otherwise. Typing the phrase again keeps the person's choice, and the
+    /// Home card reports it, before and after.
+    #[test]
+    fn a_too_early_recovery_keeps_the_first_recoverys_no_wait() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = crate::api::storage::store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        // SAFETY: serialized by the locks above.
+        unsafe { std::env::set_var("HOLLOW_DATA_DIR", tmp.path()) };
+        crate::identity::encryption::clear_session_key();
+        let c = fresh_identity_on_disk(tmp.path());
+        let (master, recovery) = crate::identity::recovery::keys_from_phrase(PHRASE).unwrap();
+        sign_restore(&master, &c.device, &recovery, RestoreSign::Recover { lost_since_ms: 1_000, no_wait: true }, &c.db_path, &c.db_passphrase).unwrap();
+        let mark = crate::node::phrase_restore::Mark {
+            at_ms: crate::node::roster_book::now_ms(),
+            branch: crate::node::phrase_restore::Branch::Recover,
+            empty: true,
+            device: c.device.peer_id(),
+        };
+        crate::node::phrase_restore::write(&MessageStore::open(&c.db_path, &c.db_passphrase).unwrap(), &mark).unwrap();
+        recovery_elsewhere(&c, crate::node::roster_book::now_ms() + 5 * 60 * 1000);
+        let status = roster_status().unwrap();
+        assert_eq!(status.too_early.as_deref(), Some("recover"));
+        assert_eq!(status.too_early_lost_since_ms, Some(1_000));
+        assert!(welcome_restore_state().unwrap().unwrap().no_wait, "the card reports the outdated base's choice");
+
+        recover_with_phrase(PHRASE.into(), Vec::new(), status.too_early_lost_since_ms.unwrap()).unwrap();
+
+        let status = roster_status().unwrap();
+        assert!(status.member);
+        assert!(!status.backup_wait, "typing the phrase again let restored backups wait in");
+        assert!(welcome_restore_state().unwrap().unwrap().no_wait);
+    }
+
+    /// Review (Dart half, finding 1): a recovery's T lands before its base does, so no
+    /// crash between the two writes leaves a recovery whose T is unknown.
+    #[test]
+    fn a_recovery_records_its_t_before_its_roster() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = crate::api::storage::store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        // SAFETY: serialized by the locks above.
+        unsafe { std::env::set_var("HOLLOW_DATA_DIR", tmp.path()) };
+        crate::identity::encryption::clear_session_key();
+        let c = fresh_identity_on_disk(tmp.path());
+        let (master, recovery) = crate::identity::recovery::keys_from_phrase(PHRASE).unwrap();
+        // The roster save is refused (a crash right before it): the T is there already.
+        crate::node::authority_view::refuse_book_for_test(&c.device.peer_id(), &master.peer_id());
+        let signed = crate::node::roster_book::recover(&master, &recovery, &c.device, &[], true, Some(7_000), &c.db_path, &c.db_passphrase);
+        crate::node::authority_view::unrefuse_book_for_test(&c.device.peer_id());
+        let (roster, _) = signed.unwrap();
+        let store = MessageStore::open(&c.db_path, &c.db_passphrase).unwrap();
+        assert!(crate::node::roster_book::load(&store, &master.peer_id()).is_none(), "precondition: the roster never landed");
+        assert_eq!(crate::node::roster_book::recovery_lost_since(&store, &roster.base()), Some(7_000));
+    }
+
+    /// D3b: a device that counted, left out by a recovery typed on another device.
+    #[test]
+    fn roster_status_says_dropped_by_recovery_for_a_device_the_base_left_out() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = crate::api::storage::store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        // SAFETY: serialized by the locks above.
+        unsafe { std::env::set_var("HOLLOW_DATA_DIR", tmp.path()) };
+        crate::identity::encryption::clear_session_key();
+        let c = fresh_identity_on_disk(tmp.path());
+        {
+            let store = MessageStore::open(&c.db_path, &c.db_passphrase).unwrap();
+            let (_, state) = crate::node::roster_book::ensure_own(&store, &c.master, &c.device, &c.db_path);
+            assert!(state.is_member(&c.device.peer_id()), "precondition: this device counts");
+        }
+        let at = crate::node::roster_book::now_ms() - 1_000;
+        recovery_elsewhere(&c, at);
+
+        let status = roster_status().unwrap();
+
+        assert!(!status.member);
+        assert_eq!(status.too_early, None);
+        assert_eq!(status.dropped_by_recovery_at_ms, Some(at));
+    }
+
+    /// HOL-SEC-229 through the shipped in-app recovery: the device it cut off asks to join
+    /// again and the Devices page names it as cut off, one of ours; a device no record
+    /// names may be one of the old ones (the master key signs an ask for any key).
+    #[test]
+    fn roster_status_names_a_device_the_in_app_recovery_cut_off() {
+        let _g = crate::node::resolver::test_lock();
+        let _s = crate::api::storage::store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        // SAFETY: serialized by the locks above.
+        unsafe { std::env::set_var("HOLLOW_DATA_DIR", tmp.path()) };
+        crate::identity::encryption::clear_session_key();
+        let c = fresh_identity_on_disk(tmp.path());
+        let (old, backup) = (NativeKeypair::from_secret_bytes(&[0x61; 32]), NativeKeypair::from_secret_bytes(&[0x62; 32]));
+        let m = c.master.peer_id();
+        {
+            let store = MessageStore::open(&c.db_path, &c.db_passphrase).unwrap();
+            crate::node::roster_book::ensure_own(&store, &c.master, &c.device, &c.db_path);
+            let mut r = crate::node::roster_book::load(&store, &m).unwrap();
+            r.add_consent(crate::identity::roster::sign_consent(&old, &m));
+            crate::node::roster_book::merge_for_test(&store, &r, &m, &c.device.peer_id());
+        }
+        crate::node::roster_book::vouch(&c.master, &c.device, &old.peer_id(), &c.db_path, &c.db_passphrase).unwrap();
+        recover_with_phrase(PHRASE.to_string(), Vec::new(), crate::node::roster_book::now_ms() - 1_000).unwrap();
+        let store = MessageStore::open(&c.db_path, &c.db_passphrase).unwrap();
+        let mut r = crate::node::roster_book::load(&store, &m).unwrap();
+        let base = r.base();
+        for d in [&old, &backup] {
+            r.add_consent(crate::identity::roster::sign_consent(d, &m));
+            r.add_pending(crate::identity::roster::sign_pending(&c.master, &base, &d.peer_id()));
+        }
+        crate::node::roster_book::merge_for_test(&store, &r, &m, &c.device.peer_id());
+
+        let status = roster_status().unwrap();
+        let row = |d: &NativeKeypair| status.devices.iter().find(|x| x.device_peer_id == d.peer_id()).map(|x| (x.state.clone(), x.cut_off_at_ms, x.cut_off.clone()));
+        assert_eq!(row(&old), Some(("pending".into(), r.base_at(), Some("ours".into()))));
+        assert_eq!(row(&backup), Some(("pending".into(), r.base_at(), Some("maybe".into()))), "a device no record names is not a maybe");
     }
 
     /// C-IDENTITY-09. The Devices page learns what removing a device keeps: the

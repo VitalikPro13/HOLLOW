@@ -9,6 +9,7 @@ import 'package:hollow/src/core/profile_registry.dart';
 import 'package:hollow/src/core/providers/relay_domain_provider.dart';
 import 'package:hollow/src/core/providers/storage_provider.dart'
     show formatBytes;
+import 'package:hollow/src/core/services/phrase_restore.dart';
 import 'package:hollow/src/core/time_labels.dart';
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
@@ -24,22 +25,39 @@ import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/dialogs/terms_agreement_dialog.dart';
 import 'package:hollow/src/ui/dialogs/welcome_frame.dart';
+import 'package:hollow/src/ui/dialogs/welcome_phrase_step.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// [agreedTerms] is always true: Welcome lets nobody on without agreeing.
-typedef WelcomeResult = ({String action, String relayDomain, bool agreedTerms});
+/// [branch] names how a `'restored_phrase'` came back, null for every other
+/// action.
+typedef WelcomeResult = ({
+  String action,
+  String relayDomain,
+  bool agreedTerms,
+  PhraseRestoreBranch? branch,
+});
 
 /// [relinkedTo]: this device was set to link again; the old data's profile
 /// name on a desktop, empty on a phone. [relinkedFolder]: the same, where no
 /// profile lists the old data (a portable copy, a data folder override).
-/// Linking then comes first.
+/// Linking then comes first. [afterSetAside]: the last phrase restore's
+/// identity was set aside, so Welcome opens on the phrase step again.
+/// [relayDomain]: the relay to start from instead of the default (the one the
+/// set-aside identity used).
 Future<WelcomeResult?> showWelcomeDialog(BuildContext context,
-    {String? relinkedTo, String? relinkedFolder}) {
+    {String? relinkedTo,
+    String? relinkedFolder,
+    bool afterSetAside = false,
+    String? relayDomain}) {
   return showHollowDialog<WelcomeResult>(
     context: context,
     barrierDismissible: false,
     builder: (dialogContext) => _WelcomeContent(
-        relinkedTo: relinkedTo, relinkedFolder: relinkedFolder),
+        relinkedTo: relinkedTo,
+        relinkedFolder: relinkedFolder,
+        afterSetAside: afterSetAside,
+        relayDomain: relayDomain),
   );
 }
 
@@ -54,22 +72,34 @@ class _Backup {
 class _WelcomeContent extends StatefulWidget {
   final String? relinkedTo;
   final String? relinkedFolder;
+  final bool afterSetAside;
+  final String? relayDomain;
 
-  const _WelcomeContent({this.relinkedTo, this.relinkedFolder});
+  const _WelcomeContent(
+      {this.relinkedTo,
+      this.relinkedFolder,
+      this.afterSetAside = false,
+      this.relayDomain});
 
   @override
   State<_WelcomeContent> createState() => _WelcomeContentState();
 }
 
 class _WelcomeContentState extends State<_WelcomeContent> {
-  final _relayController = TextEditingController(text: kDefaultRelayDomain);
+  late final _relayController = TextEditingController(
+      text: widget.relayDomain?.trim().isNotEmpty == true
+          ? widget.relayDomain!.trim()
+          : kDefaultRelayDomain);
   final _passController = TextEditingController();
   bool _showAdvanced = false;
   String? _relayError;
 
   // Apple 1.2: the Terms are agreed to before an identity is made, restored
-  // or linked, and the choices that do any of it appear only after.
-  bool _agreed = false;
+  // or linked, and the choices that do any of it appear only after. A set-aside
+  // comes back from a restore this install agreed to moments ago.
+  late bool _agreed = widget.afterSetAside;
+
+  late bool _phraseOpen = widget.afterSetAside;
 
   _Backup? _backup;
   bool _obscure = true;
@@ -146,10 +176,22 @@ class _WelcomeContentState extends State<_WelcomeContent> {
     return false;
   }
 
-  void _finish(String action) {
+  void _finish(String action, {PhraseRestoreBranch? branch}) {
     if (!_agreed || !_relayIsUsable()) return;
-    Navigator.of(context)
-        .pop((action: action, relayDomain: _relayDomain!, agreedTerms: true));
+    Navigator.of(context).pop((
+      action: action,
+      relayDomain: _relayDomain!,
+      agreedTerms: true,
+      branch: branch,
+    ));
+  }
+
+  /// The relay field lives on the first screen, so a typo there closes the
+  /// phrase step to show it.
+  bool _phraseCanStart() {
+    if (_relayIsUsable()) return true;
+    setState(() => _phraseOpen = false);
+    return false;
   }
 
   @override
@@ -209,6 +251,7 @@ class _WelcomeContentState extends State<_WelcomeContent> {
         action: 'restored_backup',
         relayDomain: _relayDomain!,
         agreedTerms: true,
+        branch: null,
       ));
     } catch (e) {
       if (!mounted) return;
@@ -226,6 +269,21 @@ class _WelcomeContentState extends State<_WelcomeContent> {
 
   @override
   Widget build(BuildContext context) {
+    if (_phraseOpen) {
+      final domain = _relayDomain;
+      return WelcomePhraseStep(
+        afterSetAside: widget.afterSetAside,
+        relayDomain:
+            domain != null && domain != kDefaultRelayDomain ? domain : null,
+        onChangeRelay: () => setState(() {
+          _phraseOpen = false;
+          _showAdvanced = true;
+        }),
+        onBack: () => setState(() => _phraseOpen = false),
+        canStart: _phraseCanStart,
+        onRestored: (branch) => _finish('restored_phrase', branch: branch),
+      );
+    }
     return _backup == null ? _firstRun(context) : _restoreStep(context);
   }
 
@@ -381,10 +439,6 @@ class _WelcomeContentState extends State<_WelcomeContent> {
           ),
         ),
         const SizedBox(height: HollowSpacing.xs),
-        // There is deliberately no "Restore from a recovery phrase" here: the
-        // phrase regenerates the master keypair alone, carries NO synced data,
-        // and leaves a stale database on disk. The mnemonic FFI stays for the
-        // in-app recovery dialogs.
         if (relinked == null) linkRow,
         HollowListRow(
           touch: phone,
@@ -401,6 +455,25 @@ class _WelcomeContentState extends State<_WelcomeContent> {
             color: hollow.textTertiary,
           ),
           onTap: _pickBackup,
+        ),
+        HollowListRow(
+          touch: phone,
+          leading: Icon(
+            LucideIcons.keyRound,
+            size: 20,
+            color: hollow.textSecondary,
+          ),
+          title: 'Use your recovery phrase',
+          subtitle: 'If you lost your only device',
+          trailing: Icon(
+            LucideIcons.chevronRight,
+            size: 16,
+            color: hollow.textTertiary,
+          ),
+          onTap: () {
+            if (!_agreed || _restoring) return;
+            setState(() => _phraseOpen = true);
+          },
         ),
         ...footer,
       ],

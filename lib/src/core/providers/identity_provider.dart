@@ -63,24 +63,6 @@ class IdentityNotifier extends Notifier<IdentityState> {
       state = state.copyWith(error: e.toString());
     }
   }
-
-  /// Restore identity from a 24-word mnemonic phrase.
-  Future<void> restoreFromMnemonic(String phrase) async {
-    try {
-      final identityService = ref.read(identityServiceProvider);
-      final info = await identityService.restoreIdentityFromMnemonic(
-        phrase: phrase,
-      );
-      state = state.copyWith(
-        peerId: info.peerId,
-        mnemonic: info.mnemonic,
-        isLoaded: true,
-      );
-    } catch (e) {
-      debugPrint('[HOLLOW] Restore identity error: $e');
-      state = state.copyWith(error: e.toString());
-    }
-  }
 }
 
 final identityProvider =

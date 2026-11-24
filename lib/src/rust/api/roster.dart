@@ -6,8 +6,14 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `changed`, `ctx`, `delegation_from`, `destroy_order`, `destroy_permission`, `erase_stored_phrase`, `stored_phrase`
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Ctx`
+// These functions are ignored because they are not marked as `pub`: `changed`, `chosen_no_wait`, `ctx`, `delegation_from`, `destroy_order`, `destroy_permission`, `erase_stored_phrase`, `sign_restore`, `stored_phrase`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Ctx`, `RestoreSign`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `clone`, `eq`, `fmt`
+
+/// The Home card's state, `None` when no Welcome restore minted THIS device or its 30
+/// days are over.
+Future<WelcomeRestoreState?> welcomeRestoreState() =>
+    RustLib.instance.api.crateApiRosterWelcomeRestoreState();
 
 /// What our own roster says about every device, this one first.
 Future<RosterStatus> rosterStatus() =>
@@ -138,12 +144,23 @@ class RosterDevice {
   /// Members this device added: removing it keeps them unless they go too.
   final List<String> added;
 
+  /// A pending device a phrase recovery cut off (HOL-SEC-229): when. Never shown as a
+  /// restored backup, and approved only from the Devices page.
+  final PlatformInt64? cutOffAtMs;
+
+  /// With `cut_off_at_ms`: `"ours"` when this device knows it was one of ours, `"maybe"`
+  /// when the recovery knew none of the old devices (a Welcome recovery on an empty
+  /// install).
+  final String? cutOff;
+
   const RosterDevice({
     required this.devicePeerId,
     required this.state,
     required this.thisDevice,
     this.firstSeenMs,
     required this.added,
+    this.cutOffAtMs,
+    this.cutOff,
   });
 
   @override
@@ -152,7 +169,9 @@ class RosterDevice {
       state.hashCode ^
       thisDevice.hashCode ^
       firstSeenMs.hashCode ^
-      added.hashCode;
+      added.hashCode ^
+      cutOffAtMs.hashCode ^
+      cutOff.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -163,7 +182,9 @@ class RosterDevice {
           state == other.state &&
           thisDevice == other.thisDevice &&
           firstSeenMs == other.firstSeenMs &&
-          added == other.added;
+          added == other.added &&
+          cutOffAtMs == other.cutOffAtMs &&
+          cutOff == other.cutOff;
 }
 
 /// What our own roster says, for the Devices page and the lock screens.
@@ -187,6 +208,20 @@ class RosterStatus {
   final PlatformInt64? wipeAtMs;
   final List<RosterDevice> devices;
 
+  /// This device is not a member although the phrase admitted it (`"admit"`) or a
+  /// recovery kept it (`"recover"`): that statement is dated at or before the current
+  /// base (a clock behind, or a later change). The lock's button runs
+  /// `join_with_phrase`, or `recover_with_phrase(keep: [], too_early_lost_since_ms)`.
+  final String? tooEarly;
+
+  /// For `too_early == "recover"`: when that recovery said the person last had the
+  /// devices it dropped.
+  final PlatformInt64? tooEarlyLostSinceMs;
+
+  /// This device is not a member because a recovery typed elsewhere left it out:
+  /// that recovery's time.
+  final PlatformInt64? droppedByRecoveryAtMs;
+
   const RosterStatus({
     required this.member,
     required this.protected,
@@ -195,6 +230,9 @@ class RosterStatus {
     this.removedBy,
     this.wipeAtMs,
     required this.devices,
+    this.tooEarly,
+    this.tooEarlyLostSinceMs,
+    this.droppedByRecoveryAtMs,
   });
 
   @override
@@ -205,7 +243,10 @@ class RosterStatus {
       joinsAtMs.hashCode ^
       removedBy.hashCode ^
       wipeAtMs.hashCode ^
-      devices.hashCode;
+      devices.hashCode ^
+      tooEarly.hashCode ^
+      tooEarlyLostSinceMs.hashCode ^
+      droppedByRecoveryAtMs.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -218,5 +259,44 @@ class RosterStatus {
           joinsAtMs == other.joinsAtMs &&
           removedBy == other.removedBy &&
           wipeAtMs == other.wipeAtMs &&
-          devices == other.devices;
+          devices == other.devices &&
+          tooEarly == other.tooEarly &&
+          tooEarlyLostSinceMs == other.tooEarlyLostSinceMs &&
+          droppedByRecoveryAtMs == other.droppedByRecoveryAtMs;
+}
+
+/// What a Welcome phrase restore that minted this device left for the Home card.
+class WelcomeRestoreState {
+  final PlatformInt64 atMs;
+
+  /// `"admit"` (No) or `"recover"` (Yes).
+  final String branch;
+
+  /// The restore found no roster here (a fresh install).
+  final bool empty;
+
+  /// The identity's roster says a device restored from a backup joins only when
+  /// approved.
+  final bool noWait;
+
+  const WelcomeRestoreState({
+    required this.atMs,
+    required this.branch,
+    required this.empty,
+    required this.noWait,
+  });
+
+  @override
+  int get hashCode =>
+      atMs.hashCode ^ branch.hashCode ^ empty.hashCode ^ noWait.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is WelcomeRestoreState &&
+          runtimeType == other.runtimeType &&
+          atMs == other.atMs &&
+          branch == other.branch &&
+          empty == other.empty &&
+          noWait == other.noWait;
 }

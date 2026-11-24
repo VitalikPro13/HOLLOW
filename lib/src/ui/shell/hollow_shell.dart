@@ -72,6 +72,7 @@ import 'package:hollow/src/core/providers/server_avatar_anim_provider.dart';
 import 'package:hollow/src/core/providers/server_avatar_provider.dart';
 import 'package:hollow/src/core/providers/server_banner_provider.dart';
 import 'package:hollow/src/core/providers/device_proof_provider.dart';
+import 'package:hollow/src/core/services/phrase_restore.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/sticker_provider.dart';
 import 'package:hollow/src/core/providers/server_strip_layout_provider.dart';
@@ -159,6 +160,7 @@ import 'package:hollow/src/ui/mobile/mobile_shell.dart';
 import 'package:hollow/src/core/providers/roster_provider.dart';
 import 'package:hollow/src/rust/api/roster.dart' as roster_api;
 import 'package:hollow/src/ui/dialogs/restore_chooser.dart';
+import 'package:hollow/src/ui/shell/restore_pick_banner.dart';
 import 'package:hollow/src/ui/shell/roster_lock.dart';
 import 'package:hollow/src/ui/shell/server_strip.dart';
 import 'package:hollow/src/core/providers/guest_provider.dart';
@@ -592,6 +594,9 @@ class _HollowShellState extends ConsumerState<HollowShell>
     ref.listenManual<List<String>>(pendingDeviceAsksProvider, (_, asks) {
       if (asks.isNotEmpty) _askAboutPendingDevices();
     });
+    ref.listenManual<AsyncValue<roster_api.RosterStatus>>(rosterStatusProvider, (_, next) {
+      if (next.hasValue && ref.read(pendingDeviceAsksProvider).isNotEmpty) _askAboutPendingDevices();
+    });
     ref.listenManual<RestoreChooserAsk?>(restoreChooserAskProvider, (_, ask) {
       if (ask != null) unawaited(_restoreOffers.afterRecovery(fresh: ask.fresh));
     });
@@ -646,7 +651,8 @@ class _HollowShellState extends ConsumerState<HollowShell>
         final asks = ref.read(pendingDeviceAsksProvider);
         // Only a device that belongs can answer for another.
         if (asks.isEmpty || ref.read(rosterGateProvider).kind != RosterGateKind.none) break;
-        await showPendingDeviceDialog(context, ref, asks.first);
+        // An unreadable roster leaves the ask queued until the roster is read again.
+        if (!await showPendingDeviceDialog(context, ref, asks.first)) break;
       }
     } finally {
       _pendingDeviceDialogOpen = false;
@@ -1166,8 +1172,9 @@ class _HollowShellState extends ConsumerState<HollowShell>
     // handles open, Windows keeps messages.db and the next identity loads
     // forever.
     await _finishPendingWipe();
-    // A relink a restart cut short is finished or undone before the link import
-    // and anything else reads the identity.
+    // A relink a restart cut short is finished or undone, and an identity the
+    // person set aside moves out, before the link import and anything else
+    // reads the identity.
     try {
       await recovery_api.settleRelink();
     } catch (_) {}
@@ -1213,15 +1220,22 @@ class _HollowShellState extends ConsumerState<HollowShell>
     WelcomeResult? welcomeResult;
     if (!hasExisting && mounted) {
       final relinked = await keptOldDataForWelcome();
+      final setAside = await readSetAsideNote().catchError((_) => null);
       if (!mounted) return;
       _setPreparing(false);
       welcomeResult = await showWelcomeDialog(context,
-          relinkedTo: relinked?.profile, relinkedFolder: relinked?.folder);
+          relinkedTo: relinked?.profile,
+          relinkedFolder: relinked?.folder,
+          afterSetAside: setAside != null,
+          relayDomain: setAside?.relayDomain);
       if (!mounted) return;
       _setPreparing(true);
       unawaited(recovery_api.clearRelinkWelcome().catchError((_) {}));
+      if (setAside != null) {
+        unawaited(recovery_api.clearSetAsideWelcome().catchError((_) {}));
+      }
 
-      // 'restored_mnemonic' and 'restored_backup' leave an identity on disk;
+      // 'restored_phrase' and 'restored_backup' leave an identity on disk;
       // 'create_new' and null fall through to a normal load, which generates.
     }
 
@@ -1259,8 +1273,29 @@ class _HollowShellState extends ConsumerState<HollowShell>
       if (_unlocking && mounted) setState(() => _unlocking = false);
       return;
     }
+    final followUps = phraseRestoreFollowUps(welcomeResult);
+    if (followUps.phraseSaved) {
+      // Before Home reads its flags in _afterIdentity.
+      await storage_api
+          .saveSetting(key: kRecoveryPhraseSavedKey, value: '1')
+          .catchError((_) {});
+    }
+    if (followUps.offerLock) {
+      await _offerLockAfterPhraseRestore();
+    }
     await _afterIdentity(
         welcomeResult: welcomeResult, linkedThisLaunch: linkedThisLaunch);
+  }
+
+  /// A phrase restore lands its keys unlocked unless the keychain default took
+  /// them, so the first start offers a lock (C-IDENTITY-15), as after a link.
+  Future<void> _offerLockAfterPhraseRestore() async {
+    try {
+      if ((await identity_api.getIdentityProtectionStatus()).isEncrypted) return;
+      await storage_api.saveSetting(key: kProtectionOfferDueKey, value: '1');
+    } catch (e) {
+      debugPrint('[HOLLOW] Lock offer after restore skipped: $e');
+    }
   }
 
   /// A repair put a database that opens in place of one that did not: load
@@ -1549,6 +1584,11 @@ class _HollowShellState extends ConsumerState<HollowShell>
     // questions, so the keychain offer waits for a later one.
     final setUpThisLaunch = welcomeResult != null || linkedThisLaunch;
     unawaited(_offerAfterStart(setUpThisLaunch: setUpThisLaunch));
+    // Behind the start's offers: the restore chooser for the servers it owned.
+    if (phraseRestoreFollowUps(welcomeResult).askChooser && mounted) {
+      askForRestoreChooser(ProviderScope.containerOf(context, listen: false),
+          fresh: true);
+    }
 
     await _resumeInviteAfterRelaySwitch();
 
@@ -2244,6 +2284,8 @@ class _HollowShellState extends ConsumerState<HollowShell>
         // to announce.
         const SystemStatusBanner(),
         const ClockSkewBanner(),
+        // Dock and the phone carry this on Home, which Classic does not have.
+        const RestorePickBanner(),
         Expanded(
           child: Row(
             children: [
@@ -3026,4 +3068,21 @@ class _ShellScaffold extends StatelessWidget {
       ),
     );
   }
+}
+
+/// What a launch owes a Welcome phrase restore: a lock offer after either
+/// branch, on a recovery the chooser for the servers it owned
+/// (PHRASE_RESTORE_DESIGN 1.1 step 4), and the phrase counted as saved, since
+/// the person just typed it and Rust checked it.
+@visibleForTesting
+({bool offerLock, bool askChooser, bool phraseSaved}) phraseRestoreFollowUps(
+    WelcomeResult? result) {
+  if (result?.action != 'restored_phrase') {
+    return (offerLock: false, askChooser: false, phraseSaved: false);
+  }
+  return (
+    offerLock: true,
+    askChooser: result!.branch == PhraseRestoreBranch.recover,
+    phraseSaved: true,
+  );
 }

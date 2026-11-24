@@ -303,6 +303,7 @@ pub(crate) async fn author_due_checkpoints(
         .iter()
         .filter(|(id, s)| {
             s.checkpoint_due(local_peer_str, now)
+                && !crdt_resync.witness.is_restoring(id)
                 && s.checkpoint_witnessed(local_peer_str, &crdt_resync.op_sync.witnesses(id))
         })
         .map(|(id, _)| id.clone())
@@ -460,6 +461,11 @@ pub(crate) fn author_home_relays(
     }
 }
 
+/// Harness: owners whose devices never set a missing join key, so a test sees which key
+/// the settling's own key rule leaves.
+#[cfg(test)]
+pub(crate) static MISSING_KEY_OFF: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::LazyLock::new(Default::default);
+
 /// Whether this device sets a server's missing join key now. A second key is an invite
 /// reset, so only a device that knows none exists sets one: the lowest of the owner's
 /// devices the relay shows us in the room, with no join or whole-log fetch under way,
@@ -478,6 +484,10 @@ fn sets_missing_join_key(
     local_device: &str,
 ) -> bool {
     if super::ws_client::backgrounded() || pending_server_joins.contains_key(server_id) || crdt_resync.whole_log_due(server_id) {
+        return false;
+    }
+    #[cfg(test)]
+    if MISSING_KEY_OFF.lock().unwrap_or_else(|e| e.into_inner()).contains(local_master) {
         return false;
     }
     let lower_sibling = ws_room_peers.get(server_id).is_some_and(|peers| {
@@ -2454,6 +2464,10 @@ fn ask_join_lock(
     server_id: &str,
     pending: &mut PendingJoin,
 ) {
+    // A sync re-entry never reads a lock: the door it would open is the cut-off device's.
+    if pending.sync_reentry() {
+        return;
+    }
     let now = std::time::Instant::now();
     pending.lock_asked_at = Some(now);
     if pending.lock_asks.len() >= MAX_LOCK_ASKS {
@@ -3117,10 +3131,21 @@ pub(crate) fn settle_lost_devices(
             continue;
         }
         let Some(view) = before.get(server_id) else { continue };
+        let owner = state.current_owner().as_deref() == Some(local_peer_str);
+        // HOL-SEC-216: our records start at or after T, so they cannot tell what the
+        // lost device did before it. Nothing is written; a server we own restores from
+        // members' witnesses instead.
+        if !super::restore_flow::records_reach_t(&store, state, t_ms as i64) {
+            hollow_log!("[HOLLOW-CRDT] {server_id} first held here after T: not settled from our records");
+            if owner {
+                super::restore_flow::note_lost_restore(&store, state, local_peer_str, t_ms as i64);
+            }
+            continue;
+        }
         let t_ms = state.lost_t(t_ms);
         let seen = store.op_seen_ms(server_id).unwrap_or_default();
         let mut ops = Vec::new();
-        if state.current_owner().as_deref() == Some(local_peer_str) {
+        if owner {
             for device in dropped {
                 co_sign_marks(
                     state, mls, ws_cmd_tx, ws_room_peers, gossip_overlays, event_tx, local_peer_str, device_keypair, server_id, device,
@@ -3128,7 +3153,8 @@ pub(crate) fn settle_lost_devices(
                 );
             }
             let Some(roster) = roster.clone() else { continue };
-            let settling = crate::crdt::settle::Settling { before: view.clone(), dropped, t_ms, seen: &seen, roster };
+            let keys_after_ms = super::roster_book::keys_after_ms(&store, &roster, dropped);
+            let settling = crate::crdt::settle::Settling { before: view.clone(), dropped, t_ms, seen: &seen, roster, home: super::ws_client::relay_home(), keys_after_ms };
             let counted = super::floor::counted_members(state);
             let written = write_settling(state, server_id, &settling, local_peer_str, device_keypair, crdt_store);
             settled.push((server_id.clone(), super::floor::settled_newcomers(&counted, state, local_peer_str), written.clone()));
@@ -3193,7 +3219,8 @@ pub(crate) fn merge_rival_settlings(
         if !state.cut || super::conference::is_conference_sid(server_id) || state.is_deleted() || state.current_owner().as_deref() != Some(local_peer_str) {
             continue;
         }
-        let Some((dropped, t_ms)) = state.merged_settling() else { continue };
+        let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) else { return };
+        let Some((dropped, t_ms)) = rival_merge_due(state, &store) else { continue };
         let ids: Vec<String> = state.rival_settles.iter().map(|st| st.id()).collect();
         if !tried.insert(format!("{server_id}:{}", ids.join(","))) {
             continue;
@@ -3201,15 +3228,22 @@ pub(crate) fn merge_rival_settlings(
         if tried.len() > 256 {
             tried.clear();
         }
-        let Ok(store) = crate::storage::MessageStore::lease(db_path, db_passphrase) else { return };
         let Some(roster) = store.load_roster(local_peer_str).ok().flatten() else { return };
         let seen = store.op_seen_ms(server_id).unwrap_or_default();
         let before = state.view_counting(local_peer_str, &dropped);
-        let settling = crate::crdt::settle::Settling { before, dropped: &dropped, t_ms, seen: &seen, roster };
+        let keys_after_ms = super::roster_book::keys_after_ms(&store, &roster, &dropped);
+        let settling = crate::crdt::settle::Settling { before, dropped: &dropped, t_ms, seen: &seen, roster, home: super::ws_client::relay_home(), keys_after_ms };
         for op in write_settling(state, server_id, &settling, local_peer_str, device_keypair, crdt_store) {
             broadcast_op_mls_first(mls, ws_cmd_tx, ws_room_peers, gossip_overlays, event_tx, state, local_peer_str, server_id, &op, crypto_store);
         }
     }
+}
+
+/// The rival settlings `state` owes a merge of, while this device held the server before
+/// their T: a sibling that did merges, our records cannot (HOL-SEC-216).
+fn rival_merge_due(state: &ServerState, store: &crate::storage::MessageStore) -> Option<(Vec<String>, u64)> {
+    let (dropped, t_ms) = state.merged_settling()?;
+    super::restore_flow::held_before(store, state, t_ms as i64).then_some((dropped, t_ms))
 }
 
 /// Section 8.2 step 1 (M4): before a retire, ask member identities of every server we hold
@@ -3341,6 +3375,15 @@ pub(crate) async fn handle_approve_device(
 
 // ── 10b. LeaveServer ─────────────────────────────────────────────────
 
+/// Whether our leave of a server we hold drops it here with no op: a recovery's settling
+/// dropped us, so our fold no longer counts us and our own rules refuse any leave op
+/// (only a member authors), and nobody can be told. Never while a join of ours is
+/// pending (`joining`): a joiner's fold lacks us until its admission folds, and its join
+/// would bring the server back. A member always writes its signed leave.
+pub(crate) fn leaves_without_op(state: &ServerState, local_master: &str, joining: bool) -> bool {
+    !joining && !state.is_member(local_master)
+}
+
 pub(crate) async fn handle_leave_server(
     server_states: &mut HashMap<String, ServerState>,
     mls: &mut Option<MlsManager>,
@@ -3355,12 +3398,25 @@ pub(crate) async fn handle_leave_server(
     crdt_store: &CrdtStore,
     leave_book: &mut super::leave_book::LeaveBook,
     door: Option<(u64, zeroize::Zeroizing<[u8; 32]>)>,
+    joining: bool,
 ) -> bool {
     if let Some(state) = server_states.get_mut(&server_id) {
         // The owner is fixed for the server's life, so the only way out is a delete.
         if state.get_role(local_peer_str) == crate::crdt::operations::MemberRole::Owner {
             hollow_log!("[HOLLOW-CRDT] Owner cannot leave server {server_id}");
             return deny(event_tx, "You own this server, so you can't leave it, only delete it.").await;
+        }
+
+        if leaves_without_op(state, local_peer_str, joining) {
+            hollow_log!("[HOLLOW-CRDT] Our fold of {server_id} no longer counts us: dropping it here without a leave op");
+            if let Some(mls_mgr) = mls {
+                mls_mgr.remove_group(&server_id);
+                for cid in state.subgroup_channel_ids() {
+                    mls_mgr.remove_group(&crate::crypto::subgroup_id(&server_id, &cid));
+                }
+                persist_mls_state(mls_mgr, crypto_store);
+            }
+            return drop_left_server(server_states, event_tx, ws_cmd_tx, crdt_store, leave_book, server_id).await;
         }
 
         hollow_log!("[HOLLOW-CRDT] Leaving server {server_id}");
@@ -3408,6 +3464,19 @@ pub(crate) async fn handle_leave_server(
         }
     }
 
+    drop_left_server(server_states, event_tx, ws_cmd_tx, crdt_store, leave_book, server_id).await
+}
+
+/// The local half of a leave: the state, its room (unless a leave still to hand on keeps
+/// it) and its stored rows go, and the UI drops the server.
+async fn drop_left_server(
+    server_states: &mut HashMap<String, ServerState>,
+    event_tx: &mpsc::Sender<NetworkEvent>,
+    ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
+    crdt_store: &CrdtStore,
+    leave_book: &super::leave_book::LeaveBook,
+    server_id: String,
+) -> bool {
     server_states.remove(&server_id);
     if !leave_book.holds_room(&server_id) {
         let _ = ws_cmd_tx.send(super::ws_client::WsCommand::LeaveRoom {
@@ -5223,10 +5292,42 @@ fn apply_sync_item_extras(
 
 #[cfg(test)]
 mod tests {
+    /// R-CR-19: a leave drops a held server with no op only where our fold no longer
+    /// counts us and no join of ours is pending; a joiner (its fold lacks it until its
+    /// admission folds) and a member are never dropped silently.
+    #[test]
+    fn a_leave_drops_without_an_op_only_a_member_the_fold_dropped_with_no_join_pending() {
+        use crate::crdt::hold::tests::{hears_of_recovery, member_of, world, MEMBER, MEMBER_PHONE, MEMBER_RECOVERY, OWNER};
+        use crate::crdt::testkeys::keys;
+        let held = member_of(&world(), MEMBER, MEMBER_PHONE, false);
+        let mut dropped = held.clone();
+        hears_of_recovery(&mut dropped);
+        let (member, owner, stranger) = (keys(MEMBER).1, keys(OWNER).1, keys(MEMBER_RECOVERY).1);
+        assert!(held.is_member(&member) && !dropped.is_member(&member) && dropped.keeps_peer(&member), "precondition: the recovery's fold drops the member, its hold keeps it");
+        assert!(leaves_without_op(&dropped, &member, false), "the dropped member's leave cannot be an op");
+        assert!(!leaves_without_op(&dropped, &member, true), "a pending join of ours is never dropped silently");
+        assert!(!leaves_without_op(&held, &member, false), "a member writes its signed leave");
+        assert!(!leaves_without_op(&dropped, &owner, false), "the owner is always a member");
+        assert!(!leaves_without_op(&held, &stranger, true), "a joiner whose admission has not folded yet keeps its join");
+    }
+
     use super::*;
 
     fn store() -> crate::storage::MessageStore {
         crate::storage::MessageStore::open(":memory:", &"ab".repeat(32)).expect("open in-memory store")
+    }
+
+    /// HOL-SEC-216: a rival merge is written from this device's records only when they
+    /// reach back before the merged T (2,000 here).
+    #[test]
+    fn a_rival_merge_never_runs_on_a_server_held_only_after_t() {
+        let mut phone = crate::crdt::settle::tests::rival_world();
+        assert!(rival_merge_due(&phone, &store()).is_some(), "control: first folded at 1,000, before T");
+        for at in std::sync::Arc::make_mut(&mut phone.first_folds).values_mut() {
+            *at = 2_500;
+        }
+        assert!(phone.merged_settling().is_some(), "precondition: the rivalry stands");
+        assert_eq!(rival_merge_due(&phone, &store()), None);
     }
 
     fn dm_item(ts: i64, edited_at: Option<i64>) -> DmSyncItem {

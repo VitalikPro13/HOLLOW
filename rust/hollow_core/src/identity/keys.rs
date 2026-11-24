@@ -176,7 +176,7 @@ fn land_identity_key(
     keypair: &NativeKeypair,
     mirror: Option<&[u8]>,
     set_aside_locked: bool,
-) -> Result<(), String> {
+) -> Result<Landing, String> {
     let _landing = super::encryption::key_file_lock();
     let planned: Vec<&str> = if set_aside_locked {
         LOCKED_KEY_FILES.iter().map(|(name, _)| *name).filter(|name| is_encrypted_key(&root.join(name))).collect()
@@ -190,12 +190,76 @@ fn land_identity_key(
     landed
 }
 
+/// What a key landing moved, so a restore that fails after it puts the folder back
+/// ([`Landing::undo`]).
+pub(crate) struct Landing {
+    locked: Vec<(&'static str, &'static str)>,
+    /// The database the new identity cannot open, kept aside under this name.
+    kept: Option<String>,
+    /// The new identity's own kept database, put back from this name.
+    reclaimed: Option<String>,
+    /// The plaintext key file the new one replaced.
+    replaced: Option<zeroize::Zeroizing<Vec<u8>>>,
+    /// No database was in place once the key landed.
+    no_database: bool,
+}
+
+impl Landing {
+    /// Puts back what the landing changed: the key file as it was, the locked keys
+    /// under their names, the databases where they were. A database made after the
+    /// landing holds only what the failed restore wrote, and goes, so typing the phrase
+    /// again signs for one device, never beside one nobody holds a key for.
+    fn undo(self, root: &std::path::Path) {
+        crate::log::init();
+        let path = root.join("identity.key");
+        match &self.replaced {
+            Some(bytes) => {
+                if let Err(e) = super::encryption::write_key_file(&path, bytes) {
+                    hollow_log!("[HOLLOW-ID] The key file a failed restore replaced could not be put back: {e}");
+                }
+            }
+            None => {
+                let _landing = super::encryption::key_file_lock();
+                crate::api::wipe::zero_and_remove(&path);
+                if path.exists() {
+                    hollow_log!("[HOLLOW-ID] The key a failed restore landed could not be taken back out");
+                }
+            }
+        }
+        {
+            let _landing = super::encryption::key_file_lock();
+            for (name, aside) in &self.locked {
+                if !root.join(name).exists()
+                    && let Err(e) = fs::rename(root.join(aside), root.join(name))
+                {
+                    hollow_log!("[HOLLOW-ID] A locked key file could not go back after a failed restore: {e}");
+                }
+            }
+        }
+        let databases = (|| {
+            if self.no_database {
+                crate::api::storage::remove_database(root)?;
+            }
+            if let Some(stem) = &self.reclaimed {
+                crate::api::storage::move_database_to(root, stem)?;
+            }
+            if let Some(stem) = &self.kept {
+                crate::api::storage::put_database_back(root, stem)?;
+            }
+            Ok::<(), String>(())
+        })();
+        if let Err(e) = databases {
+            hollow_log!("[HOLLOW-STORE] A database stays where a failed restore left it: {e}");
+        }
+    }
+}
+
 fn land_staged_key(
     root: &std::path::Path,
     keypair: &NativeKeypair,
     mirror: Option<&[u8]>,
     set_aside_locked: bool,
-) -> Result<(), String> {
+) -> Result<Landing, String> {
     let path = root.join("identity.key");
     let staged = super::encryption::staging_path(&path);
     let discard = || crate::api::wipe::zero_and_remove(&staged);
@@ -233,7 +297,11 @@ fn land_staged_key(
         }
     };
     let locked = if set_aside_locked { set_aside_locked_keys(root) } else { Vec::new() };
-    let Err(e) = place_staged_key(&staged, &path) else { return Ok(()) };
+    let replaced = fs::read(&path).ok().map(zeroize::Zeroizing::new);
+    let Err(e) = place_staged_key(&staged, &path) else {
+        let no_database = !root.join("messages.db").exists();
+        return Ok(Landing { locked, kept, reclaimed, replaced, no_database });
+    };
     discard();
     for (name, aside) in locked {
         if !root.join(name).exists() {
@@ -356,48 +424,182 @@ fn place_staged_key(staged: &std::path::Path, path: &std::path::Path) -> Result<
     Ok(())
 }
 
-/// Restore an identity from an existing mnemonic phrase.
+/// Why typed words are not a recovery phrase (positions from 1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PhraseError {
+    Words(usize),
+    Word(usize),
+    Checksum,
+}
+
+impl PhraseError {
+    /// The code Welcome maps to its copy.
+    pub(crate) fn code(self) -> String {
+        match self {
+            PhraseError::Words(n) => format!("phrase_words:{n}"),
+            PhraseError::Word(i) => format!("phrase_word:{i}"),
+            PhraseError::Checksum => "phrase_checksum".into(),
+        }
+    }
+
+    /// What the in-app phrase dialogs show.
+    pub(crate) fn text(self) -> String {
+        match self {
+            PhraseError::Words(n) => format!("A recovery phrase is 24 words. This one has {n}."),
+            PhraseError::Word(i) => format!("Word {i} isn't a recovery phrase word. Check how it's spelled."),
+            PhraseError::Checksum => "These words aren't a recovery phrase. Check each word and the order.".into(),
+        }
+    }
+}
+
+/// Every phrase Hollow made is 24 English words; a 12-word wallet phrase is never one.
+const PHRASE_WORDS: usize = 24;
+
+/// `typed` as a recovery phrase: lowercased, single-spaced, exactly 24 words of the
+/// English list with a valid checksum.
+pub(crate) fn parse_phrase(typed: &str) -> Result<Mnemonic, PhraseError> {
+    let lower = zeroize::Zeroizing::new(typed.to_lowercase());
+    let words: Vec<&str> = lower.split_whitespace().collect();
+    if words.len() != PHRASE_WORDS {
+        return Err(PhraseError::Words(words.len()));
+    }
+    let normalized = zeroize::Zeroizing::new(words.join(" "));
+    Mnemonic::parse_in_normalized(bip39::Language::English, &normalized).map_err(|e| match e {
+        bip39::Error::UnknownWord(i) => PhraseError::Word(i + 1),
+        _ => PhraseError::Checksum,
+    })
+}
+
+/// How a typed phrase restores (PHRASE_RESTORE_DESIGN 1.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PhraseRestore {
+    /// The in-app restores and Welcome's No: the device already here is kept when it
+    /// may be, else the phrase admits a new one.
+    Admit,
+    /// Welcome's Yes: a recovery keeping only a newly minted device.
+    Recover { lost_since_ms: i64 },
+}
+
+/// What a phrase restore did.
+pub(crate) struct Restored {
+    pub data: IdentityData,
+    /// The device already here was kept; nothing was signed.
+    pub kept_device: bool,
+    /// No roster was held here (a fresh install).
+    pub empty: bool,
+}
+
+/// Restore an identity from an existing mnemonic phrase (the in-app restores).
 pub(crate) fn restore_identity_from_mnemonic(phrase: &str) -> Result<IdentityData, String> {
-    let mnemonic: Mnemonic = phrase
-        .parse()
-        .map_err(|e| format!("Invalid mnemonic: {e}"))?;
+    let mnemonic = parse_phrase(phrase).map_err(PhraseError::text)?;
+    restore_with_phrase(&mnemonic, PhraseRestore::Admit, false).map(|r| r.data)
+}
 
-    let keypair = NativeKeypair::from_mnemonic(&mnemonic)?;
-    let peer_id = keypair.peer_id();
-
+/// Lands the phrase's master key, then keeps the device this folder holds or mints one
+/// (HOL-SEC-217), signing into the database with the phrase (HOL-SEC-218). `welcome`
+/// drops a gone identity's duress slot first and leaves the mark the Home card reads.
+pub(crate) fn restore_with_phrase(mnemonic: &Mnemonic, how: PhraseRestore, welcome: bool) -> Result<Restored, String> {
+    let keypair = NativeKeypair::from_mnemonic(mnemonic)?;
     crate::api::storage::refuse_while_not_ready()?;
+    let root = data_dir()?;
+    if welcome && !root.join("identity.key").exists() {
+        // A code made for an identity that is gone must never fire beside this one.
+        crate::api::wipe::zero_and_remove(&root.join("identity.duress"));
+    }
     // An encrypted key it replaces is kept aside under its locked name, so the new one
     // mirrors no protection.
-    land_identity_key(&data_dir()?, &keypair, None, true)?;
+    let landing = land_identity_key(&root, &keypair, None, true)?;
+    // A restore that fails past here leaves the folder as it was, so no launch runs
+    // the new master key beside the old device.
+    restore_landed(&root, mnemonic, keypair, how, welcome).inspect_err(|_| landing.undo(&root))
+}
+
+/// [`restore_with_phrase`] once the master key landed.
+fn restore_landed(root: &std::path::Path, mnemonic: &Mnemonic, keypair: NativeKeypair, how: PhraseRestore, welcome: bool) -> Result<Restored, String> {
+    let peer_id = keypair.peer_id();
+    let seed = zeroize::Zeroizing::new(mnemonic.to_seed(""));
+    let recovery = super::recovery::recovery_keypair_from_seed(&seed);
+    let db_path = root.join("messages.db").to_str().ok_or("Invalid path encoding")?.to_string();
+    let db_passphrase = crate::api::storage::db_key_of(&keypair)?;
+    let store = crate::storage::MessageStore::open(&db_path, &db_passphrase)?;
+    let held = crate::node::roster_book::held_for_restore(&store, &peer_id, &db_path);
+    let empty = held.is_none();
+
+    if how == PhraseRestore::Admit
+        && let Some(old) = device_kept_here(root, &store, held.as_ref(), &keypair)
+    {
+        let device_peer_id = old.peer_id();
+        return Ok(Restored {
+            data: IdentityData { keypair, peer_id, device_keypair: old, device_peer_id, mnemonic: None },
+            kept_device: true,
+            empty,
+        });
+    }
 
     // Restoring a mnemonic onto a device IS the multi-device case, so this device MUST
     // mint a FRESH random device key (seeding from master recreates the same-peer_id
-    // collision) and overwrite any stale identity.device left by a previous identity.
+    // collision). The old device's secrets go before anything is signed for the new
+    // one, and its key file is replaced last.
     let mut device_secret = zeroize::Zeroizing::new([0u8; 32]);
     getrandom::fill(&mut device_secret[..]).map_err(|e| format!("RNG failed: {e}"))?;
     let device_keypair = NativeKeypair::from_secret_bytes(&device_secret);
-    save_keypair_to(&device_keypair_path()?, &device_keypair)?;
     let device_peer_id = device_keypair.peer_id();
+    store.forget_device_secrets()?;
+    if let Some(held) = &held {
+        crate::node::roster_book::keep_held_for_restore(&store, held, &device_peer_id, &db_path)?;
+    }
+    let sign = match how {
+        PhraseRestore::Admit => crate::api::roster::RestoreSign::Admit,
+        PhraseRestore::Recover { lost_since_ms } => crate::api::roster::RestoreSign::Recover {
+            lost_since_ms,
+            // A held roster keeps its own choice; with none, someone else may hold a
+            // device, so a restored backup joins only when approved (decision Nov 21).
+            no_wait: held.as_ref().is_none_or(|h| crate::node::roster_book::fold(&store, h).no_wait),
+        },
+    };
+    crate::api::roster::sign_restore(&keypair, &device_keypair, &recovery, sign, &db_path, &db_passphrase)?;
+    if welcome {
+        let branch = match how {
+            PhraseRestore::Admit => crate::node::phrase_restore::Branch::Admit,
+            PhraseRestore::Recover { .. } => crate::node::phrase_restore::Branch::Recover,
+        };
+        let mark = crate::node::phrase_restore::Mark { at_ms: now_ms(), branch, empty, device: device_peer_id.clone() };
+        crate::node::phrase_restore::write(&store, &mark)?;
+    }
+    drop(store);
+    place_key_file(&device_keypair_path()?, &device_keypair)?;
 
-    // The phrase was typed on this device, so it admits it (design ID-1).
-    let seed = zeroize::Zeroizing::new(mnemonic.to_seed(""));
-    let recovery = super::recovery::recovery_keypair_from_seed(&seed);
-    let mut roster = super::roster::Roster::new(&peer_id);
-    roster.add_consent(super::roster::sign_consent(&device_keypair, &peer_id));
-    roster.add_phrase_statement(
-        &super::roster::r_pub_of(&recovery),
-        None,
-        Some(super::roster::sign_phrase_admit(&keypair, &recovery, now_ms(), &device_peer_id)),
-    )?;
-    crate::node::roster_book::write_bootstrap(&data_dir()?, &roster)?;
-
-    Ok(IdentityData {
-        keypair,
-        peer_id,
-        device_keypair,
-        device_peer_id,
-        mnemonic: Some(mnemonic.to_string()),
+    Ok(Restored {
+        data: IdentityData { keypair, peer_id, device_keypair, device_peer_id, mnemonic: None },
+        kept_device: false,
+        empty,
     })
+}
+
+/// The device `root` already holds, when a phrase restore may keep it whole (HOL-SEC-217,
+/// D4): its key file decodes, it is not the master (G1), the held
+/// roster counts it, and the database's MLS identity, when there is one, is certified
+/// for it. Anything else mints a device.
+fn device_kept_here(
+    root: &std::path::Path,
+    store: &crate::storage::MessageStore,
+    held: Option<&super::roster::Roster>,
+    master: &NativeKeypair,
+) -> Option<NativeKeypair> {
+    // An encrypted one was set aside as `.locked` by the landing, so this is plaintext.
+    let bytes = zeroize::Zeroizing::new(fs::read(root.join("identity.device")).ok()?);
+    let device = NativeKeypair::from_protobuf_encoding(&bytes).ok()?;
+    let id = device.peer_id();
+    let own = master.peer_id();
+    if id == own || !crate::node::roster_book::fold(store, held?).is_member(&id) {
+        return None;
+    }
+    let mls_names_it = match crate::crypto::MlsManager::load_from(store, &[]) {
+        Ok(None) => true,
+        Ok(Some(mls)) => mls.bound_leaf().is_some_and(|leaf| leaf.device == id && leaf.master == own),
+        Err(_) => false,
+    };
+    mls_names_it.then_some(device)
 }
 
 /// Load the identity from disk, creating one if none exists. An encrypted file needs
@@ -486,6 +688,14 @@ pub(crate) fn save_keypair_to(path: &PathBuf, keypair: &NativeKeypair) -> Result
     let bytes_to_write = encode_key_file(existing.as_deref(), keypair)?;
     fs::write(path, bytes_to_write).map_err(|e| format!("Failed to write identity file: {e}"))?;
     Ok(())
+}
+
+/// [`save_keypair_to`] through a staged write, so a write that fails or dies leaves
+/// the file there before it whole.
+fn place_key_file(path: &std::path::Path, keypair: &NativeKeypair) -> Result<(), String> {
+    let existing = zeroize::Zeroizing::new(fs::read(path).ok());
+    let bytes = zeroize::Zeroizing::new(encode_key_file(existing.as_deref(), keypair)?);
+    super::encryption::write_key_file(path, &bytes)
 }
 
 /// A key file's bytes: an HKEYV1 envelope with `existing`'s protection when a session
@@ -608,5 +818,344 @@ mod tests {
         assert!(!root.join("identity.key").exists(), "the locked master stayed in place");
         assert_eq!(fs::read(root.join("identity.device")).unwrap(), plain, "a plaintext key was moved");
         assert!(!root.join("identity.device.locked").exists());
+    }
+}
+
+#[cfg(test)]
+mod phrase_restore_tests {
+    use super::*;
+    use crate::identity::roster::{self, Roster};
+    use crate::storage::MessageStore;
+
+    struct Root {
+        _g: std::sync::MutexGuard<'static, ()>,
+        _s: std::sync::MutexGuard<'static, ()>,
+        tmp: crate::test_tmp::TestDir,
+    }
+
+    impl Root {
+        fn path(&self) -> std::path::PathBuf {
+            self.tmp.path().join("data")
+        }
+        fn db(&self) -> String {
+            self.path().join("messages.db").to_string_lossy().into_owned()
+        }
+        fn store(&self, master: &NativeKeypair) -> MessageStore {
+            MessageStore::open(&self.db(), &crate::api::storage::db_key_of(master).unwrap()).unwrap()
+        }
+    }
+
+    impl Drop for Root {
+        fn drop(&mut self) {
+            // SAFETY: still serialized by the guards, which drop after this.
+            unsafe { std::env::remove_var("HOLLOW_DATA_DIR") };
+        }
+    }
+
+    fn root() -> Root {
+        let g = crate::node::resolver::test_lock();
+        let s = crate::api::storage::store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("data")).unwrap();
+        // SAFETY: serialized by the locks above.
+        unsafe { std::env::set_var("HOLLOW_DATA_DIR", tmp.path().join("data")) };
+        super::super::encryption::clear_session_key();
+        Root { _g: g, _s: s, tmp }
+    }
+
+    /// An identity on disk whose database holds its roster (the old device counted),
+    /// as one that has run once has it. Returns the phrase, master and device.
+    fn ran_once(r: &Root) -> (zeroize::Zeroizing<String>, NativeKeypair, NativeKeypair) {
+        let id = generate_new_identity().unwrap();
+        let phrase = zeroize::Zeroizing::new(id.mnemonic.clone().unwrap());
+        let store = r.store(&id.keypair);
+        let (_, state) = crate::node::roster_book::ensure_own(&store, &id.keypair, &id.device_keypair, &r.db());
+        assert!(state.is_member(&id.device_peer_id), "precondition: the old device counts");
+        (phrase, id.keypair, id.device_keypair)
+    }
+
+    fn mls_for(store: &MessageStore, device: &NativeKeypair, master: &NativeKeypair) {
+        let m = crate::crypto::MlsManager::new(device, master).unwrap();
+        store.save_mls_identity(&m.signer_bytes().unwrap(), &m.credential_bytes().unwrap(), &m.serialize_storage().unwrap()).unwrap();
+    }
+
+    fn own_state(r: &Root, master: &NativeKeypair) -> (Roster, roster::RosterState) {
+        let store = r.store(master);
+        let held = crate::node::roster_book::load(&store, &master.peer_id()).expect("a roster in the database");
+        let state = crate::node::roster_book::fold(&store, &held);
+        (held, state)
+    }
+
+    fn restore(phrase: &str, how: PhraseRestore) -> Restored {
+        restore_with_phrase(&parse_phrase(phrase).unwrap(), how, true).unwrap()
+    }
+
+    /// HOL-SEC-217 (reviewer probe, ported): a restore that mints a device beside this
+    /// identity's own database (the key pair gone, or bound to the device elsewhere)
+    /// never speaks with the old device's Olm or MLS state.
+    #[test]
+    fn a_restore_that_mints_a_device_beside_its_own_database_starts_a_fresh_olm_account() {
+        let r = root();
+        let (phrase, master, old) = ran_once(&r);
+        let account = crate::crypto::OlmManager::new().account_pickle_json().unwrap().to_string();
+        {
+            let store = r.store(&master);
+            store.save_olm_account(&account).unwrap();
+            store.save_olm_read_mark("peer", 5).unwrap();
+            assert!(store.insert_live_frame_nonce("peer", &[1; 16], i64::MAX, "peer", false).unwrap());
+            mls_for(&store, &old, &master);
+            store.save_setting("theme", "dark").unwrap();
+        }
+        crate::api::wipe::zero_and_remove(&r.path().join("identity.key"));
+        crate::api::wipe::zero_and_remove(&r.path().join("identity.device"));
+
+        let new = restore_identity_from_mnemonic(&phrase).unwrap();
+
+        assert_ne!(new.device_peer_id, old.peer_id(), "a restore mints a new device");
+        let store = r.store(&master);
+        let held = store.load_olm_account().unwrap().map(|a| a.to_string());
+        assert_ne!(held.as_deref(), Some(account.as_str()), "the new device runs on the old device's Olm account");
+        assert!(store.load_mls_identity().unwrap().is_none(), "the old device's MLS identity stayed");
+        assert!(store.load_olm_read_marks().unwrap().is_empty(), "the old device's read marks stayed");
+        assert!(store.load_live_frame_nonces(0, i64::MAX).unwrap().is_empty(), "the old device's nonces stayed");
+        assert_eq!(store.load_setting("theme").unwrap().as_deref(), Some("dark"), "the database's own rows went");
+        assert!(own_state(&r, &master).1.is_member(&new.device_peer_id), "the phrase admitted the new device");
+    }
+
+    /// D4: only the key file was lost. The device this folder holds, counted and named
+    /// by its MLS credential, is kept whole: nothing minted, signed or marked.
+    #[test]
+    fn a_restore_over_a_lost_key_file_keeps_its_counted_device() {
+        let r = root();
+        let (phrase, master, old) = ran_once(&r);
+        let account = crate::crypto::OlmManager::new().account_pickle_json().unwrap().to_string();
+        {
+            let store = r.store(&master);
+            store.save_olm_account(&account).unwrap();
+            mls_for(&store, &old, &master);
+        }
+        let roster_before = own_state(&r, &master).0;
+        crate::api::wipe::zero_and_remove(&r.path().join("identity.key"));
+
+        let done = restore(&phrase, PhraseRestore::Admit);
+
+        assert!(done.kept_device);
+        assert_eq!(done.data.device_peer_id, old.peer_id(), "the counted device was replaced");
+        assert_eq!(fs::read(r.path().join("identity.device")).unwrap(), old.to_protobuf_encoding().unwrap());
+        let store = r.store(&master);
+        assert_eq!(store.load_olm_account().unwrap().map(|a| a.to_string()).as_deref(), Some(account.as_str()));
+        assert!(store.load_mls_identity().unwrap().is_some());
+        assert_eq!(store.load_setting(crate::node::phrase_restore::KEY).unwrap(), None, "a kept device wrote the mark");
+        assert_eq!(own_state(&r, &master).0, roster_before, "a kept device signed something");
+    }
+
+    #[test]
+    fn a_restore_never_keeps_a_device_its_roster_does_not_count() {
+        let r = root();
+        let (phrase, _, old) = ran_once(&r);
+        let stranger = NativeKeypair::from_secret_bytes(&[0x71; 32]);
+        fs::write(r.path().join("identity.device"), stranger.to_protobuf_encoding().unwrap()).unwrap();
+        crate::api::wipe::zero_and_remove(&r.path().join("identity.key"));
+
+        let done = restore(&phrase, PhraseRestore::Admit);
+
+        assert!(!done.kept_device);
+        assert_ne!(done.data.device_peer_id, stranger.peer_id(), "kept a device the roster does not count");
+        assert_ne!(done.data.device_peer_id, old.peer_id());
+    }
+
+    /// G1: a legacy roster can count the master id (a 0.11 keystone), and anyone with
+    /// the master key can log in as it, so it is never kept as this device.
+    #[test]
+    fn a_restore_never_keeps_the_master_as_its_device() {
+        let r = root();
+        let id = generate_new_identity().unwrap();
+        let phrase = id.mnemonic.clone().unwrap();
+        let master = id.keypair;
+        let own = master.peer_id();
+        let _ = fs::remove_file(r.path().join(crate::node::roster_book::BOOTSTRAP_FILE));
+        let mut legacy = Roster::new(&own);
+        legacy.add_legacy(roster::sign_legacy(&master, &own));
+        legacy.add_consent(roster::sign_consent(&master, &own));
+        {
+            let store = r.store(&master);
+            crate::node::roster_book::merge_for_test(&store, &legacy, &own, &own);
+            assert!(crate::node::roster_book::fold(&store, &legacy).is_member(&own), "precondition: the legacy roster counts the master id");
+        }
+        fs::write(r.path().join("identity.device"), master.to_protobuf_encoding().unwrap()).unwrap();
+        crate::api::wipe::zero_and_remove(&r.path().join("identity.key"));
+
+        let done = restore(&phrase, PhraseRestore::Admit);
+
+        assert!(!done.kept_device);
+        assert_ne!(done.data.device_peer_id, own, "kept the master as this device");
+    }
+
+    #[test]
+    fn a_restore_never_keeps_a_device_the_databases_mls_credential_does_not_name() {
+        let r = root();
+        let (phrase, master, old) = ran_once(&r);
+        mls_for(&r.store(&master), &NativeKeypair::from_secret_bytes(&[0x72; 32]), &master);
+        crate::api::wipe::zero_and_remove(&r.path().join("identity.key"));
+
+        let done = restore(&phrase, PhraseRestore::Admit);
+
+        assert!(!done.kept_device);
+        assert_ne!(done.data.device_peer_id, old.peer_id(), "kept a device beside another device's MLS identity");
+        assert!(r.store(&master).load_mls_identity().unwrap().is_none());
+    }
+
+    /// Yes: "someone else may have it" covers a copy of this folder, so a recovery never
+    /// keeps the device here, and its base keeps only the new one.
+    #[test]
+    fn a_recovery_restore_always_mints_a_device() {
+        let r = root();
+        let (phrase, master, old) = ran_once(&r);
+        mls_for(&r.store(&master), &old, &master);
+        crate::api::wipe::zero_and_remove(&r.path().join("identity.key"));
+
+        let done = restore(&phrase, PhraseRestore::Recover { lost_since_ms: 1_000 });
+
+        assert!(!done.kept_device);
+        assert_ne!(done.data.device_peer_id, old.peer_id());
+        let (_, state) = own_state(&r, &master);
+        assert_eq!(state.members, std::collections::BTreeSet::from([done.data.device_peer_id.clone()]));
+    }
+
+    /// HOL-SEC-218: a restore beside a held roster whose base is dated ahead of this
+    /// clock (a recovery signed by a device a few minutes fast) still counts.
+    #[test]
+    fn a_restore_beside_a_held_roster_dates_its_admission_after_its_newest_statement() {
+        let r = root();
+        let (phrase, master, old) = ran_once(&r);
+        let (_, recovery) = crate::identity::recovery::keys_from_phrase(&phrase).unwrap();
+        let (mut held, _) = own_state(&r, &master);
+        let ahead = now_ms() + 5 * 60 * 1000;
+        let rec = roster::sign_recovery(&master, &recovery, ahead, &[old.peer_id()], false);
+        held.add_phrase_statement(&roster::r_pub_of(&recovery), Some(rec), None).unwrap();
+        crate::node::roster_book::merge_for_test(&r.store(&master), &held, &master.peer_id(), &old.peer_id());
+        crate::api::wipe::zero_and_remove(&r.path().join("identity.key"));
+        crate::api::wipe::zero_and_remove(&r.path().join("identity.device"));
+
+        let done = restore(&phrase, PhraseRestore::Admit);
+
+        let (roster, state) = own_state(&r, &master);
+        assert!(roster.base_at() == Some(ahead), "precondition: the base is the one dated ahead");
+        assert!(state.is_member(&done.data.device_peer_id), "the admission was dated before the base it joins");
+        assert!(state.is_member(&old.peer_id()), "an admission drops nobody");
+    }
+
+    #[test]
+    fn welcome_recovery_into_an_empty_store_signs_a_base_keeping_only_this_device() {
+        let r = root();
+        let phrase = Mnemonic::from_entropy(&[0x33; 32]).unwrap().to_string();
+        let t = now_ms() - 3_600_000;
+
+        let done = restore(&phrase, PhraseRestore::Recover { lost_since_ms: t });
+
+        assert!(done.empty);
+        let master = done.data.keypair.clone();
+        let (roster, state) = own_state(&r, &master);
+        assert_eq!(roster.recoveries.len(), 1);
+        assert_eq!(state.members, std::collections::BTreeSet::from([done.data.device_peer_id.clone()]));
+        assert!(state.no_wait, "an empty install's recovery lets a restored backup wait in");
+        let store = r.store(&master);
+        assert_eq!(crate::node::roster_book::recovery_lost_since(&store, &roster.base()), Some(t));
+        let mark = crate::node::phrase_restore::current(&store, &done.data.device_peer_id, now_ms()).expect("the mark");
+        assert_eq!((mark.branch, mark.empty), (crate::node::phrase_restore::Branch::Recover, true));
+        assert!(!r.path().join(crate::node::roster_book::BOOTSTRAP_FILE).exists(), "the restore left a bootstrap");
+    }
+
+    /// The in-app restores share the 24-word rule: a 12-word wallet phrase lands nothing.
+    #[test]
+    fn every_phrase_restore_refuses_a_12_word_phrase() {
+        let r = root();
+        let twelve = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+        let err = restore_identity_from_mnemonic(twelve).err().expect("a 12-word phrase restored");
+        assert_eq!(err, "A recovery phrase is 24 words. This one has 12.");
+        assert!(!r.path().join("identity.key").exists(), "a key landed");
+    }
+
+    #[test]
+    fn a_welcome_restore_drops_a_gone_identitys_duress_slot() {
+        let r = root();
+        let slot = r.path().join("identity.duress");
+        fs::write(&slot, [0xa5u8; 96]).unwrap();
+        let peek = r.tmp.path().join("peek");
+        fs::hard_link(&slot, &peek).unwrap();
+        let phrase = Mnemonic::from_entropy(&[0x34; 32]).unwrap().to_string();
+
+        restore(&phrase, PhraseRestore::Admit);
+
+        assert!(!slot.exists(), "a gone identity's duress slot stayed beside the restored one");
+        assert!(fs::read(&peek).unwrap().iter().all(|b| *b == 0), "the slot was unlinked unzeroed");
+    }
+
+    /// Review finding 2: a Yes restore that fails once the master key has landed takes
+    /// the key back out, so the next launch never runs as the old device the person
+    /// said someone else may hold.
+    #[test]
+    fn a_recovery_that_fails_after_the_key_lands_never_runs_as_the_old_device() {
+        let r = root();
+        let (phrase, master, old) = ran_once(&r);
+        crate::api::wipe::zero_and_remove(&r.path().join("identity.key"));
+        let db = r.path().join("messages.db");
+        let mut perms = fs::metadata(&db).unwrap().permissions();
+        perms.set_readonly(true);
+        fs::set_permissions(&db, perms.clone()).unwrap();
+        assert!(fs::OpenOptions::new().write(true).open(&db).is_err(), "precondition: the database cannot be written");
+        let out = restore_with_phrase(&parse_phrase(&phrase).unwrap(), PhraseRestore::Recover { lost_since_ms: 1_000 }, true);
+        #[allow(clippy::permissions_set_readonly_false)]
+        perms.set_readonly(false);
+        fs::set_permissions(&db, perms).unwrap();
+        assert!(out.is_err(), "precondition: the restore failed");
+        let landed = r.path().join("identity.key").exists();
+        let device = fs::read(r.path().join("identity.device")).ok().and_then(|b| NativeKeypair::from_protobuf_encoding(&b).ok()).map(|k| k.peer_id());
+        let counted = own_state(&r, &master).1.is_member(&old.peer_id());
+        assert!(
+            !(landed && device.as_deref() == Some(old.peer_id().as_str()) && counted),
+            "the failed recovery left the master key beside the old device, which still counts: the next launch runs as it",
+        );
+        assert!(!landed, "the landed key stayed after the restore failed");
+    }
+
+    /// Review finding 2: a restore on a fresh install that fails at its last step
+    /// leaves the folder as it found it, so typing the phrase again admits one device,
+    /// never a second beside a first nobody holds a key for.
+    #[test]
+    fn a_failed_restore_on_a_fresh_install_leaves_nothing_behind() {
+        let r = root();
+        let phrase = Mnemonic::from_entropy(&[0x35; 32]).unwrap().to_string();
+        super::super::encryption::test_faults::fail_rename_of("identity.device");
+        let out = restore_with_phrase(&parse_phrase(&phrase).unwrap(), PhraseRestore::Recover { lost_since_ms: 1_000 }, true);
+        super::super::encryption::test_faults::clear();
+        assert!(out.is_err(), "precondition: the restore failed");
+        for name in ["identity.key", "identity.device", "messages.db", "messages.db-wal"] {
+            assert!(!r.path().join(name).exists(), "{name} stayed after the restore failed");
+        }
+
+        let done = restore(&phrase, PhraseRestore::Recover { lost_since_ms: 1_000 });
+
+        let master = NativeKeypair::from_mnemonic(&parse_phrase(&phrase).unwrap()).unwrap();
+        let members = own_state(&r, &master).1.members;
+        assert_eq!(members.into_iter().collect::<Vec<_>>(), vec![done.data.device_peer_id], "the failed restore's device still counts");
+    }
+
+    /// Review finding 2: a locked identity's key file, set aside for a restore that then
+    /// fails, comes back under its own name.
+    #[test]
+    fn a_failed_restore_puts_a_locked_key_back() {
+        let r = root();
+        let mut locked = b"HKEYV1".to_vec();
+        locked.push(0x02);
+        locked.resize(119, 7);
+        fs::write(r.path().join("identity.key"), &locked).unwrap();
+        let phrase = Mnemonic::from_entropy(&[0x36; 32]).unwrap().to_string();
+        super::super::encryption::test_faults::fail_rename_of("identity.device");
+        let out = restore_with_phrase(&parse_phrase(&phrase).unwrap(), PhraseRestore::Admit, true);
+        super::super::encryption::test_faults::clear();
+        assert!(out.is_err(), "precondition: the restore failed");
+        assert_eq!(fs::read(r.path().join("identity.key")).unwrap(), locked, "the locked key is not back");
+        assert!(!r.path().join("identity.key.locked").exists());
     }
 }

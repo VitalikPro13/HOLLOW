@@ -81,6 +81,54 @@ fn may_answer(local_device: &str, asker: &str, now: Instant) -> bool {
     true
 }
 
+/// Harness: `local_device` may answer every asker again, as once its 10-minute gap
+/// (`ANSWER_EVERY`) has passed.
+#[cfg(test)]
+pub(crate) fn answer_gap_passed_for_test(local_device: &str) {
+    if let Some(map) = ANSWERED.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+        map.retain(|(d, _), _| d != local_device);
+    }
+}
+
+#[cfg(test)]
+static REFUSED: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+
+#[cfg(test)]
+static SILENT: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Harness: `local_device` answers no shared-servers ask (a friend that names nothing,
+/// or a 0.14.2 one), whatever its state holds.
+#[cfg(test)]
+pub(crate) fn silence_for_test(local_device: &str) {
+    SILENT.lock().unwrap_or_else(|e| e.into_inner()).push(local_device.to_string());
+}
+
+#[cfg(test)]
+fn silent_for_test(local_device: &str) -> bool {
+    SILENT.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|d| d == local_device)
+}
+
+#[cfg(not(test))]
+fn silent_for_test(_local_device: &str) -> bool {
+    false
+}
+
+/// Harness: `local_device` left `asker`'s ask unanswered.
+#[cfg(test)]
+pub(crate) fn note_refused(local_device: &str, asker: &str) {
+    REFUSED.lock().unwrap_or_else(|e| e.into_inner()).push((local_device.to_string(), asker.to_string()));
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+pub(crate) fn note_refused(_local_device: &str, _asker: &str) {}
+
+/// Harness: how many of `asker`'s asks `local_device` left unanswered.
+#[cfg(test)]
+pub(crate) fn refused_for_test(local_device: &str, asker: &str) -> usize {
+    REFUSED.lock().unwrap_or_else(|e| e.into_inner()).iter().filter(|(d, a)| d == local_device && a == asker).count()
+}
+
 /// Whether we answer `asker`: an accepted friend's device our BOOK counts for that
 /// friend's identity (first-party statements only, never a roster a co-member delivered).
 /// A minted key or a removed device of the friend gets nothing.
@@ -93,7 +141,9 @@ pub(crate) fn asker_ok(store: &MessageStore, db_path: &str, asker: &str) -> Opti
 }
 
 /// The entries for `master`: servers whose state lists it as a member, owned ones first.
-pub(crate) fn entries<'a>(states: impl IntoIterator<Item = &'a ServerState>, master: &str, relay: &str) -> Vec<SharedServer> {
+/// `key_dropped` tells a server whose key in force a cut-off device set
+/// (`ServerState::join_key_dropped` under a fresh view): its entry names no key.
+pub(crate) fn entries<'a>(states: impl IntoIterator<Item = &'a ServerState>, master: &str, relay: &str, key_dropped: &dyn Fn(&ServerState) -> bool) -> Vec<SharedServer> {
     let mut shared: Vec<&ServerState> = states
         .into_iter()
         .filter(|s| !super::conference::is_conference_sid(&s.server_id) && !s.is_deleted() && s.members.contains_key(master))
@@ -108,7 +158,7 @@ pub(crate) fn entries<'a>(states: impl IntoIterator<Item = &'a ServerState>, mas
         .map(|s| SharedServer {
             server_id: s.server_id.clone(),
             owner: (!crate::crdt::anchor::is_genesis_id(&s.server_id)).then(|| s.anchor_owner()).flatten().unwrap_or_default(),
-            join_key: s.join_public_text().unwrap_or_default(),
+            join_key: if key_dropped(s) { String::new() } else { s.join_public_text().unwrap_or_default() },
             // Where the server lives, which a friend's join must reach (`home_relay`).
             relay: s.home_relay().unwrap_or_else(|| relay.to_string()),
             members: super::standing::rank_masters(s, s.members.keys().cloned()).into_iter().take(MAX_MEMBERS).collect(),
@@ -145,24 +195,44 @@ pub(crate) fn answer<'a>(
     asker: &str,
     states: impl IntoIterator<Item = &'a ServerState>,
 ) -> Option<Vec<HavenMessage>> {
+    if silent_for_test(local_device) {
+        return None;
+    }
     let store = MessageStore::lease(db_path, db_passphrase).ok()?;
     let master = asker_ok(&store, db_path, asker)?;
     if !may_answer(local_device, asker, Instant::now()) {
         return None;
     }
     let relay = super::ws_client::relay_home().unwrap_or_default();
-    Some(frames(entries(states, &master, &relay)))
+    // Under the rosters we hold now, not the fold's last rebuild: a key the recovery
+    // being answered cut off is never handed back (F5: the owner re-enters by sync).
+    let key_dropped = |s: &ServerState| {
+        let co = |m: &str| super::server_rosters::co_member_rosters(&store, &s.server_id, m);
+        s.join_key_dropped(&super::authority_view::view_for(&store, db_path, s, &co))
+    };
+    Some(frames(entries(states, &master, &relay, &key_dropped)))
 }
 
-/// Whether this device typed our identity's newest phrase recovery within the window: its
-/// T is recorded here. A device that held servers before the recovery qualifies too.
-pub(crate) fn recovering(local_master: &str, db_path: &str, db_passphrase: &str) -> bool {
-    let Some(roster) = super::roster_book::own_roster(local_master, db_path, db_passphrase) else { return false };
-    let Some(at) = roster.recoveries.iter().map(|r| r.at_ms).max() else { return false };
-    let recent = super::types::now_ms().saturating_sub(at) < RECOVERY_WINDOW_MS;
-    recent
-        && MessageStore::lease(db_path, db_passphrase)
-            .is_ok_and(|s| super::roster_book::recovery_lost_since(&s, &roster.base()).is_some())
+/// Whether this device asks friends for the servers we share: it typed our identity's
+/// newest phrase recovery within the window (its T is recorded here; a device that held
+/// servers before the recovery qualifies too), or a Welcome phrase admission put it into
+/// an empty database within the window and our roster still counts it (PHRASE_RESTORE
+/// 3, R2). A removal never drops the admission statement, so membership decides.
+pub(crate) fn recovering(local_master: &str, local_device: &str, db_path: &str, db_passphrase: &str) -> bool {
+    MessageStore::lease(db_path, db_passphrase).is_ok_and(|s| recovering_in(&s, local_master, local_device, super::types::now_ms()))
+}
+
+pub(crate) fn recovering_in(store: &MessageStore, local_master: &str, local_device: &str, now_ms: i64) -> bool {
+    let Some(roster) = super::roster_book::load(store, local_master) else { return false };
+    let recovered = roster.recoveries.iter().map(|r| r.at_ms).max().is_some_and(|at| {
+        now_ms.saturating_sub(at) < RECOVERY_WINDOW_MS && super::roster_book::recovery_lost_since(store, &roster.base()).is_some()
+    });
+    recovered
+        || super::phrase_restore::current(store, local_device, now_ms).is_some_and(|m| {
+            m.branch == super::phrase_restore::Branch::Admit
+                && m.empty
+                && super::roster_book::fold(store, &roster).is_member(local_device)
+        })
 }
 
 /// The longest relay domain an entry may name.
@@ -177,19 +247,40 @@ pub(crate) fn frame_fits(servers: &[SharedServer], pad: &str) -> bool {
 /// The entries of an answer from `from` we act on: only from a friend device we count,
 /// only joinable ids with a well-formed key, pin and relay, each server once, at most
 /// [`PER_FRAME`]; member ids only of a peer id's shape, each once, at most [`MAX_MEMBERS`].
+/// An entry with NO key is a sync re-entry (F5), only of a self-certifying id, whose
+/// first answer must found it for us; a pinned (legacy) id comes back only keyed.
 pub(crate) fn accepted(store: &MessageStore, db_path: &str, from: &str, servers: &[SharedServer]) -> Vec<SharedServer> {
     if asker_ok(store, db_path, from).is_none() {
+        if !servers.is_empty() {
+            let master = super::resolver::resolve(from);
+            let friend = store.get_friend_row(&master).ok().flatten().map(|(status, ..)| status);
+            let held = super::roster_book::load(store, &master).map(|r| r.authority().counts(from));
+            hollow_log!("[HOLLOW-SECURITY] Dropped {from}'s shared-servers answer: not a friend device we count (master {master}, friend {friend:?}, counted {held:?})");
+        }
         return Vec::new();
     }
     let mut seen = std::collections::HashSet::new();
     servers
         .iter()
         .filter(|s| {
-            super::sync_handler::joinable_server_id(&s.server_id)
-                && super::sealed_box::key_from_text(&s.join_key).is_some()
-                && (s.owner.is_empty() || super::witness::peer_id_shape(&s.owner))
-                && s.relay.len() <= RELAY_MAX
-                && s.relay.bytes().all(|b| b.is_ascii_graphic())
+            let genesis = crate::crdt::anchor::is_genesis_id(&s.server_id);
+            let why = if !super::sync_handler::joinable_server_id(&s.server_id) {
+                "no server id"
+            } else if !s.join_key.is_empty() && super::sealed_box::key_from_text(&s.join_key).is_none() {
+                "no join key"
+            } else if s.join_key.is_empty() && !genesis {
+                // A pinned id syncs by state vector, whose answer never shows a caught-up
+                // fold (no digest round), so a sync re-entry of it could never complete.
+                "no key, and not a self-certifying id"
+            } else if !(s.owner.is_empty() || super::witness::peer_id_shape(&s.owner)) {
+                "no owner id"
+            } else if s.relay.len() > RELAY_MAX || !s.relay.bytes().all(|b| b.is_ascii_graphic()) {
+                "no relay name"
+            } else {
+                return true;
+            };
+            hollow_log!("[HOLLOW-SECURITY] Dropped {} from {from}'s shared-servers answer: {why}", s.server_id);
+            false
         })
         .filter(|s| seen.insert(s.server_id.clone()))
         .take(PER_FRAME)
@@ -201,11 +292,19 @@ pub(crate) fn accepted(store: &MessageStore, db_path: &str, from: &str, servers:
         .collect()
 }
 
+/// Whether `held` (our state of the entry's server) means we skip the entry: always for
+/// a keyed one; for a keyless one only when it holds our own member span or our own
+/// signed leave (finding 8), so a state holding neither re-enters by sync.
+pub(crate) fn held_skips(held: Option<&ServerState>, entry: &SharedServer, local_master: &str) -> bool {
+    held.is_some_and(|s| !entry.join_key.is_empty() || s.member_record.contains_key(local_master) || s.left_at(local_master).is_some())
+}
+
 /// Which friend devices this recovering device asked, and which answered.
 #[derive(Default)]
 pub(crate) struct Asks {
-    /// When we asked, and how many answer frames we took since.
-    asked: HashMap<String, (Instant, usize)>,
+    /// When we asked, how many answer frames we took since, and whether a friend's
+    /// accept already asked again inside [`ASK_AGAIN`].
+    asked: HashMap<String, (Instant, usize, bool)>,
     answered: std::collections::HashSet<String>,
 }
 
@@ -216,7 +315,7 @@ impl Asks {
     /// Take one answer frame from `device`: only from a device we asked, and at most
     /// [`FRAMES`] per ask. An answer nobody asked for joins nothing.
     pub(crate) fn take_frame(&mut self, device: &str) -> bool {
-        let Some((_, taken)) = self.asked.get_mut(device) else { return false };
+        let Some((_, taken, _)) = self.asked.get_mut(device) else { return false };
         *taken += 1;
         if *taken >= FRAMES {
             self.asked.remove(device);
@@ -227,26 +326,61 @@ impl Asks {
         true
     }
 
-    fn may_ask(&mut self, device: &str, now: Instant) -> bool {
-        if self.answered.contains(device) || self.asked.get(device).is_some_and(|(at, _)| now.saturating_duration_since(*at) < ASK_AGAIN) {
+    /// A sync re-entry these devices named lapsed: the next arrival of each asks again
+    /// (one ask per arrival, as `may_ask` allows), since only a new answer starts it anew.
+    pub(crate) fn forget_answered(&mut self, devices: &[String]) {
+        for d in devices {
+            self.answered.remove(d);
+        }
+    }
+
+    /// `accepted`: the device's accept of our friend request just landed. It answers the
+    /// request that carried our roster, so an ask it left unanswered for want of that
+    /// roster is sent again at once, once per [`ASK_AGAIN`].
+    fn may_ask(&mut self, device: &str, now: Instant, accepted: bool) -> bool {
+        if self.answered.contains(device) {
+            return false;
+        }
+        if let Some((at, _, reasked)) = self.asked.get(device)
+            && now.saturating_duration_since(*at) < ASK_AGAIN
+            && !(accepted && !*reasked)
+        {
             return false;
         }
         if self.asked.len() >= ANSWERED_MAX {
-            self.asked.retain(|_, (at, _)| now.saturating_duration_since(*at) < ASK_AGAIN);
+            self.asked.retain(|_, (at, ..)| now.saturating_duration_since(*at) < ASK_AGAIN);
             if self.asked.len() >= ANSWERED_MAX {
                 return false;
             }
         }
-        self.asked.insert(device.to_string(), (now, 0));
+        let reasked = self.asked.get(device).is_some_and(|(at, ..)| now.saturating_duration_since(*at) < ASK_AGAIN);
+        self.asked.insert(device.to_string(), (now, 0, reasked));
         true
     }
 }
 
-/// A shared server waiting for the event loop, and the friend who named it.
+/// A shared server waiting for the event loop, the friend who named it, and for a
+/// keyless entry every friend device that named it (the sync re-entry's sources).
 #[derive(Debug, Clone)]
 pub(crate) struct Queued {
     pub entry: SharedServer,
     pub friend: String,
+    pub devices: Vec<String>,
+}
+
+/// Friend devices one sync re-entry asks, at most.
+pub(crate) const SYNC_FROM_MAX: usize = 8;
+/// A sync re-entry asks its next source after this long with no answer, at most
+/// [`SYNC_ASKS_MAX`] times, then ends (the next friend arrival asks again).
+pub(crate) const SYNC_ASK_EVERY: Duration = Duration::from_secs(15);
+pub(crate) const SYNC_ASKS_MAX: u8 = 6;
+const SYNC_REENTRY_WAIT: Duration = Duration::from_secs(15 * (SYNC_ASKS_MAX as u64 + 1));
+
+/// Add `device` to `sources`: distinct, at most [`SYNC_FROM_MAX`].
+pub(crate) fn add_source(sources: &mut Vec<String>, device: &str) {
+    if sources.len() < SYNC_FROM_MAX && !sources.iter().any(|d| d == device) {
+        sources.push(device.to_string());
+    }
 }
 
 /// Why a shared server waits for the person instead of being joined.
@@ -318,15 +452,51 @@ const JOINS_PER_TICK: usize = 4;
 pub(crate) struct Joins {
     queue: std::collections::VecDeque<Queued>,
     started: HashMap<String, (Queued, Instant)>,
+    /// Re-entries of servers we own that completed before their witness restore
+    /// registered: the lock keeper waits on them as on an open restore (F5 note 3.3).
+    reentered: std::collections::BTreeSet<String>,
 }
 
 impl Joins {
-    /// Queue `entry` from `friend`, unless it is already on its way or held; at most
-    /// [`MAX_SERVERS`] in all. An entry on another relay waits for the person.
-    pub(crate) fn offer(&mut self, db_path: &str, entry: SharedServer, friend: &str, our_relay: &str) {
-        let queued = Queued { entry, friend: friend.to_string() };
+    /// A re-entry of `sid`, a server we own, completed.
+    pub(crate) fn note_reentered(&mut self, sid: &str) {
+        if self.reentered.len() < MAX_SERVERS {
+            self.reentered.insert(sid.to_string());
+        }
+    }
+
+    /// The completed re-entries still `waiting` for their witness restore to
+    /// register; the others are forgotten (the restore holds the lock keeper from then,
+    /// a settling is held, or the server is gone). Never by seats: a settling that seats
+    /// only us (an "I don't know" rollback) still needs a lock.
+    pub(crate) fn reentered(&mut self, waiting: &dyn Fn(&str) -> bool) -> Vec<String> {
+        self.reentered.retain(|sid| waiting(sid));
+        self.reentered.iter().cloned().collect()
+    }
+
+    /// A source of the sync re-entry of `sid` answered our open round: its wait starts
+    /// again, so a server still arriving round by round does not lapse.
+    pub(crate) fn progressed(&mut self, sid: &str, now: Instant) {
+        if let Some((_, at)) = self.started.get_mut(sid).filter(|(q, _)| q.entry.join_key.is_empty()) {
+            *at = now;
+        }
+    }
+
+    /// Queue `entry` from `friend`'s `device`, unless it is already on its way or held; at
+    /// most [`MAX_SERVERS`] in all. An entry on another relay waits for the person. A
+    /// keyless entry already queued takes `device` as one more source (finding 6).
+    pub(crate) fn offer(&mut self, db_path: &str, entry: SharedServer, friend: &str, device: &str, our_relay: &str) {
+        let queued = Queued { entry, friend: friend.to_string(), devices: vec![device.to_string()] };
         let sid = &queued.entry.server_id;
-        if self.started.contains_key(sid) || self.queue.iter().any(|q| q.entry.server_id == *sid) {
+        if let Some(q) = self.queue.iter_mut().find(|q| q.entry.server_id == *sid) {
+            if q.entry.join_key.is_empty() && queued.entry.join_key.is_empty() {
+                add_source(&mut q.devices, device);
+            }
+            hollow_log!("[HOLLOW-SERVER] {sid} a friend says we share is already on its way");
+            return;
+        }
+        if self.started.contains_key(sid) {
+            hollow_log!("[HOLLOW-SERVER] {sid} a friend says we share is already on its way");
             return;
         }
         if !queued.entry.relay.is_empty() && queued.entry.relay != our_relay {
@@ -341,30 +511,34 @@ impl Joins {
     }
 
     /// The entries to start now, at most [`JOINS_PER_TICK`]; each counts as started.
-    pub(crate) fn due(&mut self, now: Instant) -> Vec<SharedServer> {
+    pub(crate) fn due(&mut self, now: Instant) -> Vec<Queued> {
         let n = self.queue.len().min(JOINS_PER_TICK);
         self.queue
             .drain(..n)
-            .map(|q| {
-                let entry = q.entry.clone();
-                self.started.insert(entry.server_id.clone(), (q, now));
-                entry
+            .inspect(|q| {
+                self.started.insert(q.entry.server_id.clone(), (q.clone(), now));
             })
             .collect()
     }
 
     /// Re-entries no member answered within [`REENTRY_WAIT`]: they wait for the person.
-    /// `joined` tells a server we now hold; `reentry` one whose re-entry is still pending.
+    /// `joined` tells a server we now hold with no join of it pending. A sync re-entry
+    /// gets its asks' time from its last answered round and is never held (finding 7: the
+    /// person cannot join a server by hand with no key); the next friend arrival asks
+    /// again (`Asks::forget_answered`).
     pub(crate) fn lapsed(&mut self, db_path: &str, now: Instant, joined: &dyn Fn(&str) -> bool) -> Vec<String> {
         let mut out = Vec::new();
         self.started.retain(|sid, (q, at)| {
             if joined(sid) {
                 return false;
             }
-            if now.saturating_duration_since(*at) < REENTRY_WAIT {
+            let keyless = q.entry.join_key.is_empty();
+            if now.saturating_duration_since(*at) < if keyless { SYNC_REENTRY_WAIT } else { REENTRY_WAIT } {
                 return true;
             }
-            hold(db_path, q, HeldWhy::NotAMember);
+            if !keyless {
+                hold(db_path, q, HeldWhy::NotAMember);
+            }
             out.push(sid.clone());
             false
         });
@@ -377,43 +551,59 @@ impl Joins {
 /// can admit us anew on a friend's word. Nothing is persisted: after a restart the
 /// friends are asked again.
 #[allow(clippy::too_many_arguments)]
+///
+/// A keyless entry (F5) is a SYNC re-entry instead: no lock read and no join box, only
+/// a digest sync from the friend devices that named it (`sync_from`, which the caller
+/// asks); it completes on an answer of theirs whose fold lists us, founded for us.
 pub(crate) fn start_reentry(
     pending_server_joins: &mut HashMap<String, super::types::PendingJoin>,
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
-    entry: SharedServer,
+    queued: Queued,
     local_master: &str,
     device_peer_id: &str,
     db_path: &str,
     db_passphrase: &str,
 ) {
+    let Queued { entry, devices, .. } = queued;
     if pending_server_joins.contains_key(&entry.server_id) || !super::sync_handler::joinable_server_id(&entry.server_id) {
+        hollow_log!("[HOLLOW-SERVER] Not re-entering {}: a join is already pending or the id is not joinable", entry.server_id);
         return;
     }
-    hollow_log!("[HOLLOW-SERVER] Re-entering {} a friend says we share", entry.server_id);
+    let sync = entry.join_key.is_empty();
+    if sync && devices.is_empty() {
+        return;
+    }
+    hollow_log!("[HOLLOW-SERVER] Re-entering {} a friend says we share{}", entry.server_id, if sync { ", by sync" } else { "" });
     let mut pending = super::types::PendingJoin {
         owner_pin: (!entry.owner.is_empty() && !crate::crdt::anchor::is_genesis_id(&entry.server_id)).then_some(entry.owner),
         device_list: super::roster_book::join_roster(local_master, device_peer_id, db_path, db_passphrase),
-        join_key: Some(entry.join_key),
+        join_key: (!sync).then_some(entry.join_key),
         reply_secret: super::join_lane::ReplySecret::new(),
         reentry: true,
+        sync_from: if sync { devices.into_iter().take(SYNC_FROM_MAX).collect() } else { Vec::new() },
         ..Default::default()
     };
     super::age_gate::unsettle_at(db_path, db_passphrase, &entry.server_id);
-    super::sync_handler::request_join_lock(ws_cmd_tx, &entry.server_id, &mut pending);
+    if !sync {
+        super::sync_handler::request_join_lock(ws_cmd_tx, &entry.server_id, &mut pending);
+    }
     let _ = ws_cmd_tx.send(super::ws_client::WsCommand::JoinRoom { room_code: entry.server_id.clone() });
     pending_server_joins.insert(entry.server_id, pending);
 }
 
 /// Ask friend device `peer` which servers we share, when we are a recovering fresh start,
 /// it is an accepted friend's device in our DM room with it, and it has not answered yet.
-/// `live_only`, so this runs again each time the device arrives (LOW).
+/// `live_only`, so this runs again each time the device arrives (LOW), and on its
+/// accept (`after_accept`): our first ask can reach it before the roster that counts us.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn ask_if_recovering(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     asks: &mut Asks,
     room: Option<&str>,
+    after_accept: bool,
     peer: &str,
     local_master: &str,
+    local_device: &str,
     db_path: &str,
     db_passphrase: &str,
 ) {
@@ -423,7 +613,7 @@ pub(crate) fn ask_if_recovering(
     }
     let Ok(store) = MessageStore::lease(db_path, db_passphrase) else { return };
     let accepted = store.get_friend_row(&master).ok().flatten().is_some_and(|(status, ..)| status == "accepted");
-    if !accepted || !recovering(local_master, db_path, db_passphrase) || !asks.may_ask(peer, Instant::now()) {
+    if !accepted || !recovering(local_master, local_device, db_path, db_passphrase) || !asks.may_ask(peer, Instant::now(), after_accept) {
         return;
     }
     hollow_log!("[HOLLOW-SERVER] Asking {peer} which servers we share");

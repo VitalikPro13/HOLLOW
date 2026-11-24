@@ -1,4 +1,4 @@
-mod keys;
+pub(crate) mod keys;
 pub(crate) mod attempts;
 pub(crate) mod device_key;
 pub(crate) mod duress;

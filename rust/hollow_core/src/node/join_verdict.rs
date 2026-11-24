@@ -34,9 +34,10 @@ pub(crate) fn old_link() -> bool {
 
 /// Why a newcomer's ask was not made with the server's current invite link, if it was
 /// not: a retired key opened its box or its signed key names one, or it names no key
-/// (an older client).
+/// (an older client). During an owner's recovery a key set by the device it cut off
+/// counts as reset already (F5): that device would admit whom it likes until the settling.
 pub(crate) fn link_refusal(state: &ServerState, ask: Option<&JoinAsk>, old_link: bool) -> Option<&'static str> {
-    if old_link {
+    if old_link || state.join_key_dropped(&state.authority) {
         return Some(INVITE_RESET);
     }
     match ask.and_then(|a| a.key.as_ref()) {
@@ -169,6 +170,32 @@ mod tests {
             Verdict::Admit,
             "a returning member is no newcomer",
         );
+    }
+
+    /// F5: while part A's hold keeps the cut-off device's `JoinKeySet` counting, an ask
+    /// naming that key is refused as reset (that device would admit whom it likes until the
+    /// settling); a returning member is still no newcomer, and before the recovery the same
+    /// ask meets the gates.
+    #[test]
+    fn a_key_the_cut_off_device_set_admits_nobody_new_during_the_hold() {
+        use crate::crdt::hold::tests::{baseless_replica, baseless_world, view_after, MEMBER, MEMBER_PHONE};
+        let (mut owner, mut log) = baseless_world();
+        let secret = [5u8; 32];
+        log.push(owner.author_checked(crate::crdt::operations::CrdtPayload::JoinKeySet { secret: crate::crdt::operations::JoinSecret(hex::encode(secret)) }).unwrap());
+        let mut m = baseless_replica(&log, MEMBER, MEMBER_PHONE, true);
+        let joiner = crate::identity::native_identity::NativeKeypair::from_secret_bytes(&[52; 32]);
+        let key = super::super::sealed_box::key_to_text(&super::super::sealed_box::public_of(&secret));
+        let ask = JoinAsk::sign_for_invite(&m.server_id, 1, &key, &joiner).unwrap();
+        let judge = |s: &ServerState, member: bool| verdict(s, &joiner.peer_id(), false, member, Some(&ask), false, None, false, "member", |_| false);
+        assert_eq!(m.join_public_text(), Some(key.clone()), "precondition: the owner's phone set the key in force");
+        assert!(!m.join_key_dropped(&m.authority));
+        assert_eq!(judge(&m, false), Verdict::Admit, "control: before the recovery the link admits");
+        m.authority = view_after(false);
+        let _ = m.rebuild_now();
+        assert!(m.in_recovery() && m.join_public_text() == Some(key.clone()), "precondition: part A keeps the phone's key");
+        assert!(m.join_key_dropped(&m.authority));
+        assert_eq!(judge(&m, false), Verdict::Refuse { reason: INVITE_RESET.into(), settles: true }, "the cut-off device's key admitted a newcomer");
+        assert_eq!(judge(&m, true), Verdict::Admit, "a returning member was refused");
     }
 
     /// A member whose device lost the server (a reset, a fresh install) is asked the

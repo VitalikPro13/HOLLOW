@@ -14,6 +14,7 @@ import 'package:hollow/src/ui/components/hollow_spinner.dart';
 import 'package:hollow/src/ui/components/hollow_text_field.dart';
 import 'package:hollow/src/ui/settings/device_management_shared.dart';
 import 'package:hollow/src/ui/settings/settings_shared.dart';
+import 'package:hollow/src/ui/shell/roster_lock.dart' show rosterDateLabel;
 import 'package:hollow/src/core/peer_id_label.dart';
 
 /// Where the recovery phrase is typed (design ID-1). Nothing here keeps the
@@ -25,6 +26,7 @@ class RecoveryPhraseField extends StatelessWidget {
   final String? errorText;
   final ValueChanged<String>? onChanged;
   final bool autofocus;
+  final FocusNode? focusNode;
 
   const RecoveryPhraseField({
     super.key,
@@ -32,6 +34,7 @@ class RecoveryPhraseField extends StatelessWidget {
     this.errorText,
     this.onChanged,
     this.autofocus = false,
+    this.focusNode,
   });
 
   @override
@@ -39,10 +42,11 @@ class RecoveryPhraseField extends StatelessWidget {
     return SecretScreen(
       child: HollowTextField(
         controller: controller,
-        hintText: 'The 12 or 24 words, in order',
+        hintText: 'Your 24 words, in order',
         minLines: 2,
         maxLines: 4,
         autofocus: autofocus,
+        focusNode: focusNode,
         errorText: errorText,
         onChanged: onChanged,
         keyboardType: TextInputType.visiblePassword,
@@ -105,6 +109,40 @@ Future<bool> showRecoverWithPhraseDialog(
   return ok ?? false;
 }
 
+/// Type the phrase again after a recovery the roster outdated before it
+/// counted (HOL-SEC-218): the same recovery from the moment the first one
+/// named, asked again when none is stored (never the epoch, the widest undo).
+/// The devices the roster holds now are listed to keep: one of them may be the
+/// person's own newer install.
+Future<bool> showRecoverAgainDialog(
+  BuildContext context, {
+  required roster_api.RosterStatus status,
+  required int? lostSinceMs,
+}) async {
+  final others = status.devices.where((d) => !d.thisDevice).toList();
+  final ok = await showHollowDialog<bool>(
+    context: context,
+    builder: (_) => _PhraseDialog(
+      title: 'Use your recovery phrase',
+      body: others.isEmpty
+          ? 'Typing it keeps this device and removes every other device.'
+          : 'Typing it keeps this device and the ones you pick, and removes '
+              'every other device.',
+      confirmLabel: others.isEmpty ? 'Keep this device' : 'Keep these devices',
+      devices: others.map((d) => d.devicePeerId).toList(),
+      fixedSinceMs: lostSinceMs,
+      onSubmit: (phrase, keep, sinceMs) => roster_api.recoverWithPhrase(
+          phrase: phrase,
+          keep: keep.toList(),
+          // Nothing else to drop: no moment to judge from.
+          lostSinceMs: sinceMs ??
+              lostSinceMs ??
+              DateTime.now().millisecondsSinceEpoch),
+    ),
+  );
+  return ok ?? false;
+}
+
 /// Type the phrase to choose whether a device restored from a backup may join by
 /// nobody refusing it for seven days. True when the choice was made.
 Future<bool> showBackupWaitDialog(BuildContext context, {required bool allowed}) async {
@@ -157,6 +195,9 @@ class _PhraseDialog extends ConsumerStatefulWidget {
   final Future<void> Function(String phrase, Set<String> keep, int? lostSinceMs)
       onSubmit;
 
+  /// The moment already answered for [devices]: not asked again, and named.
+  final int? fixedSinceMs;
+
   const _PhraseDialog({
     required this.title,
     required this.body,
@@ -164,11 +205,20 @@ class _PhraseDialog extends ConsumerStatefulWidget {
     required this.onSubmit,
     this.danger = false,
     this.devices = const [],
+    this.fixedSinceMs,
   });
 
   @override
   ConsumerState<_PhraseDialog> createState() => _PhraseDialogState();
 }
+
+/// What a recovery from [sinceMs] undoes for the devices not kept; 0 is
+/// "Longer ago, or not sure".
+String undoneSinceText(BuildContext context, int sinceMs) => sinceMs <= 0
+    ? 'Changes the others made in your servers are undone.'
+    : 'Changes the others made in your servers after '
+        '${rosterDateLabel(context, DateTime.fromMillisecondsSinceEpoch(sinceMs))} '
+        'are undone.';
 
 /// Shown when the devices counted before the chosen moment could not be read.
 const kKeepUnreadText =
@@ -193,15 +243,36 @@ class _PhraseDialogState extends ConsumerState<_PhraseDialog>
 
   String get _typed => _phrase.text.trim().split(RegExp(r'\s+')).join(' ');
 
-  bool get _asksWhen => widget.devices.isNotEmpty;
+  bool get _hasDevices => widget.devices.isNotEmpty;
+
+  bool get _asksWhen => _hasDevices && widget.fixedSinceMs == null;
+
+  @override
+  void initState() {
+    super.initState();
+    final fixed = widget.fixedSinceMs;
+    if (_hasDevices && fixed != null) {
+      _sinceMs = fixed;
+      _keepLoading = true;
+      // setState is not allowed until initState returns.
+      Future.microtask(() => _loadKeep(fixed));
+    }
+  }
 
   /// A new answer starts the ticks again from what this device counted before it.
   Future<void> _answered(LastHadAnswer answer, int sinceMs) async {
     if (!mounted) return;
-    final ask = ++_keepAsk;
     setState(() {
       _answer = answer;
       _sinceMs = sinceMs;
+    });
+    await _loadKeep(sinceMs);
+  }
+
+  Future<void> _loadKeep(int sinceMs) async {
+    if (!mounted) return;
+    final ask = ++_keepAsk;
+    setState(() {
       _keep.clear();
       _keepNote = null;
       _keepLoading = true;
@@ -225,7 +296,7 @@ class _PhraseDialogState extends ConsumerState<_PhraseDialog>
 
   Future<void> _submit() async {
     if (actionRunning || _phrase.text.trim().isEmpty) return;
-    if (_asksWhen && (_sinceMs == null || _keepLoading)) return;
+    if (_hasDevices && (_sinceMs == null || _keepLoading)) return;
     final phrase = _typed.toLowerCase();
     var wrong = false;
     final ok = await runDialogAction(() async {
@@ -233,7 +304,7 @@ class _PhraseDialogState extends ConsumerState<_PhraseDialog>
         wrong = true;
         return;
       }
-      await widget.onSubmit(phrase, {..._keep}, _asksWhen ? _sinceMs : null);
+      await widget.onSubmit(phrase, {..._keep}, _hasDevices ? _sinceMs : null);
     });
     if (!mounted) return;
     if (wrong) {
@@ -257,7 +328,8 @@ class _PhraseDialogState extends ConsumerState<_PhraseDialog>
     String name(String id) =>
         deviceGivenName(id, labels: labels, kinds: kinds) ?? shortPeerLabel(id);
     final ready = _phrase.text.trim().isNotEmpty &&
-        (!_asksWhen || (_sinceMs != null && !_keepLoading));
+        (!_hasDevices || (_sinceMs != null && !_keepLoading));
+    final fixed = widget.fixedSinceMs;
     return HollowDialog(
       title: widget.title,
       width: 420,
@@ -287,7 +359,8 @@ class _PhraseDialogState extends ConsumerState<_PhraseDialog>
             const SizedBox(height: HollowSpacing.xs),
             Text(
               "Devices you don't keep are treated as lost or stolen. Changes "
-              'they made in your servers after this time can be undone.',
+              'they made in your servers after this time can be undone, and '
+              'invite links to the servers you own stop working.',
               style: secondary,
             ),
             const SizedBox(height: HollowSpacing.sm),
@@ -298,7 +371,7 @@ class _PhraseDialogState extends ConsumerState<_PhraseDialog>
               onAnswer: _answered,
             ),
           ],
-          if (_asksWhen && _sinceMs != null) ...[
+          if (_hasDevices && _sinceMs != null) ...[
             const SizedBox(height: HollowSpacing.lg),
             const SettingsFieldLabel(
                 label: 'Tick the devices that are still yours. The others '
@@ -331,6 +404,10 @@ class _PhraseDialogState extends ConsumerState<_PhraseDialog>
                 const SizedBox(height: HollowSpacing.sm),
                 Text(_keepNote!, style: secondary),
               ],
+            ],
+            if (fixed != null) ...[
+              const SizedBox(height: HollowSpacing.sm),
+              Text(undoneSinceText(context, fixed), style: secondary),
             ],
           ],
         ],

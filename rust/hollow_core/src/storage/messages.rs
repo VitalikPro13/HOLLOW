@@ -5290,6 +5290,9 @@ impl MessageStore {
                  DELETE FROM app_settings WHERE key = 'recovery_mnemonic';
                  DELETE FROM app_settings WHERE key >= 'retire_held:' AND key < 'retire_held;';
                  DELETE FROM app_settings WHERE key >= 'settle_owed:' AND key < 'settle_owed;';
+                 DELETE FROM app_settings WHERE key >= 'lost_restore:' AND key < 'lost_restore;';
+                 DELETE FROM app_settings WHERE key = 'welcome_restore';
+                 DELETE FROM app_settings WHERE key = 'own_phrase_statement';
                  DELETE FROM app_settings WHERE key IN ('age_gate_phones', 'age_gate_local', 'age_gate_asked', 'age_gate_store_install');
                  DELETE FROM app_settings WHERE key >= 'age_consent:' AND key < 'age_consent;';
                  DELETE FROM image_verdicts;
@@ -5304,6 +5307,38 @@ impl MessageStore {
         self.conn
             .execute_batch("VACUUM;")
             .map_err(|e| format!("Failed to rebuild the scrubbed database: {e}"))
+    }
+
+    /// What a phrase restore drops before it mints a new device beside this database
+    /// (HOL-SEC-217): everything [`Self::scrub_device_secrets`] drops that is the old
+    /// DEVICE's (Olm account and sessions, nonces, MLS identity and groups, its owed
+    /// settlings, restores and marks), never the history, floors or clears, which belong
+    /// to this database on this machine.
+    pub fn forget_device_secrets(&self) -> Result<(), String> {
+        self.conn
+            .execute_batch(
+                "PRAGMA secure_delete = ON;
+                 DELETE FROM olm_account;
+                 DELETE FROM olm_sessions;
+                 DELETE FROM olm_session_floors;
+                 DELETE FROM olm_read_marks;
+                 DELETE FROM live_frame_nonces;
+                 DELETE FROM mls_identity;
+                 DELETE FROM mls_storage;
+                 DELETE FROM app_settings WHERE key = 'recovery_mnemonic';
+                 DELETE FROM app_settings WHERE key >= 'retire_held:' AND key < 'retire_held;';
+                 DELETE FROM app_settings WHERE key >= 'settle_owed:' AND key < 'settle_owed;';
+                 DELETE FROM app_settings WHERE key >= 'lost_restore:' AND key < 'lost_restore;';
+                 DELETE FROM app_settings WHERE key = 'welcome_restore';
+                 DELETE FROM app_settings WHERE key = 'own_phrase_statement';
+                 DELETE FROM app_settings WHERE key IN ('age_gate_phones', 'age_gate_local', 'age_gate_asked', 'age_gate_store_install');
+                 DELETE FROM app_settings WHERE key >= 'age_consent:' AND key < 'age_consent;';
+                 DELETE FROM image_verdicts;",
+            )
+            .map_err(|e| format!("Failed to forget the old device's secrets: {e}"))?;
+        self.conn
+            .execute_batch("VACUUM;")
+            .map_err(|e| format!("Failed to rebuild the database: {e}"))
     }
 
     /// Delete the persisted MLS identity, used when a linked sibling detects it
@@ -10410,6 +10445,39 @@ mod tests {
         store.scrub_device_secrets().unwrap();
         assert!(store.load_olm_read_marks().unwrap().is_empty(), "a copy carried this device's read marks");
         assert!(store.load_live_frame_nonces(0, i64::MAX).unwrap().is_empty(), "a copy carried this device's live frame nonces");
+    }
+
+    /// HOL-SEC-217: a phrase restore minting a device beside this database drops what
+    /// was the old device's, and keeps what belongs to the database: its history, the
+    /// floors and clears this machine made, and other settings.
+    #[test]
+    fn forget_device_secrets_keeps_history_and_clears() {
+        let store = mem_store();
+        store.save_olm_account("{\"old\":1}").unwrap();
+        store.save_olm_read_mark("peer", 5).unwrap();
+        assert!(store.insert_live_frame_nonce("peer", &[1; 16], i64::MAX, "peer", false).unwrap());
+        store.save_mls_identity(b"signer", b"credential", b"storage").unwrap();
+        for key in ["retire_held:dev", "settle_owed:lost:dev", "lost_restore:srv", "welcome_restore", "own_phrase_statement", "age_consent:srv", "recovery_mnemonic"] {
+            store.save_setting(key, "x").unwrap();
+        }
+        store.save_setting("theme", "dark").unwrap();
+        store.record_image_verdict("h", 1, 1).unwrap();
+        store.clear_history_in(Some("srv"), &[("srv".into(), "chan".into())], 1_000).unwrap();
+        let floor = store.channel_floor("srv", "chan");
+        assert!(floor.is_some(), "precondition: a clear made a floor");
+
+        store.forget_device_secrets().unwrap();
+
+        assert!(store.load_olm_account().unwrap().is_none(), "the old device's Olm account stayed");
+        assert!(store.load_olm_read_marks().unwrap().is_empty());
+        assert!(store.load_live_frame_nonces(0, i64::MAX).unwrap().is_empty());
+        assert!(store.load_mls_identity().unwrap().is_none(), "the old device's MLS identity stayed");
+        for key in ["retire_held:dev", "settle_owed:lost:dev", "lost_restore:srv", "welcome_restore", "own_phrase_statement", "age_consent:srv", "recovery_mnemonic"] {
+            assert_eq!(store.load_setting(key).unwrap(), None, "{key} stayed");
+        }
+        assert_eq!(store.image_verdict("h", 1), None);
+        assert_eq!(store.load_setting("theme").unwrap().as_deref(), Some("dark"), "a setting of the database went");
+        assert_eq!(store.channel_floor("srv", "chan"), floor, "the floor this machine cleared to went");
     }
 
     /// Overlay images and rail blobs never share a row: the same bytes held as both

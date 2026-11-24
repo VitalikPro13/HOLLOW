@@ -26,14 +26,22 @@ abstract final class SecurityAlertKind {
   static const ownDeviceAdded = 'own_device_added';
 }
 
+/// The `by` of an own-device alert for a device the recovery phrase added
+/// (HOL-SEC-215): no device of ours vouched, another machine typed the phrase.
+const kAddedByPhrase = 'phrase';
+
 /// What an own-device alert names: the device added and the device of ours that
-/// added it.
+/// added it, or [kAddedByPhrase].
 ({String device, String by})? ownDeviceAddedDetail(
     verification_api.SecurityAlertFfi alert) {
   if (alert.kind != SecurityAlertKind.ownDeviceAdded) return null;
   final parts = alert.detail.split(':');
   if (parts.length != 2 || parts.any((p) => p.isEmpty)) return null;
   return (device: parts[0], by: parts[1]);
+}
+
+extension OwnDeviceAddedBy on ({String device, String by}) {
+  bool get byPhrase => by == kAddedByPhrase;
 }
 
 /// Security alerts recorded for contacts (Issue 1-C).

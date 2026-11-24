@@ -5,6 +5,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_icon_button.dart';
+import 'package:hollow/src/ui/components/hollow_list_row.dart' show HollowBleed;
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// The one surface Welcome and the first-run link steps share, so moving
@@ -36,6 +37,9 @@ class WelcomeFrame extends StatelessWidget {
   });
 
   static const double width = 440;
+
+  /// A desktop row's inset, `HollowListRow.insetOf()`.
+  static const double _rowInset = HollowSpacing.md;
 
   /// The whole screen and touch-size controls: every phone and tablet at any
   /// width or orientation (they keep the phone shell after it too), and a
@@ -75,7 +79,17 @@ class WelcomeFrame extends StatelessWidget {
               header,
               const SizedBox(height: HollowSpacing.lg),
             ],
-            Flexible(child: SingleChildScrollView(child: body)),
+            // Widened past the text edge so a flush row's fill is not cut
+            // by the scroll's clip.
+            Flexible(
+              child: HollowBleed(
+                horizontal: _rowInset,
+                child: SingleChildScrollView(
+                  padding: const EdgeInsets.symmetric(horizontal: _rowInset),
+                  child: body,
+                ),
+              ),
+            ),
             if (bottom != null) ...[
               const SizedBox(height: HollowSpacing.xl),
               bottom!,

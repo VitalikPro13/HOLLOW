@@ -66,8 +66,8 @@ void main() {
     expect(find.textContaining('10-character code'), findsOneWidget);
   });
 
-  testWidgets('creating an identity is the one filled action, and no phrase '
-      'restore is offered', (tester) async {
+  testWidgets('creating an identity is the one filled action, and the phrase '
+      'restore is the last way back', (tester) async {
     showWelcomeDialog(await _open(tester));
     await tester.pumpAndSettle();
     await tester.tap(find.text('Agree and continue'));
@@ -81,11 +81,7 @@ void main() {
     expect(find.text('Create an identity'), findsOneWidget);
     expect(find.text('Link a device'), findsOneWidget);
     expect(find.text('Restore from a backup'), findsOneWidget);
-    expect(
-      find.textContaining('recovery phrase'),
-      findsOneWidget,
-      reason: 'only the line saying the phrase comes next',
-    );
+    expect(find.text('Use your recovery phrase'), findsOneWidget);
     expect(find.textContaining('Restore from a recovery phrase'), findsNothing);
   });
 

@@ -64,6 +64,25 @@ pub(crate) struct CrdtStore {
     cmd_tx: mpsc::UnboundedSender<CrdtStoreCmd>,
 }
 
+#[cfg(test)]
+static PAUSED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Harness: the actor of `db_path` writes nothing (a write it holds stays off disk, as
+/// in a process about to die) until `on` is false again.
+#[cfg(test)]
+pub(crate) fn pause_for_test(db_path: &str, on: bool) {
+    let mut paused = PAUSED.lock().unwrap_or_else(|e| e.into_inner());
+    paused.retain(|p| p != db_path);
+    if on {
+        paused.push(db_path.to_string());
+    }
+}
+
+#[cfg(test)]
+fn paused_for_test(db_path: &str) -> bool {
+    PAUSED.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|p| p == db_path)
+}
+
 impl CrdtStore {
     /// Spawn the persistence actor.  Opens its own DB connection.
     pub fn open(db_path: String, passphrase: String) -> Result<Self, String> {
@@ -84,6 +103,10 @@ impl CrdtStore {
 
             while let Some(cmd) = cmd_rx.blocking_recv() {
                 backlog.observe(cmd_rx.len());
+                #[cfg(test)]
+                while paused_for_test(&db_path) {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
 
                 // Collect the whole drain FIRST, then split reads from writes:
                 // `begin_transaction` is BEGIN IMMEDIATE, a RESERVED write lock,

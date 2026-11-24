@@ -29,9 +29,44 @@ fn recovery(store: &MessageStore, local_master: &str) -> Option<(String, i64, i6
     Some((base, t, at))
 }
 
+/// `app_settings` prefix of a server we own that a lost-or-stolen removal could not
+/// settle from our records (first held here at or after T): `lost_restore:{sid}` holds
+/// T and the members our state named before the removal, whom the witness desk asks
+/// (once the lost device stops counting, our own state may name nobody else). This
+/// device's own row, never in a copy.
+pub(crate) const LOST_RESTORE: &str = "lost_restore:";
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct LostRestore {
+    t_ms: i64,
+    #[serde(default)]
+    members: Vec<String>,
+}
+
+fn lost_restore(store: &MessageStore, server_id: &str) -> Option<LostRestore> {
+    serde_json::from_str(&store.load_setting(&format!("{LOST_RESTORE}{server_id}")).ok()??).ok()
+}
+
 /// Whether this device held `state` before `at`: a first fold or a stored op from before.
-fn held_before(store: &MessageStore, state: &ServerState, at: i64) -> bool {
+/// A device that did not holds no record of what the server decided before `at`, so it
+/// never settles the server from its own records (HOL-SEC-216).
+pub(crate) fn held_before(store: &MessageStore, state: &ServerState, at: i64) -> bool {
     state.first_folds.values().any(|f| (*f as i64) < at) || store.op_first_seen_ms(&state.server_id).is_some_and(|ms| (ms as i64) < at)
+}
+
+/// Whether a settling with the answered `t_ms` may stand on this device's records of
+/// `state`. "Not sure" (0) names no moment: each server's T is then the oldest restore
+/// point held here (`ServerState::lost_t`), which our records hold by definition.
+pub(crate) fn records_reach_t(store: &MessageStore, state: &ServerState, t_ms: i64) -> bool {
+    t_ms <= 0 || held_before(store, state, t_ms)
+}
+
+/// Of a recovery answered with `t_ms` and signed at `at`, whether this device settles
+/// `state` from its records (else a server we own restores from witnesses, `register`):
+/// held before T; for "not sure", held before the recovery itself (DEVICE_PROOF_DESIGN
+/// 8.1: a fresh install, holding no restore point, gets the chooser).
+fn recovery_settles_here(store: &MessageStore, state: &ServerState, t_ms: i64, at: i64) -> bool {
+    held_before(store, state, if t_ms > 0 { t_ms } else { at })
 }
 
 /// Section 8.1: a phrase recovery treats every device it drops as lost or stolen since
@@ -47,39 +82,77 @@ pub(crate) fn held_before_recovery(
     let (_, t_ms, at) = recovery(store, local_master)?;
     let views = server_states
         .iter()
-        .filter(|(_, s)| held_before(store, s, at))
+        .filter(|(_, s)| recovery_settles_here(store, s, t_ms, at))
         .map(|(sid, s)| (sid.clone(), s.view_counting(local_master, dropped)))
         .collect();
     Some((views, t_ms.max(0) as u64))
 }
 
-/// Mark for restore every server we own that this device first held after our current
-/// recovery (it holds no record from before, so section 8.3 cannot settle it here) and
-/// has not settled yet.
+/// Note that `state`, a server we own, restores from witnesses since `t_ms`: a lost
+/// removal found no record of it here from before T. The older T wins.
+pub(crate) fn note_lost_restore(store: &MessageStore, state: &ServerState, local_master: &str, t_ms: i64) {
+    if lost_restore(store, &state.server_id).is_some_and(|held| held.t_ms <= t_ms) {
+        return;
+    }
+    let members = state.members.keys().filter(|m| m.as_str() != local_master).take(super::union_list::MAX_ASKED).cloned().collect();
+    if let Ok(json) = serde_json::to_string(&LostRestore { t_ms, members }) {
+        let _ = store.save_setting(&format!("{LOST_RESTORE}{}", state.server_id), &json);
+    }
+}
+
+/// Mark for restore every server we own that this device first held at or after the T
+/// of our current recovery or of a lost removal (it holds no record from before, so
+/// section 8.3 cannot settle it here) and has not settled yet.
 pub(crate) fn register(desk: &mut WitnessDesk, server_states: &ServerStates, store: &MessageStore, local_master: &str) {
-    let Some((base, t_ms, at)) = recovery(store, local_master) else { return };
-    for (sid, state) in server_states {
-        if state.anchor_owner().as_deref() != Some(local_master)
-            || super::conference::is_conference_sid(sid)
-            || state.is_deleted()
-            || held_before(store, state, at)
-            || store.load_setting(&done_key(sid, &base)).ok().flatten().is_some()
-        {
-            continue;
+    let ours = |sid: &str, state: &ServerState| {
+        state.anchor_owner().as_deref() == Some(local_master) && !super::conference::is_conference_sid(sid) && !state.is_deleted()
+    };
+    if let Some((base, t_ms, at)) = recovery(store, local_master) {
+        for (sid, state) in server_states {
+            if !ours(sid, state) || recovery_settles_here(store, state, t_ms, at) || store.load_setting(&done_key(sid, &base)).ok().flatten().is_some() {
+                continue;
+            }
+            desk.recover(sid, t_ms);
         }
-        desk.recover(sid, t_ms);
+    }
+    for (key, _) in store.load_settings_with_prefix(LOST_RESTORE).unwrap_or_default() {
+        let Some(sid) = key.strip_prefix(LOST_RESTORE) else { continue };
+        let (Some(row), Some(state)) = (lost_restore(store, sid), server_states.get(sid)) else { continue };
+        if ours(sid, state) && !records_reach_t(store, state, row.t_ms) {
+            desk.recover(sid, row.t_ms);
+        }
     }
 }
 
 /// The contents the witnesses named that check as bases of the server: signed by our
 /// identity with a device proof, at most [`super::witness::CONTENTS_MAX`] and
-/// [`super::witness::CONTENT_BYTES_MAX`] in step 2's order.
-fn checked_contents(state: &ServerState, seen: &[Seen], contents: &HashMap<String, CrdtOp>, contact: &dyn Fn(&str) -> bool, me: &str) -> HashMap<String, CpFacts> {
+/// [`super::witness::CONTENT_BYTES_MAX`] in step 2's order. A record that checked
+/// (`records`, its ops) is a point too (HOL-SEC-230 part B): its generation is its size,
+/// its line the other records it holds every op of, its members those of a settling on
+/// it (`trial`, a copy of our state). A record and a checkpoint are never on one line.
+fn checked_contents(
+    state: &ServerState,
+    seen: &[Seen],
+    contents: &HashMap<String, CrdtOp>,
+    records: &HashMap<String, Vec<CrdtOp>>,
+    contact: &dyn Fn(&str) -> bool,
+    me: &str,
+) -> HashMap<String, CpFacts> {
     let mut facts = HashMap::new();
     let mut bytes = 0usize;
+    let mut trial: Option<ServerState> = None;
+    let mut sets: Vec<(String, std::collections::BTreeSet<[u8; 32]>)> = Vec::new();
     for cp in super::witness::content_order(seen, contact) {
         if facts.len() >= super::witness::CONTENTS_MAX {
             break;
+        }
+        if let Some(ops) = records.get(&cp) {
+            let ids: std::collections::BTreeSet<[u8; 32]> = ops.iter().map(CrdtOp::content_hash).collect();
+            let Some(hlc) = ops.iter().map(|o| o.hlc.clone()).max() else { continue };
+            let members = trial.get_or_insert_with(|| state.clone()).record_members(&ids);
+            facts.insert(cp.clone(), CpFacts { generation: ids.len() as u64, hlc, lineage: Vec::new(), members });
+            sets.push((cp, ids));
+            continue;
         }
         let Some(op) = contents.get(&cp) else { continue };
         if op.author != me || op.verify_author().is_err() || op.proven_device().is_none() {
@@ -94,6 +167,11 @@ fn checked_contents(state: &ServerState, seen: &[Seen], contents: &HashMap<Strin
             facts.insert(cp, CpFacts::of(&base));
         }
     }
+    for (x, line) in crate::crdt::record::record_lineage(&sets) {
+        if let Some(f) = facts.get_mut(&x) {
+            f.lineage = line;
+        }
+    }
     facts
 }
 
@@ -103,6 +181,7 @@ fn rejudge(desk: &mut WitnessDesk, state: &ServerState, store: &MessageStore, db
     let sid = state.server_id.clone();
     let mut seen = Vec::new();
     let mut contents: HashMap<String, CrdtOp> = HashMap::new();
+    let mut records: HashMap<String, Vec<CrdtOp>> = HashMap::new();
     for (w, content, at) in desk.taken(&sid) {
         let Some(identity) = super::server_rosters::place(store, db_path, state, &w.by) else { continue };
         if identity == me {
@@ -111,13 +190,30 @@ fn rejudge(desk: &mut WitnessDesk, state: &ServerState, store: &MessageStore, db
         if let Some(op) = content {
             contents.entry(w.cp.clone()).or_insert_with(|| op.clone());
         }
-        seen.push(Seen { identity, cp: w.cp.clone(), folded_age_ms: w.folded_age_ms, received_ms: *at });
+        // A record names a point once every op it lists is held here and checks; one
+        // that fails a check names none, one still syncing waits.
+        let cp = if w.rec.is_empty() {
+            w.cp.clone()
+        } else if records.contains_key(&w.rec) {
+            w.rec.clone()
+        } else {
+            match desk.record_ids(&sid, &w.rec).map(|ids| state.record_ops(ids)) {
+                Some(Ok(ops)) => {
+                    records.insert(w.rec.clone(), ops);
+                    w.rec.clone()
+                }
+                Some(Err(crate::crdt::record::RecordCheck::Void)) => String::new(),
+                Some(Err(crate::crdt::record::RecordCheck::NotHeld)) | None => continue,
+            }
+        };
+        seen.push(Seen { identity, cp, folded_age_ms: w.folded_age_ms, received_ms: *at });
     }
-    let facts = checked_contents(state, &seen, &contents, &|m| contacts.contains(m), me);
+    let facts = checked_contents(state, &seen, &contents, &records, &|m| contacts.contains(m), me);
     let mut named: Vec<String> = facts.values().flat_map(|f| f.members.iter().cloned()).collect();
     named.sort();
     named.dedup();
-    desk.update(&sid, super::witness::judge(&seen, &facts), now_ms);
+    let judged = super::witness::judge(&seen, &facts, &|m| desk.listed(&sid, m));
+    desk.update(&sid, judged, now_ms);
     desk.keep_contents(&sid, contents.into_iter().filter(|(cp, _)| facts.contains_key(cp)).collect());
     named
 }
@@ -141,7 +237,10 @@ pub(crate) fn tick(
     db_passphrase: &str,
 ) {
     let now_ms = super::types::now_ms();
-    let due = crdt_resync.witness.register_due(now_ms, REGISTER_EVERY_MS);
+    if crdt_resync.witness.has_deferred() {
+        answer_deferred(crdt_resync, server_states, frame_budget, ws_cmd_tx, device, db_path, db_passphrase, now_ms);
+    }
+    let due = crdt_resync.witness.register_due(now_ms, REGISTER_EVERY_MS) && !register_held(&device.peer_id());
     if !due && crdt_resync.witness.all().is_empty() {
         return;
     }
@@ -158,6 +257,15 @@ pub(crate) fn tick(
     let contacts = super::union_list::contacts(&store);
     for sid in restoring {
         let Some(state) = server_states.get(&sid) else { continue };
+        // A lost removal's restore may know no member to ask: the members our state
+        // named before the removal, and those it names now, are one source like a join
+        // answer.
+        if crdt_resync.union.sources(&sid, &|m| contacts.contains(m), local_master).is_empty() {
+            let before = lost_restore(&store, &sid).map(|r| r.members).unwrap_or_default();
+            crdt_resync.union.state_named(&sid, before.into_iter().chain(state.members.keys().cloned()), &|m| contacts.contains(m));
+            let members = crdt_resync.union.sources(&sid, &|m| contacts.contains(m), local_master);
+            crdt_resync.witness.note_members(&sid, members);
+        }
         let named = rejudge(&mut crdt_resync.witness, state, &store, db_path, &contacts, local_master, now_ms);
         if let Some((choice, started, round_at)) = crdt_resync.witness.chosen_round(&sid) {
             let heard = crdt_resync.op_sync.ended_since(&sid, round_at).iter().filter(|d| !super::resolver::same_identity(d, local_master)).count();
@@ -182,6 +290,37 @@ pub(crate) fn tick(
         }
     }
     publish(&crdt_resync.witness, &store, &device_id, now_ms);
+}
+
+/// The witness asks our fold could not answer when heard (`WitnessDesk::answer`), now
+/// that this tick's rebuilds ran: each answered alone, beside no ops, or held again.
+#[allow(clippy::too_many_arguments)]
+fn answer_deferred(
+    crdt_resync: &mut super::crdt_resync::CrdtResync,
+    server_states: &ServerStates,
+    frame_budget: &mut super::frame_budget::FrameBudget,
+    ws_cmd_tx: &WsCmdTx,
+    device: &crate::identity::native_identity::NativeKeypair,
+    db_path: &str,
+    db_passphrase: &str,
+    now_ms: i64,
+) {
+    let Ok(store) = MessageStore::lease(db_path, db_passphrase) else { return };
+    let device_id = device.peer_id();
+    for d in crdt_resync.witness.take_deferred() {
+        let Some(state) = server_states.get(&d.server) else { continue };
+        let co = |m: &str| super::server_rosters::co_member_rosters(&store, &state.server_id, m);
+        let view = super::authority_view::view_for(&store, db_path, state, &co);
+        let Some((witness, cp, ids)) = crdt_resync.witness.answer_heard(&store, state, &view, &d.ask, &d.asker, device, d.heard_ms, now_ms) else { continue };
+        let x = super::sync_ext::ReplyExt {
+            witness: Some(witness),
+            witness_cp: cp.and_then(|op| serde_json::to_string(&op).ok()),
+            witness_rec: ids,
+            ..Default::default()
+        };
+        let msg = crate::node::types::HavenMessage::SyncResponse { server_id: d.server.clone(), ops_json: "[]".into(), nonce: None, page: None, digest: None, x: x.boxed() };
+        super::frame_budget::pace_carried(frame_budget, ws_cmd_tx, &device_id, &d.asker, &msg);
+    }
 }
 
 /// The person chose for `server_id` (`None` = "I don't know"): the round that fetches
@@ -255,25 +394,27 @@ fn settle(
 ) {
     let desk = &mut crdt_resync.witness;
     let x = choice.as_ref().and_then(|cp| desk.content(server_id, cp));
-    let (Some(state), Some(t_ms), Some(roster), Some((base, _, _))) = (
-        server_states.get_mut(server_id),
-        desk.t_ms(server_id),
-        store.load_roster(local_master).ok().flatten(),
-        recovery(store, local_master),
-    ) else {
+    let (Some(state), Some(t_ms), Some(roster)) =
+        (server_states.get_mut(server_id), desk.t_ms(server_id), store.load_roster(local_master).ok().flatten())
+    else {
         return;
     };
-    let on = match &x {
-        Some(x) => crate::crdt::settle::SettleOn::Witnessed(Box::new(x.clone())),
-        None if choice.is_some() => {
+    let record = choice.as_ref().and_then(|cp| desk.record_ids(server_id, cp)).map(|ids| {
+        ids.iter().filter_map(|i| <[u8; 32]>::try_from(hex::decode(i).ok()?.as_slice()).ok()).collect::<std::collections::BTreeSet<[u8; 32]>>()
+    });
+    let on = match (&x, record) {
+        (Some(x), _) => crate::crdt::settle::SettleOn::Witnessed(Box::new(x.clone())),
+        (None, Some(ids)) => crate::crdt::settle::SettleOn::Record(ids),
+        (None, None) if choice.is_some() => {
             desk.unchoose(server_id);
             return;
         }
-        None => crate::crdt::settle::SettleOn::Rollback,
+        (None, None) => crate::crdt::settle::SettleOn::Rollback,
     };
     let dropped = dropped_devices(state, x.as_ref(), local_master);
     let seen = store.op_seen_ms(server_id).unwrap_or_default();
-    let s = crate::crdt::settle::Settling { before: state.authority.clone(), dropped: &dropped, t_ms: t_ms.max(0) as u64, seen: &seen, roster };
+    let keys_after_ms = super::roster_book::keys_after_ms(store, &roster, &dropped);
+    let s = crate::crdt::settle::Settling { before: state.authority.clone(), dropped: &dropped, t_ms: t_ms.max(0) as u64, seen: &seen, roster, home: super::ws_client::relay_home(), keys_after_ms };
     let counted = super::floor::counted_members(state);
     let Some((ops, ingested)) = state.author_settling_on(local_master, &s, device, &on) else {
         hollow_log!("[HOLLOW-CRDT] Could not write the restore of {server_id}: choose again");
@@ -291,7 +432,10 @@ fn settle(
     desk.finish(server_id);
     let back = super::floor::settled_newcomers(&counted, state, local_master);
     crdt_resync.floor.note_settled(server_id, back, x.iter().chain(ops.iter()).cloned().collect(), std::time::Instant::now());
-    let _ = store.save_setting(&done_key(server_id, &base), "1");
+    if let Some((base, _, _)) = recovery(store, local_master) {
+        let _ = store.save_setting(&done_key(server_id, &base), "1");
+    }
+    let _ = store.delete_setting(&format!("{LOST_RESTORE}{server_id}"));
     let _ = event_tx.try_send(super::types::NetworkEvent::ServerUpdated { server_id: server_id.to_string() });
     hollow_log!("[HOLLOW-CRDT] Restored {server_id} from members' witnesses ({})", if choice.is_some() { "a named point" } else { "rolled back" });
 }
@@ -349,8 +493,117 @@ pub(crate) fn snapshot() -> Vec<RestoreSnap> {
     SNAPSHOT.lock().unwrap_or_else(|e| e.into_inner()).values().flatten().cloned().collect()
 }
 
+#[cfg(test)]
+static REGISTER_HELD: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Harness: `device` registers no witness restore while `on` (a register tick that
+/// comes late, past several batch ticks).
+#[cfg(test)]
+pub(crate) fn hold_register_for_test(device: &str, on: bool) {
+    let mut held = REGISTER_HELD.lock().unwrap_or_else(|e| e.into_inner());
+    held.retain(|d| d != device);
+    if on {
+        held.push(device.to_string());
+    }
+}
+
+#[cfg(test)]
+fn register_held(device: &str) -> bool {
+    REGISTER_HELD.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|d| d == device)
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+fn register_held(_device: &str) -> bool {
+    false
+}
+
 /// [`snapshot`] of one local device (the harness runs several nodes).
 #[cfg(test)]
 pub(crate) fn snapshot_of(device_id: &str) -> Vec<RestoreSnap> {
     SNAPSHOT.lock().unwrap_or_else(|e| e.into_inner()).get(device_id).cloned().unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::identity::native_identity::NativeKeypair;
+    use crate::identity::roster::Roster;
+
+    /// A "not sure" recovery (T = 0) has each server's T at its oldest restore point
+    /// held here, so a server held for a year still settles from our records.
+    #[test]
+    fn a_not_sure_recovery_still_settles_what_this_device_held_long_before() {
+        let _g = super::super::resolver::test_lock();
+        let store = MessageStore::open(":memory:", &"ab".repeat(32)).unwrap();
+        let kp = |t: u8| NativeKeypair::from_secret_bytes(&[t; 32]);
+        let (master, recovery, me) = (kp(0x74), kp(0x75), kp(0x76));
+        let at = super::super::types::now_ms() - 60_000;
+        let r = Roster::genesis(&master, &recovery, &me, at);
+        super::super::roster_book::merge_for_test(&store, &r, &master.peer_id(), &me.peer_id());
+        super::super::roster_book::note_recovery_lost_since(&store, &r.base(), 0).unwrap();
+        let mut s = ServerState::new("long_held".into(), "long_held".into(), master.peer_id());
+        std::sync::Arc::make_mut(&mut s.first_folds).insert("cp".into(), (at - 365 * 86_400_000) as u64);
+        let mut states = ServerStates::new();
+        states.insert("long_held".into(), s);
+        let (views, _) = held_before_recovery(&states, &store, &master.peer_id(), &[]).expect("the recovery recorded its T");
+        assert!(views.contains_key("long_held"), "a server held for a year was not settled from our records after a not-sure recovery");
+    }
+
+    /// The other half of a "not sure" recovery: only an owned server first held after
+    /// the recovery itself goes to the witnesses (the chooser); one held before it
+    /// settled from our records and is never handed over as well.
+    #[test]
+    fn a_not_sure_recovery_hands_the_witnesses_only_what_it_first_held_after_it() {
+        let _g = super::super::resolver::test_lock();
+        let store = MessageStore::open(":memory:", &"ab".repeat(32)).unwrap();
+        let kp = |t: u8| NativeKeypair::from_secret_bytes(&[t; 32]);
+        let (master, recovery, me) = (kp(0x77), kp(0x78), kp(0x79));
+        let at = super::super::types::now_ms() - 60_000;
+        let r = Roster::genesis(&master, &recovery, &me, at);
+        super::super::roster_book::merge_for_test(&store, &r, &master.peer_id(), &me.peer_id());
+        super::super::roster_book::note_recovery_lost_since(&store, &r.base(), 0).unwrap();
+        let state = |sid: &str, first: i64| {
+            let mut s = ServerState::new(sid.into(), sid.into(), master.peer_id());
+            std::sync::Arc::make_mut(&mut s.first_folds).insert("cp".into(), first as u64);
+            s
+        };
+        let mut states = ServerStates::new();
+        states.insert("long_held".into(), state("long_held", at - 365 * 86_400_000));
+        states.insert("after".into(), state("after", at + 1));
+        let mut desk = WitnessDesk::default();
+
+        register(&mut desk, &states, &store, &master.peer_id());
+
+        assert_eq!(desk.restoring(), vec!["after".to_string()], "the witnesses got the wrong servers");
+    }
+
+    /// HOL-SEC-216: a recovery settles from our records only the servers this device
+    /// held before T, never those first held between T and the recovery itself.
+    #[test]
+    fn held_before_judges_against_t_not_the_recovery() {
+        let _g = super::super::resolver::test_lock();
+        let store = MessageStore::open(":memory:", &"ab".repeat(32)).unwrap();
+        let kp = |t: u8| NativeKeypair::from_secret_bytes(&[t; 32]);
+        let (master, recovery, me) = (kp(0x71), kp(0x72), kp(0x73));
+        let at = super::super::types::now_ms() - 60_000;
+        let t = at - 3_600_000;
+        let r = Roster::genesis(&master, &recovery, &me, at);
+        super::super::roster_book::merge_for_test(&store, &r, &master.peer_id(), &me.peer_id());
+        super::super::roster_book::note_recovery_lost_since(&store, &r.base(), t).unwrap();
+        let state = |sid: &str, first: i64| {
+            let mut s = ServerState::new(sid.into(), sid.into(), master.peer_id());
+            std::sync::Arc::make_mut(&mut s.first_folds).insert("cp".into(), first as u64);
+            s
+        };
+        let mut states = ServerStates::new();
+        states.insert("before_t".into(), state("before_t", t - 1));
+        states.insert("between".into(), state("between", t + 1));
+
+        let (views, t_ms) = held_before_recovery(&states, &store, &master.peer_id(), &[]).expect("the recovery recorded its T");
+
+        assert_eq!(t_ms, t as u64);
+        assert!(views.contains_key("before_t"));
+        assert!(!views.contains_key("between"), "a server first held after T was settled from our records");
+    }
 }

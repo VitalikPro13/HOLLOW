@@ -462,6 +462,15 @@ void main() {
       expect(find.text(restoreChecking('Test Server')), findsOneWidget);
     });
 
+    testWidgets('a server no member named a point for waits, never offering "I don\'t know"',
+        (tester) async {
+      await _openChooser(
+          tester, fixtureRestores([dp.RestoreStage.waitingForMember]));
+      expect(find.text(restoreWaitingForMember('Test Server')), findsOneWidget);
+      expect(find.text(kRestoreDontKnow), findsNothing);
+      expect(find.text('Restore'), findsNothing);
+    });
+
     testWidgets('no known server asks for an invite', (tester) async {
       await _openChooser(
           tester, const dp.Restores(serversKnown: false, servers: []),

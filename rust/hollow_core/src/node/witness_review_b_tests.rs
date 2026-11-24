@@ -31,7 +31,7 @@ fn review_b_a_long_restore_still_takes_a_late_members_witness() {
     let asks = desk.due_asks("s", &[], &devices, "me", &me_dev, now);
     let (to, ask) = asks.into_iter().find(|(d, _)| *d == late_dev).expect("the late member is asked");
     let w = CpWitness::sign("s", &me_dev, &ask, String::new(), 0, &late_kp).expect("a well-formed witness");
-    desk.receive(&to, w, None, now);
+    desk.receive(&to, w, None, vec![], now);
     assert_eq!(desk.taken("s").len(), 1, "the answer to an ask we sent was dropped: the nonce book filled up and was never pruned");
 }
 
@@ -61,7 +61,7 @@ fn review_b_control_a_short_restore_takes_the_late_witness() {
     let asks = desk.due_asks("s", &[], &devices, "me", &me_dev, now);
     let (to, ask) = asks.into_iter().find(|(d, _)| *d == late_dev).expect("the late member is asked");
     let w = CpWitness::sign("s", &me_dev, &ask, String::new(), 0, &late_kp).expect("a well-formed witness");
-    desk.receive(&to, w, None, now);
+    desk.receive(&to, w, None, vec![], now);
     assert_eq!(desk.taken("s").len(), 1, "the answer to an ask we sent was dropped: the nonce book filled up and was never pruned");
 }
 

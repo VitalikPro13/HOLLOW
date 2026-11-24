@@ -374,6 +374,33 @@ pub(crate) fn ensure_own(
     (roster, state)
 }
 
+/// Our roster as a phrase restore finds it (PHRASE_RESTORE_DESIGN 1.2 step 7): the
+/// stored one merged with a bootstrap of `master` no start has imported yet. `None`
+/// when neither is here: a fresh install.
+pub(crate) fn held_for_restore(store: &MessageStore, master: &str, db_path: &str) -> Option<Roster> {
+    let stored = load(store, master);
+    let boot = bootstrap_path(db_path)
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|j| serde_json::from_str::<Roster>(&j).ok())
+        .map(|r| r.verified(now_ms()))
+        .filter(|r| r.master == master);
+    match (stored, boot) {
+        (Some(s), Some(b)) => Some(s.merged(&b).reverified()),
+        (s, b) => s.or(b.map(|b| b.reverified())),
+    }
+}
+
+/// Store `held` before a phrase restore signs into it, so what it signs is dated past
+/// the bootstrap's statements too; the bootstrap is consumed.
+pub(crate) fn keep_held_for_restore(store: &MessageStore, held: &Roster, device: &str, db_path: &str) -> Result<(), String> {
+    let state = fold(store, held);
+    save(store, held, &state, &held.master, device)?;
+    if let Some(path) = bootstrap_path(db_path) {
+        let _ = std::fs::remove_file(path);
+    }
+    Ok(())
+}
+
 /// The upgrade, signed by the phrase 0.11 stored: the same recovery on every device of
 /// the identity, an admission for each device the 0.11 list kept and this one, and this
 /// device's consent first so that what it signs next has standing. Never the master id:
@@ -473,25 +500,101 @@ pub(crate) fn own_room(local_master: &str) -> String {
     super::dm_room::dm_room_code(local_master, local_master)
 }
 
-/// `peer` just appeared to us in `room`: if our own roster removed it, hand it that roster
-/// there. The notice of the removal or of its first sighting is lost when it left before
-/// we saw the device in a room, or went into our inbox just as the relay took it away.
+/// Own-room hand-offs to devices our roster does not count, per minute of this node:
+/// any master-key holder can mint device ids and join our own room, each arrival
+/// drawing our whole roster.
+pub(crate) const HAND_OFF_BUDGET: usize = 8;
+const HAND_OFF_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+/// A device told our roster is told again only once the roster moves, our relay
+/// session is lost, or this much later (its notice may have died with its socket).
+const HAND_OFF_AGAIN: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// One node's own-room hand-offs. `told` holds at most BUDGET per WINDOW over AGAIN
+/// entries: each is admitted by the budget and pruned once AGAIN has passed.
+#[derive(Default)]
+struct HandOffs {
+    spent: std::collections::VecDeque<std::time::Instant>,
+    told: std::collections::HashMap<String, (u64, std::time::Instant)>,
+}
+
+/// Per local device id (harness nodes share the process).
+fn hand_offs() -> std::sync::MutexGuard<'static, std::collections::HashMap<String, HandOffs>> {
+    static BOOK: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, HandOffs>>> = std::sync::OnceLock::new();
+    BOOK.get_or_init(Default::default).lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Whether we may hand `peer` our roster at `revision` now; a yes is charged.
+fn may_hand_off(local_device: &str, peer: &str, revision: u64, now: std::time::Instant) -> bool {
+    let mut book = hand_offs();
+    let h = book.entry(local_device.to_string()).or_default();
+    h.told.retain(|_, (_, at)| now.duration_since(*at) < HAND_OFF_AGAIN);
+    if h.told.get(peer).is_some_and(|(rev, _)| *rev == revision) {
+        return false;
+    }
+    h.spent.retain(|t| now.duration_since(*t) < HAND_OFF_WINDOW);
+    if h.spent.len() >= HAND_OFF_BUDGET {
+        return false;
+    }
+    h.spent.push_back(now);
+    h.told.insert(peer.to_string(), (revision, now));
+    true
+}
+
+/// Our relay session was lost: every device we told may have missed it.
+pub(crate) fn on_session_lost(local_device: &str) {
+    if let Some(h) = hand_offs().get_mut(local_device) {
+        h.told.clear();
+    }
+}
+
+/// Forget every node's hand-offs.
+#[cfg(test)]
+pub(crate) fn clear_hand_offs_for_test() {
+    hand_offs().clear();
+}
+
+/// Another identity's device, or its single-device master id.
+fn placed_elsewhere(peer: &str, local_master: &str) -> bool {
+    let theirs = super::resolver::resolve(peer);
+    (theirs != peer && theirs != local_master) || super::resolver::holds_roster_of(peer)
+}
+
+/// `peer` just appeared to us in `room`: if our own roster removed it, or it is in our
+/// own room and our roster does not count it (a recovery left it out, it waits to join,
+/// or it is newer than what we hold), hand it that roster there. The notice of a removal
+/// or a recovery is lost when the device was away, left before we saw it in a room, or
+/// went into our inbox just as the relay took it away, and the mailbox replays only to
+/// members. Only holders of our master key can name our own room, and a device we place
+/// with another identity, or another identity removed, hears nothing there; one our
+/// roster does not count is told within [`may_hand_off`]'s bound.
 pub(crate) fn tell_removed_device_in_room(
     ws_cmd_tx: &tokio::sync::mpsc::UnboundedSender<super::ws_client::WsCommand>,
     local_master: &str,
+    local_device: &str,
     peer: &str,
     room: &str,
     db_path: &str,
     db_passphrase: &str,
 ) {
-    if !super::resolver::is_revoked(peer) || super::resolver::is_bare_master(peer) {
+    let in_own_room = room == own_room(local_master);
+    if peer == local_device || super::resolver::is_bare_master(peer) || !(in_own_room || super::resolver::is_revoked(peer)) {
+        return;
+    }
+    // Not removed anywhere: only the own-room branch can send, judged before the store.
+    if !super::resolver::is_revoked(peer)
+        && (super::resolver::is_device_of(peer, local_master)
+            || placed_elsewhere(peer, local_master)
+            || !may_hand_off(local_device, peer, revision(local_master), std::time::Instant::now()))
+    {
         return;
     }
     let Some((roster, state)) = own(local_master, db_path, db_passphrase) else { return };
-    if !state.removed.contains_key(peer) {
+    // Another identity's removal is its own to tell.
+    let left_out = in_own_room && !state.is_member(peer) && !super::resolver::is_revoked(peer);
+    if !state.removed.contains_key(peer) && !left_out {
         return;
     }
-    hollow_log!("[HOLLOW-ROSTER] Removed device {peer} appeared in {room}: handing it our roster");
+    hollow_log!("[HOLLOW-ROSTER] Device {peer} our roster does not count appeared in {room}: handing it our roster");
     super::crypto_handler::send_message_to_peer_in_room(
         ws_cmd_tx, room, peer, super::types::HavenMessage::RosterNotice { roster },
     );
@@ -594,6 +697,116 @@ pub(crate) fn note_recovery_lost_since(store: &MessageStore, base: &str, t_ms: i
 #[allow(dead_code)] // read by the settling, track C (DEVICE_PROOF_DESIGN 8.1)
 pub(crate) fn recovery_lost_since(store: &MessageStore, base: &str) -> Option<i64> {
     store.load_setting(&recovery_lost_since_key(base)).ok().flatten().and_then(|v| v.parse().ok())
+}
+
+fn recovery_cut_off_key(base: &str) -> String {
+    format!("recovery_cut_off:{base}")
+}
+
+/// The most devices one base's record names: only the phrase holder makes bases, and a
+/// base cuts off at most the consents a roster keeps, so this is room, not a limit. Past
+/// it the newest cuts are kept, and a device left out still reads as maybe cut off.
+const MAX_CUT_OFF: usize = 512;
+
+/// Which devices the recovery that made a base cut off, as this device knows it
+/// (HOL-SEC-229): device -> when it was cut off, and `unknown_at`, the newest recovery
+/// that cut any device: the master key signs a join ask for any key, and this device
+/// cannot tell an old device it never held from a new one, so every other asker in that
+/// base may be one of the old ones. Local to this device, never sent.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct CutOff {
+    #[serde(default)]
+    devices: std::collections::BTreeMap<String, i64>,
+    #[serde(default)]
+    unknown_at: Option<i64>,
+}
+
+impl CutOff {
+    fn is_empty(&self) -> bool {
+        self.devices.is_empty() && self.unknown_at.is_none()
+    }
+
+    /// `Some((when, one of ours))` for `device`.
+    fn of(&self, device: &str) -> Option<(i64, bool)> {
+        self.devices.get(device).map(|at| (*at, true)).or_else(|| self.unknown_at.map(|at| (at, false)))
+    }
+}
+
+/// `base`'s record; an unreadable one is an error, never an empty record.
+fn read_cut_off(store: &MessageStore, base: &str) -> Result<CutOff, String> {
+    match store.load_setting(&recovery_cut_off_key(base))? {
+        Some(v) => serde_json::from_str(&v).map_err(|e| format!("recovery cut-off record: {e}")),
+        None => Ok(CutOff::default()),
+    }
+}
+
+/// What a move from `prev` to a new base signed at `at` cut off: `prev`'s members the new
+/// base does not count, and whatever `prev`'s own base cut off that it does not take back.
+/// A move that cuts a member marks every other asker as maybe one of the old ones; one
+/// that cuts none keeps the earlier mark, since the master key it guards against is
+/// still out there.
+fn cut_by(store: &MessageStore, prev: &RosterState, at: i64, kept: impl Fn(&str) -> bool) -> Result<CutOff, String> {
+    let earlier = read_cut_off(store, &prev.base)?;
+    let mut devices: std::collections::BTreeMap<String, i64> =
+        earlier.devices.into_iter().filter(|(d, _)| !kept(d)).collect();
+    let mut cut_here = false;
+    for d in prev.members.iter().filter(|d| !kept(d)) {
+        devices.entry(d.clone()).or_insert(at);
+        cut_here = true;
+    }
+    Ok(CutOff { devices, unknown_at: if cut_here { Some(at) } else { earlier.unknown_at } })
+}
+
+/// Add `cut` to what `base`'s record holds: a device's earliest cut and the newest mark
+/// win, the newest cuts first while there is room.
+fn note_cut_off(store: &MessageStore, base: &str, cut: CutOff) -> Result<(), String> {
+    let mut held = read_cut_off(store, base)?;
+    let mut devices: Vec<(String, i64)> = cut.devices.into_iter().collect();
+    devices.sort_by_key(|(_, at)| std::cmp::Reverse(*at));
+    let mut left_out = None;
+    for (d, at) in devices {
+        if held.devices.len() >= MAX_CUT_OFF && !held.devices.contains_key(&d) {
+            left_out = left_out.max(Some(at));
+            continue;
+        }
+        let e = held.devices.entry(d).or_insert(at);
+        *e = (*e).min(at);
+    }
+    held.unknown_at = held.unknown_at.max(cut.unknown_at).max(left_out);
+    if held.is_empty() {
+        return Ok(());
+    }
+    store.save_setting(&recovery_cut_off_key(base), &serde_json::to_string(&held).map_err(|e| e.to_string())?)
+}
+
+/// The latest moment our current base's recovery cut off any of `devices` (the
+/// HOL-SEC-229 record, its "maybe" mark included): a join key set before it may be
+/// held by one of them. `None` when one of them is not named, or the record cannot be
+/// read: then no key stands (the key rule).
+pub(crate) fn keys_after_ms(store: &MessageStore, roster: &Roster, devices: &[String]) -> Option<u64> {
+    let cut = read_cut_off(store, &roster.base()).ok()?;
+    let ats = devices.iter().map(|d| cut.of(d).map(|(at, _)| at)).collect::<Option<Vec<i64>>>()?;
+    ats.into_iter().max().and_then(|at| u64::try_from(at).ok())
+}
+
+/// `device`, waiting in our own `state`, as a recovery cut it off: when, and whether this
+/// device knows it was one of ours (else it may be). An unreadable record reads as maybe.
+pub(crate) fn cut_off_by_recovery(store: &MessageStore, roster: &Roster, state: &RosterState, device: &str) -> Option<(i64, bool)> {
+    if !state.pending.contains(device) {
+        return None;
+    }
+    match read_cut_off(store, &state.base) {
+        Ok(cut) => cut.of(device),
+        Err(_) => Some((roster.base_at().unwrap_or(0), false)),
+    }
+}
+
+/// Whether the person is asked about `device`, waiting in our own `state`: a device a
+/// recovery cut off, or may have, gets no pop-up where waiting cannot let it in
+/// (HOL-SEC-229), only its row in the device list; where it can, the pop-up warns and
+/// never offers Approve. An unreadable record asks nothing.
+fn asks_the_person(store: &MessageStore, state: &RosterState, device: &str) -> bool {
+    !state.no_wait || read_cut_off(store, &state.base).is_ok_and(|cut| cut.of(device).is_none())
 }
 
 /// How a device leaves (DEVICE_PROOF_DESIGN 8.1): retiring keeps what it did, lost or
@@ -810,16 +1023,22 @@ fn phrase_time(r: &Roster) -> i64 {
 
 /// The phrase starts a new base keeping `keep` and this device. `no_wait` decides
 /// whether a restored backup may still join the new base by seven quiet days.
+/// `lost_since_ms`, when the person said when they last had the dropped devices, is
+/// stored for the new base before the roster is: a crash between never leaves a
+/// recovery whose T is unknown.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn recover(
     master: &NativeKeypair,
     recovery: &NativeKeypair,
     device: &NativeKeypair,
     keep: &[String],
     no_wait: bool,
+    lost_since_ms: Option<i64>,
     db_path: &str,
     db_passphrase: &str,
 ) -> Result<(Roster, RosterState), String> {
-    change_own(master, device, db_path, db_passphrase, |r, _| {
+    let mut at = 0;
+    let (roster, state) = change_own(master, device, db_path, db_passphrase, |r, s| {
         let mut keep: Vec<String> = keep.to_vec();
         keep.push(device.peer_id());
         keep.sort();
@@ -830,9 +1049,24 @@ pub(crate) fn recover(
         if !r.has_consent(&device.peer_id()) {
             r.add_consent(roster::sign_consent(device, &r.master.clone()));
         }
-        let rec = roster::sign_recovery(master, recovery, phrase_time(r), &keep, no_wait);
+        at = phrase_time(r);
+        let rec = roster::sign_recovery(master, recovery, at, &keep, no_wait);
+        let base = roster::base_id(&r.master, &roster::r_pub_of(recovery), &rec);
+        let store = MessageStore::lease(db_path, db_passphrase)?;
+        if let Some(t) = lost_since_ms {
+            note_recovery_lost_since(&store, &base, t)?;
+        }
+        // A recovery dropping devices as lost cut off whatever its held roster missed
+        // too (an empty install's, a stale one), and any key the master signs an ask for.
+        let mut cut = cut_by(&store, s, at, |d| keep.iter().any(|k| k == d))?;
+        if lost_since_ms.is_some() {
+            cut.unknown_at = Some(at);
+        }
+        note_cut_off(&store, &base, cut)?;
         r.add_phrase_statement(&roster::r_pub_of(recovery), Some(rec), None)
-    })
+    })?;
+    note_own_phrase(db_path, db_passphrase, OwnPhrase { kind: PhraseKind::Recover, at_ms: at, base: state.base.clone(), no_wait });
+    Ok((roster, state))
 }
 
 /// The phrase admits this device into whatever base is current.
@@ -843,13 +1077,71 @@ pub(crate) fn admit_by_phrase(
     db_path: &str,
     db_passphrase: &str,
 ) -> Result<(Roster, RosterState), String> {
-    change_own(master, device, db_path, db_passphrase, |r, _| {
+    let mut at = 0;
+    let (roster, state) = change_own(master, device, db_path, db_passphrase, |r, _| {
         if !r.has_consent(&device.peer_id()) {
             r.add_consent(roster::sign_consent(device, &r.master.clone()));
         }
-        let pa = roster::sign_phrase_admit(master, recovery, phrase_time(r), &device.peer_id());
+        at = phrase_time(r);
+        let pa = roster::sign_phrase_admit(master, recovery, at, &device.peer_id());
         r.add_phrase_statement(&roster::r_pub_of(recovery), None, Some(pa))
-    })
+    })?;
+    note_own_phrase(db_path, db_passphrase, OwnPhrase { kind: PhraseKind::Admit, at_ms: at, base: state.base.clone(), no_wait: state.no_wait });
+    Ok((roster, state))
+}
+
+/// This device's newest phrase statement about itself, kept here: a base compacts
+/// older statements away, so only this device can tell that a later base outdated
+/// its admission or recovery (HOL-SEC-218). This device's own row, never in a copy.
+pub(crate) const OWN_PHRASE: &str = "own_phrase_statement";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum PhraseKind {
+    Admit,
+    Recover,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct OwnPhrase {
+    pub(crate) kind: PhraseKind,
+    pub(crate) at_ms: i64,
+    /// The base current once it was signed (a recovery's own).
+    pub(crate) base: String,
+    /// A recovery's "backups need approval": a later base must never quietly undo it.
+    #[serde(default)]
+    pub(crate) no_wait: bool,
+}
+
+fn note_own_phrase(db_path: &str, db_passphrase: &str, own: OwnPhrase) {
+    let Ok(store) = MessageStore::lease(db_path, db_passphrase) else { return };
+    if let Ok(json) = serde_json::to_string(&own) {
+        let _ = store.save_setting(OWN_PHRASE, &json);
+    }
+}
+
+/// This device's own phrase statement that the current base outdated: this device is
+/// neither a member nor removed, and the base's recovery is dated at or after it, within
+/// the skew a clock may have. A base dated any later is a change made elsewhere on
+/// purpose, which [`dropped_by_recovery_at`] reports: typing the phrase again here would
+/// sign a recovery dropping the device that made it.
+pub(crate) fn own_phrase_outdated(store: &MessageStore, roster: &Roster, state: &RosterState, me: &str) -> Option<OwnPhrase> {
+    if state.is_member(me) || state.removed.contains_key(me) {
+        return None;
+    }
+    let own: OwnPhrase = serde_json::from_str(&store.load_setting(OWN_PHRASE).ok()??).ok()?;
+    let after = roster.base_at()?.checked_sub(own.at_ms)?;
+    (0..=roster::MAX_FUTURE_SKEW_MS).contains(&after).then_some(own)
+}
+
+/// When the recovery that left this device out was signed: this device counted for the
+/// identity once (its own first sight of itself), and now is neither a member, nor
+/// removed, nor outdated by its own phrase statement.
+pub(crate) fn dropped_by_recovery_at(store: &MessageStore, roster: &Roster, state: &RosterState, me: &str) -> Option<i64> {
+    if state.is_member(me) || state.removed.contains_key(me) || own_phrase_outdated(store, roster, state, me).is_some() {
+        return None;
+    }
+    seen_before(store, &roster.master, &roster::device_seen_key(me), i64::MAX).then(|| roster.base_at()).flatten()
 }
 
 /// When this device learned it was removed and who removed it, if it was.
@@ -914,10 +1206,11 @@ async fn announce_own_state_inner(
         }
         None => note_own_removal(&store, None),
     }
-    for device in state.pending.iter().filter(|d| d.as_str() != local_device) {
-        let _ = event_tx
-            .send(NetworkEvent::PendingDeviceAsking { device_peer_id: device.clone() })
-            .await;
+    let asking: Vec<String> =
+        state.pending.iter().filter(|d| d.as_str() != local_device && asks_the_person(&store, state, d)).cloned().collect();
+    drop(store);
+    for device in asking {
+        let _ = event_tx.send(NetworkEvent::PendingDeviceAsking { device_peer_id: device }).await;
     }
 }
 
@@ -1583,11 +1876,12 @@ pub(crate) fn lost_by_own_change(
     lost.into_iter().collect()
 }
 
-/// Members another of our devices vouched into our identity since `prev`, each with
-/// its voucher: what the rest of our devices are told (C-IDENTITY-09). Never a device
-/// this one vouched (the person was here), one the 0.11 upgrade admitted, or anything
-/// before this device was a member itself, its own admission included.
-fn vouched_by_a_sibling(
+/// Members another of our devices or the phrase added to our identity since `prev`,
+/// each with its voucher (`phrase` for an admission or a recovery's keep, HOL-SEC-215):
+/// what the rest of our devices are told (C-IDENTITY-09). Never a device this one
+/// vouched (the person was here), this device itself, one the 0.11 upgrade admitted, or
+/// anything before this device was a member itself, its own admission included.
+fn added_by_another(
     roster: &Roster,
     prev: &RosterState,
     now: &RosterState,
@@ -1596,6 +1890,22 @@ fn vouched_by_a_sibling(
 ) -> Vec<(String, String)> {
     if !prev.is_member(local_device) {
         return Vec::new();
+    }
+    // The first base a phrase-admitted device learns, dated before its own admission, is
+    // the identity as it was before this device joined (a Welcome restore into an empty
+    // store): only a phrase admission after ours is news there.
+    let joined_at = roster.phrase_admits.iter().filter(|p| p.device == local_device).map(|p| p.at_ms).max();
+    if let (Some(joined), Some(base_at)) = (joined_at, roster.base_at())
+        && prev.base != now.base
+        && base_at < joined
+    {
+        return now
+            .members
+            .difference(&prev.members)
+            .filter(|d| !upgrade_admitted.contains(*d))
+            .filter(|d| roster.phrase_admits.iter().any(|p| p.device == **d && p.at_ms > joined))
+            .map(|d| (d.clone(), super::security_alerts::BY_PHRASE.to_string()))
+            .collect();
     }
     now.members
         .difference(&prev.members)
@@ -1610,8 +1920,10 @@ fn vouched_by_a_sibling(
             if vouchers.contains(&local_device) {
                 return None;
             }
-            let by = vouchers.iter().find(|b| now.is_member(b)).or(vouchers.first())?;
-            Some((d.clone(), by.to_string()))
+            if let Some(by) = vouchers.iter().find(|b| now.is_member(b)).or(vouchers.first()) {
+                return Some((d.clone(), by.to_string()));
+            }
+            roster.phrase_rooted(d).then(|| (d.clone(), super::security_alerts::BY_PHRASE.to_string()))
         })
         .collect()
 }
@@ -1722,6 +2034,15 @@ fn fold_in_store(
         hollow_log!("[HOLLOW-ROSTER] Failed to save the roster for {master}: {e}");
         return None;
     }
+    // A recovery typed on another device of ours: what it cut off, as we held it, in this
+    // fold's own transaction, since a later fold sees no base move to record (HOL-SEC-229).
+    if master == local_master && prev.base != now.base && !prev.members.is_empty() {
+        let at = merged.base_at().unwrap_or_else(now_ms);
+        if let Err(e) = cut_by(store, &prev, at, |d| now.is_member(d)).and_then(|cut| note_cut_off(store, &now.base, cut)) {
+            hollow_log!("[HOLLOW-ROSTER] Dropped our roster from {sender}: what its recovery cut off was not recorded ({e})");
+            return None;
+        }
+    }
 
     // One of the identity's own devices showed us its roster and we now hold all of it
     // (AR-29): that confirms its own slot, never another device's. A sibling sharing a
@@ -1748,7 +2069,7 @@ fn fold_in_store(
     let upgrade_admitted = stored.as_ref().map(Roster::upgrade_admitted).unwrap_or_default();
     let own_news = if master == local_master && changed {
         let upgrade: BTreeSet<String> = upgrade_admitted.union(&merged.upgrade_admitted()).cloned().collect();
-        vouched_by_a_sibling(&merged, &prev, &now, local_device, &upgrade)
+        added_by_another(&merged, &prev, &now, local_device, &upgrade)
             .into_iter()
             .filter_map(|(device, voucher)| {
                 let at = super::security_alerts::record_own_device_added(store, master, &device, &voucher)?;
@@ -1791,11 +2112,15 @@ async fn own_changes(
         note_own_removal(&store, None);
         let _ = event_tx.send(NetworkEvent::DeviceRestored).await;
     }
-    let asking: BTreeSet<&String> = now.pending.difference(&prev.pending).collect();
-    for device in asking.into_iter().filter(|d| d.as_str() != local_device) {
-        let _ = event_tx
-            .send(NetworkEvent::PendingDeviceAsking { device_peer_id: device.clone() })
-            .await;
+    let asking: Vec<String> = now
+        .pending
+        .difference(&prev.pending)
+        .filter(|d| d.as_str() != local_device && asks_the_person(&store, now, d))
+        .cloned()
+        .collect();
+    drop(store);
+    for device in asking {
+        let _ = event_tx.send(NetworkEvent::PendingDeviceAsking { device_peer_id: device }).await;
     }
 }
 
@@ -2380,7 +2705,7 @@ mod tests {
             "the owner's device must learn it was removed",
         );
 
-        let (_, state) = recover(&me.master, &recovery, &me.device, &[], false, &me.db, &me.pass).unwrap();
+        let (_, state) = recover(&me.master, &recovery, &me.device, &[], false, None, &me.db, &me.pass).unwrap();
         assert!(state.is_member(&me.device.peer_id()));
         assert!(!state.is_member(&thief.peer_id()), "the thief survived the recovery");
         let mut late = roster.clone();
@@ -2671,7 +2996,7 @@ mod tests {
         let me = Observer::new(0x01, 0x02);
         let recovery = kp(0x03);
         let genesis = held_from_ahead(&me, &recovery);
-        let (_, state) = recover(&me.master, &recovery, &me.device, &[], false, &me.db, &me.pass).unwrap();
+        let (_, state) = recover(&me.master, &recovery, &me.device, &[], false, None, &me.db, &me.pass).unwrap();
         assert_ne!(state.base, genesis.base(), "the recovery was dated before the base it meant to replace");
 
         let other = Observer::new(0x01, 0x09);
@@ -2704,7 +3029,7 @@ mod tests {
         assert!(!me.state_of(&own_master).is_member(&thief.peer_id()), "a forged recovery key admitted its device");
         me.own();
         assert_eq!(stored_phrase(&me).as_deref(), Some(PHRASE), "the stored phrase was erased for a forged key");
-        let (_, state) = recover(&me.master, &recovery, &me.device, &[], false, &me.db, &me.pass)
+        let (_, state) = recover(&me.master, &recovery, &me.device, &[], false, None, &me.db, &me.pass)
             .expect("the real phrase was locked out");
         assert!(state.protected && state.is_member(&me.device.peer_id()));
 
@@ -2732,9 +3057,9 @@ mod tests {
         let _g = guard();
         let me = Observer::new(0x01, 0x02);
         me.own();
-        recover(&me.master, &kp(0x03), &me.device, &[], false, &me.db, &me.pass).unwrap();
+        recover(&me.master, &kp(0x03), &me.device, &[], false, None, &me.db, &me.pass).unwrap();
         assert!(
-            recover(&me.master, &kp(0x04), &me.device, &[], false, &me.db, &me.pass).is_err(),
+            recover(&me.master, &kp(0x04), &me.device, &[], false, None, &me.db, &me.pass).is_err(),
             "a second recovery key replaced the pinned one",
         );
     }
@@ -2785,19 +3110,138 @@ mod tests {
         let prev = state(&[&me_id, &p_id]);
         let now = state(&[&me_id, &p_id, &n, &q, &u, &x]);
         let upgrade = BTreeSet::from([u.clone()]);
-        assert_eq!(vouched_by_a_sibling(&r, &prev, &now, &me_id, &upgrade), vec![(n.clone(), p_id.clone())]);
+        assert_eq!(added_by_another(&r, &prev, &now, &me_id, &upgrade), vec![(n.clone(), p_id.clone())]);
         assert_eq!(
-            vouched_by_a_sibling(&r, &prev, &now, &me_id, &BTreeSet::new()).into_iter().collect::<BTreeSet<_>>(),
+            added_by_another(&r, &prev, &now, &me_id, &BTreeSet::new()).into_iter().collect::<BTreeSet<_>>(),
             BTreeSet::from([(n.clone(), p_id.clone()), (u.clone(), p_id.clone())]),
             "control: without the upgrade the vouched device is news",
         );
         let joining = state(&[&p_id]);
         assert!(
-            vouched_by_a_sibling(&r, &joining, &now, &me_id, &upgrade).is_empty(),
+            added_by_another(&r, &joining, &now, &me_id, &upgrade).is_empty(),
             "a device that just joined was told about itself or what came before it",
         );
         let other_base = RosterState { base: "f".repeat(32), ..now.clone() };
-        assert!(vouched_by_a_sibling(&r, &prev, &other_base, &me_id, &upgrade).is_empty(), "a vouch from another base");
+        assert!(added_by_another(&r, &prev, &other_base, &me_id, &upgrade).is_empty(), "a vouch from another base");
+    }
+
+    /// HOL-SEC-215 (R-ID-14): a roster `me` holds rooted by the phrase, and the same
+    /// with `then` added, as this device folds them.
+    fn phrase_case(then: impl FnOnce(&mut Roster, &NativeKeypair, &NativeKeypair)) -> (Roster, RosterState, RosterState, String) {
+        let (master, recovery, me) = (kp(0x11), kp(0x12), kp(0x13));
+        let at = now_ms() - 60_000;
+        let mut r = Roster::genesis(&master, &recovery, &me, at);
+        let prev = r.verified(now_ms()).fold(|_| None, now_ms());
+        then(&mut r, &master, &recovery);
+        let now = r.verified(now_ms()).fold(|_| None, now_ms());
+        (r, prev, now, me.peer_id())
+    }
+
+    #[test]
+    fn a_device_the_phrase_admits_alerts_our_other_devices() {
+        let f = kp(0x14);
+        let (r, prev, now, me) = phrase_case(|r, master, recovery| {
+            r.add_consent(sign_consent(&f, &master.peer_id()));
+            let pa = roster::sign_phrase_admit(master, recovery, now_ms() - 1_000, &f.peer_id());
+            r.add_phrase_statement(&roster::r_pub_of(recovery), None, Some(pa)).unwrap();
+        });
+        assert!(now.is_member(&f.peer_id()), "precondition: the phrase admits F");
+        assert_eq!(added_by_another(&r, &prev, &now, &me, &BTreeSet::new()), vec![(f.peer_id(), "phrase".to_string())]);
+    }
+
+    #[test]
+    fn a_device_a_recovery_keeps_alerts_our_other_devices() {
+        let f = kp(0x14);
+        let me_id = kp(0x13).peer_id();
+        let (r, prev, now, me) = phrase_case(|r, master, recovery| {
+            r.add_consent(sign_consent(&f, &master.peer_id()));
+            let rec = roster::sign_recovery(master, recovery, now_ms() - 1_000, &[me_id.clone(), f.peer_id()], false);
+            r.add_phrase_statement(&roster::r_pub_of(recovery), Some(rec), None).unwrap();
+        });
+        assert!(now.is_member(&f.peer_id()) && now.is_member(&me), "precondition: the recovery keeps both");
+        assert_eq!(added_by_another(&r, &prev, &now, &me, &BTreeSet::new()), vec![(f.peer_id(), "phrase".to_string())]);
+    }
+
+    /// The admitted device learns of its own admission as a new member: it was not one
+    /// before, so it alerts nothing (the prev rule covers "not this device").
+    #[test]
+    fn the_device_the_phrase_admitted_alerts_nothing_about_itself() {
+        let f = kp(0x14);
+        let (r, _, now, _) = phrase_case(|r, master, recovery| {
+            r.add_consent(sign_consent(&f, &master.peer_id()));
+            let pa = roster::sign_phrase_admit(master, recovery, now_ms() - 1_000, &f.peer_id());
+            r.add_phrase_statement(&roster::r_pub_of(recovery), None, Some(pa)).unwrap();
+        });
+        let before_f = RosterState { members: now.members.iter().filter(|d| **d != f.peer_id()).cloned().collect(), ..now.clone() };
+        assert!(added_by_another(&r, &before_f, &now, &f.peer_id(), &BTreeSet::new()).is_empty());
+    }
+
+    /// A Welcome admission into an empty store (phrase restore, No branch): the first
+    /// roster it learns from its siblings brings an older base. The devices that base
+    /// keeps or vouched for were the identity before this device joined, never news; a
+    /// phrase admission after ours still is.
+    #[test]
+    fn a_base_older_than_our_own_admission_is_no_news() {
+        let (master, recovery, old, me) = (kp(0x11), kp(0x12), kp(0x13), kp(0x14));
+        let (linked, later) = (kp(0x15), kp(0x16));
+        let mut theirs = Roster::genesis(&master, &recovery, &old, now_ms() - 60_000);
+        let base = theirs.verified(now_ms()).fold(|_| None, now_ms()).base;
+        theirs.add_consent(sign_consent(&linked, &master.peer_id()));
+        theirs.add_vouch(sign_vouch(&old, &master.peer_id(), &base, &linked.peer_id()));
+        let mut ours = Roster::new(&master.peer_id());
+        ours.add_consent(sign_consent(&me, &master.peer_id()));
+        let pa = roster::sign_phrase_admit(&master, &recovery, now_ms() - 10_000, &me.peer_id());
+        ours.add_phrase_statement(&roster::r_pub_of(&recovery), None, Some(pa)).unwrap();
+        let prev = ours.verified(now_ms()).fold(|_| None, now_ms());
+        assert!(prev.is_member(&me.peer_id()), "precondition: the phrase admits this install");
+        let mut merged = ours.merged(&theirs);
+        let now = merged.verified(now_ms()).fold(|_| None, now_ms());
+        assert!(now.is_member(&old.peer_id()) && now.is_member(&linked.peer_id()) && now.is_member(&me.peer_id()), "precondition");
+        assert!(added_by_another(&merged, &prev, &now, &me.peer_id(), &BTreeSet::new()).is_empty());
+
+        merged.add_consent(sign_consent(&later, &master.peer_id()));
+        let pa = roster::sign_phrase_admit(&master, &recovery, now_ms() - 1_000, &later.peer_id());
+        merged.add_phrase_statement(&roster::r_pub_of(&recovery), None, Some(pa)).unwrap();
+        let after = merged.verified(now_ms()).fold(|_| None, now_ms());
+        assert!(after.is_member(&later.peer_id()), "precondition: a later admission");
+        assert_eq!(
+            added_by_another(&merged, &prev, &after, &me.peer_id(), &BTreeSet::new()),
+            vec![(later.peer_id(), "phrase".to_string())],
+            "a phrase admission after ours is news even in the base we first learn",
+        );
+
+        let fresh = kp(0x17);
+        merged.add_consent(sign_consent(&fresh, &master.peer_id()));
+        merged.add_vouch(sign_vouch(&old, &master.peer_id(), &base, &fresh.peer_id()));
+        let vouched = merged.verified(now_ms()).fold(|_| None, now_ms());
+        assert_eq!(
+            added_by_another(&merged, &after, &vouched, &me.peer_id(), &BTreeSet::new()),
+            vec![(fresh.peer_id(), old.peer_id())],
+            "once the base is known, a sibling's vouch is news again",
+        );
+
+        let kept = kp(0x18);
+        merged.add_consent(sign_consent(&kept, &master.peer_id()));
+        let rec = roster::sign_recovery(&master, &recovery, now_ms() - 500, &[me.peer_id(), kept.peer_id()], false);
+        merged.add_phrase_statement(&roster::r_pub_of(&recovery), Some(rec), None).unwrap();
+        let recovered = merged.verified(now_ms()).fold(|_| None, now_ms());
+        assert!(recovered.is_member(&kept.peer_id()) && recovered.base != vouched.base, "precondition: a newer base keeps it");
+        assert_eq!(
+            added_by_another(&merged, &vouched, &recovered, &me.peer_id(), &BTreeSet::new()),
+            vec![(kept.peer_id(), "phrase".to_string())],
+            "a recovery after our admission is news",
+        );
+    }
+
+    #[test]
+    fn an_upgrade_admission_still_alerts_nothing() {
+        let f = kp(0x14);
+        let (r, prev, now, me) = phrase_case(|r, master, recovery| {
+            r.add_consent(sign_consent(&f, &master.peer_id()));
+            let pa = roster::sign_phrase_admit(master, recovery, now_ms() - 1_000, &f.peer_id());
+            r.add_phrase_statement(&roster::r_pub_of(recovery), None, Some(pa)).unwrap();
+        });
+        assert!(added_by_another(&r, &prev, &now, &me, &BTreeSet::from([f.peer_id()])).is_empty());
     }
 
     /// C-IDENTITY-09. The ingest records the alert once with who added the device, tells
@@ -4368,5 +4812,287 @@ mod tests {
             load(&me.store(), &bob.peer_id()).is_some_and(|r| r.r_pub.is_empty()),
             "the relay's copy picked the recovery key of a roster we hold keyless"
         );
+    }
+
+    /// The hand-off budget alone: once per peer and revision, again after the roster
+    /// moves, our session is lost or AGAIN passes, and at most BUDGET per WINDOW.
+    #[test]
+    fn the_hand_off_budget_tells_once_per_revision_and_refills_by_the_minute() {
+        let _g = super::super::resolver::test_lock();
+        let me = "hand-off-unit-device";
+        hand_offs().remove(me);
+        let t0 = std::time::Instant::now();
+        assert!(may_hand_off(me, "p", 1, t0), "control: a first hand-off runs");
+        assert!(!may_hand_off(me, "p", 1, t0), "the same revision was handed twice");
+        assert!(may_hand_off(me, "p", 2, t0), "a moved roster was not handed");
+        on_session_lost(me);
+        assert!(may_hand_off(me, "p", 2, t0), "a lost session kept the old hand-off");
+        assert!(may_hand_off(me, "p", 2, t0 + HAND_OFF_AGAIN), "a hand-off AGAIN ago still counted");
+        // The three at t0 left the window: one spent so far.
+        for i in 1..HAND_OFF_BUDGET {
+            assert!(may_hand_off(me, &format!("q{i}"), 1, t0 + HAND_OFF_AGAIN), "within the budget");
+        }
+        assert!(!may_hand_off(me, "over", 1, t0 + HAND_OFF_AGAIN), "past the budget");
+        assert!(may_hand_off(me, "over", 1, t0 + HAND_OFF_AGAIN + HAND_OFF_WINDOW), "the window never refilled");
+        hand_offs().remove(me);
+    }
+
+    /// Identity `me` with `others` counted besides it, phrase-rooted with `recovery`.
+    fn rooted_with(me: &Observer, recovery: &NativeKeypair, others: &[&NativeKeypair]) -> Roster {
+        let m = me.master.peer_id();
+        let mut r = Roster::new(&m);
+        r.r_pub = r_pub_of(recovery);
+        let mut keep = vec![me.device.peer_id()];
+        r.add_consent(sign_consent(&me.device, &m));
+        for d in others {
+            r.add_consent(sign_consent(d, &m));
+            keep.push(d.peer_id());
+        }
+        keep.sort();
+        r.recoveries.push(roster::sign_recovery(&me.master, recovery, now_ms() - 60_000, &keep, false));
+        write_bootstrap(&me.dir(), &r).unwrap();
+        me.own();
+        r
+    }
+
+    /// `device` asks to join our identity's current base.
+    async fn asks(me: &mut Observer, device: &NativeKeypair) -> Vec<NetworkEvent> {
+        let (mut r, s) = own(&me.master.peer_id(), &me.db, &me.pass).unwrap();
+        r.add_consent(sign_consent(device, &me.master.peer_id()));
+        r.add_pending(sign_pending(&me.master, &s.base, &device.peer_id()));
+        me.drain();
+        me.ingest(&device.peer_id(), &r).await;
+        assert!(me.state_of(&me.master.peer_id()).pending.contains(&device.peer_id()), "precondition: the ask landed");
+        me.drain()
+    }
+
+    fn prompted(events: &[NetworkEvent], device: &NativeKeypair) -> bool {
+        events.iter().any(|e| matches!(e, NetworkEvent::PendingDeviceAsking { device_peer_id } if *device_peer_id == device.peer_id()))
+    }
+
+    fn cut_off_here(me: &Observer, device: &NativeKeypair) -> Option<(i64, bool)> {
+        let store = me.store();
+        let r = load(&store, &me.master.peer_id()).unwrap();
+        cut_off_by_recovery(&store, &r, &fold(&store, &r), &device.peer_id())
+    }
+
+    /// HOL-SEC-229: a recovery records the members it cut off. One that asks again is
+    /// named as ours and raises no pop-up where backups need approval; any other asker
+    /// may be one of the old ones (the master key signs an ask for any key), so it is
+    /// named as maybe cut off, never as a restored backup. A recovery into an empty
+    /// install knew no device, so every asker is a maybe.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_recovery_records_the_devices_it_cut_off() {
+        let _g = guard();
+        let mut me = Observer::new(0x31, 0x32);
+        let (recovery, old, backup) = (kp(0x33), kp(0x34), kp(0x35));
+        rooted_with(&me, &recovery, &[&old]);
+        let (r, _) = recover(&me.master, &recovery, &me.device, &[], true, Some(now_ms() - 1_000), &me.db, &me.pass).unwrap();
+        let at = r.base_at().unwrap();
+        let events = asks(&mut me, &old).await;
+        assert!(!prompted(&events, &old), "the cut-off device raised the approval pop-up");
+        assert_eq!(cut_off_here(&me, &old), Some((at, true)));
+        let events = asks(&mut me, &backup).await;
+        assert!(!prompted(&events, &backup), "a device no record names was offered as a restored backup");
+        assert_eq!(cut_off_here(&me, &backup), Some((at, false)), "a device no record names is not a maybe");
+
+        let mut fresh = Observer::new(0x31, 0x36);
+        let (r, _) = recover(&fresh.master, &recovery, &fresh.device, &[], true, Some(now_ms() - 1_000), &fresh.db, &fresh.pass).unwrap();
+        let events = asks(&mut fresh, &old).await;
+        assert!(!prompted(&events, &old), "an empty install's recovery raised the approval pop-up");
+        assert_eq!(cut_off_here(&fresh, &old), Some((r.base_at().unwrap(), false)));
+        assert_eq!(cut_off_here(&fresh, &fresh.device), None, "only a device asking to join is named");
+    }
+
+    /// HOL-SEC-229 on a device the recovery kept: the new base reaches it from the device
+    /// that typed the phrase, and it records the member that base cut off.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_kept_device_records_what_a_recovery_elsewhere_cut_off() {
+        let _g = guard();
+        let mut me = Observer::new(0x41, 0x42);
+        let (recovery, typist, old) = (kp(0x43), kp(0x44), kp(0x45));
+        let mut r = rooted_with(&me, &recovery, &[&typist, &old]);
+        let mut keep = vec![me.device.peer_id(), typist.peer_id()];
+        keep.sort();
+        let at = now_ms() - 1_000;
+        r.recoveries.push(roster::sign_recovery(&me.master, &recovery, at, &keep, true));
+        me.ingest(&typist.peer_id(), &r).await;
+        assert!(!me.state_of(&me.master.peer_id()).is_member(&old.peer_id()), "precondition: the new base cut it off");
+        let events = asks(&mut me, &old).await;
+        assert!(!prompted(&events, &old), "the kept device raised the approval pop-up for the cut-off device");
+        assert_eq!(cut_off_here(&me, &old), Some((at, true)));
+    }
+
+    /// Where backups may still join by seven quiet days, a cut-off device that asks
+    /// again is put to the person (as cut off, never as a backup): silence would let it in.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn a_cut_off_device_still_warns_where_it_can_join_by_waiting() {
+        let _g = guard();
+        let mut me = Observer::new(0x51, 0x52);
+        let (recovery, old) = (kp(0x53), kp(0x54));
+        rooted_with(&me, &recovery, &[&old]);
+        let (r, _) = recover(&me.master, &recovery, &me.device, &[], false, Some(now_ms() - 1_000), &me.db, &me.pass).unwrap();
+        let events = asks(&mut me, &old).await;
+        assert!(prompted(&events, &old), "a cut-off device that can join by waiting went unannounced");
+        assert_eq!(cut_off_here(&me, &old), Some((r.base_at().unwrap(), true)));
+    }
+
+    /// HOL-SEC-229 review: the master key signs a join ask for any key, so a recovery that
+    /// drops devices as lost marks every asker its record does not name as maybe one of
+    /// the old ones: a fresh key is never offered as a restored backup.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn rev229_a_fresh_key_after_a_lost_recovery_is_not_offered_as_a_backup() {
+        let _g = guard();
+        let mut me = Observer::new(0x91, 0x92);
+        let (recovery, old, fresh) = (kp(0x93), kp(0x94), kp(0x95));
+        rooted_with(&me, &recovery, &[&old]);
+        let (r, _) = recover(&me.master, &recovery, &me.device, &[], true, Some(now_ms() - 1_000), &me.db, &me.pass).unwrap();
+        let events = asks(&mut me, &fresh).await;
+        assert!(cut_off_here(&me, &fresh).is_some(), "a fresh key after a lost recovery is named as a restored backup");
+        assert_eq!(cut_off_here(&me, &fresh), Some((r.base_at().unwrap(), false)));
+        assert!(!prompted(&events, &fresh), "a fresh key after a lost recovery raised the approval pop-up");
+    }
+
+    /// HOL-SEC-229 review: a kept device records the cut in the fold that takes the new
+    /// base, not after it: a fold that committed while the after-step never ran (a kill,
+    /// a failed lease) still leaves the record, and nothing pops for the cut-off device,
+    /// at once or at the next start. A fresh key reads as maybe one of the old ones.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn rev229_b_a_kept_device_that_missed_the_after_step_still_never_prompts() {
+        let _g = guard();
+        let mut me = Observer::new(0xa1, 0xa2);
+        let (recovery, typist, old, fresh) = (kp(0xa3), kp(0xa4), kp(0xa5), kp(0xa6));
+        let (m, d) = (me.master.peer_id(), me.device.peer_id());
+        let mut r = rooted_with(&me, &recovery, &[&typist, &old]);
+        let mut keep = vec![d.clone(), typist.peer_id()];
+        keep.sort();
+        let at = now_ms() - 1_000;
+        r.recoveries.push(roster::sign_recovery(&me.master, &recovery, at, &keep, true));
+        // The fold's store half commits; the async half after it never runs.
+        let folded = fold_in(&me.db, &me.pass, &r.verified(now_ms()), &typist.peer_id(), &m, &d, Source::Delivered);
+        assert!(folded.is_some_and(|f| f.prev.base != f.now.base), "precondition: the fold took the new base");
+        assert!(!me.state_of(&m).is_member(&old.peer_id()), "precondition: the new base cut it off");
+
+        let events = asks(&mut me, &old).await;
+        assert!(!prompted(&events, &old), "the kept device raised the approval pop-up for the cut-off device");
+        assert_eq!(cut_off_here(&me, &old), Some((at, true)));
+        let events = asks(&mut me, &fresh).await;
+        assert!(!prompted(&events, &fresh), "the kept device raised the approval pop-up for a fresh key");
+        assert_eq!(cut_off_here(&me, &fresh), Some((at, false)));
+        announce_own_state(&me.events, &d, &me.state_of(&m), &me.db, &me.pass).await;
+        let events = me.drain();
+        assert!(!prompted(&events, &old) && !prompted(&events, &fresh), "the next start raised the approval pop-up");
+    }
+
+    /// HOL-SEC-229 review: a kept device that cannot record what a recovery cut off takes
+    /// none of that base: the fold fails, the roster stays as it was.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn rev229_c_a_kept_device_that_cannot_record_the_cut_refuses_the_base() {
+        let _g = guard();
+        let me = Observer::new(0xb1, 0xb2);
+        let (recovery, typist, old) = (kp(0xb3), kp(0xb4), kp(0xb5));
+        let (m, d) = (me.master.peer_id(), me.device.peer_id());
+        let mut r = rooted_with(&me, &recovery, &[&typist, &old]);
+        let before = me.state_of(&m).base;
+        let mut keep = vec![d.clone(), typist.peer_id()];
+        keep.sort();
+        r.recoveries.push(roster::sign_recovery(&me.master, &recovery, now_ms() - 1_000, &keep, true));
+        let new_base = r.reverified().base();
+        me.store().save_setting(&recovery_cut_off_key(&new_base), "not json").unwrap();
+        let folded = fold_in(&me.db, &me.pass, &r.verified(now_ms()), &typist.peer_id(), &m, &d, Source::Delivered);
+        assert!(folded.is_none(), "the fold took a base whose cut it could not record");
+        assert_eq!(me.state_of(&m).base, before, "the roster moved without the record");
+    }
+
+    /// HOL-SEC-229 review, item 5: a recovery that keeps every member (choosing whether
+    /// backups wait, confirming the stored phrase) marks nothing, so a backup asking after
+    /// it is still put to the person; after a lost recovery the mark stays through such a
+    /// base (the master key is still out there) and moves to the date of the newest
+    /// recovery that cut a device; a device stays named by its own first cut.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn rev229_d_the_maybe_mark_names_the_newest_recovery_that_cut_a_device() {
+        let _g = guard();
+        let mut me = Observer::new(0xc1, 0xc2);
+        let (recovery, old, other) = (kp(0xc3), kp(0xc4), kp(0xc5));
+        let (backup, fresh, later) = (kp(0xc6), kp(0xc7), kp(0xc8));
+        let m = me.master.peer_id();
+        rooted_with(&me, &recovery, &[&old, &other]);
+        let all = |me: &Observer| me.state_of(&m).members.into_iter().collect::<Vec<_>>();
+        recover(&me.master, &recovery, &me.device, &all(&me), true, None, &me.db, &me.pass).unwrap();
+        let events = asks(&mut me, &backup).await;
+        assert!(prompted(&events, &backup), "a recovery that kept every member hid a restored backup");
+        assert_eq!(cut_off_here(&me, &backup), None, "a recovery that cut nothing marked an asker");
+
+        let (r1, _) = recover(&me.master, &recovery, &me.device, &[other.peer_id()], true, Some(now_ms() - 1_000), &me.db, &me.pass).unwrap();
+        let t1 = r1.base_at().unwrap();
+        recover(&me.master, &recovery, &me.device, &all(&me), false, None, &me.db, &me.pass).unwrap();
+        asks(&mut me, &old).await;
+        asks(&mut me, &fresh).await;
+        assert_eq!(cut_off_here(&me, &old), Some((t1, true)), "the cut-off device lost its record through a base keeping every member");
+        assert_eq!(cut_off_here(&me, &fresh), Some((t1, false)), "the mark did not stay with the recovery that cut");
+
+        let (r3, _) = recover(&me.master, &recovery, &me.device, &[], true, None, &me.db, &me.pass).unwrap();
+        let t3 = r3.base_at().unwrap();
+        asks(&mut me, &old).await;
+        asks(&mut me, &later).await;
+        assert_eq!(cut_off_here(&me, &later), Some((t3, false)), "the mark names an older recovery than the newest one that cut");
+        assert_eq!(cut_off_here(&me, &old), Some((t1, true)), "a device is named by its first cut");
+        assert_eq!(cut_off_here(&me, &other), None, "a device not asking is named nowhere");
+    }
+
+    /// The key rule's cut-off (F5 note 4): the latest cut of every device a settling
+    /// drops, and none at all when one of them is not named (a key it held may still
+    /// work), unless the record's "maybe" mark names it.
+    #[test]
+    fn keys_after_ms_is_none_when_a_dropped_device_is_not_named() {
+        let me = Observer::new(0xd5, 0xd6);
+        let store = me.store();
+        let roster = Roster::genesis(&me.master, &kp(0xd7), &me.device, 1_000);
+        let base = roster.base();
+        let (named, other, unnamed) = ("dev-named".to_string(), "dev-other".to_string(), "dev-unnamed".to_string());
+        note_cut_off(&store, &base, CutOff { devices: [(named.clone(), 2_000), (other.clone(), 3_000)].into_iter().collect(), unknown_at: None }).unwrap();
+        assert_eq!(keys_after_ms(&store, &roster, std::slice::from_ref(&named)), Some(2_000));
+        assert_eq!(keys_after_ms(&store, &roster, &[named.clone(), other.clone()]), Some(3_000), "the latest cut");
+        assert_eq!(keys_after_ms(&store, &roster, &[named.clone(), unnamed.clone()]), None, "a device the record does not name");
+        note_cut_off(&store, &base, CutOff { devices: Default::default(), unknown_at: Some(4_000) }).unwrap();
+        assert_eq!(keys_after_ms(&store, &roster, &[named, unnamed]), Some(4_000), "the maybe mark names every other device");
+    }
+
+    /// HOL-SEC-229 review, item 6: past the cap the record keeps the newest cuts, and a
+    /// device left out still reads as maybe cut off, never as a restored backup.
+    #[test]
+    fn rev229_e_a_device_past_the_cut_off_cap_still_reads_as_maybe() {
+        let me = Observer::new(0xd1, 0xd2);
+        let store = me.store();
+        let name = |i: usize| format!("dev{i:04}");
+        let devices = (0..=MAX_CUT_OFF).map(|i| (name(i), 1_000 + i as i64)).collect();
+        note_cut_off(&store, "base", CutOff { devices, unknown_at: None }).unwrap();
+        let held = read_cut_off(&store, "base").unwrap();
+        assert_eq!(held.devices.len(), MAX_CUT_OFF);
+        assert_eq!(held.of(&name(MAX_CUT_OFF)), Some((1_000 + MAX_CUT_OFF as i64, true)), "the newest cut was left out");
+        assert_eq!(held.of(&name(0)), Some((1_000, false)), "a device past the cap reads as a restored backup");
+    }
+
+    /// HOL-SEC-229 review: a record that cannot be read never makes an asker a restored
+    /// backup: no pop-up, and the device list names it as maybe cut off.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn rev229_f_an_unreadable_record_offers_no_asker_as_a_backup() {
+        let _g = guard();
+        let mut me = Observer::new(0xe1, 0xe2);
+        let (recovery, old, fresh) = (kp(0xe3), kp(0xe4), kp(0xe5));
+        rooted_with(&me, &recovery, &[&old]);
+        let (r, s) = recover(&me.master, &recovery, &me.device, &[], true, Some(now_ms() - 1_000), &me.db, &me.pass).unwrap();
+        me.store().save_setting(&recovery_cut_off_key(&s.base), "not json").unwrap();
+        let events = asks(&mut me, &fresh).await;
+        assert!(!prompted(&events, &fresh), "an unreadable record raised the approval pop-up");
+        assert_eq!(cut_off_here(&me, &fresh), Some((r.base_at().unwrap(), false)), "an unreadable record named an asker as a backup");
     }
 }

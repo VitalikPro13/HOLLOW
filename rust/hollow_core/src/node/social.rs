@@ -694,6 +694,37 @@ pub(crate) fn friend_accept_msg(requested_at: i64, device_list: Option<crate::id
     }
 }
 
+/// Answers to a settled friend request already re-sent on this connection, per
+/// requesting DEVICE (design D7): a mailbox replay of one device's request must never use
+/// up the answer another device of the same identity (a phrase-restored one) needs. Each
+/// device is answered once per connection whatever `requested_at` it claims, so a
+/// requester stepping it never draws an answer per frame. Cleared on reconnect.
+#[derive(Default)]
+pub(crate) struct AnswerResent(std::collections::HashSet<(String, String)>);
+
+/// Requesting devices remembered per connection; only accepted or declined friends'
+/// devices reach it, and at the cap it starts over.
+const ANSWER_RESENT_MAX: usize = 4096;
+
+impl AnswerResent {
+    /// Whether to answer `device` of `master` again on this connection.
+    pub(crate) fn take(&mut self, master: &str, device: &str) -> bool {
+        let key = (master.to_string(), device.to_string());
+        if self.0.contains(&key) {
+            return false;
+        }
+        if self.0.len() >= ANSWER_RESENT_MAX {
+            self.0.clear();
+        }
+        self.0.insert(key);
+        true
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.0.clear();
+    }
+}
+
 /// Sends an accept to `device` inside the deterministic DM room. A copy for a device
 /// that is not there yet parks under that room at the relay, never under a room the
 /// device already left, where it would replay on an unrelated later join.
@@ -5074,5 +5105,19 @@ mod tests {
         let mut forged = Roster::legacy_for_test(&stranger, &[&d2]);
         forged.add_consent(sign_consent(&d1, &m.peer_id()));
         assert!(!super::answer_meets_our_row(&store, &forged, &d2.peer_id()), "a consent the device never gave this identity");
+    }
+
+    /// D7: a replay of the lost device's request never uses up the answer the new
+    /// device's request needs; each device is answered once per connection, whatever
+    /// `requested_at` it claims (review finding 5).
+    #[test]
+    fn an_answer_resent_is_kept_per_requesting_device() {
+        let mut sent = crate::node::social::AnswerResent::default();
+        assert!(sent.take("m", "old"));
+        assert!(!sent.take("m", "old"), "the same replay twice");
+        assert!(sent.take("m", "new"), "the new device's request was used up by the old one's");
+        assert!(!sent.take("m", "new"), "a request on the same connection again");
+        sent.clear();
+        assert!(sent.take("m", "old"), "a new connection answers again");
     }
 }

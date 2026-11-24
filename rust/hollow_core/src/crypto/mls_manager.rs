@@ -763,6 +763,11 @@ impl MlsManager {
         .to_string()
     }
 
+    /// Who this credential's bound certificate names, `None` for a legacy unbound one.
+    pub(crate) fn bound_leaf(&self) -> Option<LeafIdentity> {
+        classify_leaf(self.credential_with_key.credential.serialized_content(), self.signer.public()).bound().cloned()
+    }
+
     /// This device's certificate (its bound credential's text), `None` while the
     /// credential is still a legacy unbound one.
     pub fn own_certificate(&self) -> Option<String> {

@@ -93,6 +93,119 @@ pub fn restore_identity_from_mnemonic(phrase: String) -> Result<IdentityInfo, St
     })
 }
 
+/// Welcome's answer to "Could someone else have your old device?".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WelcomeRestoreMode {
+    /// No: the old device broke or was wiped. The phrase admits this install and every
+    /// other device keeps counting.
+    Admit,
+    /// Yes, or not sure: a recovery keeping only this install; every other device is
+    /// dropped as lost or stolen since `lost_since_ms` (0 = longer ago, or not sure).
+    Recover { lost_since_ms: i64 },
+}
+
+/// What `welcome_restore` did. Words that are not a recovery phrase come back as an
+/// error string instead: `phrase_words:{n}` (not 24 words), `phrase_word:{i}` (word i,
+/// from 1, is not on the list), `phrase_checksum`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RestoreOutcome {
+    /// The identity is on this device. The phrase never comes back out of Rust.
+    Restored {
+        /// The keychain default ran (Windows and macOS OS data root, no `.locked` pair):
+        /// show its toast. False: set the protection offer due.
+        locked_to_keychain: bool,
+    },
+    /// A folder of old data kept beside this profile opens with these words; nothing
+    /// changed. Desktop offers to switch to it. `profile_name` is always `None` from Rust:
+    /// Dart names the folder from the profile registry itself.
+    KeptMatch { path: String, profile_name: Option<String> },
+    /// Old data with an identity is kept beside this profile and none of it opens with
+    /// these words; nothing changed. A typo is likely.
+    KeptNoneOpens,
+}
+
+/// Welcome's phrase restore (PHRASE_RESTORE_DESIGN 1.2). With `check_kept`, old data
+/// kept beside this profile is probed first and a match or a miss returns before
+/// anything lands; the person's choice calls again without it.
+#[frb]
+pub fn welcome_restore(phrase: String, mode: WelcomeRestoreMode, check_kept: bool) -> Result<RestoreOutcome, String> {
+    let phrase = zeroize::Zeroizing::new(phrase);
+    crate::log::init();
+    let mnemonic = identity::keys::parse_phrase(&phrase).map_err(identity::keys::PhraseError::code)?;
+    crate::api::storage::finish_wipe_before_a_new_identity()?;
+    crate::api::storage::refuse_while_not_ready()?;
+    let root = crate::identity::data_dir()?;
+    if check_kept {
+        let master = crate::identity::native_identity::NativeKeypair::from_mnemonic(&mnemonic)?;
+        let db_key = zeroize::Zeroizing::new(crate::api::storage::db_key_of(&master)?);
+        match crate::api::recovery::check_kept_at(&root, &db_key) {
+            crate::api::recovery::KeptCheck::Match(path) => {
+                return Ok(RestoreOutcome::KeptMatch { path: path.to_string_lossy().into_owned(), profile_name: None });
+            }
+            crate::api::recovery::KeptCheck::NoneOpens => return Ok(RestoreOutcome::KeptNoneOpens),
+            crate::api::recovery::KeptCheck::Clear => {}
+        }
+    }
+    let how = match mode {
+        WelcomeRestoreMode::Admit => identity::keys::PhraseRestore::Admit,
+        WelcomeRestoreMode::Recover { lost_since_ms } => identity::keys::PhraseRestore::Recover { lost_since_ms: lost_since_ms.max(0) },
+    };
+    let restored = identity::keys::restore_with_phrase(&mnemonic, how, true)?;
+    hollow_log!(
+        "[HOLLOW-ID] Restored from the recovery phrase on Welcome: {}, {}",
+        if restored.kept_device { "kept the device here" } else { "a new device" },
+        if restored.empty { "no roster held" } else { "beside a held roster" },
+    );
+    forget_missed_tries();
+    Ok(RestoreOutcome::Restored { locked_to_keychain: keychain_default_after_restore(&root, &phrase) })
+}
+
+/// The keychain default once a typed phrase restored (design 2.3): never where a
+/// `.locked` pair still needs this profile's keychain slot, which the default would
+/// overwrite. A keychain that fails leaves the restore as it is.
+fn keychain_default_after_restore(root: &std::path::Path, phrase: &str) -> bool {
+    if crate::identity::keys::LOCKED_KEY_FILES.iter().any(|(_, aside)| root.join(aside).exists()) {
+        return false;
+    }
+    protect_new_identity_by_default(phrase.to_string()).unwrap_or_else(|e| {
+        hollow_log!("[HOLLOW-ID] The keychain default did not run after a phrase restore: {e}");
+        false
+    })
+}
+
+/// Whether "Type my phrase again" may set this identity aside: a Welcome restore
+/// within 30 days that no friend accepted and no server holds.
+#[frb]
+pub fn may_set_aside_this_identity() -> bool {
+    set_aside_gate().is_ok_and(|(_, allowed, _)| allowed)
+}
+
+/// The data root, whether this identity may be set aside now, and its relay.
+fn set_aside_gate() -> Result<(std::path::PathBuf, bool, Option<String>), String> {
+    let id = identity::load_existing_identity()?.ok_or("There is no identity on this device yet.")?;
+    let root = crate::identity::data_dir()?;
+    let db = root.join("messages.db");
+    let pass = crate::api::storage::db_key_of(&id.keypair)?;
+    let store = crate::storage::MessageStore::open(db.to_str().ok_or("Invalid path encoding")?, &pass)?;
+    let allowed = crate::node::phrase_restore::may_set_aside(&store, &id.device_peer_id, crate::node::roster_book::now_ms());
+    let relay = store.load_setting(crate::node::fetch::RELAY_DOMAIN_KEY).ok().flatten();
+    Ok((root, allowed, relay))
+}
+
+/// Sets this identity aside (moved, never erased) at the next launch, after which the
+/// profile opens at Welcome. Checks `may_set_aside_this_identity` again. The caller
+/// relaunches the app.
+#[frb]
+pub fn set_aside_this_identity() -> Result<(), String> {
+    crate::log::init();
+    let (root, allowed, relay) = set_aside_gate()?;
+    if !allowed {
+        return Err("Hollow couldn't set this identity aside. Try again.".into());
+    }
+    crate::api::storage::refuse_while_not_ready()?;
+    crate::api::recovery::mark_set_aside_at(&root, relay, crate::node::roster_book::now_ms())
+}
+
 /// A new identity or a new lock starts its own count of missed tries.
 fn forget_missed_tries() {
     if let Ok(root) = crate::identity::data_dir() {
@@ -2187,7 +2300,7 @@ mod keychain_tests {
     use crate::identity::platform_keystore::{self, test_support::Fault};
     use std::path::{Path, PathBuf};
 
-    const PHRASE: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+    const PHRASE: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art";
     const OTHER: &str = "legal winner thank year wave sausage worth useful legal winner thank yellow";
 
     struct Fixture {
@@ -2238,6 +2351,38 @@ mod keychain_tests {
             encryption::IdentityFormat::Encrypted { flags, .. } => flags,
             encryption::IdentityFormat::Plaintext => 0,
         }
+    }
+
+    /// Design 2.3: a Welcome restore over a keychain-locked pair keeps the pair as
+    /// `.locked`, and the keychain default leaves this profile's slot alone, the only key
+    /// that pair opens with. Without such a pair the default runs inside the restore.
+    #[test]
+    fn the_keychain_default_skips_a_profile_whose_locked_pair_needs_its_slot() {
+        let fx = plaintext_identity();
+        // SAFETY: serialized by the fixture's lock.
+        unsafe { std::env::set_var("HOLLOW_TEST_KEYCHAIN_DEFAULTS", "1") };
+        if this_os() == DesktopOs::Other {
+            return;
+        }
+        enable_os_keychain_protection().unwrap();
+        let slot = platform_keystore::read_profile_key_at(fx.root()).unwrap();
+        assert!(slot.is_some(), "precondition: the slot holds the old key");
+        encryption::clear_session_key();
+
+        let out = welcome_restore(PHRASE.into(), WelcomeRestoreMode::Admit, false).unwrap();
+
+        assert_eq!(out, RestoreOutcome::Restored { locked_to_keychain: false });
+        assert!(fx.root().join("identity.key.locked").exists());
+        assert_eq!(platform_keystore::read_profile_key_at(fx.root()).unwrap(), slot, "the default took the locked pair's slot");
+        assert_eq!(flags_of(fx.root().join("identity.key")), 0);
+
+        for (_, aside) in crate::identity::keys::LOCKED_KEY_FILES {
+            std::fs::remove_file(fx.root().join(aside)).unwrap();
+        }
+        encryption::clear_session_key();
+        let out = welcome_restore(PHRASE.into(), WelcomeRestoreMode::Admit, false).unwrap();
+        assert_eq!(out, RestoreOutcome::Restored { locked_to_keychain: true }, "control: no locked pair");
+        assert_eq!(flags_of(fx.root().join("identity.key")), 0x02);
     }
 
     /// A phrase restore over a locked identity (the key-missing screen) keeps the
@@ -3502,7 +3647,7 @@ mod b5_device_bound_tests {
         attempts::set_for_test(fx.root(), 9, attempts::Clock::now());
         assert!(app_lock_wait_secs() > 0);
         restore_identity_from_mnemonic(
-            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about".into(),
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art".into(),
         )
         .expect("restore");
         assert_eq!(app_lock_wait_secs(), 0, "the phrase restore kept the old streak");
@@ -4311,5 +4456,183 @@ mod keychain_move_tests {
         settle_keychain_move_at(fx.root(), None);
         assert!(!keychain_rekey_wants_password_at(fx.root(), None), "the next start did not finish it");
         assert_eq!(unlock_identity(Some(PIN.into())).expect("typed after").peer_id, peer_of_lay_down());
+    }
+}
+
+#[cfg(test)]
+mod welcome_restore_tests {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    const A24: &str = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art";
+
+    struct Fx {
+        _g: std::sync::MutexGuard<'static, ()>,
+        _s: std::sync::MutexGuard<'static, ()>,
+        tmp: crate::test_tmp::TestDir,
+    }
+
+    impl Fx {
+        fn root(&self) -> PathBuf {
+            self.tmp.path().join("hollow")
+        }
+    }
+
+    impl Drop for Fx {
+        fn drop(&mut self) {
+            crate::identity::encryption::clear_session_key();
+            // SAFETY: still serialized by the guards.
+            unsafe { std::env::remove_var("HOLLOW_DATA_DIR") };
+        }
+    }
+
+    fn fx() -> Fx {
+        let g = crate::node::resolver::test_lock();
+        let s = crate::api::storage::store_test_lock();
+        let tmp = crate::test_tmp::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("hollow")).unwrap();
+        // SAFETY: serialized by the locks above.
+        unsafe { std::env::set_var("HOLLOW_DATA_DIR", tmp.path().join("hollow")) };
+        crate::identity::encryption::clear_session_key();
+        Fx { _g: g, _s: s, tmp }
+    }
+
+    fn nothing_landed(root: &Path) {
+        assert!(!root.join("identity.key").exists(), "a key landed");
+        assert!(!root.join("messages.db").exists(), "a database was made");
+    }
+
+    #[test]
+    fn welcome_restore_refuses_a_phrase_that_is_not_24_words() {
+        let fx = fx();
+        let twelve = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+        assert_eq!(welcome_restore(twelve.into(), WelcomeRestoreMode::Admit, true).err().as_deref(), Some("phrase_words:12"));
+        assert_eq!(welcome_restore(format!("{A24} abandon"), WelcomeRestoreMode::Admit, true).err().as_deref(), Some("phrase_words:25"));
+        nothing_landed(&fx.root());
+    }
+
+    #[test]
+    fn welcome_restore_names_the_word_that_is_not_in_the_list() {
+        let fx = fx();
+        let typo = A24.replacen("abandon abandon abandon", "abandon abandon abandn", 1);
+        assert_eq!(welcome_restore(typo, WelcomeRestoreMode::Admit, true).err().as_deref(), Some("phrase_word:3"));
+        nothing_landed(&fx.root());
+    }
+
+    #[test]
+    fn welcome_restore_refuses_a_phrase_that_fails_its_checksum() {
+        let fx = fx();
+        let bad = A24.replace(" art", " abandon");
+        assert_eq!(welcome_restore(bad, WelcomeRestoreMode::Admit, true).err().as_deref(), Some("phrase_checksum"));
+        nothing_landed(&fx.root());
+    }
+
+    /// Normalized before it is judged: case and extra spaces are not typos.
+    #[test]
+    fn welcome_restore_takes_a_phrase_in_any_case_and_spacing() {
+        let fx = fx();
+        let messy = format!("  {}  ", A24.to_uppercase().replace(' ', "   "));
+        assert!(matches!(welcome_restore(messy, WelcomeRestoreMode::Admit, true), Ok(RestoreOutcome::Restored { .. })));
+        assert!(fx.root().join("identity.key").exists());
+    }
+
+    /// Design 13.1: the phrase never comes back out of Rust, on Welcome or in-app.
+    #[test]
+    fn a_phrase_restore_hands_no_phrase_back() {
+        let fx = fx();
+        let info = restore_identity_from_mnemonic(A24.into()).unwrap();
+        assert_eq!(info.mnemonic, None);
+        let _ = std::fs::remove_file(fx.root().join("identity.key"));
+        let out = welcome_restore(A24.into(), WelcomeRestoreMode::Admit, false).unwrap();
+        assert!(!format!("{out:?}").contains("abandon"), "the outcome carries the phrase: {out:?}");
+    }
+
+    /// D6: a landing, relink or wipe in flight refuses before any kept folder is opened.
+    #[test]
+    fn welcome_restore_refuses_while_not_ready_before_probing_kept_data() {
+        let fx = fx();
+        let root = fx.root();
+        let kept = fx.tmp.path().join("hollow-old-2026-11-01");
+        std::fs::create_dir_all(&kept).unwrap();
+        std::fs::write(kept.join("relink_origin.json"), format!("{{\"root\":{:?}}}", root.to_string_lossy())).unwrap();
+        let (master, _) = crate::identity::recovery::keys_from_phrase(A24).unwrap();
+        let pass = crate::api::storage::db_key_of(&master).unwrap();
+        drop(crate::storage::MessageStore::open(kept.join("messages.db").to_str().unwrap(), &pass).unwrap());
+        assert!(matches!(
+            welcome_restore(A24.into(), WelcomeRestoreMode::Admit, true),
+            Ok(RestoreOutcome::KeptMatch { .. })
+        ), "control: the kept folder matches");
+
+        std::fs::write(root.join("relink.json"), "{}").unwrap();
+        assert_eq!(
+            welcome_restore(A24.into(), WelcomeRestoreMode::Admit, true).err().as_deref(),
+            Some(crate::api::storage::IDENTITY_NOT_READY),
+        );
+        nothing_landed(&root);
+    }
+
+    #[test]
+    fn welcome_restore_writes_its_mark_only_when_it_mints() {
+        let fx = fx();
+        let root = fx.root();
+        welcome_restore(A24.into(), WelcomeRestoreMode::Admit, false).unwrap();
+        let state = crate::api::roster::welcome_restore_state().unwrap().expect("a minted device has the mark");
+        assert_eq!((state.branch.as_str(), state.empty), ("admit", true));
+
+        // Only the key file goes: the device here counts and is kept, and the mark it
+        // left is its own, not a new one.
+        let (master, _) = crate::identity::recovery::keys_from_phrase(A24).unwrap();
+        let store = crate::storage::MessageStore::open(root.join("messages.db").to_str().unwrap(), &crate::api::storage::db_key_of(&master).unwrap()).unwrap();
+        store.delete_setting(crate::node::phrase_restore::KEY).unwrap();
+        drop(store);
+        crate::api::wipe::zero_and_remove(&root.join("identity.key"));
+        welcome_restore(A24.into(), WelcomeRestoreMode::Admit, false).unwrap();
+        assert!(crate::api::roster::welcome_restore_state().unwrap().is_none(), "a kept device wrote a mark");
+    }
+
+    /// 6.2: the retry sets an identity aside only while nobody else knows it.
+    #[test]
+    fn set_aside_is_refused_once_a_friend_accepted_or_a_server_holds_us() {
+        let fx = fx();
+        let root = fx.root();
+        welcome_restore(A24.into(), WelcomeRestoreMode::Admit, false).unwrap();
+        assert!(may_set_aside_this_identity(), "control: a fresh restore may be set aside");
+        let (master, _) = crate::identity::recovery::keys_from_phrase(A24).unwrap();
+        let open = || crate::storage::MessageStore::open(root.join("messages.db").to_str().unwrap(), &crate::api::storage::db_key_of(&master).unwrap()).unwrap();
+
+        open().save_friend("friend", "accepted", "", 1).unwrap();
+        assert!(!may_set_aside_this_identity(), "an accepted friend knows this identity");
+        assert!(set_aside_this_identity().is_err());
+        assert!(!root.join("set_aside.pending").exists());
+        open().save_friend("friend", "pending", "outgoing", 1).unwrap();
+        assert!(may_set_aside_this_identity(), "control: a request nobody accepted");
+
+        // A test row, written past the actor (`server_rows_are_written_only_through_the_actor`
+        // reads method calls in live code only).
+        crate::storage::MessageStore::save_server_state(&open(), "srv", "{}").unwrap();
+        assert!(!may_set_aside_this_identity(), "a server holds this identity");
+        assert!(set_aside_this_identity().is_err());
+        crate::storage::MessageStore::delete_server_state(&open(), "srv").unwrap();
+        assert!(may_set_aside_this_identity(), "control: the server went");
+
+        let store = open();
+        let mark: crate::node::phrase_restore::Mark = serde_json::from_str(&store.load_setting(crate::node::phrase_restore::KEY).unwrap().unwrap()).unwrap();
+        let old = crate::node::phrase_restore::Mark { at_ms: mark.at_ms - crate::node::phrase_restore::WINDOW_MS, ..mark.clone() };
+        crate::node::phrase_restore::write(&store, &old).unwrap();
+        assert!(!may_set_aside_this_identity(), "past its 30 days");
+        crate::node::phrase_restore::write(&store, &mark).unwrap();
+        drop(store);
+
+        open().save_setting(crate::node::fetch::RELAY_DOMAIN_KEY, "relay.example.org").unwrap();
+        set_aside_this_identity().unwrap();
+        assert!(root.join("set_aside.pending").exists());
+        assert!(root.join("identity.key").exists(), "nothing moves while this process runs");
+
+        // Review (Dart half, a): the next launch moves it, and Welcome still knows the
+        // relay, whose setting went with the database.
+        crate::api::recovery::settle_relink().unwrap();
+        assert!(!root.join("identity.key").exists() && !root.join("messages.db").exists(), "the identity was not set aside");
+        let welcome = crate::api::recovery::set_aside_welcome().unwrap().expect("Welcome is told");
+        assert_eq!(welcome.relay.as_deref(), Some("relay.example.org"), "the next restore would land on the default relay");
     }
 }

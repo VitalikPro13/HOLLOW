@@ -97,6 +97,9 @@ impl ServerState {
     pub(crate) fn verdict(&self, op: &CrdtOp) -> Verdict {
         match self.direct_verdict(op) {
             Verdict::Uncounted | Verdict::Missing if self.is_endorsed(op) => Verdict::Counted,
+            // Part A (HOL-SEC-230, -231): what the fold held when the view dropped its
+            // device keeps counting here until the recovery decides it.
+            Verdict::Uncounted if self.recovery.as_ref().is_some_and(|r| r.keeps(op)) => Verdict::Counted,
             v => v,
         }
     }
@@ -112,10 +115,12 @@ impl ServerState {
     }
 
     /// A held retire names `op` (clock, content id) as written by its proving device.
-    fn is_endorsed(&self, op: &CrdtOp) -> bool {
+    /// The id is `op`'s own, never `content_of`'s: that reads the op held at the key, so a
+    /// variant there would pass as the op the retire named (HOL-SEC-224).
+    pub(super) fn is_endorsed(&self, op: &CrdtOp) -> bool {
         let Some(dev) = op.dev.as_deref() else { return false };
         let Some(named) = self.endorsed.0.get(&(op.author.clone(), op.hlc.physical_ms, op.hlc.counter)) else { return false };
-        let h = hex::encode(self.content_of(op));
+        let h = hex::encode(op.content_hash());
         named.iter().any(|(d, x)| *d == dev.device && *x == h)
     }
 
@@ -409,11 +414,34 @@ impl ServerState {
         !self.cut || clause_exempt(op) || (self.verdict(op) == Verdict::Counted && self.lock_maker_counts(op))
     }
 
-    /// A new join lock link counts only from a device the view counts (t14-lock R3).
+    /// Whether the fold still holds an owner op that `view` (a fresh read of the stored
+    /// rosters) no longer counts and neither a retire nor the hold keeps: a roster saved
+    /// since the last rebuild, which the next one takes (`ViewDirty`). What a witness
+    /// names waits for that rebuild, else it names none where part A will hold a record.
+    pub(crate) fn fold_lags(&self, view: &super::authority::AuthorityView) -> bool {
+        let Some(owner) = self.anchor_owner() else { return false };
+        let Some(entry) = view.entry(&owner).cloned().filter(|_| self.cut && view.is_set()) else { return false };
+        let entry = self.round_entry(&owner, entry);
+        let Some(auth) = entry.auth.as_ref() else { return false };
+        self.op_log.iter().any(|o| {
+            o.author == owner
+                && !clause_exempt(o)
+                && o.dev.as_deref().is_some_and(|d| !auth.counts(&d.device))
+                && !self.is_endorsed(o)
+                && !self.recovery.as_ref().is_some_and(|r| r.keeps(o))
+        })
+    }
+
+    /// A new join lock link counts only from a device the view counts (t14-lock R3). The
+    /// one exception is a lock op part A's hold keeps, made by the device it dropped: the
+    /// relay's lock still names that door, which members prove and open join boxes with
+    /// until the settling moves the lock; that device knew the door already.
     fn lock_maker_counts(&self, op: &CrdtOp) -> bool {
         let CrdtPayload::JoinLock { link, .. } = &op.payload else { return true };
-        self.anchor_owner()
-            .is_some_and(|owner| self.join_lock.link_allowed(&self.server_id, link, &owner, &|m: &str, d: &str| self.authority.counts(m, d)))
+        let kept = |m: &str, d: &str| self.recovery.as_ref().is_some_and(|r| r.keeps(op) && r.dropped.iter().any(|(rm, rd)| rm == m && rd == d));
+        self.anchor_owner().is_some_and(|owner| {
+            self.join_lock.link_allowed(&self.server_id, link, &owner, &|m: &str, d: &str| self.authority.counts(m, d) || kept(m, d))
+        })
     }
 
     /// Whether the device clause under `cut` refuses `op` for a reason a roster can end
@@ -1041,6 +1069,35 @@ pub(crate) mod tests {
         assert!(folded(&r, &dr), "a counted device's retire is admitted");
         assert!(folded(&r, &nick), "the op it names counts as the phone wrote it");
         assert!(!folded(&r, &later) && parked(&r, &later), "an op it does not name stays refused");
+        assert_eq!(r.nicknames.get(&keys(MEMBER).1).map(|n| n.read().clone()).as_deref(), Some("mm"));
+    }
+
+    #[test]
+    fn a_variant_at_an_endorsed_ops_key_is_not_endorsed() {
+        let (mut owner, founding) = owner_on(true);
+        let (first, nick, _, mut laptop) = phone_then_laptop(&mut owner, &founding);
+        let dr = retire(&mut laptop, MEMBER_PHONE, &[&nick]);
+        let mut r = ServerState::skeleton(owner.server_id.clone());
+        r.authority = view_retired();
+        r.ingest_remote(&first);
+        r.ingest_remote(&[nick.clone(), dr.clone()]);
+        assert!(folded(&r, &nick) && r.verdict(&nick) == Verdict::Counted, "precondition: the retire endorses nick");
+        // The retired phone signs another op at nick's clock, with a lower content id.
+        let variant = (0..64)
+            .map(|i| {
+                let mut v = nick.clone();
+                v.payload = P::NicknameChanged { peer_id: keys(MEMBER).1, nickname: format!("v{i}") };
+                v.sign(&keys(MEMBER).0, &keys(MEMBER).2);
+                v.sign_device(&keys(MEMBER_PHONE).0);
+                v
+            })
+            .find(|v| v.content_hash() < nick.content_hash())
+            .expect("a variant with a lower content id");
+        assert_eq!(variant.proven_device(), Some(keys(MEMBER_PHONE).1.as_str()), "precondition: the phone's proof verifies");
+        r.ingest_remote(std::slice::from_ref(&variant));
+        let kept = r.op_log.iter().find(|o| o.author == nick.author && o.hlc == nick.hlc).expect("an op folds at the key");
+        assert_eq!(kept.content_hash(), nick.content_hash(), "the endorsed op keeps its key");
+        assert_ne!(r.verdict(&variant), Verdict::Counted, "the retire named nick's content, not the variant's");
         assert_eq!(r.nicknames.get(&keys(MEMBER).1).map(|n| n.read().clone()).as_deref(), Some("mm"));
     }
 

@@ -2,7 +2,7 @@
 //! heard of the recovery, and the hold that keeps every member's seat and server until
 //! the recovery ends. The hold grants no authority: `op_allowed` reads the fold as it is.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -43,6 +43,12 @@ pub(crate) struct Recovery {
     pub(crate) round: Option<Round>,
     /// B, the checkpoint our mark names (`floor_b`): for the mark, the pin and KEEP only.
     pub(crate) floor_b: Option<CrdtOp>,
+    /// Part A (HOL-SEC-230, -231): the (master, device) pairs whose folded ops the view
+    /// stopped counting at the trigger. Empty for a base step-back (8.8 item 1).
+    pub(crate) dropped: Vec<(String, String)>,
+    /// The ops those devices proved that the fold held at the trigger, by (author, ms,
+    /// counter) to content id: they keep counting here until the recovery decides them.
+    pub(crate) kept: BTreeMap<(String, u64, u32), [u8; 32]>,
 }
 
 /// The owner as the previous view judged it, while the round runs.
@@ -74,6 +80,10 @@ struct Row {
     shell: Option<String>,
     #[serde(default)]
     floor_b: Option<CrdtOp>,
+    #[serde(default)]
+    dropped: Vec<(String, String)>,
+    #[serde(default)]
+    kept: Vec<(String, u64, u32, String)>,
 }
 
 impl Recovery {
@@ -87,13 +97,22 @@ impl Recovery {
             leaves: self.leaves.clone(),
             shell: self.shell.clone(),
             floor_b: self.floor_b.clone(),
+            dropped: self.dropped.clone(),
+            kept: self.kept.iter().map(|((a, ms, c), h)| (a.clone(), *ms, *c, hex::encode(h))).collect(),
         };
-        serde_json::to_string(&row).ok()
+        // The row carries a whole state: serde's frames for it take a few hundred KB in a
+        // Windows debug build, more than a node task has left (as `parse_state`).
+        std::thread::scope(|scope| std::thread::Builder::new().stack_size(8 << 20).spawn_scoped(scope, || serde_json::to_string(&row).ok()).ok()?.join().ok().flatten())
     }
 
     pub(crate) fn from_json(json: &str) -> Option<Self> {
-        let row: Row = serde_json::from_str(json).ok()?;
+        let row: Row = std::thread::scope(|scope| std::thread::Builder::new().stack_size(8 << 20).spawn_scoped(scope, || serde_json::from_str::<Row>(json).ok()).ok()?.join().ok().flatten())?;
         let removals = row.removals.into_iter().collect();
+        let mut kept = BTreeMap::new();
+        for (a, ms, c, h) in row.kept {
+            let h: [u8; 32] = hex::decode(&h).ok()?.try_into().ok()?;
+            kept.insert((a, ms, c), h);
+        }
         Some(Self {
             trigger_ms: row.trigger_ms,
             base: row.base,
@@ -104,13 +123,36 @@ impl Recovery {
             shell: row.shell,
             round: None,
             floor_b: row.floor_b,
+            dropped: row.dropped,
+            kept,
         })
+    }
+
+    /// A part A hold: the fold keeps what it held, no base was stepped back.
+    pub(crate) fn keeps_fold(&self) -> bool {
+        !self.dropped.is_empty()
+    }
+
+    /// Whether this hold keeps `op` counted: one of the ops it recorded, proved by a
+    /// device it recorded, judged by the op's own content id (never the one held at its
+    /// key, HOL-SEC-224).
+    pub(crate) fn keeps(&self, op: &CrdtOp) -> bool {
+        let Some(dev) = op.dev.as_deref() else { return false };
+        self.kept.get(&(op.author.clone(), op.hlc.physical_ms, op.hlc.counter)).is_some_and(|h| *h == op.content_hash())
+            && self.dropped.iter().any(|(m, d)| *m == op.author && *d == dev.device)
     }
 
     /// Whether `master` held a bound leaf in `group` at the trigger.
     fn had_leaf(&self, group: &str, master: &str) -> bool {
         self.leaves.as_ref().and_then(|l| l.get(group)).is_some_and(|s| s.contains(master))
     }
+}
+
+/// What part A's trigger weighs across a rebuild (`ServerState::kept_candidates`).
+pub(crate) struct KeptCandidates {
+    ops: Vec<(OpKey, String, [u8; 32])>,
+    pre: Arc<ServerState>,
+    removals: BTreeSet<OpKey>,
 }
 
 /// The master a kick, ban or leave takes out.
@@ -180,6 +222,20 @@ impl ServerState {
 
     /// 8.8 class 3, a peer's side: the fold counts it or KEEP holds it (a shell is never
     /// answered: it is out of KEEP once removed).
+    /// Whether the join key in force was set by a device `view` does not count and no
+    /// retire endorses: one a recovery cut off, which part A's hold (or a fold that has not
+    /// rebuilt under `view` yet) still counts. That device knows the key, so it admits
+    /// nobody new and no entry names it (F5); the settling sets a fresh one.
+    pub(crate) fn join_key_dropped(&self, view: &super::authority::AuthorityView) -> bool {
+        let Some(reg) = self.join_secret.as_ref().filter(|_| self.cut && view.is_set()) else { return false };
+        self.op_log.iter().any(|o| {
+            o.hlc == *reg.hlc()
+                && matches!(&o.payload, CrdtPayload::JoinKeySet { secret } if secret == reg.read())
+                && o.dev.as_deref().is_some_and(|d| !view.counts(&o.author, &d.device))
+                && !self.is_endorsed(o)
+        })
+    }
+
     pub(crate) fn keeps_peer(&self, peer: &str) -> bool {
         self.is_member(peer) || self.recovery_hold(None, peer) != Hold::Out
     }
@@ -284,6 +340,166 @@ impl ServerState {
             shell: None,
             round: None,
             floor_b: None,
+            dropped: Vec::new(),
+            kept: BTreeMap::new(),
+        })
+    }
+
+    /// Part A (HOL-SEC-230, -231), before a rebuild: the folded ops it may drop, proved
+    /// by a device the view now judges Uncounted (never Missing: a roster not held yet
+    /// decides nothing) for an identity other than ours (ours settles through our own
+    /// settling). Empty under a base step-back, which 8.8 item 1 holds, or when we are no
+    /// member. With them, the fold as it stands (`pre`).
+    /// Whether `kept_candidates` would find any (no snapshot): the common rebuild skips it.
+    pub(super) fn may_keep(&self) -> bool {
+        let Some(me) = self.hlc.as_ref().map(|h| h.actor()) else { return false };
+        self.recovery.as_ref().is_none_or(|r| r.keeps_fold())
+            && self.op_log.iter().any(|o| o.author != me && o.dev.is_some() && self.verdict(o) == Verdict::Uncounted)
+    }
+
+    #[inline(never)]
+    pub(super) fn kept_candidates(&self) -> Option<KeptCandidates> {
+        if self.recovery.as_ref().is_some_and(|r| !r.keeps_fold()) {
+            return None;
+        }
+        let me = self.hlc.as_ref().map(|h| h.actor().to_string())?;
+        if !self.is_member(&me) {
+            return None;
+        }
+        let ops: Vec<(OpKey, String, [u8; 32])> = self
+            .op_log
+            .iter()
+            // The full verdict: an op a retire endorses or this hold keeps folds anyway, so
+            // only a view change since the last fold makes one (and the snapshot) here.
+            .filter(|o| o.author != me && self.verdict(o) == Verdict::Uncounted)
+            .filter_map(|o| Some(((o.author.clone(), o.hlc.clone()), o.proven_device()?.to_string(), o.content_hash())))
+            .collect();
+        if ops.is_empty() {
+            return None;
+        }
+        let removals = self
+            .op_log
+            .iter()
+            .chain(self.stored.iter().map(|(o, _)| o))
+            .filter(|o| removal_target(o).is_some())
+            .map(|o| (o.author.clone(), o.hlc.clone()))
+            .collect();
+        Some(KeptCandidates { ops, pre: Arc::new(self.lean_snapshot()), removals })
+    }
+
+    /// Part A's trigger, after the rebuild: the candidates it no longer folds, for
+    /// devices nothing decides (`device_decided`). A new hold, or the current part A hold
+    /// grown by the new losses.
+    pub(super) fn kept_trigger(&self, c: KeptCandidates) -> Option<Recovery> {
+        let all = || self.op_log.iter().chain(self.stored.iter().map(|(o, _)| o));
+        let deciders = Self::deciders(all());
+        let owner = self.anchor_owner();
+        let lost: Vec<(OpKey, String, [u8; 32])> = c
+            .ops
+            .into_iter()
+            .filter(|(k, _, _)| !self.op_log.iter().any(|o| o.author == k.0 && o.hlc == k.1))
+            .filter(|(k, d, _)| !self.device_decided(&deciders, self.base.as_deref(), owner.as_deref(), &k.0, d))
+            .collect();
+        if lost.is_empty() {
+            return None;
+        }
+        let mut r = match self.recovery.as_deref() {
+            Some(r) => r.clone(),
+            None => Recovery {
+                trigger_ms: super::hlc::wall_clock_ms(),
+                base: None,
+                base_op: None,
+                pre: c.pre,
+                removals: c.removals,
+                leaves: None,
+                shell: None,
+                round: None,
+                floor_b: None,
+                dropped: Vec::new(),
+                kept: BTreeMap::new(),
+            },
+        };
+        for ((author, hlc), dev, h) in lost {
+            let pair = (author.clone(), dev);
+            if !r.dropped.contains(&pair) {
+                r.dropped.push(pair);
+            }
+            r.kept.insert((author, hlc.physical_ms, hlc.counter), h);
+        }
+        r.dropped.sort();
+        Some(r)
+    }
+
+    /// The ops that can decide a dropped device: retires and settle signs.
+    pub(super) fn deciders<'a>(ops: impl Iterator<Item = &'a CrdtOp>) -> Vec<&'a CrdtOp> {
+        ops.filter(|o| matches!(o.payload, CrdtPayload::DeviceRetired { .. } | CrdtPayload::SettleSign { .. })).collect()
+    }
+
+    /// Whether `device` of `master` needs no hold: the view counts it again, a counted
+    /// retire of `master` names it (it decides what the device's ops count for), or, for
+    /// the owner, a settling on `base`'s line drops it. Never a base alone: the settler's
+    /// first checkpoint names no device.
+    pub(super) fn device_decided(&self, deciders: &[&CrdtOp], base: Option<&super::fold::Base>, owner: Option<&str>, master: &str, device: &str) -> bool {
+        if self.authority.counts(master, device) {
+            return true;
+        }
+        if deciders.iter().any(|o| {
+            o.author == master
+                && matches!(&o.payload, CrdtPayload::DeviceRetired { device: d, .. } if d == device)
+                && self.direct_verdict(o) == Verdict::Counted
+        }) {
+            return true;
+        }
+        if owner != Some(master) {
+            return false;
+        }
+        let Some(b) = base else { return false };
+        if b.state.cp_settles.as_ref().is_some_and(|st| st.devices.iter().any(|d| d == device)) {
+            return true;
+        }
+        let Some(id) = b.state.cp_settled.as_deref() else { return false };
+        deciders.iter().any(|o| {
+            o.author == master && matches!(&o.payload, CrdtPayload::SettleSign { stamp } if stamp.id() == id && stamp.devices.iter().any(|d| d == device))
+        })
+    }
+
+    /// Whether `op` folds without part A's hold: counted by the view or a retire.
+    fn counts_unheld(&self, op: &CrdtOp) -> bool {
+        matches!(self.direct_verdict(op), Verdict::Counted) || self.is_endorsed(op)
+    }
+
+    /// The end of a part A hold: every dropped device is decided (`device_decided`), or
+    /// another identity's every kept op is decided by the owner's base, or every kept op
+    /// folds without the hold. Never by a clock; a kept op no longer held decides
+    /// nothing (compaction is no decision).
+    fn kept_hold_ends(&self, r: &Recovery) -> bool {
+        let all = || self.op_log.iter().chain(self.stored.iter().map(|(o, _)| o));
+        let held = |k: &(String, u64, u32), h: &[u8; 32]| all().find(|o| o.author == k.0 && o.hlc.physical_ms == k.1 && o.hlc.counter == k.2 && o.content_hash() == *h);
+        let folded: HashSet<(&str, u64, u32)> = self.op_log.iter().map(|o| (o.author.as_str(), o.hlc.physical_ms, o.hlc.counter)).collect();
+        let unheld = |k: &(String, u64, u32), h: &[u8; 32]| held(k, h).is_some_and(|o| folded.contains(&(k.0.as_str(), k.1, k.2)) && self.counts_unheld(o));
+        if r.kept.iter().all(|(k, h)| unheld(k, h)) {
+            return true;
+        }
+        let deciders = Self::deciders(all());
+        let owner = self.anchor_owner();
+        // Another identity's op the owner's newer base no longer folds on top and holds
+        // unparked (or no more): the owner's checkpoint decided it (part C's mitigation).
+        let base_at = self.base.as_ref().map(|b| b.hlc.clone());
+        let parked = |k: &(String, u64, u32)| {
+            self.stored.iter().any(|(o, kind)| o.author == k.0 && o.hlc.physical_ms == k.1 && o.hlc.counter == k.2 && matches!(kind, super::fold::RowKind::Parked(_)))
+        };
+        let by_base = |k: &(String, u64, u32)| {
+            base_at.as_ref().is_some_and(|b| (k.1, k.2) < (b.physical_ms, b.counter)) && !folded.contains(&(k.0.as_str(), k.1, k.2)) && !parked(k)
+        };
+        r.dropped.iter().all(|(m, d)| {
+            if self.device_decided(&deciders, self.base.as_deref(), owner.as_deref(), m, d) {
+                return true;
+            }
+            owner.as_deref() != Some(m.as_str())
+                && r.kept
+                    .iter()
+                    .filter(|(k, h)| k.0 == *m && held(k, h).is_none_or(|o| o.proven_device() == Some(d.as_str())))
+                    .all(|(k, h)| by_base(k) || unheld(k, h))
         })
     }
 
@@ -369,7 +585,9 @@ impl ServerState {
         r.round = None;
         let mut fresh = Vec::new();
         if let Some(b) = b.filter(|_| self.can_author() && !self.base_holds_again(now_ms)) {
-            let cp = hex::encode(self.content_of(&b));
+            // B's own id: B may be an answer or a base no longer held, with a variant
+            // held at its key (HOL-SEC-225).
+            let cp = hex::encode(b.content_hash());
             fresh.push(self.create_op(CrdtPayload::FloorMark { cp: cp.clone() }));
             if super::authority::base_content_for(self, &cp).is_none() {
                 fresh.push(b.clone());
@@ -392,7 +610,7 @@ impl ServerState {
             return None;
         }
         let b = r.base_op.clone()?;
-        let cp = hex::encode(self.content_of(&b));
+        let cp = hex::encode(b.content_hash());
         let mut fresh = vec![self.create_op(CrdtPayload::FloorMark { cp: cp.clone() })];
         if super::authority::base_content_for(self, &cp).is_none() {
             fresh.push(b.clone());
@@ -413,6 +631,9 @@ impl ServerState {
         if self.recovery.is_none() || self.floor_round_open() {
             return false;
         }
+        if let Some(r) = self.recovery.as_deref().filter(|r| r.keeps_fold()) {
+            return self.kept_hold_ends(r);
+        }
         if on_settle_line {
             return true;
         }
@@ -425,7 +646,7 @@ impl ServerState {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::sync::Arc;
 
     use super::super::authority::{self, AuthorityView, KeyRule};
@@ -434,26 +655,26 @@ mod tests {
     use super::super::server_state::{Founder, ServerState};
     use super::super::testkeys::keys;
     use super::*;
-    use crate::identity::roster::{r_pub_of, sign_consent, sign_recovery, sign_vouch, Roster};
+    use crate::identity::roster::{r_pub_of, sign_consent, sign_recovery, sign_removal, sign_vouch, Roster};
 
-    const OWNER: u8 = 1;
-    const PHONE: u8 = 2;
-    const RECOVERY: u8 = 3;
-    const LAPTOP: u8 = 4;
-    const MEMBER: u8 = 5;
-    const MEMBER_PHONE: u8 = 6;
-    const MEMBER_RECOVERY: u8 = 7;
-    const MOD: u8 = 8;
-    const MOD_PHONE: u8 = 9;
-    const MOD_RECOVERY: u8 = 10;
-    const STRANGER: u8 = 11;
-    const MEMBER_OLD: u8 = 12;
-    const LATE: u8 = 13;
-    const LATE_PHONE: u8 = 14;
-    const LATE_RECOVERY: u8 = 15;
+    pub(crate) const OWNER: u8 = 1;
+    pub(crate) const PHONE: u8 = 2;
+    pub(crate) const RECOVERY: u8 = 3;
+    pub(crate) const LAPTOP: u8 = 4;
+    pub(crate) const MEMBER: u8 = 5;
+    pub(crate) const MEMBER_PHONE: u8 = 6;
+    pub(crate) const MEMBER_RECOVERY: u8 = 7;
+    pub(crate) const MOD: u8 = 8;
+    pub(crate) const MOD_PHONE: u8 = 9;
+    pub(crate) const MOD_RECOVERY: u8 = 10;
+    pub(crate) const STRANGER: u8 = 11;
+    pub(crate) const MEMBER_OLD: u8 = 12;
+    pub(crate) const LATE: u8 = 13;
+    pub(crate) const LATE_PHONE: u8 = 14;
+    pub(crate) const LATE_RECOVERY: u8 = 15;
 
     /// The owner's roster before and after its PHONE (every checkpoint's writer) is dropped.
-    fn owner_rosters() -> (Roster, Roster) {
+    pub(crate) fn owner_rosters() -> (Roster, Roster) {
         let (master, m_id, _) = keys(OWNER);
         let mut before = Roster::genesis(&master, &keys(RECOVERY).0, &keys(PHONE).0, 1_000);
         before.add_vouch(sign_vouch(&keys(PHONE).0, &m_id, &before.base(), &keys(LAPTOP).1));
@@ -464,7 +685,7 @@ mod tests {
         (before, after)
     }
 
-    fn view(owner: &Roster) -> Arc<AuthorityView> {
+    pub(crate) fn view(owner: &Roster) -> Arc<AuthorityView> {
         let mut v = AuthorityView::judging();
         v.insert(keys(OWNER).1, authority::judge(&keys(OWNER).1, &KeyRule::FirstHeld, &[owner]));
         for (tag, phone, rec) in [(MEMBER, MEMBER_PHONE, MEMBER_RECOVERY), (MOD, MOD_PHONE, MOD_RECOVERY), (LATE, LATE_PHONE, LATE_RECOVERY)] {
@@ -474,7 +695,7 @@ mod tests {
         Arc::new(v)
     }
 
-    fn replica(sid: &str, tag: u8, device: u8, signs: bool) -> ServerState {
+    pub(crate) fn replica(sid: &str, tag: u8, device: u8, signs: bool) -> ServerState {
         let (kp, id, pk) = keys(tag);
         let (dkp, did, _) = keys(device);
         let mut s = ServerState::skeleton(sid.into());
@@ -486,7 +707,7 @@ mod tests {
         s
     }
 
-    fn admit(owner: &mut ServerState, tag: u8) -> CrdtOp {
+    pub(crate) fn admit(owner: &mut ServerState, tag: u8) -> CrdtOp {
         let ask = super::super::operations::JoinAsk::sign(&owner.server_id, 1, &keys(tag).0);
         owner.author_checked(P::MemberAdded { peer_id: keys(tag).1, display_name: "m".into(), follow: None, ask: Some(ask) }).unwrap()
     }
@@ -497,7 +718,7 @@ mod tests {
         s.author_checkpoint(P::ServerCheckpoint { state: json, covers }).expect("the checkpoint becomes the base").0
     }
 
-    struct World {
+    pub(crate) struct World {
         owner: ServerState,
         log: Vec<CrdtOp>,
         cp0: CrdtOp,
@@ -509,7 +730,7 @@ mod tests {
     /// The owner's phone founds (committing to its recovery key), admits MEMBER and MOD
     /// (a moderator), writes cp0, admits LATE, and writes cp1: every checkpoint is the
     /// phone's.
-    fn world() -> World {
+    pub(crate) fn world() -> World {
         let (before, _) = owner_rosters();
         let (master, m_id, pk) = keys(OWNER);
         let (phone, phone_id, _) = keys(PHONE);
@@ -530,7 +751,7 @@ mod tests {
     }
 
     /// `tag`'s replica holding the world, judged by the owner roster from before.
-    fn member_of(w: &World, tag: u8, device: u8, signs: bool) -> ServerState {
+    pub(crate) fn member_of(w: &World, tag: u8, device: u8, signs: bool) -> ServerState {
         let (before, _) = owner_rosters();
         let mut s = replica(&w.owner.server_id, tag, device, signs);
         s.authority = view(&before);
@@ -541,7 +762,7 @@ mod tests {
 
     /// The recovery reaches the replica: the owner's view drops the phone, and the floor
     /// round ends with no answer.
-    fn hears_of_recovery(s: &mut ServerState) {
+    pub(crate) fn hears_of_recovery(s: &mut ServerState) {
         hears_of_recovery_in_round(s);
         let _ = s.end_floor_round(&[]);
     }
@@ -1207,5 +1428,496 @@ mod tests {
         assert_eq!(judged(&m), (true, false), "(honest mark kept, the fabricated F0 is the base)");
         let _ = m.rebuild_now();
         assert_eq!(judged(&m), (true, false), "a rebuild from the kept marks and pins decides the same");
+    }
+
+    /// A rename the owner's phone signs at `cp`'s clock (its lane, so the proof verifies),
+    /// the first of a few for which `pick` holds. Wide enough that a `cp` whose content id
+    /// sorts near the top still finds one (64 tries failed about one run in 65).
+    fn variant_at(cp: &CrdtOp, pick: impl Fn(&CrdtOp) -> bool) -> CrdtOp {
+        (0..4096)
+            .map(|i| {
+                let mut v = cp.clone();
+                v.payload = P::ServerRenamed { new_name: format!("v{i}") };
+                v.sign(&keys(OWNER).0, &keys(OWNER).2);
+                v.sign_device(&keys(PHONE).0);
+                v
+            })
+            .find(|v| pick(v))
+            .expect("a variant")
+    }
+
+    /// HOL-SEC-225: B is the answered checkpoint itself, found by its own content id, even
+    /// where this replica holds a variant at its key.
+    #[test]
+    fn a_floor_pick_matches_an_answered_checkpoint_by_its_own_content() {
+        let w = world();
+        let (before, _) = owner_rosters();
+        let cp1 = w.cp1.content_hash();
+        let variant = variant_at(&w.cp1, |v| v.content_hash() > cp1);
+        assert_eq!(variant.proven_device(), Some(keys(PHONE).1.as_str()), "precondition: the phone's proof verifies");
+        let stale_log: Vec<CrdtOp> = w
+            .log
+            .iter()
+            .filter(|o| o.content_hash() != cp1 && !matches!(&o.payload, P::MemberAdded { peer_id, .. } if *peer_id == keys(LATE).1))
+            .cloned()
+            .chain(std::iter::once(variant.clone()))
+            .collect();
+        let mut m = replica(&w.owner.server_id, MEMBER, MEMBER_PHONE, true);
+        m.authority = view(&before);
+        m.ingest_remote(&stale_log);
+        assert_eq!(base_of(&m), Some(w.cp0.content_hash()), "precondition: the stale member stands on cp0");
+        assert_eq!(m.content_of(&w.cp1), variant.content_hash(), "precondition: the variant is held at cp1's key");
+        hears_of_recovery_in_round(&mut m);
+        assert!(m.floor_round_open(), "precondition: the trigger opens the round");
+        m.end_floor_round(std::slice::from_ref(&w.cp1)).expect("the round ends");
+        assert_eq!(named_by_marks(&m), vec![hex::encode(cp1)], "the mark names the answered cp1, not the step back nor the variant");
+        assert_eq!(m.recovery.as_ref().and_then(|r| r.floor_b.as_ref()).map(|b| b.content_hash()), Some(cp1), "B recorded in floor_b");
+    }
+
+    /// HOL-SEC-225: a mark made after a restart names the recorded pre-trigger base by its
+    /// own content id, never a variant now held at its key.
+    #[test]
+    fn a_floor_mark_after_restart_names_the_recorded_base_by_its_own_content() {
+        let w = world();
+        let cp1 = w.cp1.content_hash();
+        let mut m = member_of(&w, MEMBER, MEMBER_PHONE, false);
+        hears_of_recovery(&mut m);
+        let recorded = m.recovery.as_ref().and_then(|r| r.base_op.as_ref()).map(|b| b.content_hash());
+        assert!(marks_of(&m).is_empty() && recorded == Some(cp1), "precondition: unsigned, cp1 recorded, no mark");
+        let at = |m: &ServerState| {
+            let is = |o: &CrdtOp| o.content_hash() == cp1;
+            (m.op_log.iter().any(is), m.stored.iter().any(|(o, _)| is(o)), m.held.iter().any(|(o, _)| is(o)))
+        };
+        assert_eq!(at(&m), (false, false, true), "precondition: the step back holds cp1 in RAM only");
+        // A restart keeps the stored rows and the recovery row, never what was held in RAM.
+        let rows: Vec<(CrdtOp, Option<u64>)> = m
+            .op_log
+            .iter()
+            .map(|o| (o.clone(), None))
+            .chain(m.stored.iter().map(|(o, k)| (o.clone(), if let RowKind::Parked(u) = k { Some(*u) } else { None })))
+            .collect();
+        let mut back = m.clone();
+        back.restore_op_log(rows);
+        assert_eq!(at(&back), (false, false, false), "precondition: the restart lost cp1");
+        let variant = variant_at(&w.cp1, |v| v.content_hash() > cp1);
+        back.ingest_remote(std::slice::from_ref(&variant));
+        assert_eq!(back.content_of(&w.cp1), variant.content_hash(), "precondition: the variant is held at cp1's key");
+        let (kp, _, pk) = keys(MEMBER);
+        back.set_signer(kp, pk);
+        back.set_device_signer(keys(MEMBER_PHONE).0);
+        back.mark_after_restart().expect("the mark goes out");
+        assert_eq!(named_by_marks(&back), vec![hex::encode(cp1)], "the recorded base, by its own content id");
+    }
+
+    // Part A (HOL-SEC-230, -231): the hold without a base.
+
+    pub(crate) const MOD_LAPTOP: u8 = 16;
+
+    /// The owner's phone founds and admits MEMBER, MOD (a moderator) and LATE, and MOD's
+    /// phone bans STRANGER after admitting it: no checkpoint anywhere.
+    pub(crate) fn baseless_world() -> (ServerState, Vec<CrdtOp>) {
+        let (before, _) = owner_rosters();
+        let (master, m_id, pk) = keys(OWNER);
+        let (phone, phone_id, _) = keys(PHONE);
+        let r_pub = before.r_pub.clone();
+        let (mut owner, _) = ServerState::found_on("s0".into(), m_id, Founder { device_peer_id: &phone_id, device: Some(&phone), r_pub: Some(&r_pub) }, master, pk);
+        owner.authority = view(&before);
+        admit(&mut owner, MEMBER);
+        admit(&mut owner, MOD);
+        owner.author_checked(P::RoleChanged { peer_id: keys(MOD).1, role: MemberRole::Moderator, priority: 0 }).unwrap();
+        admit(&mut owner, LATE);
+        admit(&mut owner, STRANGER);
+        let mut moderator = replica(&owner.server_id, MOD, MOD_PHONE, true);
+        moderator.authority = view(&before);
+        moderator.ingest_remote(&owner.op_log);
+        moderator.author_checked(P::MemberBanned { peer_id: keys(STRANGER).1, seen: None }).expect("the moderator bans");
+        owner.ingest_remote(&moderator.op_log);
+        assert!(owner.is_banned(&keys(STRANGER).1) && owner.base.is_none(), "precondition: the ban folds, no checkpoint");
+        let log = owner.op_log.iter().chain(owner.stored.iter().map(|(o, _)| o)).cloned().collect();
+        (owner, log)
+    }
+
+    pub(crate) fn baseless_replica(log: &[CrdtOp], tag: u8, device: u8, signs: bool) -> ServerState {
+        let (before, _) = owner_rosters();
+        let sid = log.iter().find_map(|o| matches!(o.payload, P::ServerCreated { .. }).then(|| o.server_id.clone())).expect("the founding op");
+        let mut s = replica(&sid, tag, device, signs);
+        s.authority = view(&before);
+        s.ingest_remote(log);
+        s
+    }
+
+    /// The view after the owner's phrase dropped its phone, and with `mod_dropped` the
+    /// moderator's phrase dropping MOD_PHONE for MOD_LAPTOP too.
+    pub(crate) fn view_after(mod_dropped: bool) -> Arc<AuthorityView> {
+        let (_, after) = owner_rosters();
+        let mut v = (*view(&after)).clone();
+        if mod_dropped {
+            let mut r = Roster::genesis(&keys(MOD).0, &keys(MOD_RECOVERY).0, &keys(MOD_PHONE).0, 1_000);
+            r.add_vouch(sign_vouch(&keys(MOD_PHONE).0, &keys(MOD).1, &r.base(), &keys(MOD_LAPTOP).1));
+            r.add_consent(sign_consent(&keys(MOD_LAPTOP).0, &keys(MOD).1));
+            let rec = sign_recovery(&keys(MOD).0, &keys(MOD_RECOVERY).0, 2_000, std::slice::from_ref(&keys(MOD_LAPTOP).1), false);
+            r.add_phrase_statement(&r_pub_of(&keys(MOD_RECOVERY).0), Some(rec), None).expect("the phrase drops the moderator's phone");
+            v.insert(keys(MOD).1, authority::judge(&keys(MOD).1, &KeyRule::FirstHeld, &[&r]));
+        }
+        Arc::new(v)
+    }
+
+    #[test]
+    fn a_server_without_a_base_holds_its_members_when_the_owner_device_is_dropped() {
+        let (mut owner, log) = baseless_world();
+        let mut m = baseless_replica(&log, MEMBER, MEMBER_PHONE, true);
+        m.authority = view_after(false);
+        let _ = m.rebuild_now();
+        let r = m.recovery.clone().expect("HOL-SEC-230: the drop of the founding device opens a hold");
+        assert!(r.keeps_fold() && r.base.is_none() && r.dropped == vec![(keys(OWNER).1, keys(PHONE).1)], "a part A hold: {:?}", r.dropped);
+        for who in [MEMBER, MOD, LATE] {
+            assert!(m.is_member(&keys(who).1), "the fold keeps {who}");
+        }
+        assert_eq!(m.get_role(&keys(MOD).1), MemberRole::Moderator, "and the phone's role grant");
+        assert!(!m.floor_holds(), "no floor: nothing to name");
+        let back = Recovery::from_json(&r.to_json().unwrap()).expect("the row parses");
+        assert_eq!((back.dropped, back.kept), (r.dropped.clone(), r.kept.clone()), "the row keeps what it holds");
+        // The phone after the notice: nothing it writes counts.
+        let late = owner.author_checked(P::ServerRenamed { new_name: "thief".into() }).unwrap();
+        m.ingest_remote(std::slice::from_ref(&late));
+        assert_ne!(m.name.read(), "thief", "an op the hold never recorded stays refused");
+        assert!(m.in_recovery(), "still held");
+    }
+
+    #[test]
+    fn a_baseless_hold_never_forms_for_us_a_non_member_a_missing_roster_or_a_counted_device() {
+        let (_, log) = baseless_world();
+        // Our own identity: our settling decides.
+        let mut ours = baseless_replica(&log, OWNER, LAPTOP, true);
+        ours.authority = view_after(false);
+        let _ = ours.rebuild_now();
+        assert!(!ours.in_recovery(), "our own recovery opens no hold here");
+        // A view with no roster for the owner (Missing) decides nothing.
+        let mut m = baseless_replica(&log, MEMBER, MEMBER_PHONE, true);
+        let mut missing = (*view_after(false)).clone();
+        missing.insert(keys(OWNER).1, authority::ViewEntry::default());
+        m.authority = Arc::new(missing);
+        let _ = m.rebuild_now();
+        assert!(!m.in_recovery(), "a Missing roster is no trigger");
+        // A member whose roster is not held yet (Missing): its op parks, no hold forms.
+        let mut parked = baseless_replica(&log, MEMBER, MEMBER_PHONE, true);
+        let mut no_mod = (*view_after(false)).clone();
+        let (before, _) = owner_rosters();
+        no_mod.insert(keys(OWNER).1, authority::judge(&keys(OWNER).1, &KeyRule::FirstHeld, &[&before]));
+        no_mod.insert(keys(MOD).1, authority::ViewEntry::default());
+        parked.authority = Arc::new(no_mod);
+        let _ = parked.rebuild_now();
+        assert!(!parked.is_banned(&keys(STRANGER).1), "precondition: the moderator's ban no longer folds");
+        assert!(!parked.in_recovery(), "an op whose author's roster is Missing opens no hold");
+        // A view that still counts every device: nothing lost.
+        let mut same = baseless_replica(&log, MEMBER, MEMBER_PHONE, true);
+        let _ = same.rebuild_now();
+        assert!(!same.in_recovery(), "nothing dropped, no hold");
+        // A replica that is no member.
+        let mut stranger = baseless_replica(&log, 17, 18, true);
+        stranger.authority = view_after(false);
+        let _ = stranger.rebuild_now();
+        assert!(!stranger.in_recovery(), "a non-member holds nothing");
+    }
+
+    /// The owner's laptop removes the phone the ordinary way (a retire, no phrase).
+    fn view_removed() -> Arc<AuthorityView> {
+        let (mut r, _) = owner_rosters();
+        let base = r.base();
+        r.add_removal(sign_removal(&keys(LAPTOP).0, &keys(OWNER).1, &base, &keys(PHONE).1, &[keys(LAPTOP).1]));
+        let mut v = (*view(&r)).clone();
+        v.insert(keys(OWNER).1, authority::judge(&keys(OWNER).1, &KeyRule::FirstHeld, &[&r]));
+        Arc::new(v)
+    }
+
+    #[test]
+    fn a_baseless_hold_ends_on_a_counted_retire_of_the_dropped_device() {
+        let (_, log) = baseless_world();
+        let mut m = baseless_replica(&log, MEMBER, MEMBER_PHONE, true);
+        m.authority = view_removed();
+        let _ = m.rebuild_now();
+        assert!(m.in_recovery(), "precondition: held");
+        // The owner's laptop retires the phone, naming the ops it folded but LATE's.
+        let mut laptop = baseless_replica(&log, OWNER, LAPTOP, true);
+        let named: Vec<CrdtOp> = log.iter().filter(|o| o.proven_device() == Some(keys(PHONE).1.as_str())).filter(|o| !matches!(&o.payload, P::MemberAdded { peer_id, .. } if *peer_id == keys(LATE).1)).cloned().collect();
+        laptop.authority = view_removed();
+        let mut refs: Vec<super::super::operations::OpRef> = named.iter().map(super::super::operations::OpRef::of).collect();
+        refs.sort();
+        let dr = laptop.create_op(P::DeviceRetired { device: keys(PHONE).1, ops: refs, posts_until_ms: None, restore: None });
+        m.ingest_remote(std::slice::from_ref(&dr));
+        assert!(!m.in_recovery(), "the retire decides the phone's ops: the hold ends");
+        assert!(m.is_member(&keys(MEMBER).1) && !m.is_member(&keys(LATE).1), "what it named counts, the rest does not");
+    }
+
+    /// `fold_lags` (F5 round 3): an op of the dropped phone that a counted retire endorses
+    /// counts under the fresh view too, so a fold holding only such ops does not lag (a
+    /// witness would hold its answer for nothing).
+    #[test]
+    fn a_fold_whose_dropped_device_a_retire_endorses_does_not_lag() {
+        let (_, log) = baseless_world();
+        let m = baseless_replica(&log, MEMBER, MEMBER_PHONE, true);
+        assert!(m.fold_lags(&view_removed()), "control: the phone's ops lag a view that dropped it");
+        let mut laptop = baseless_replica(&log, OWNER, LAPTOP, true);
+        let named: Vec<CrdtOp> = log.iter().filter(|o| o.proven_device() == Some(keys(PHONE).1.as_str())).cloned().collect();
+        let mut refs: Vec<super::super::operations::OpRef> = named.iter().map(super::super::operations::OpRef::of).collect();
+        refs.sort();
+        let dr = laptop.create_op(P::DeviceRetired { device: keys(PHONE).1, ops: refs, posts_until_ms: None, restore: None });
+        let mut retired = m.clone();
+        retired.ingest_remote(std::slice::from_ref(&dr));
+        assert!(!retired.fold_lags(&view_removed()), "a retire endorses every op the phone wrote: nothing lags");
+    }
+
+    /// `join_key_dropped` (F5): a key the dropped phone set that a counted retire
+    /// endorses is not a dropped key (the retire vouches for it); without the retire it is.
+    #[test]
+    fn a_join_key_a_retire_endorses_is_not_dropped() {
+        let (mut owner, mut log) = baseless_world();
+        log.push(owner.author_checked(P::JoinKeySet { secret: super::super::operations::JoinSecret(hex::encode([9u8; 32])) }).unwrap());
+        let m = baseless_replica(&log, MEMBER, MEMBER_PHONE, true);
+        assert!(m.join_key_dropped(&view_removed()), "control: the phone's key is dropped once a view drops the phone");
+        let mut laptop = baseless_replica(&log, OWNER, LAPTOP, true);
+        let named: Vec<CrdtOp> = log.iter().filter(|o| o.proven_device() == Some(keys(PHONE).1.as_str())).cloned().collect();
+        let mut refs: Vec<super::super::operations::OpRef> = named.iter().map(super::super::operations::OpRef::of).collect();
+        refs.sort();
+        let dr = laptop.create_op(P::DeviceRetired { device: keys(PHONE).1, ops: refs, posts_until_ms: None, restore: None });
+        let mut retired = m.clone();
+        retired.ingest_remote(std::slice::from_ref(&dr));
+        assert!(!retired.join_key_dropped(&view_removed()), "a retire endorses the phone's key: it is not dropped");
+    }
+
+    #[test]
+    fn a_baseless_hold_survives_the_settlers_first_checkpoint() {
+        let (_, log) = baseless_world();
+        let mut m = baseless_replica(&log, MEMBER, MEMBER_PHONE, true);
+        m.authority = view_after(false);
+        let _ = m.rebuild_now();
+        assert!(m.in_recovery(), "precondition: held");
+        let mut laptop = baseless_replica(&log, OWNER, LAPTOP, true);
+        laptop.authority = view_after(false);
+        let _ = laptop.rebuild_now();
+        assert!(!laptop.is_member(&keys(LATE).1), "precondition: the laptop's fold lacks what the phone wrote");
+        let cp = checkpoint(&mut laptop);
+        m.ingest_remote(std::slice::from_ref(&cp));
+        assert!(m.in_recovery(), "a checkpoint naming no dropped device never ends the hold");
+        assert!(m.recovery_hold(None, &keys(LATE).1) >= Hold::Keep, "the seats stay held");
+    }
+
+    #[test]
+    fn a_moderators_dropped_device_keeps_its_ban_in_the_owners_fold() {
+        let (mut owner, _) = baseless_world();
+        owner.authority = view_after(true);
+        // The owner's own phone stays counted here: only the moderator's view changed.
+        let mut v = (*owner.authority).clone();
+        let (before, _) = owner_rosters();
+        v.insert(keys(OWNER).1, authority::judge(&keys(OWNER).1, &KeyRule::FirstHeld, &[&before]));
+        owner.authority = Arc::new(v);
+        let _ = owner.rebuild_now();
+        assert!(owner.is_banned(&keys(STRANGER).1) && !owner.is_member(&keys(STRANGER).1), "HOL-SEC-231: the ban stays in the owner's fold");
+        let r = owner.recovery.clone().expect("a hold for the moderator's dropped phone");
+        assert_eq!(r.dropped, vec![(keys(MOD).1, keys(MOD_PHONE).1)]);
+        // The moderator's phone after the notice: a new ban never counts.
+        let mut moderator = baseless_replica(&owner.op_log.clone(), MOD, MOD_PHONE, true);
+        let late = moderator.author_checked(P::MemberRemoved { peer_id: keys(MEMBER).1, seen: None });
+        if let Some(late) = late {
+            owner.ingest_remote(std::slice::from_ref(&late));
+            assert!(owner.is_member(&keys(MEMBER).1), "a kick the hold never recorded stays refused");
+        }
+    }
+
+    #[test]
+    fn a_recovery_stored_while_the_node_was_down_opens_the_hold_at_restart() {
+        let (_, log) = baseless_world();
+        let m = baseless_replica(&log, MEMBER, MEMBER_PHONE, true);
+        let rows: Vec<(CrdtOp, Option<u64>)> = m
+            .op_log
+            .iter()
+            .map(|o| (o.clone(), None))
+            .chain(m.stored.iter().map(|(o, k)| (o.clone(), if let RowKind::Parked(u) = k { Some(*u) } else { None })))
+            .collect();
+        let mut back: ServerState = serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
+        let (kp, id, pk) = keys(MEMBER);
+        back.set_hlc(super::super::hlc::Hlc::for_device(id, &keys(MEMBER_PHONE).1));
+        back.set_signer(kp, pk);
+        back.set_device_signer(keys(MEMBER_PHONE).0);
+        back.authority = view_after(false);
+        let restored = back.restore_op_log(rows);
+        assert!(back.in_recovery(), "HOL-SEC-232: the restart judges the trigger against the saved rows");
+        assert!(restored.recovery.is_some(), "and hands the row to save");
+        assert!(back.is_member(&keys(LATE).1), "the fold keeps what it held");
+    }
+
+    // Part C (HOL-SEC-230): early owner checkpoints, and none of a stepped-back fold.
+
+    #[test]
+    fn an_owner_checkpoints_a_cut_server_soon_after_its_first_admission() {
+        let (before, _) = owner_rosters();
+        let (master, m_id, pk) = keys(OWNER);
+        let (phone, phone_id, _) = keys(PHONE);
+        let r_pub = before.r_pub.clone();
+        let (mut owner, _) = ServerState::found_on("c".into(), m_id.clone(), Founder { device_peer_id: &phone_id, device: Some(&phone), r_pub: Some(&r_pub) }, master, pk);
+        owner.authority = view(&before);
+        let _ = owner.rebuild_now();
+        let now = super::super::hlc::wall_clock_ms();
+        assert!(owner.cut, "precondition: a phrase-rooted server is cut from its founding op");
+        assert!(!owner.checkpoint_due(&m_id, now), "the founding op alone owes nothing");
+        admit(&mut owner, MEMBER);
+        assert!(owner.checkpoint_due(&m_id, now), "the first admission is due a checkpoint");
+        checkpoint(&mut owner);
+        assert!(owner.base.is_some(), "precondition: the checkpoint is the base");
+        let hour = super::super::fold::CHECKPOINT_MIN_GAP_MS + 60_000;
+        let mut idle = owner.clone();
+        admit(&mut owner, MOD);
+        assert!(!owner.checkpoint_due(&m_id, now), "at most hourly");
+        assert!(owner.checkpoint_due(&m_id, now + hour), "an hour on, an admission past the base is due");
+        idle.author_checked(P::MessagePinned { channel_id: "general".into(), message_id: "m".into() });
+        assert!(!idle.checkpoint_due(&m_id, now + hour), "a pin alone never checkpoints an idle server");
+    }
+
+    #[test]
+    fn no_early_checkpoint_while_an_owned_server_awaits_its_settling() {
+        let (_, log) = baseless_world();
+        let mut laptop = baseless_replica(&log, OWNER, LAPTOP, true);
+        let now = super::super::hlc::wall_clock_ms();
+        assert!(laptop.checkpoint_due(&keys(OWNER).1, now), "precondition: before the recovery the first checkpoint is due");
+        laptop.authority = view_after(false);
+        let _ = laptop.rebuild_now();
+        assert!(laptop.settle_owed(&keys(OWNER).1), "the phone proved ops of ours nothing settled");
+        laptop.author_checked(P::ServerRenamed { new_name: "after".into() }).expect("the laptop still writes");
+        assert!(!laptop.checkpoint_due(&keys(OWNER).1, now + 10 * super::super::fold::CHECKPOINT_MIN_GAP_MS), "no checkpoint of the stepped-back fold");
+        // The writer rule never takes a fold listing only us as witnessed.
+        let mut alone = laptop.clone();
+        alone.members.retain(|m, _| *m == keys(OWNER).1);
+        assert!(!alone.checkpoint_witnessed(&keys(OWNER).1, &Default::default()), "no other identity, no witness");
+    }
+
+    #[test]
+    fn a_leafless_owner_device_asks_members_for_a_leaf_only_once_its_recovery_settles() {
+        use crate::node::crypto_handler::leaf_ask_waits_for_settling as waits;
+        let (_, log) = baseless_world();
+        let mut laptop = baseless_replica(&log, OWNER, LAPTOP, true);
+        let owner = keys(OWNER).1;
+        assert!(!waits(&laptop, &owner), "an owner whose devices all count asks at once");
+        laptop.authority = view_after(false);
+        let _ = laptop.rebuild_now();
+        assert!(laptop.settle_owed(&owner), "precondition: the phone proved ops of ours nothing settled");
+        assert!(waits(&laptop, &owner), "members still keep seats this fold drops until the settling");
+        let mut not_ours = laptop.clone();
+        not_ours.roles.remove(&owner);
+        assert!(!waits(&not_ours, &owner), "only the identity owning the server waits; nobody else's settling reaches members' holds");
+    }
+
+    #[test]
+    fn a_restart_judges_the_base_trigger_against_the_saved_base() {
+        let w = world();
+        let m = member_of(&w, MEMBER, MEMBER_PHONE, true);
+        let rows: Vec<(CrdtOp, Option<u64>)> = m
+            .op_log
+            .iter()
+            .map(|o| (o.clone(), None))
+            .chain(m.stored.iter().map(|(o, k)| (o.clone(), if let RowKind::Parked(u) = k { Some(*u) } else { None })))
+            .collect();
+        let mut back: ServerState = serde_json::from_str(&serde_json::to_string(&m).unwrap()).unwrap();
+        let (kp, id, pk) = keys(MEMBER);
+        back.set_hlc(super::super::hlc::Hlc::for_device(id, &keys(MEMBER_PHONE).1));
+        back.set_signer(kp, pk);
+        back.set_device_signer(keys(MEMBER_PHONE).0);
+        let (_, after) = owner_rosters();
+        back.authority = view(&after);
+        let restored = back.restore_op_log(rows);
+        let r = back.recovery.clone().expect("HOL-SEC-232: the restart opens the 8.8 hold");
+        assert_eq!(r.base.as_deref(), Some(hex::encode(w.cp1.content_hash()).as_str()), "the step back records the saved base");
+        assert!(!r.keeps_fold() && restored.recovery.is_some(), "a base step-back, saved");
+    }
+
+    /// The baseless world with the owner's phone holding the first join lock, and the
+    /// lock (its change key mints successors).
+    fn locked_world() -> (ServerState, Vec<CrdtOp>, crate::node::join_lock::NewLock) {
+        let (mut owner, mut log) = baseless_world();
+        let nonce = owner.founding_nonce().expect("a self-certifying founding");
+        let lock = crate::node::join_lock::mint_owner_base(&owner.server_id, 1, &keys(OWNER).0, Some(&nonce), &keys(PHONE).0).expect("a lock");
+        let door = Some(super::super::operations::JoinSecret(hex::encode(lock.door.as_slice())));
+        log.push(owner.author_checked(P::JoinLock { link: lock.link.clone(), door, grants: Default::default() }).expect("the phone makes the first lock"));
+        (owner, log, lock)
+    }
+
+    fn door_of(s: &ServerState) -> Option<(u64, String)> {
+        s.join_lock.newest_door_id().map(|(n, d)| (n, d.to_string()))
+    }
+
+    /// Review F5c finding 1: the founding phone made the server's first join lock. Part
+    /// A's hold keeps every seat and the phone's ops, so it keeps that lock's door too:
+    /// members prove it to the relay on every (re)join and open join boxes sealed to it.
+    #[test]
+    fn rev_f5c_a_part_a_hold_keeps_the_door_the_dropped_device_made() {
+        let (_, log, _) = locked_world();
+        let mut m = baseless_replica(&log, MEMBER, MEMBER_PHONE, true);
+        assert!(m.join_lock.newest_door_id().is_some(), "precondition: the member holds the phone's door");
+        m.authority = view_after(false);
+        let _ = m.rebuild_now();
+        assert!(m.in_recovery() && m.is_member(&keys(MEMBER).1), "precondition: part A's hold keeps the member seated");
+        let door = door_of(&m);
+        let liveness = door_of(m.liveness_state(&keys(MEMBER).1));
+        assert!(
+            door.is_some() && liveness.is_some(),
+            "part A kept the seats but dropped the door the relay's lock names: fold door {door:?}, liveness door {liveness:?} (door_room::sync sends SetDoor None, answer_ask has nothing to hand)"
+        );
+    }
+
+    /// The door part A keeps is the one the fold held before the recovery (the dropped
+    /// phone made it, so it learns nothing), and the phone mints no new link meanwhile:
+    /// neither in its own op nor in one a counted device carries.
+    #[test]
+    fn a_part_a_hold_keeps_only_the_pre_trigger_door_and_takes_no_new_link_from_the_dropped_device() {
+        let (mut owner, log, lock) = locked_world();
+        let mut m = baseless_replica(&log, MEMBER, MEMBER_PHONE, true);
+        let before = door_of(&m);
+        m.authority = view_after(false);
+        let _ = m.rebuild_now();
+        let pre = m.recovery.as_ref().map(|r| door_of(&r.pre)).expect("precondition: held");
+        assert!(before.is_some() && door_of(&m) == before && pre == before, "the kept door is the pre-trigger one: {:?} {pre:?} {before:?}", door_of(&m));
+        let sid = owner.server_id.clone();
+        // The phone after the notice moves the lock with the change key it holds.
+        let next = crate::node::join_lock::mint_successor(&sid, &lock.link, &lock.change, &keys(OWNER).1, &keys(PHONE).0).expect("a successor");
+        let secret = || Some(super::super::operations::JoinSecret(hex::encode(next.door.as_slice())));
+        let own = owner.author_checked(P::JoinLock { link: next.link.clone(), door: secret(), grants: Default::default() }).expect("the phone moves its lock");
+        let mut a = m.clone();
+        a.ingest_remote(std::slice::from_ref(&own));
+        assert_eq!(door_of(&a), before, "the dropped phone's own new link never folds");
+        // A counted moderator's op carrying the phone's link: the lock layer alone refuses.
+        let mut moderator = baseless_replica(&log, MOD, MOD_PHONE, true);
+        let carried = moderator.create_op(P::JoinLock { link: next.link.clone(), door: secret(), grants: Default::default() });
+        let mut b = m.clone();
+        b.ingest_remote(std::slice::from_ref(&carried));
+        assert_eq!(door_of(&b), before, "a link the dropped phone made never folds, whoever carries it");
+        // Control: the moderator's own successor of the kept lock folds.
+        let mine = crate::node::join_lock::mint_successor(&sid, &lock.link, &lock.change, &keys(MOD).1, &keys(MOD_PHONE).0).expect("a successor");
+        let ok = moderator.create_op(P::JoinLock {
+            link: mine.link.clone(),
+            door: Some(super::super::operations::JoinSecret(hex::encode(mine.door.as_slice()))),
+            grants: Default::default(),
+        });
+        let mut c = m.clone();
+        c.ingest_remote(std::slice::from_ref(&ok));
+        assert_eq!(door_of(&c).map(|(n, _)| n), Some(2), "control: a counted device's move of the kept lock folds");
+    }
+
+    /// Once the hold ends, the kept lock op counts by the view again: a lock the dropped
+    /// device made holds no door here.
+    #[test]
+    fn the_door_part_a_kept_ends_with_the_hold() {
+        let (_, log, _) = locked_world();
+        let mut m = baseless_replica(&log, MEMBER, MEMBER_PHONE, true);
+        m.authority = view_removed();
+        let _ = m.rebuild_now();
+        assert!(m.in_recovery() && door_of(&m).is_some(), "precondition: held with the phone's door");
+        let mut laptop = baseless_replica(&log, OWNER, LAPTOP, true);
+        laptop.authority = view_removed();
+        let named: Vec<CrdtOp> = log.iter().filter(|o| o.proven_device() == Some(keys(PHONE).1.as_str())).cloned().collect();
+        let mut refs: Vec<super::super::operations::OpRef> = named.iter().map(super::super::operations::OpRef::of).collect();
+        refs.sort();
+        let dr = laptop.create_op(P::DeviceRetired { device: keys(PHONE).1, ops: refs, posts_until_ms: None, restore: None });
+        m.ingest_remote(std::slice::from_ref(&dr));
+        assert!(!m.in_recovery() && m.is_member(&keys(MEMBER).1), "precondition: the retire ends the hold");
+        assert_eq!(door_of(&m), None, "the dropped phone's lock holds no door once the hold ended");
     }
 }

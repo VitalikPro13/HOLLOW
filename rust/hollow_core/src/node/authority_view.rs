@@ -222,6 +222,9 @@ impl ViewDirty {
     /// it, and return the servers to rebuild now (each at most once per `REBUILD_GAP`, at
     /// most `REBUILDS_PER_TICK` of them).
     pub(crate) fn due(&mut self, states: &mut HashMap<String, ServerState>, db_path: &str, db_passphrase: &str) -> Vec<String> {
+        if rebuilds_held_for_test(db_path) {
+            return Vec::new();
+        }
         if self.key.is_none() {
             self.key = MessageStore::lease(db_path, db_passphrase).ok().and_then(|s| s.db_path());
         }
@@ -251,6 +254,30 @@ impl ViewDirty {
         self.last_rebuild.retain(|_, at| now.duration_since(*at) < REBUILD_GAP);
         due
     }
+}
+
+#[cfg(test)]
+static REBUILDS_HELD: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Harness: the node at `db_path` takes no saved roster into its views and rebuilds
+/// nothing for one (a busy event loop's `REBUILD_GAP`, stretched) until released.
+#[cfg(test)]
+pub(crate) fn hold_rebuilds_for_test(db_path: &str, held: bool) {
+    let mut h = REBUILDS_HELD.lock().unwrap_or_else(|e| e.into_inner());
+    h.retain(|p| p != db_path);
+    if held {
+        h.push(db_path.to_string());
+    }
+}
+
+#[cfg(test)]
+fn rebuilds_held_for_test(db_path: &str) -> bool {
+    REBUILDS_HELD.lock().unwrap_or_else(|e| e.into_inner()).iter().any(|p| p == db_path)
+}
+
+#[cfg(not(test))]
+fn rebuilds_held_for_test(_db_path: &str) -> bool {
+    false
 }
 
 #[cfg(test)]

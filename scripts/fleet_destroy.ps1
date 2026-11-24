@@ -860,7 +860,7 @@ try {
     Step a @{ op = 'tap'; target = 'dialog > type:HollowToggle'; index = 0 }
     Step a @{ op = 'wait'; ms = 600 }
     # Destroying every device takes the recovery phrase (design ID-1).
-    Step a @{ op = 'enter_text'; target = 'dialog > hint:The 12 or 24 words, in order'; value = (Get-FixturePhrase a) }
+    Step a @{ op = 'enter_text'; target = 'dialog > hint:Your 24 words, in order'; value = (Get-FixturePhrase a) }
     Step a @{ op = 'tap'; target = 'dialog > hint:DESTROY' }
     Step a @{ op = 'enter_text'; target = 'dialog > hint:DESTROY'; value = 'DESTROY' }
     Step a @{ op = 'wait_for'; target = 'dialog > text:DESTROY'; timeout_ms = 15000 }

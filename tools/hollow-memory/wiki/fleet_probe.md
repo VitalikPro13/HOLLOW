@@ -569,7 +569,7 @@ wait `text:Waiting to join your identity`. a is asked (`text:A device wants to j
 `dialog > text:Later`) and Devices shows a `text:Waiting` row. The toggle sits under
 Security > `semantics:Show advanced settings` (collapsed again every time the page is
 left), `semantics:Let restored backups join on their own`, phrase into
-`dialog > hint:The 12 or 24 words, in order`, `dialog > text:Turn off` / `Turn on`. The
+`dialog > hint:Your 24 words, in order`, `dialog > text:Turn off` / `Turn on`. The
 relay keeps every recovery shown, so a later run on the same fixture starts from that
 state: `-Onboard -Fresh` the peer first. Driver and the phone batches: `build/fleet_out/kept/session26/helpers` (gitignored).
 

@@ -11,6 +11,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/hollow_badge.dart';
 import 'package:hollow/src/ui/components/hollow_button.dart';
+import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_icon_button.dart';
 import 'package:hollow/src/ui/components/hollow_menu.dart';
 import 'package:hollow/src/ui/components/overlay_anchor.dart';
@@ -218,8 +219,9 @@ String _rosterDeviceTitle(WidgetRef ref, String id) =>
         kinds: ref.watch(deviceKindProvider)) ??
     shortPeerLabel(id);
 
-/// A device restored from a backup that asks to join. Unless the phrase turned
-/// it off, it joins on its own once seven days pass with nobody refusing it.
+/// A device that asks to join: restored from a backup, or cut off by a recovery
+/// (named so). Unless the phrase turned it off, it joins on its own once seven
+/// days pass with nobody refusing it.
 class _WaitingDeviceRow extends ConsumerStatefulWidget {
   final roster_api.RosterDevice device;
   final bool joinsByWaiting;
@@ -253,20 +255,59 @@ class _WaitingDeviceRowState extends ConsumerState<_WaitingDeviceRow> {
     }
   }
 
+  /// A device the recovery cut off was cut off because someone else may hold it:
+  /// letting it back in hands that holder our messages, so it takes a second step.
+  Future<void> _approve() async {
+    if (widget.device.cutOffAtMs == null) return _answer(true);
+    final id = widget.device.devicePeerId;
+    final name = deviceGivenName(id,
+            labels: ref.read(deviceLabelProvider), kinds: ref.read(deviceKindProvider)) ??
+        shortPeerLabel(id);
+    const risk = ' If you approve it, whoever holds it gets your messages again, '
+        'including everything sent since the recovery. Approve it only if you '
+        'have it with you.';
+    final approved = await showHollowConfirm(
+      context: context,
+      title: 'Let this device back in?',
+      message: widget.device.cutOff == 'ours'
+          ? 'Your recovery phrase cut $name off in case someone else holds it.$risk'
+          : '$name may be one of your old devices, or a copy someone else holds.$risk',
+      confirmLabel: 'Approve',
+      destructive: true,
+      onConfirm: () => roster_api.approveDevice(devicePeerId: id),
+    );
+    if (approved) ref.read(pendingDeviceAsksProvider.notifier).answered(id);
+  }
+
   @override
   Widget build(BuildContext context) {
     final seen = widget.device.firstSeenMs;
     final joins = seen == null || !widget.joinsByWaiting
         ? null
         : DateTime.fromMillisecondsSinceEpoch(seen.toInt()).add(const Duration(days: 7));
+    final cutOff = widget.device.cutOffAtMs;
+    final String subtitle;
+    if (cutOff != null) {
+      // HOL-SEC-229: never a restored backup, and approving it here is the one way back.
+      final cut = rosterDateLabel(context, DateTime.fromMillisecondsSinceEpoch(cutOff.toInt()));
+      final again = joins == null ? '' : ' If nobody refuses it, it joins again on ${rosterDateLabel(context, joins)}.';
+      subtitle = widget.device.cutOff == 'ours'
+          ? 'Your recovery phrase cut it off on $cut. Approve it only if you '
+              'have it with you.$again'
+          : 'Your recovery phrase cut off your old devices on $cut. It may be '
+              'one of them, or a copy someone else has. Approve it only if you '
+              'have it with you.$again';
+    } else {
+      subtitle = joins == null
+          ? 'Restored from a backup. It asks to join your identity.'
+          : 'Restored from a backup. It joins on ${rosterDateLabel(context, joins)} '
+              'unless you refuse it.';
+    }
     return SettingsRow(
       title: _rosterDeviceTitle(ref, widget.device.devicePeerId),
       titleTrailing: const HollowBadge('Waiting'),
       leading: const _KindTile(LucideIcons.monitorSmartphone),
-      subtitle: joins == null
-          ? 'Restored from a backup. It asks to join your identity.'
-          : 'Restored from a backup. It joins on ${rosterDateLabel(context, joins)} '
-              'unless you refuse it.',
+      subtitle: subtitle,
       trailing: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -279,7 +320,7 @@ class _WaitingDeviceRowState extends ConsumerState<_WaitingDeviceRow> {
           const SizedBox(width: HollowSpacing.sm),
           HollowButton.outline(
             compact: true,
-            onPressed: _approving != null ? null : () => _answer(true),
+            onPressed: _approving != null ? null : _approve,
             loading: _approving == true,
             child: const Text('Approve'),
           ),

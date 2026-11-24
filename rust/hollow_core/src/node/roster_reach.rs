@@ -379,6 +379,23 @@ pub(crate) fn on_dm(
     }
 }
 
+/// A server Welcome from `to` seats a device of our own identity that our roster does not
+/// place yet (a phrase admission into an empty install holds only its own statements):
+/// ask `to`, which placed it, for its view of our roster now, before the held Welcome
+/// runs out. The relay's copy never lands in our own roster, so a member is the source.
+pub(crate) fn ask_own_roster(
+    ws_cmd_tx: &WsCmdTx,
+    local_master: &str,
+    local_device: &str,
+    to: &str,
+    audience: &dyn Fn(&str) -> Audience,
+    db_path: &str,
+    db_passphrase: &str,
+) -> bool {
+    let Ok(store) = MessageStore::lease(db_path, db_passphrase) else { return false };
+    mismatch_ask(ws_cmd_tx, &store, local_master, local_device, local_master, to, super::roster_book::now_ms(), audience)
+}
+
 /// Send `to` our view of `subject`'s roster and ask for its view back, a moment later,
 /// gated per (subject, `to`). Returns whether it was sent.
 #[allow(clippy::too_many_arguments)]

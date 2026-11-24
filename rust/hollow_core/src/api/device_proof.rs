@@ -285,6 +285,9 @@ pub enum RestoreStage {
     OnlyOne,
     /// No member reachable; Hollow asks again when they are online.
     NobodyReachable,
+    /// Members answered and none names a point: the server waits for one that does,
+    /// asking again as members come online. No "I don't know" here.
+    WaitingForMember,
     /// Restored, or this device holds the server and settles it itself.
     Done,
 }
@@ -338,6 +341,7 @@ pub fn restore_choices() -> Result<Restores, String> {
                 Stage::Points => RestoreStage::Points,
                 Stage::OnlyOne => RestoreStage::OnlyOne,
                 Stage::NobodyReachable => RestoreStage::NobodyReachable,
+                Stage::WaitingForMember => RestoreStage::WaitingForMember,
                 Stage::Done => RestoreStage::Done,
             },
             pick: s.pick.map(point),

@@ -6,6 +6,7 @@ import 'package:hollow/src/core/friendly_error.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/providers/roster_provider.dart';
 import 'package:hollow/src/core/services/destroy_flow.dart';
+import 'package:hollow/src/core/services/phrase_restore.dart';
 import 'package:hollow/src/core/providers/device_proof_provider.dart';
 import 'package:hollow/src/rust/api/roster.dart' as roster_api;
 import 'package:hollow/src/rust/api/wipe.dart' as wipe_api;
@@ -16,11 +17,13 @@ import 'package:hollow/src/ui/components/hollow_button.dart';
 import 'package:hollow/src/ui/components/hollow_dialog.dart';
 import 'package:hollow/src/ui/components/hollow_toast.dart';
 import 'package:hollow/src/ui/dialogs/recovery_phrase_dialogs.dart';
+import 'package:hollow/src/ui/shell/home_restore_card.dart';
 import 'package:hollow/src/core/peer_id_label.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 /// The full-screen lock for a device our own roster does not admit (design ID-1):
-/// one that was removed, or one restored from a backup that waits to be let in.
+/// one that was removed, one restored from a backup or left out by a recovery
+/// that waits to be let in, or one whose phrase restore came too early.
 /// Opaque like the app lock; it lifts when the roster says this device belongs.
 Route<void> rosterLockRoute() => PageRouteBuilder<void>(
       opaque: true,
@@ -110,6 +113,8 @@ class _RosterLockScreenState extends ConsumerState<RosterLockScreen> {
       );
       if (!done) return;
       await container.read(rosterGateProvider.notifier).refresh();
+      // The new base may judge backups differently; the card says what Rust holds.
+      container.invalidate(restoreCardProvider);
       askForRestoreChooser(container, fresh: true);
     } catch (e) {
       if (mounted) HollowToast.show(context, friendlyError(e), type: HollowToastType.error);
@@ -121,16 +126,43 @@ class _RosterLockScreenState extends ConsumerState<RosterLockScreen> {
     if (done) await ref.read(rosterGateProvider.notifier).refresh();
   }
 
+  /// The statement that came too early, made again: an admission joins, a
+  /// recovery recovers from the same moment as before, keeping the devices
+  /// picked from the roster held now.
+  Future<void> _typeAgain(RosterGate gate) async {
+    if (gate.tooEarly != PhraseRestoreBranch.recover) return _join();
+    final container = ProviderScope.containerOf(context, listen: false);
+    try {
+      final status = await roster_api.rosterStatus();
+      if (!mounted) return;
+      final done = await showRecoverAgainDialog(context,
+          status: status, lostSinceMs: gate.lostSinceMs);
+      if (!done) return;
+      await container.read(rosterGateProvider.notifier).refresh();
+      container.invalidate(restoreCardProvider);
+      askForRestoreChooser(container, fresh: true);
+    } catch (e) {
+      if (mounted) HollowToast.show(context, friendlyError(e), type: HollowToastType.error);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final hollow = HollowTheme.of(context);
     final gate = ref.watch(rosterGateProvider);
     final labels = ref.watch(deviceLabelProvider);
     final removed = gate.kind == RosterGateKind.removed;
+    final tooEarly = gate.kind == RosterGateKind.tooEarly;
 
     final String title;
     final String body;
-    if (removed) {
+    if (tooEarly) {
+      title = 'Type your recovery phrase again';
+      body = "Your identity doesn't count this device yet. Your recovery "
+          'phrase was used on another device after you typed it here, or '
+          "this device's clock was behind. Check the date and time, then type "
+          'the phrase again.';
+    } else if (removed) {
       // A bare id names nothing a removed device can look up, so only a label is said.
       final label = labels[gate.removedBy];
       final kind = deviceKindName(ref.watch(deviceKindProvider)[gate.removedBy] ?? '');
@@ -148,9 +180,19 @@ class _RosterLockScreenState extends ConsumerState<RosterLockScreen> {
       final when = gate.joinsAt == null
           ? ''
           : ' If nobody refuses it, it joins on ${rosterDateLabel(context, gate.joinsAt!)}.';
-      title = 'Waiting to join your identity';
-      body = 'This device was restored from a backup. Approve it on one of your '
-          'other devices, or type your recovery phrase.$when';
+      final dropped = gate.droppedAt;
+      if (dropped != null) {
+        title = 'Your recovery phrase was used on another device';
+        body = "Since ${rosterDateLabel(context, dropped)}, this device isn't "
+            'part of your identity. If that was you and you want to use this '
+            'device too, type your recovery phrase, or approve it in Settings, '
+            'under Devices, on your other device.$when';
+      } else {
+        title = 'Waiting to join your identity';
+        body = 'This device was restored from a backup. Type your recovery '
+            'phrase, or approve it in Settings, under Devices, on one of your '
+            'other devices.$when';
+      }
     }
 
     return PopScope(
@@ -167,7 +209,12 @@ class _RosterLockScreenState extends ConsumerState<RosterLockScreen> {
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Icon(removed ? LucideIcons.shieldOff : LucideIcons.hourglass,
+                    Icon(
+                        removed
+                            ? LucideIcons.shieldOff
+                            : tooEarly
+                                ? LucideIcons.keyRound
+                                : LucideIcons.hourglass,
                         size: 32, color: hollow.textSecondary),
                     const SizedBox(height: HollowSpacing.lg),
                     Text(
@@ -197,7 +244,13 @@ class _RosterLockScreenState extends ConsumerState<RosterLockScreen> {
                               child: const Text('Erase now'),
                             ),
                           HollowButton.filled(
-                            onPressed: _erasing ? null : (removed ? _usePhrase : _join),
+                            onPressed: _erasing
+                                ? null
+                                : removed
+                                    ? _usePhrase
+                                    : tooEarly
+                                        ? () => _typeAgain(gate)
+                                        : _join,
                             child: const Text('Use recovery phrase'),
                           ),
                         ],
@@ -214,26 +267,138 @@ class _RosterLockScreenState extends ConsumerState<RosterLockScreen> {
   }
 }
 
-/// Whether [status] still has [device] waiting to join.
+/// Whether [status] still has [device] waiting to join and this device may answer for
+/// it: a device the roster does not count (a recovery left it out) vouches for nothing.
 bool rosterStillWaiting(roster_api.RosterStatus status, String device) =>
-    status.devices.any((d) => d.devicePeerId == device && d.state == 'pending');
+    status.member && status.devices.any((d) => d.devicePeerId == device && d.state == 'pending');
+
+/// [device] as [status] holds it, if it does.
+roster_api.RosterDevice? rosterDeviceOf(roster_api.RosterStatus status, String device) =>
+    status.devices.where((d) => d.devicePeerId == device).firstOrNull;
+
+/// Whether the pop-up may offer to approve [device]: never for a device a recovery
+/// cut off (HOL-SEC-229), which the person lets back in only from the device list.
+bool rosterAsksApproval(roster_api.RosterStatus status, String device) =>
+    rosterStillWaiting(status, device) && rosterDeviceOf(status, device)?.cutOffAtMs == null;
 
 /// Asks this device's person whether a device restored from a backup is theirs.
 /// Approve vouches for it; Refuse removes it; Later leaves it waiting. An ask that
-/// was settled meanwhile (on another device, or by the phrase) is never shown.
-Future<void> showPendingDeviceDialog(BuildContext context, WidgetRef ref, String device) async {
+/// was settled meanwhile (on another device, or by the phrase) is never shown. A
+/// device a recovery cut off gets no pop-up where it cannot join by waiting, and
+/// only a warning that offers Refuse where it can. False when the roster could not
+/// be read: nothing is shown (only a status saying the device was not cut off may
+/// offer Approve) and the ask stays queued for the next read.
+Future<bool> showPendingDeviceDialog(BuildContext context, WidgetRef ref, String device) async {
   final asks = ref.read(pendingDeviceAsksProvider.notifier);
-  final waiting = await roster_api.rosterStatus().then((s) => rosterStillWaiting(s, device), onError: (_) => true);
-  if (!waiting || !context.mounted) return asks.answered(device);
+  final roster_api.RosterStatus status;
+  try {
+    status = await roster_api.rosterStatus();
+  } catch (e) {
+    debugPrint('[HOLLOW] Roster status unavailable, a join ask waits: $e');
+    return false;
+  }
+  if (!rosterStillWaiting(status, device) || !context.mounted) {
+    asks.answered(device);
+    return true;
+  }
+  final asker = rosterDeviceOf(status, device)!;
+  final cutOffAt = asker.cutOffAtMs;
+  if (cutOffAt != null && !status.backupWait) {
+    asks.answered(device);
+    return true;
+  }
   final name = deviceGivenName(device,
           labels: ref.read(deviceLabelProvider), kinds: ref.read(deviceKindProvider)) ??
       shortPeerLabel(device);
   await showHollowDialog<void>(
     context: context,
     barrierDismissible: false,
-    builder: (_) => _PendingDeviceDialog(device: device, name: name),
+    builder: (_) => cutOffAt == null
+        ? _PendingDeviceDialog(device: device, name: name)
+        : _CutOffDeviceDialog(
+            device: device,
+            name: name,
+            cutOffAt: DateTime.fromMillisecondsSinceEpoch(cutOffAt.toInt()),
+            ours: asker.cutOff == 'ours',
+            joinsAt: asker.firstSeenMs == null
+                ? null
+                : DateTime.fromMillisecondsSinceEpoch(asker.firstSeenMs!.toInt()).add(const Duration(days: 7)),
+          ),
   );
   asks.answered(device);
+  return true;
+}
+
+/// A device a recovery cut off that can still join by nobody refusing it: the person
+/// is warned and may refuse it here, never approve it.
+class _CutOffDeviceDialog extends ConsumerStatefulWidget {
+  final String device;
+  final String name;
+  final DateTime cutOffAt;
+  /// This device knows it was one of ours; else it is a device no record here names,
+  /// which may be an old one or one someone else made with the identity's key.
+  final bool ours;
+  final DateTime? joinsAt;
+  const _CutOffDeviceDialog({
+    required this.device,
+    required this.name,
+    required this.cutOffAt,
+    required this.ours,
+    required this.joinsAt,
+  });
+
+  @override
+  ConsumerState<_CutOffDeviceDialog> createState() => _CutOffDeviceDialogState();
+}
+
+class _CutOffDeviceDialogState extends ConsumerState<_CutOffDeviceDialog> with HollowDialogAction {
+  Future<void> _refuse() async {
+    final ok = await runDialogAction(
+      () => roster_api.refuseDevice(devicePeerId: widget.device),
+      fallback: "Hollow couldn't answer for that device. Try again.",
+    );
+    if (ok && mounted) Navigator.of(context).pop();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    ref.listen(rosterStatusProvider, (_, next) {
+      final status = next.valueOrNull;
+      if (status != null && !actionRunning && !rosterStillWaiting(status, widget.device)) {
+        Navigator.of(context).pop();
+      }
+    });
+    final cut = rosterDateLabel(context, widget.cutOffAt);
+    final joins = widget.joinsAt == null ? null : rosterDateLabel(context, widget.joinsAt!);
+    final text = widget.ours
+        ? 'Your recovery phrase cut ${widget.name} off on $cut.'
+            '${joins == null ? '' : ' If nobody refuses it, it joins again on $joins.'}'
+            ' Refuse it unless you have it with you. To let it back in, approve '
+            'it in Settings, under Devices.'
+        : '${widget.name} asks to join your identity. Your recovery phrase cut '
+            'off your old devices on $cut. It may be one of them, or a copy '
+            'someone else has.'
+            '${joins == null ? '' : ' If nobody refuses it, it joins on $joins.'}'
+            ' Refuse it unless you have it with you.';
+    return HollowDialog(
+      title: widget.ours ? 'A device you cut off asks to join' : 'A device asks to join',
+      width: 420,
+      busy: actionRunning,
+      error: actionError,
+      content: HollowDialogText(text),
+      actions: [
+        HollowButton.ghost(
+          onPressed: actionRunning ? null : () => Navigator.of(context).pop(),
+          child: const Text('Later'),
+        ),
+        HollowButton.danger(
+          onPressed: actionRunning ? null : _refuse,
+          loading: actionRunning,
+          child: const Text('Refuse'),
+        ),
+      ],
+    );
+  }
 }
 
 class _PendingDeviceDialog extends ConsumerStatefulWidget {
@@ -261,10 +426,11 @@ class _PendingDeviceDialogState extends ConsumerState<_PendingDeviceDialog> with
 
   @override
   Widget build(BuildContext context) {
-    // Settled elsewhere while this was open: a Refuse now would remove a member.
+    // Settled elsewhere while this was open (a Refuse now would remove a member), or
+    // a recovery cut the device off, which this pop-up never offers to approve.
     ref.listen(rosterStatusProvider, (_, next) {
       final status = next.valueOrNull;
-      if (status != null && !actionRunning && !rosterStillWaiting(status, widget.device)) {
+      if (status != null && !actionRunning && !rosterAsksApproval(status, widget.device)) {
         Navigator.of(context).pop();
       }
     });
