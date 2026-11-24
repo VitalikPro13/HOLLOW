@@ -72044,7 +72044,7 @@ async fn mock_relay_drops_the_directs_the_relay_drops() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
 async fn fms_a_crafted_file_sent_on_is_refused_or_cleaned_in_time() {
-    use super::media_strip::fixtures::{avi_nested, gifs_with_a_kept_block_past_the_end, mp4_with_empty_chunk_runs, mp4_with_location};
+    use super::media_strip::fixtures::{avi_nested, gifs_with_a_kept_block_past_the_end, mp4_with_empty_chunk_runs, mp4_with_location, webp_with_many_exif_chunks};
     let _g = test_guard();
     let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
     unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
@@ -72092,6 +72092,17 @@ async fn fms_a_crafted_file_sent_on_is_refused_or_cleaned_in_time() {
         .await;
         assert!(refused, "{name} is refused with a reason");
     }
+
+    // HOL-SEC-301: the photo path strips it once the encoder gives up, then
+    // the receivers' image check stops it; it no longer spins first.
+    let exifs = received.join("exifs.webp");
+    super::at_rest::write_all(&exifs, &webp_with_many_exif_chunks(500_000)).expect("kept at rest");
+    b.cmd_tx.send(send(&exifs, "exifs-1")).await.unwrap();
+    let failed = wait_event(&mut b, std::time::Duration::from_secs(20), |ev| {
+        matches!(ev, NetworkEvent::FileFailed { file_id, .. } if file_id == "exifs-1")
+    })
+    .await;
+    assert!(failed, "a WebP of empty EXIF chunks is judged in time");
 
     let header = |prefix: &'static str| {
         move |ev: &NetworkEvent| matches!(ev, NetworkEvent::FileHeaderReceived { file_name, .. } if file_name.starts_with(prefix))

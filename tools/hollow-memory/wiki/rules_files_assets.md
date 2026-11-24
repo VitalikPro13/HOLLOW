@@ -78,7 +78,7 @@ stay in CLAUDE.md. Wiki `rust_file_handler`, `emotes`, `hollowpack`.
   (`media_strip::REFUSED`), never sent raw; other files keep their bytes. Harness
   `dm_video_send_strips_location_before_it_leaves`. The strip parses a stranger's
   bytes (a received file sent on): it never panics, never recurses or walks a table
-  without a bound (HOL-SEC-267..269), and an honest file's output stays byte for byte
+  without a bound, holds nothing per sample (HOL-SEC-267..269, 301, 302), and an honest file's output stays byte for byte
   what it was (`strip_answers_as_0_14_did` digests every answer; change it only with
   a reason).
 - A received file reaches NO decoder before a tap (C-FILES-02): `VideoMessageBubble` cuts

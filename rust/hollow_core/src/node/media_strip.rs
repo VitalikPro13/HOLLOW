@@ -211,9 +211,7 @@ fn strip_trak(d: &mut [u8], trak: &Bx, fragmented: bool) -> Result<(), String> {
         // A timed-metadata track is where action cameras and phones keep a GPS
         // trace: the whole track goes, samples included.
         if handler == Some(b"meta".as_slice()) && !fragmented {
-            for r in sample_ranges(d, &mkids)? {
-                zero(d, r)?;
-            }
+            sample_tables(d, &mkids)?.walk(d.len(), |r| zero(d, r))?;
             to_free(d, trak);
             return Ok(());
         }
@@ -236,8 +234,19 @@ fn strip_trak(d: &mut [u8], trak: &Bx, fragmented: bool) -> Result<(), String> {
     Ok(())
 }
 
+/// A track's sample tables, read out of the file before its samples are
+/// zeroed.
+struct SampleTables {
+    /// Each sample's size; empty when `fixed` gives every one of `count`.
+    sizes: Vec<u64>,
+    fixed: u64,
+    count: usize,
+    runs: Vec<(u32, u32)>,
+    offsets: Vec<u64>,
+}
+
 /// Where a track's samples sit in the file, from its sample tables.
-fn sample_ranges(d: &[u8], mdia_kids: &[Bx]) -> Result<Vec<Range<usize>>, String> {
+fn sample_tables(d: &[u8], mdia_kids: &[Bx]) -> Result<SampleTables, String> {
     let minf = find(mdia_kids, b"minf").ok_or("track without minf")?;
     let minf_kids = boxes(d, minf.body..minf.end, false)?;
     let stbl = find(&minf_kids, b"stbl").ok_or("track without stbl")?;
@@ -249,8 +258,10 @@ fn sample_ranges(d: &[u8], mdia_kids: &[Bx]) -> Result<Vec<Range<usize>>, String
     if count > d.len() {
         return Err("sample count past the file".into());
     }
+    // A fixed size names up to one sample per byte of the file, so it is
+    // never spread into a list (HOL-SEC-302).
     let sizes: Vec<u64> = if fixed != 0 {
-        vec![fixed as u64; count]
+        Vec::new()
     } else {
         (0..count).map(|k| be32(d, stsz.body + 12 + 4 * k).map(u64::from)).collect::<Result<_, _>>()?
     };
@@ -278,35 +289,45 @@ fn sample_ranges(d: &[u8], mdia_kids: &[Bx]) -> Result<Vec<Range<usize>>, String
         }
         (0..n).map(|k| be_sized(d, co.body + 8 + 8 * k, 8)).collect::<Result<_, _>>()?
     };
+    Ok(SampleTables { sizes, fixed: fixed as u64, count, runs, offsets })
+}
 
-    let mut out = Vec::new();
-    let mut sample = 0usize;
-    for (k, &(first, per_chunk)) in runs.iter().enumerate() {
-        if first == 0 {
-            return Err("chunk numbers start at one".into());
-        }
-        let last = runs.get(k + 1).map(|n| n.0.saturating_sub(1)).unwrap_or(offsets.len() as u32);
-        if per_chunk == 0 {
-            // Runs may name the same chunks again, so walking an empty one
-            // would cost runs times chunks; it only has to name chunks the
-            // offset table holds (HOL-SEC-269).
-            if first <= last && last as usize > offsets.len() {
-                return Err("chunk past the offset table".into());
+impl SampleTables {
+    /// Hands `each` the place of every sample in a file of `len` bytes, one at
+    /// a time: holding them took a range per sample (HOL-SEC-302).
+    fn walk(&self, len: usize, mut each: impl FnMut(Range<usize>) -> Result<(), String>) -> Result<(), String> {
+        let (runs, offsets) = (&self.runs, &self.offsets);
+        let mut sample = 0usize;
+        for (k, &(first, per_chunk)) in runs.iter().enumerate() {
+            if first == 0 {
+                return Err("chunk numbers start at one".into());
             }
-            continue;
-        }
-        for chunk in first..=last {
-            let mut at = *offsets.get(chunk as usize - 1).ok_or("chunk past the offset table")?;
-            for _ in 0..per_chunk {
-                let Some(&len) = sizes.get(sample) else { return Ok(out) };
-                sample += 1;
-                let end = at.checked_add(len).filter(|e| *e <= d.len() as u64).ok_or("sample past the file")?;
-                out.push(at as usize..end as usize);
-                at = end;
+            let last = runs.get(k + 1).map(|n| n.0.saturating_sub(1)).unwrap_or(offsets.len() as u32);
+            if per_chunk == 0 {
+                // Runs may name the same chunks again, so walking an empty one
+                // would cost runs times chunks; it only has to name chunks the
+                // offset table holds (HOL-SEC-269).
+                if first <= last && last as usize > offsets.len() {
+                    return Err("chunk past the offset table".into());
+                }
+                continue;
+            }
+            for chunk in first..=last {
+                let mut at = *offsets.get(chunk as usize - 1).ok_or("chunk past the offset table")?;
+                for _ in 0..per_chunk {
+                    if sample >= self.count {
+                        return Ok(());
+                    }
+                    let size = if self.fixed != 0 { self.fixed } else { *self.sizes.get(sample).ok_or("sample past the size table")? };
+                    sample += 1;
+                    let end = at.checked_add(size).filter(|e| *e <= len as u64).ok_or("sample past the file")?;
+                    each(at as usize..end as usize)?;
+                    at = end;
+                }
             }
         }
+        Ok(())
     }
-    Ok(out)
 }
 
 fn is_heif(d: &[u8]) -> bool {
@@ -624,7 +645,14 @@ fn exif_orientation(tiff: &[u8]) -> Option<u16> {
     }
     let ifd = rd32(4)? as usize;
     let n = rd16(ifd)? as usize;
-    (0..n).map(|k| ifd + 2 + 12 * k).find(|&e| rd16(e) == Some(0x0112)).and_then(|e| rd16(e + 8)).filter(|v| (1..=8).contains(v))
+    // An entry past the block cannot match, and a crafted count walked 65535
+    // of them for every EXIF chunk of a WebP (HOL-SEC-301).
+    (0..n)
+        .map(|k| ifd + 2 + 12 * k)
+        .take_while(|&e| e + 2 <= tiff.len())
+        .find(|&e| rd16(e) == Some(0x0112))
+        .and_then(|e| rd16(e + 8))
+        .filter(|v| (1..=8).contains(v))
 }
 
 /// A TIFF block holding nothing but an orientation.
@@ -1108,6 +1136,27 @@ pub(crate) mod fixtures {
         let meta = full(b"meta", 0, &[full(b"iinf", 0, &infes), full(b"iloc", 2, &iloc)].concat());
         [bx(b"ftyp", b"heic\0\0\0\0mif1heic"), meta].concat()
     }
+
+    /// A WebP of nothing but `chunks` EXIF chunks, each a TIFF header whose
+    /// first IFD claims 18761 entries (HOL-SEC-301).
+    pub(crate) fn webp_with_many_exif_chunks(chunks: usize) -> Vec<u8> {
+        let chunk = [b"EXIF".as_slice(), &8u32.to_le_bytes(), b"II*\0\0\0\0\0"].concat();
+        let body = [b"WEBP".as_slice(), &chunk.repeat(chunks)].concat();
+        [b"RIFF".as_slice(), &(body.len() as u32).to_le_bytes(), &body].concat()
+    }
+
+    /// An mp4 whose timed GPS track holds `samples` samples of one byte each,
+    /// named by a fixed-size sample table (HOL-SEC-302).
+    pub(crate) fn mp4_with_one_byte_samples(samples: u32) -> Vec<u8> {
+        let ftyp = bx(b"ftyp", b"isom\0\0\0\0");
+        let at = ftyp.len() as u32 + 8;
+        let stsz = full(b"stsz", 0, &[1u32.to_be_bytes(), samples.to_be_bytes()].concat());
+        let stsc = full(b"stsc", 0, &[1u32.to_be_bytes(), 1u32.to_be_bytes(), samples.to_be_bytes(), 1u32.to_be_bytes()].concat());
+        let stco = full(b"stco", 0, &[1u32.to_be_bytes(), at.to_be_bytes()].concat());
+        let hdlr = full(b"hdlr", 0, &[&[0u8; 4][..], b"meta", &[0; 12]].concat());
+        let trak = bx(b"trak", &bx(b"mdia", &[hdlr, bx(b"minf", &bx(b"stbl", &[stsz, stsc, stco].concat()))].concat()));
+        [ftyp, bx(b"mdat", &vec![7u8; samples as usize]), bx(b"moov", &trak)].concat()
+    }
 }
 
 #[cfg(test)]
@@ -1139,7 +1188,13 @@ mod tests {
         assert_eq!(kinds, [b"mvhd", b"trak", b"free", b"free", b"free"], "GPS track, udta and meta became padding");
         let trak = kids[1];
         let mdia = *find(&boxes(&after, trak.body..trak.end, false).unwrap(), b"mdia").unwrap();
-        let ranges = sample_ranges(&after, &boxes(&after, mdia.body..mdia.end, false).unwrap()).unwrap();
+        let mut ranges = Vec::new();
+        let tables = sample_tables(&after, &boxes(&after, mdia.body..mdia.end, false).unwrap()).unwrap();
+        tables.walk(after.len(), |r| {
+            ranges.push(r);
+            Ok(())
+        })
+        .unwrap();
         assert_eq!(&after[ranges[0].clone()], b"VIDEO-SAMPLE-BYTES");
 
         assert_eq!(strip_for_send("mp4", after.clone()).unwrap(), after, "stripping twice changes nothing");
@@ -1320,6 +1375,88 @@ mod tests {
         assert!(strip_for_send("heic", [bx(b"ftyp", b"heic\0\0\0\0mif1heic"), meta].concat()).is_ok());
     }
 
+    /// HOL-SEC-301: a WebP's EXIF chunks cost what they hold; 0.14 walked up
+    /// to 65535 IFD entries past the end of each one.
+    #[test]
+    fn a_webp_of_many_exif_chunks_takes_one_pass() {
+        let webp = webp_with_many_exif_chunks(500_000);
+        let out = within(20, move || strip_for_send("webp", webp).map(|o| o.len()));
+        assert_eq!(out, Some(Ok(12)), "every EXIF chunk goes, in one pass");
+        // An orientation past an IFD the count overstates is still found.
+        let mut tiff = exif_with_gps(6);
+        tiff[8..10].copy_from_slice(&0xFFFFu16.to_le_bytes());
+        assert_eq!(exif_orientation(&tiff), Some(6));
+        assert_eq!(exif_orientation(&tiff[..20]), Some(6), "an entry cut after its value still counts");
+    }
+
+    /// HOL-SEC-302: a fixed-size sample table names up to a sample per byte,
+    /// and the strip holds none of them; 0.14 held about 24 bytes a sample.
+    #[test]
+    fn a_fixed_size_sample_table_is_walked_without_holding_it() {
+        let mp4 = mp4_with_one_byte_samples(4 << 20);
+        let len = mp4.len();
+        let (out, peak) = within(20, move || {
+            held::reset();
+            let out = strip_for_send("mp4", mp4);
+            (out, held::peak())
+        })
+        .expect("in time");
+        let out = out.expect("a GPS track of one-byte samples strips");
+        assert_eq!(out.len(), len);
+        assert!(out.windows(4).all(|w| w != [7; 4]), "every sample was zeroed");
+        assert!(peak < len as i64 / 4, "held {peak} bytes stripping a {len} byte file");
+    }
+
+    /// Bytes this thread holds, so a test can bound what the strip keeps. The
+    /// counter is per thread: other tests' allocations never reach it.
+    mod held {
+        use std::alloc::{GlobalAlloc, Layout, System};
+        use std::cell::Cell;
+
+        thread_local! {
+            static NOW_PEAK: Cell<(i64, i64)> = const { Cell::new((0, 0)) };
+        }
+
+        fn note(delta: i64) {
+            let _ = NOW_PEAK.try_with(|c| {
+                let (now, peak) = c.get();
+                c.set((now + delta, peak.max(now + delta)));
+            });
+        }
+
+        pub(super) fn reset() {
+            NOW_PEAK.with(|c| c.set((0, 0)));
+        }
+
+        pub(super) fn peak() -> i64 {
+            NOW_PEAK.with(|c| c.get().1)
+        }
+
+        struct Counting;
+
+        unsafe impl GlobalAlloc for Counting {
+            unsafe fn alloc(&self, l: Layout) -> *mut u8 {
+                note(l.size() as i64);
+                unsafe { System.alloc(l) }
+            }
+            unsafe fn alloc_zeroed(&self, l: Layout) -> *mut u8 {
+                note(l.size() as i64);
+                unsafe { System.alloc_zeroed(l) }
+            }
+            unsafe fn dealloc(&self, ptr: *mut u8, l: Layout) {
+                note(-(l.size() as i64));
+                unsafe { System.dealloc(ptr, l) }
+            }
+            unsafe fn realloc(&self, ptr: *mut u8, l: Layout, new_size: usize) -> *mut u8 {
+                note(new_size as i64 - l.size() as i64);
+                unsafe { System.realloc(ptr, l, new_size) }
+            }
+        }
+
+        #[global_allocator]
+        static COUNTING: Counting = Counting;
+    }
+
     /// A file received from someone and sent on is read through the same
     /// strip, so each crafted file above is refused or cleaned in time.
     #[test]
@@ -1331,6 +1468,7 @@ mod tests {
             ("got.avi", avi_nested(200_000), false),
             ("got.mp4", mp4_with_empty_chunk_runs(150_000, 150_000), true),
             ("got.heic", heic_with_empty_extents(50_000), true),
+            ("got.webp", webp_with_many_exif_chunks(500_000), true),
         ];
         for (name, bytes, sends) in cases {
             let path = dir.path().join(name);
@@ -1383,7 +1521,7 @@ mod tests {
         for data in &crafted {
             answer("webp", data);
         }
-        for (ext, data) in honest.iter().filter(|(ext, _)| ["mov", "mp4", "avi", "heic", "gif", "webm"].contains(ext)) {
+        for (ext, data) in honest.iter().filter(|(ext, _)| ["mov", "mp4", "avi", "heic", "gif", "webm", "jpg", "webp"].contains(ext)) {
             for k in 0..data.len() {
                 answer(ext, &data[..k]);
                 for v in [0x00, 0x01, 0x7F, 0xFF, data[k] ^ 0x80] {
@@ -1395,7 +1533,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(hex::encode(sha2::Digest::finalize(h)), "cc4bd9315949fc8812b75fd12ed25047d02e7275b16666664c882e7c740af42d");
+        assert_eq!(hex::encode(sha2::Digest::finalize(h)), "ddde9e8b52cd4700d0e00f42f162ee0b832ddbc0b1e45c9f67c7e21451b96f1f");
     }
 
     /// A GPS track whose chunks hold two, none, one and no samples.
