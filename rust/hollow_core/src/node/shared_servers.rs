@@ -343,7 +343,7 @@ impl Asks {
         }
         if let Some((at, _, reasked)) = self.asked.get(device)
             && now.saturating_duration_since(*at) < ASK_AGAIN
-            && !(accepted && !*reasked)
+            && (!accepted || *reasked)
         {
             return false;
         }
