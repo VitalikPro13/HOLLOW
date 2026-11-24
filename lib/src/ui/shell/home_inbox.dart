@@ -9,9 +9,15 @@ import 'package:hollow/src/core/providers/channel_provider.dart';
 import 'package:hollow/src/core/providers/chat_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
 import 'package:hollow/src/core/device_proof_copy.dart'
-    show restoreWaitTitle, kRestoreWaitBody, kRestoreServerFallback;
+    show
+        restoreWaitTitle,
+        kRestoreWaitBody,
+        kRestoreServerFallback,
+        restorePickTitle,
+        kRestorePickBody,
+        kRestorePickAction;
 import 'package:hollow/src/core/providers/device_proof_provider.dart'
-    show restoreChoicesProvider;
+    show restoreChoicesProvider, restoreNeedsChoice;
 import 'package:hollow/src/rust/api/device_proof.dart' as dp;
 import 'package:hollow/src/ui/dialogs/restore_chooser.dart'
     show showRestoreChooser;
@@ -191,6 +197,7 @@ class _HomeAttentionState extends ConsumerState<HomeAttention> {
       ..._phraseItems(),
       ..._updateItems(),
       ..._pushItems(),
+      ..._restorePickItems(),
       ..._restoreWaitItems(),
     ];
     if (items.isEmpty) return const SizedBox.shrink();
@@ -441,6 +448,30 @@ class _HomeAttentionState extends ConsumerState<HomeAttention> {
         onPrimary: () async => widget.actions.openUpdate(context),
         failure: "Couldn't open the update",
       ),
+    ];
+  }
+
+  /// Servers a phrase recovery restores that wait for the person's pick, one
+  /// row each, so a closed chooser still has a way back before the next start.
+  List<_AttentionItem> _restorePickItems() {
+    final restores = ref.watch(restoreChoicesProvider).valueOrNull;
+    if (restores == null) return const [];
+    final names = ref.watch(serverListProvider);
+    return [
+      for (final c in restores.servers)
+        if (restoreNeedsChoice(c))
+          _AttentionItem(
+            id: 'restore-pick:${c.serverId}',
+            leading: _GlyphTile(LucideIcons.history, size: _leadingSize),
+            title: restorePickTitle(
+                names[c.serverId]?.name ?? kRestoreServerFallback),
+            body: kRestorePickBody,
+            wholeBody: true,
+            primaryLabel: kRestorePickAction,
+            onPrimary: () async =>
+                showRestoreChooser(context, serverId: c.serverId),
+            failure: "Couldn't open the restore",
+          ),
     ];
   }
 

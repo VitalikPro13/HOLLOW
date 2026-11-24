@@ -27,10 +27,12 @@ import 'package:hollow/src/ui/components/hollow_toast.dart';
 /// server, what its members remember, and the person's pick. A normal screen,
 /// shown often, never an alarm; closing it chooses nothing. [fresh]: opened
 /// for a device the roster had not counted yet (see [RestoreChooserAsk]).
-Future<void> showRestoreChooser(BuildContext context, {bool fresh = false}) =>
+/// [serverId]: the server the person came for, listed first.
+Future<void> showRestoreChooser(BuildContext context,
+        {bool fresh = false, String? serverId}) =>
     showHollowDialog<void>(
       context: context,
-      builder: (_) => RestoreChooserDialog(fresh: fresh),
+      builder: (_) => RestoreChooserDialog(fresh: fresh, serverId: serverId),
     );
 
 /// How often the chooser re-reads the restores while it is open.
@@ -49,7 +51,10 @@ String restoreDateLabel(BuildContext context, DateTime at, {DateTime? now}) {
 
 class RestoreChooserDialog extends ConsumerStatefulWidget {
   final bool fresh;
-  const RestoreChooserDialog({super.key, this.fresh = false});
+
+  /// Listed first, so a row or strip naming one server opens on it.
+  final String? serverId;
+  const RestoreChooserDialog({super.key, this.fresh = false, this.serverId});
 
   @override
   ConsumerState<RestoreChooserDialog> createState() =>
@@ -163,13 +168,18 @@ class _RestoreChooserDialogState extends ConsumerState<RestoreChooserDialog> {
         style: body,
       );
     } else {
+      final focus = widget.serverId;
+      final servers = [
+        ...restores.servers.where((c) => c.serverId == focus),
+        ...restores.servers.where((c) => c.serverId != focus),
+      ];
       content = Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          for (var i = 0; i < restores.servers.length; i++) ...[
+          for (var i = 0; i < servers.length; i++) ...[
             if (i > 0) const SizedBox(height: HollowSpacing.xl),
-            _server(context, restores.servers[i], compact),
+            _server(context, servers[i], compact),
           ],
         ],
       );

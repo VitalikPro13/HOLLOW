@@ -161,6 +161,7 @@ import 'package:hollow/src/ui/mobile/mobile_shell.dart';
 import 'package:hollow/src/core/providers/roster_provider.dart';
 import 'package:hollow/src/rust/api/roster.dart' as roster_api;
 import 'package:hollow/src/ui/dialogs/restore_chooser.dart';
+import 'package:hollow/src/ui/shell/restore_pick_banner.dart';
 import 'package:hollow/src/ui/shell/roster_lock.dart';
 import 'package:hollow/src/ui/shell/server_strip.dart';
 import 'package:hollow/src/core/providers/guest_provider.dart';
@@ -2284,6 +2285,8 @@ class _HollowShellState extends ConsumerState<HollowShell>
         // to announce.
         const SystemStatusBanner(),
         const ClockSkewBanner(),
+        // Dock and the phone carry this on Home, which Classic does not have.
+        const RestorePickBanner(),
         Expanded(
           child: Row(
             children: [

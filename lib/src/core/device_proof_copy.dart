@@ -314,6 +314,20 @@ const kRestoreWaitBody =
     'None of its members who answered remember how it looked. Hollow keeps '
     'asking as members come online.';
 
+/// The Home row and the Classic strip for a server waiting on the person's
+/// pick (stages pick, points and only one).
+String restorePickTitle(String server) =>
+    '${_lead(server)} is waiting for you to pick how it looked';
+
+/// The Classic strip when several servers wait on a pick.
+String restorePickManyTitle(int count) =>
+    '$count servers are waiting for you to pick how they looked';
+
+const kRestorePickBody =
+    'Voice and restricted channels come back after you pick.';
+
+const kRestorePickAction = 'Choose';
+
 String restoreDone(String server) => '${_lead(server)} is restored.';
 
 const kRestoreNothing = 'No server is waiting to be restored.';

@@ -103,9 +103,14 @@ void main() {
           dp.RestoreStage.waitingForMember,
           dp.RestoreStage.pick,
         ])));
+    // The pick row comes first, so the wait row sits past the fold.
+    await tester.tap(find.textContaining('Show all'));
+    await tester.pump();
     expect(find.text(restoreWaitTitle('Test Server')), findsOneWidget);
     expect(find.text(kRestoreWaitBody), findsOneWidget);
-    expect(find.text('View'), findsOneWidget, reason: 'one row: a server with a point waits on the chooser, not here');
+    expect(find.text('View'), findsOneWidget,
+        reason: 'a server with a point has its own row, which says Choose');
+    expect(find.text(restorePickTitle('Dev Hangout')), findsOneWidget);
   });
 
   testWidgets('a saved phrase needs no reminder', (tester) async {
