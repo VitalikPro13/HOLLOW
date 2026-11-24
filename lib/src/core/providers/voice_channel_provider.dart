@@ -1577,9 +1577,12 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
   }
 
   /// Toggle loudspeaker/earpiece while in a voice channel. Mobile only.
-  void toggleSpeaker() {
+  void toggleSpeaker() => setSpeaker(!state.isSpeakerOn);
+
+  /// Loudspeaker on or off, as the call notification's Speaker asks.
+  void setSpeaker(bool on) {
     if (_leaving || !state.isInVoiceChannel) return;
-    _setSpeakerRoute(!state.isSpeakerOn);
+    _setSpeakerRoute(on);
   }
 
   Future<void> selectAudioRoute(AudioRoute route) async {

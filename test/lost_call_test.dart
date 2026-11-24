@@ -8,6 +8,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
+import 'package:hollow/src/core/models/call_record.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/lost_call_provider.dart';
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
@@ -36,16 +37,48 @@ void main() {
       ]));
 
   group('what lingers', () {
-    test('a live call whose link gave out', () async {
+    // A live call's only link-lost end: the link watch giving up (a closed
+    // transport is terminal to it, like a spent window).
+    test('a live call whose link watch gave up', () async {
       final c = container(CallStatus.active);
-      c.read(callProvider.notifier).debugTransportState(
+      final calls = c.read(callProvider.notifier)..debugStartLinkWatch();
+      calls.debugTransportState(
           RTCPeerConnectionState.RTCPeerConnectionStateClosed);
       await pumpEventQueue();
       expect(c.read(callProvider).status, CallStatus.idle);
+      expect(calls.lastEndCause, CallEndCause.linkLost);
       final lost = c.read(lostCallProvider);
       expect(lost?.callId, 'c1');
       expect(lost?.peerMaster, 'peer');
       expect(lost?.secondsLeft, kLostCallLingerSeconds);
+    });
+
+    // A hang-up already under way when the watch gives up closes at once and
+    // keeps its own cause.
+    test('never a hang-up the give-up crosses', () async {
+      final c = container(CallStatus.active);
+      final calls = c.read(callProvider.notifier)..debugStartLinkWatch();
+      final ending = calls.endCall();
+      calls.debugTransportState(
+          RTCPeerConnectionState.RTCPeerConnectionStateClosed);
+      await ending;
+      await pumpEventQueue();
+      expect(c.read(callProvider).status, CallStatus.idle);
+      expect(c.read(lostCallProvider), isNull);
+      expect(calls.lastEndCause, CallEndCause.localHangup);
+    });
+
+    test('never a remote hang-up the give-up crosses', () async {
+      final c = container(CallStatus.active);
+      final calls = c.read(callProvider.notifier)..debugStartLinkWatch();
+      final ending = calls.handleCallSignal('peer', 'end', 'c1');
+      calls.debugTransportState(
+          RTCPeerConnectionState.RTCPeerConnectionStateClosed);
+      await ending;
+      await pumpEventQueue();
+      expect(c.read(callProvider).status, CallStatus.idle);
+      expect(c.read(lostCallProvider), isNull);
+      expect(calls.lastEndCause, CallEndCause.remoteEnd);
     });
 
     test('never a hang-up', () async {

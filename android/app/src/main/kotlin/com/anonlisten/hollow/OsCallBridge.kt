@@ -74,7 +74,7 @@ object OsCallBridge {
         var job: Job? = null
         var current: CallEndpointCompat? = null
         var endpoints: List<CallEndpointCompat> = emptyList()
-        var pendingRoute: String? = null
+        val routes = RouteGate()
         var wantActive = false
         var held = false
         var connectedAt: Long? = null
@@ -346,10 +346,7 @@ object OsCallBridge {
         scope.launch {
             scope.availableEndpoints.collect { list ->
                 c.endpoints = list
-                c.pendingRoute?.let { pending ->
-                    c.pendingRoute = null
-                    applyRoute(c, pending)
-                }
+                c.routes.onEndpoints(list.isNotEmpty())?.let { applyRoute(c, it) }
                 AudioSwitchManager.instance?.notifyRouteChanged()
             }
         }
@@ -373,6 +370,7 @@ object OsCallBridge {
         c.held = held
         writeGlobalMute(c.mute.onHold(held, c.telecomLive, globalMute()))
         send("osHold", mapOf("uuid" to c.uuid, "held" to held))
+        c.routes.onHold(held)?.let { applyRoute(c, it) }
         debugStatus(if (held) "held" else "resumed")
     }
 
@@ -509,13 +507,11 @@ object OsCallBridge {
     }
 
     private val router = object : AudioSwitchManager.TelecomAudio {
+        // Every entry point (the app's Speaker, the route sheet, a re-assert) lands here, so no
+        // route moves while a carrier call holds ours.
         override fun requestRoute(request: String) {
             val c = call ?: return
-            if (c.control == null || c.endpoints.isEmpty()) {
-                c.pendingRoute = request
-                return
-            }
-            applyRoute(c, request)
+            c.routes.request(request)?.let { applyRoute(c, it) }
         }
 
         override fun currentRoute(): String? = call?.current?.let { kindOf(it)?.typeName }

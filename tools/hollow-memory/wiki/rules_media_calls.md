@@ -79,8 +79,9 @@ the signal whitelist's four touches, the stream overlay consent detail, share ba
   `setActive`, every session calls `begin` (else only the 3 s native safety net gives it
   audio), MixWithOthers only via `+[HollowCallAudio categoryOptions:]`, and no sound activates
   the session ahead of CallKit (`HollowSfxPlayer` waits or drops).
-- A new in-call unmute or undeafen control asks the hold guard first (`unlessOsHeld`): a held
-  call resumes only through the OS. Opening a call screen while held only shows it.
+- A new in-call unmute, undeafen, speaker or route control asks the hold guard first
+  (`unlessOsHeld`): a held call resumes only through the OS, and a route change then would move
+  the carrier call's audio (the bridge's `RouteGate` parks it below Dart too). Opening a call screen while held only shows it.
 - Mute and deafen are ONE model, `MuteDeafen` (Nov 24, DM calls and rooms): deafen mutes the
   mic, Unmute while deafened undeafens too, undeafen gives back the mic from before the deafen.
   A new path that changes mute or deafen goes through the notifier's `_setMic`, never a bare
@@ -91,7 +92,8 @@ the signal whitelist's four touches, the stream overlay consent detail, share ba
   the OS call uuid is random, never an id.
 - Android audio belongs to Telecom while a core-telecom call lives (it is the mode owner): the
   fork's `AudioSwitchManager` does not activate and its route calls go to `OsCallBridge`
-  (`requestEndpointChange`, headset-wins `AudioEndpointMapping`); a fallback (not added in 2 s,
+  (`requestEndpointChange`, headset-wins `AudioEndpointMapping`; held = parked, `RouteGate`);
+  the notification's Speaker shows and judges the ACTIVE route, never hands-free; a fallback (not added in 2 s,
   addCall failed, no telecom) gives the audio back to audioswitch as before. Rooms and meetings
   never reach Telecom (`OsCallRules.offersTelecom`). The global mic mute IS Telecom's mute:
   written with the app's mute, never while held (it would mute the carrier call). Wiki

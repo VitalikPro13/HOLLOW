@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/audio_route_provider.dart';
 import 'package:hollow/src/core/services/audio_route.dart';
+import 'package:hollow/src/core/services/os_call_service.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
@@ -72,8 +73,12 @@ class _AudioRouteSheetState extends ConsumerState<_AudioRouteSheet> {
     });
   }
 
+  // A hold that began with the sheet open: the pick asks the OS to resume
+  // instead, as the Speaker button does.
   Future<void> _pick(AudioRoute route) async {
+    final held = osCallHoldIntercept(ref.read);
     Navigator.pop(context);
+    if (held) return;
     await widget.onSelect(route);
   }
 

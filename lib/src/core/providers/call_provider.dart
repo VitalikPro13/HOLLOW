@@ -788,6 +788,10 @@ class CallNotifier extends Notifier<CallState> {
   @visibleForTesting
   VoiceService get debugVoiceService => _service;
 
+  /// Arms the live call's real link watch, as going active does.
+  @visibleForTesting
+  void debugStartLinkWatch() => _startLinkWatch(state.peerId!);
+
   /// Start holding this call open across network trouble.
   ///
   /// Called once the call goes active; everything before that is call setup and
@@ -928,6 +932,13 @@ class CallNotifier extends Notifier<CallState> {
   Future<void> _endCallForLinkLoss(String reason) async {
     if (state.status != CallStatus.active &&
         state.status != CallStatus.connecting) {
+      return;
+    }
+    // An end already under way (our hang-up, theirs) owns the teardown: it
+    // closes at once, never lingers, and keeps its own cause.
+    if (_endCause != null) {
+      _callLog('[HOLLOW-CALL] Link gave out ($reason) during an end: '
+          'leaving it to that end');
       return;
     }
     _callLog('[HOLLOW-CALL] Ending call: $reason');
@@ -1396,10 +1407,14 @@ class CallNotifier extends Notifier<CallState> {
   }
 
   /// Toggle loudspeaker/earpiece during a call. Mobile only.
-  void toggleSpeaker() {
+  void toggleSpeaker() => setSpeaker(!state.isSpeakerOn);
+
+  /// Loudspeaker on or off, as the call notification's Speaker asks: a set,
+  /// not a toggle, because hands-free can differ from the route audio is on.
+  void setSpeaker(bool on) {
     if (state.status == CallStatus.idle) return;
     _routeChosen = true;
-    _setSpeakerRoute(!state.isSpeakerOn);
+    _setSpeakerRoute(on);
   }
 
   /// Switch this call to an explicit output route (mobile route sheet).

@@ -12,6 +12,7 @@ import 'package:hollow/src/core/providers/selected_peer_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
 import 'package:hollow/src/core/services/audio_route.dart';
+import 'package:hollow/src/core/services/os_call_service.dart';
 import 'package:hollow/src/theme/hollow_colors.dart';
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
@@ -490,7 +491,9 @@ MobileCallControl leaveControl(
 
 /// Speaker: tap for loud and back, long press for the route sheet (a tap too
 /// once a headset or car is there). The toggle goes through the provider's
-/// `preferLoudRoute`, so a connected headset always keeps the audio.
+/// `preferLoudRoute`, so a connected headset always keeps the audio. While a
+/// carrier call holds ours both ask the OS to resume: a route change then
+/// would move the carrier call's audio.
 MobileCallControl speakerControl(
   BuildContext context,
   WidgetRef ref, {
@@ -507,8 +510,10 @@ MobileCallControl speakerControl(
     label: 'Speaker',
     semanticLabel: active == null ? 'Speaker' : 'Audio device, ${active.label}',
     tone: on ? MobileControlTone.on : MobileControlTone.rest,
-    onTap: !enabled ? null : (routes.hasExternalRoute ? sheet : toggle),
-    onLongPress: enabled ? sheet : null,
+    onTap: !enabled
+        ? null
+        : unlessOsHeld(ref.read, routes.hasExternalRoute ? sheet : toggle),
+    onLongPress: enabled ? unlessOsHeld(ref.read, sheet) : null,
   );
 }
 

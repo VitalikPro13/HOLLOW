@@ -427,4 +427,57 @@ class OsCallRulesTest {
         assertTrue(r.on(sessionHeld = false))
         assertEquals("Bob", r.title.take("Bob"))
     }
+
+    // ---- the app's route while a carrier call holds ours (#154 fix round) ----
+
+    private fun readyGate() = RouteGate().also { assertNull(it.onEndpoints(ready = true)) }
+
+    @Test
+    fun aRouteGoesStraightThroughOnALiveCall() {
+        val g = readyGate()
+        assertEquals("loud", g.request("loud"))
+        assertNull(g.waiting)
+    }
+
+    @Test
+    fun aRouteWaitsForTelecomsEndpoints() {
+        val g = RouteGate()
+        assertNull(g.request("loud"))
+        assertEquals("loud", g.waiting)
+        assertNull(g.onEndpoints(ready = false))
+        assertEquals("loud", g.onEndpoints(ready = true))
+        assertNull(g.waiting)
+    }
+
+    // Telecom's endpoint is the carrier call's audio while it holds ours: a move would take that
+    // call to the loudspeaker. Whatever asks (the app's button, the route sheet, a re-assert) waits.
+    @Test
+    fun aRouteAskedWhileHeldWaitsForTheResume() {
+        val g = readyGate()
+        assertNull(g.onHold(held = true))
+        assertNull(g.request("loud"))
+        assertNull(g.request("earpiece"))
+        assertEquals("earpiece", g.waiting)
+        assertEquals("earpiece", g.onHold(held = false))
+        assertNull(g.waiting)
+        assertNull(g.onHold(held = false))
+    }
+
+    @Test
+    fun newEndpointsDuringAHoldReleaseNothing() {
+        val g = readyGate()
+        g.onHold(held = true)
+        assertNull(g.request("bluetooth"))
+        assertNull(g.onEndpoints(ready = true))
+        assertEquals("bluetooth", g.waiting)
+        assertEquals("bluetooth", g.onHold(held = false))
+    }
+
+    @Test
+    fun aHoldWithNothingAskedAppliesNothingOnResume() {
+        val g = readyGate()
+        g.onHold(held = true)
+        assertNull(g.onHold(held = false))
+        assertEquals("loud", g.request("loud"))
+    }
 }

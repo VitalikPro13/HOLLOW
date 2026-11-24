@@ -14,6 +14,7 @@ import 'package:hollow/src/core/models/call_record.dart';
 import 'package:hollow/src/core/models/server_info.dart';
 import 'package:hollow/src/core/mute_deafen.dart';
 import 'package:hollow/src/core/providers/app_lock_provider.dart';
+import 'package:hollow/src/core/providers/audio_route_provider.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/conference_provider.dart';
 import 'package:hollow/src/core/providers/duress_provider.dart';
@@ -23,12 +24,15 @@ import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/settings_provider.dart';
 import 'package:hollow/src/core/age_gate.dart';
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
+import 'package:hollow/src/core/services/audio_route.dart';
 import 'package:hollow/src/core/services/os_call_avatar.dart';
 import 'package:hollow/src/core/services/os_call_service.dart';
 import 'package:hollow/src/rust/api/identity.dart' as identity_api;
 import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 import 'package:hollow/src/theme/hollow_theme_data.dart';
 import 'package:hollow/src/ui/call/call_stage_bar.dart';
+import 'package:hollow/src/ui/components/hollow_pressable.dart';
+import 'package:hollow/src/ui/mobile/mobile_call_chrome.dart';
 
 // --- fakes -------------------------------------------------------------------
 
@@ -106,10 +110,11 @@ class _Call extends CallNotifier {
   }
 
   @override
-  void toggleSpeaker() {
+  void setSpeaker(bool on) {
     speakers++;
     if (state.status == CallStatus.idle) return;
-    state = state.copyWith(isSpeakerOn: !state.isSpeakerOn);
+    state = state.copyWith(isSpeakerOn: on);
+    (ref.read(audioRouteProvider.notifier) as _Routes).platformSpeaker(on);
   }
 
   // The real notifiers' rule (test/mute_deafen_test.dart pins it there).
@@ -153,9 +158,10 @@ class _Voice extends VoiceChannelNotifier {
   }
 
   @override
-  void toggleSpeaker() {
+  void setSpeaker(bool on) {
     speakers++;
-    state = state.copyWith(isSpeakerOn: !state.isSpeakerOn);
+    state = state.copyWith(isSpeakerOn: on);
+    (ref.read(audioRouteProvider.notifier) as _Routes).platformSpeaker(on);
   }
 
   bool _before = false;
@@ -182,6 +188,26 @@ class _Conference extends ConferenceNotifier {
 
   @override
   Future<void> endMeeting() async => ends++;
+}
+
+/// The route audio is on, as the platform reports it: a connected headset
+/// keeps the audio whatever the loudspeaker asks.
+class _Routes extends AudioRouteNotifier {
+  final AudioRouteKind? seed;
+  final List<AudioRoute> attached;
+  _Routes(this.seed, [this.attached = const []]);
+
+  @override
+  AudioRouteState build() =>
+      AudioRouteState(routes: attached, activeKind: seed, loaded: true);
+
+  void set(AudioRouteKind? kind) => state =
+      AudioRouteState(routes: attached, activeKind: kind, loaded: true);
+
+  void platformSpeaker(bool on) {
+    if (state.activeKind?.isExternal ?? false) return;
+    set(on ? AudioRouteKind.speaker : AudioRouteKind.earpiece);
+  }
 }
 
 class _Lock extends AppLockedNotifier {
@@ -282,8 +308,9 @@ class _Rig {
   final _Conference conference;
   final _Lock lock;
   final _Profiles profiles;
+  final _Routes routes;
   _Rig(this.c, this.native, this.call, this.voice, this.conference, this.lock,
-      this.profiles);
+      this.profiles, this.routes);
 
   OsCallService get service => c.read(osCallServiceProvider)!;
 
@@ -304,6 +331,7 @@ Future<_Rig> _rig({
   Set<String> ageHidden = const {},
   bool startOnSpeaker = true,
   OsCallAvatarSource? faces,
+  AudioRouteKind? route,
 }) async {
   final native = _Native();
   final callN = _Call(call);
@@ -311,7 +339,9 @@ Future<_Rig> _rig({
   final confN = _Conference(conference);
   final lock = _Lock();
   final profiles = _Profiles();
+  final routes = _Routes(route);
   final c = ProviderContainer(overrides: [
+    audioRouteProvider.overrideWith(() => routes),
     osCallChannelProvider.overrideWithValue(native),
     callProvider.overrideWith(() => callN),
     voiceChannelProvider.overrideWith(() => voiceN),
@@ -330,7 +360,7 @@ Future<_Rig> _rig({
   addTearDown(c.dispose);
   await c.read(identityProtectionProvider.future);
   await c.read(startCallsOnSpeakerProvider.future);
-  final rig = _Rig(c, native, callN, voiceN, confN, lock, profiles);
+  final rig = _Rig(c, native, callN, voiceN, confN, lock, profiles, routes);
   rig.service; // mount
   await rig.settle();
   return rig;
@@ -349,8 +379,10 @@ void main() {
     OsSession? derive(
             {CallState call = const CallState(),
             VoiceChannelState voice = const VoiceChannelState(),
-            ConferenceState conference = const ConferenceState()}) =>
-        deriveOsSession(call: call, voice: voice, conference: conference);
+            ConferenceState conference = const ConferenceState(),
+            AudioRouteKind? route}) =>
+        deriveOsSession(
+            call: call, voice: voice, conference: conference, route: route);
 
     test('nothing live is no session, and an incoming ring is never one', () {
       expect(derive(), isNull);
@@ -410,6 +442,26 @@ void main() {
                       .copyWith(status: CallStatus.active, remoteScreenSharing: true))!
               .video,
           isTrue);
+    });
+
+    // Hands-free (isSpeakerOn) is true for a headset too; the notification's
+    // Speaker says only whether the loudspeaker plays.
+    test('speaker is the loudspeaker route, never hands-free', () {
+      final call = _placed('c1').copyWith(isSpeakerOn: true);
+      expect(derive(call: call, route: AudioRouteKind.bluetooth)!.speaker,
+          isFalse);
+      expect(derive(call: call, route: AudioRouteKind.wired)!.speaker, isFalse);
+      expect(derive(call: call)!.speaker, isFalse, reason: 'route unknown');
+      expect(
+          derive(call: _placed('c1'), route: AudioRouteKind.speaker)!.speaker,
+          isTrue);
+      final room = _room(speaker: true);
+      expect(derive(voice: room, route: AudioRouteKind.bluetooth)!.speaker,
+          isFalse);
+      expect(
+          derive(voice: room, route: AudioRouteKind.speaker)!.speaker, isTrue);
+      expect(derive(voice: _room(), route: AudioRouteKind.earpiece)!.speaker,
+          isFalse);
     });
 
     test('a desktop builds nothing', () async {
@@ -703,41 +755,101 @@ void main() {
     setUp(() => debugOsCallSpeakerAction = true);
     tearDown(() => debugOsCallSpeakerAction = null);
 
-    test('begin carries the speaker; a change reaches the notification',
+    test('begin carries the route; a route change reaches the notification',
         () async {
-      final r = await _rig(voice: _room(speaker: true));
+      final r = await _rig(
+          voice: _room(speaker: true), route: AudioRouteKind.speaker);
       expect(r.native.lastOf('begin')['speaker'], isTrue);
       r.native.clear();
-      r.voice.set(_room());
+      r.routes.set(AudioRouteKind.earpiece);
       await r.settle();
       expect(r.native.methods, ['setSpeaker']);
       expect(r.native.lastOf('setSpeaker')['speaker'], isFalse);
     });
 
-    test("the notification's Speaker runs the app's own toggle", () async {
+    test('a headset never shows as the loudspeaker', () async {
       final r = await _rig(
-          call: _outgoing('c1').copyWith(status: CallStatus.active));
+          voice: _room(speaker: true), route: AudioRouteKind.bluetooth);
+      expect(r.native.lastOf('begin')['speaker'], isFalse);
+      r.routes.set(AudioRouteKind.speaker);
+      await r.settle();
+      expect(r.native.lastOf('setSpeaker')['speaker'], isTrue);
+      r.routes.set(AudioRouteKind.wired);
+      await r.settle();
+      expect(r.native.lastOf('setSpeaker')['speaker'], isFalse);
+    });
+
+    test("the notification's Speaker runs the app's own path", () async {
+      final r = await _rig(
+          call: _outgoing('c1').copyWith(status: CallStatus.active),
+          route: AudioRouteKind.earpiece);
       final uuid = r.service.liveUuid;
       r.native.clear();
       await r.native.send('osSpeaker', {'uuid': uuid, 'speaker': true});
       await r.settle();
       expect(r.call.speakers, 1);
       expect(r.call.state.isSpeakerOn, isTrue);
+      expect(r.routes.state.activeKind, AudioRouteKind.speaker);
+      expect(r.native.lastOf('setSpeaker')['speaker'], isTrue);
+
+      await r.native.send('osSpeaker', {'uuid': uuid, 'speaker': false});
+      await r.settle();
+      expect(r.call.speakers, 2);
+      expect(r.routes.state.activeKind, AudioRouteKind.earpiece);
+      expect(r.native.lastOf('setSpeaker')['speaker'], isFalse);
+    });
+
+    // Hands-free stale against the route (a headset left): the press sets
+    // what the notification asked, never flips a flag the other way.
+    test('a press sets the route the notification asked for', () async {
+      final r = await _rig(
+          call: _outgoing('c1')
+              .copyWith(status: CallStatus.active, isSpeakerOn: true),
+          route: AudioRouteKind.earpiece);
+      await r.native
+          .send('osSpeaker', {'uuid': r.service.liveUuid, 'speaker': true});
+      await r.settle();
+      expect(r.routes.state.activeKind, AudioRouteKind.speaker);
       expect(r.native.lastOf('setSpeaker')['speaker'], isTrue);
     });
 
-    test('a room toggles the room speaker', () async {
-      final r = await _rig(voice: _room());
+    test('a room switches the room speaker', () async {
+      final r = await _rig(voice: _room(), route: AudioRouteKind.earpiece);
       await r.native
           .send('osSpeaker', {'uuid': r.service.liveUuid, 'speaker': true});
       await r.settle();
       expect(r.voice.speakers, 1);
       expect(r.voice.state.isSpeakerOn, isTrue);
+      expect(r.native.lastOf('setSpeaker')['speaker'], isTrue);
     });
 
-    test('our own echo, a stranger uuid and a held call toggle nothing',
+    // The iron rule: a connected headset keeps the audio. The press changes
+    // nothing, so the icon stays off; no sheet opens from a notification.
+    for (final headset in [AudioRouteKind.wired, AudioRouteKind.bluetooth]) {
+      for (final handsFree in [false, true]) {
+        test('a press with ${headset.name} active leaves route and icon '
+            '(hands-free $handsFree)', () async {
+          final r = await _rig(
+              call: _outgoing('c1').copyWith(
+                  status: CallStatus.active, isSpeakerOn: handsFree),
+              route: headset);
+          final uuid = r.service.liveUuid;
+          expect(r.native.lastOf('begin')['speaker'], isFalse);
+          r.native.clear();
+          await r.native.send('osSpeaker', {'uuid': uuid, 'speaker': true});
+          await r.settle();
+          expect(r.call.speakers, 0);
+          expect(r.call.state.isSpeakerOn, handsFree);
+          expect(r.routes.state.activeKind, headset);
+          expect(r.native.of('setSpeaker'), isEmpty);
+        });
+      }
+    }
+
+    test('our own echo, a stranger uuid and a held call change nothing',
         () async {
-      final r = await _rig(voice: _room(speaker: true));
+      final r = await _rig(
+          voice: _room(speaker: true), route: AudioRouteKind.speaker);
       final uuid = r.service.liveUuid;
       await r.native.send('osSpeaker', {'uuid': uuid, 'speaker': true});
       await r.native.send('osSpeaker', {'uuid': 'stranger', 'speaker': false});
@@ -745,11 +857,13 @@ void main() {
       await r.native.send('osSpeaker', {'uuid': uuid, 'speaker': false});
       await r.settle();
       expect(r.voice.speakers, 0);
+      expect(r.routes.state.activeKind, AudioRouteKind.speaker);
     });
 
     test('iOS (CallKit) is never sent a speaker', () async {
       debugOsCallSpeakerAction = false;
-      final r = await _rig(voice: _room(speaker: true));
+      final r = await _rig(
+          voice: _room(speaker: true), route: AudioRouteKind.speaker);
       r.voice.set(_room());
       await r.settle();
       expect(r.native.lastOf('begin').containsKey('speaker'), isFalse);
@@ -1569,18 +1683,120 @@ void main() {
       expect(await tapMute(tester, held: true), 0);
     });
   });
+
+  // A carrier call holds ours: the loudspeaker would move the carrier call's
+  // audio, so Speaker and the route sheet ask the OS to resume, like Unmute.
+  group('the in-call speaker control', () {
+    // The round button; its word sits under it, outside the press target.
+    final speaker = find.byType(HollowPressable).first;
+    late int toggles;
+    late List<AudioRoute> picked;
+
+    Future<_HeldService> pump(WidgetTester tester,
+        {required bool held, List<AudioRoute> attached = const []}) async {
+      toggles = 0;
+      picked = [];
+      final service = _HeldService(held);
+      await tester.pumpWidget(ProviderScope(
+        overrides: [
+          osCallServiceProvider.overrideWithValue(service),
+          audioRouteProvider
+              .overrideWith(() => _Routes(AudioRouteKind.earpiece, attached)),
+        ],
+        child: MaterialApp(
+          theme: HollowThemeData.dark(),
+          home: Scaffold(
+            body: Consumer(
+              builder: (context, ref, _) => MobileCallControlRow(controls: [
+                speakerControl(context, ref,
+                    on: false,
+                    toggle: () => toggles++,
+                    select: (route) async => picked.add(route)),
+              ]),
+            ),
+          ),
+        ),
+      ));
+      return service;
+    }
+
+    testWidgets('a tap toggles while nothing holds the call', (tester) async {
+      final service = await pump(tester, held: false);
+      await tester.tap(speaker);
+      await tester.pump();
+      expect(toggles, 1);
+      expect(service.unholdAsks, 0);
+    });
+
+    testWidgets('held: a tap asks to resume and moves nothing',
+        (tester) async {
+      final service = await pump(tester, held: true);
+      await tester.tap(speaker);
+      await tester.pumpAndSettle();
+      expect(toggles, 0);
+      expect(service.unholdAsks, 1);
+    });
+
+    testWidgets('held: a long press opens no route sheet', (tester) async {
+      final service =
+          await pump(tester, held: true, attached: [_earpiece, _buds]);
+      await tester.longPress(speaker);
+      await tester.pumpAndSettle();
+      expect(find.text('Audio device'), findsNothing);
+      expect(service.unholdAsks, 1);
+    });
+
+    testWidgets('held with a headset: a tap opens no route sheet',
+        (tester) async {
+      final service =
+          await pump(tester, held: true, attached: [_earpiece, _buds]);
+      await tester.tap(speaker);
+      await tester.pumpAndSettle();
+      expect(find.text('Audio device'), findsNothing);
+      expect(service.unholdAsks, 1);
+    });
+
+    testWidgets('a hold that begins while the sheet is open: a pick moves '
+        'nothing', (tester) async {
+      final service =
+          await pump(tester, held: false, attached: [_earpiece, _buds]);
+      await tester.tap(speaker);
+      await tester.pumpAndSettle();
+      expect(find.text('Audio device'), findsOneWidget);
+      service.heldNow = true;
+      await tester.tap(find.text('Buds'));
+      await tester.pumpAndSettle();
+      expect(picked, isEmpty);
+      expect(service.unholdAsks, 1);
+      expect(find.text('Audio device'), findsNothing);
+    });
+
+    testWidgets('unheld, a pick reaches the call', (tester) async {
+      await pump(tester, held: false, attached: [_earpiece, _buds]);
+      await tester.longPress(speaker);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Buds'));
+      await tester.pumpAndSettle();
+      expect(picked, [_buds]);
+    });
+  });
 }
+
+const _earpiece =
+    AudioRoute(id: 'earpiece', label: 'Phone', kind: AudioRouteKind.earpiece);
+const _buds =
+    AudioRoute(id: 'bluetooth', label: 'Buds', kind: AudioRouteKind.bluetooth);
 
 T _noRead<T>(ProviderListenable<T> provider) =>
     throw UnimplementedError('not read in this test');
 
 class _HeldService extends OsCallService {
-  final bool _held;
+  bool heldNow;
   int unholdAsks = 0;
-  _HeldService(this._held) : super(_noRead, _Native());
+  _HeldService(this.heldNow) : super(_noRead, _Native());
 
   @override
-  bool get held => _held;
+  bool get held => heldNow;
 
   @override
   void requestUnhold() => unholdAsks++;

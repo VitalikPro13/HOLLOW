@@ -32,7 +32,7 @@ The same adapters feed the phone: `MobileCallScreen` builds `DmCallStageSource(m
 - **The minimised call** (`MobileMinimisedCall`, B3): 56 tall, `radiusXl`, `overlay`, hairline, no shadow (it docks, never floats): in `MobileShell`'s column between the tab and the status strips (#154: floating 12 px above the nav bar it covered the last rows and the status strip's close), at the foot of a server page, under the header in `MobileChatRoute`. DM: the person's 36 avatar with their ring, the name, the mono timer in success ("Calling" while it rings), `CallMuteButton` and `CallLeaveButton` (Cancel while ringing). Room: the server's avatar, the channel, the timer, Mute, Leave through `leaveVoiceRoom` (B6: a meeting leaves or ends the meeting). The BODY opens the call (`openMobileDmCall` / `openMobileVoiceRoom`). No dragging.
 - **Incoming** (`MobileIncomingCallOverlay`, mounted in `app.dart`'s mobile Stack in place of the desktop card): full screen canvas, avatar 128 (its frame kept: a ringing screen has no speaking cue), the name in `display` in their colour, "Voice call" / "Video call", the leave-the-room warning, a red Decline and a teal Accept (72, labels under). Accept answers AND opens the call screen through `hollowNavigatorKey` (B3). No countdown dial, no glow. The ringtone is `CallRingtone` (`call/call_ringtone.dart`), shared with the desktop card.
 - Wakelock while video or a share is on screen; both screens close themselves (`removeRoute` when not on top) when the call or room ends.
-- **The OS sees the call** (#154, wiki `os_calls`): CallKit / Telecom mirror a DM call from the moment it is answered; rooms and meetings never become system calls (Vitalik, Nov 22). While the OS holds it (a carrier call), `CallMuteButton` and the screens' mute and deafen controls ask the OS to resume instead of acting (`unlessOsHeld`); a new control of that kind does the same. Opening a call screen while held only shows it (Vitalik, Nov 21).
+- **The OS sees the call** (#154, wiki `os_calls`): CallKit / Telecom mirror a DM call from the moment it is answered; rooms and meetings never become system calls (Vitalik, Nov 22). While the OS holds it (a carrier call), `CallMuteButton` and the screens' mute, deafen and Speaker controls and the route sheet ask the OS to resume instead of acting (`unlessOsHeld`); a new control of that kind does the same. Opening a call screen while held only shows it (Vitalik, Nov 21).
 
 ## A call the link ended (#154, Nov 24)
 
@@ -47,7 +47,9 @@ The same adapters feed the phone: `MobileCallScreen` builds `DmCallStageSource(m
   desktop `DmCallRow`, the phone `MobileCallScreen` (its idle listener skips the close while a
   linger names this peer, and closes when the linger ends) and `MobileMinimisedCall` show the
   person, "Connection lost" and a `LostCallCountdown` badge ("5 s" .. "1 s", hidden from screen
-  readers). A hang-up, decline, cancel or a call that never connected closes at once; any new
+  readers). A hang-up, decline, cancel or a call that never connected closes at once, and so does
+  a hang-up (ours or theirs) the give-up crosses: an end already under way (`_endCause` set) owns
+  the teardown and keeps its cause; any new
   call id clears it at once (`LostCallNotifier.build` listens). Voice rooms get the labels only.
   Tests: `test/lost_call_test.dart`, `test/widget/call_link_labels_test.dart`.
 

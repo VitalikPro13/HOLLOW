@@ -8,6 +8,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../hidden_notification.dart';
 import '../models/call_record.dart';
 import '../providers/app_lock_provider.dart';
+import '../providers/audio_route_provider.dart';
 import '../providers/call_provider.dart';
 import '../providers/conference_provider.dart';
 import '../providers/duress_provider.dart';
@@ -17,6 +18,7 @@ import '../providers/shell_tab.dart' show ProviderRead;
 import '../providers/voice_channel_provider.dart';
 import '../../rust/api/network.dart' as network_api;
 import '../../rust/api/storage.dart' as storage_api;
+import 'audio_route.dart';
 import 'os_call_avatar.dart';
 
 /// The `hollow/os_call` channel (DESIGN_OS_CALLS 1.2), behind an interface so
@@ -76,6 +78,8 @@ final osCallServiceProvider = Provider<OsCallService?>((ref) {
   ref.listen(callProvider, poke);
   ref.listen(voiceChannelProvider, poke);
   ref.listen(conferenceProvider, poke);
+  // The notification's Speaker shows the route audio is on.
+  if (osCallSpeakerAction) ref.listen(audioRouteProvider, poke);
   ref.listen(appLockedProvider, poke);
   ref.listen(identityProtectionProvider, poke);
   ref.onDispose(service.dispose);
@@ -574,17 +578,20 @@ class OsCallService {
     });
   }
 
-  /// Android's notification Speaker: the app's own toggle, so the headset
-  /// rule holds (a connected headset keeps the audio). Never while held: the
-  /// route would move the carrier call.
+  /// Android's notification Speaker, judged against the route audio is on
+  /// (what its icon shows). A connected headset keeps the audio, so a press
+  /// then changes nothing and the icon stays off; the route sheet is the
+  /// app's, never opened from here. Never while held: the route would move
+  /// the carrier call.
   void _osSpeaker(_Mirror mirror, bool speaker) {
     if (mirror.held) return;
+    final route = _read(audioRouteProvider).activeKind;
+    if (route != null && route.isExternal) return;
+    if (speaker == (route == AudioRouteKind.speaker)) return;
     if (mirror.kind == OsCallKind.dm) {
-      if (speaker != _read(callProvider).isSpeakerOn) {
-        _read(callProvider.notifier).toggleSpeaker();
-      }
-    } else if (speaker != _read(voiceChannelProvider).isSpeakerOn) {
-      _read(voiceChannelProvider.notifier).toggleSpeaker();
+      _read(callProvider.notifier).setSpeaker(speaker);
+    } else {
+      _read(voiceChannelProvider.notifier).setSpeaker(speaker);
     }
   }
 

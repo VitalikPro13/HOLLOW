@@ -71,10 +71,14 @@ decisions in its section 11. Android: `OsCallBridge.kt`, `HollowCallService.kt` 
   notification's Unmute during a carrier call) is the app's Unmute: it asks `requestUnhold` and
   changes nothing itself (under the mute/deafen model an unmute also undeafens, which would put us
   back into the room during the carrier call); the OS is still told the truth. `osSpeaker`
-  (Android's notification Speaker) -> the provider's `toggleSpeaker()` (DM or room), so the
-  headset rule holds (a connected headset keeps the audio); ignored while held (the route would
-  move the carrier call). Dart keeps the notification's Speaker in step with `setSpeaker`
-  (`OsSession.speaker`, Android only: `osCallSpeakerAction`), and `begin` carries the first value.
+  (Android's notification Speaker) is judged against the ROUTE audio is on
+  (`audioRouteProvider.activeKind`), never hands-free: a headset (wired, Bluetooth, car) active =
+  ignored, the headset keeps the audio and the icon stays off (no sheet opens from a
+  notification); otherwise the provider's `setSpeaker(on)` (DM or room, a set, never a flip:
+  `isSpeakerOn` is true for a headset too and can be stale), through `preferLoudRoute`; ignored
+  while held (the route would move the carrier call). The notification's Speaker state IS the
+  route: `OsSession.speaker` = `activeKind == speaker` (Android only: `osCallSpeakerAction`; the
+  service listens to `audioRouteProvider`), sent with `setSpeaker`, the first value in `begin`.
 - Mute and deafen are ONE model (`MuteDeafen`, `lib/src/core/mute_deafen.dart`, Nov 24): deafen
   mutes the mic, Unmute while deafened also undeafens, undeafen gives back the mic from before
   the deafen. Both notifiers go through it (`_setMic`), so the button, the transmit gate and the
@@ -83,7 +87,10 @@ decisions in its section 11. Android: `OsCallBridge.kt`, `HollowCallService.kt` 
   restore exactly on `osHold(false)` only (the undeafen gives the pre-hold mic back by the model;
   the mute compare after it is a safety net). While held, the app's unmute and undeafen do NOT
   act: they ask the OS (`requestUnhold`) through `unlessOsHeld` (`CallMuteButton`, the phone
-  control rows). Opening a call screen while held ONLY shows it, never asks (Vitalik, Nov 21:
+  control rows). Speaker and the route sheet do the same (`speakerControl` tap and long press,
+  the sheet's pick): a route change during a carrier call would move ITS audio. Below Dart, the
+  bridge parks every route request while held (`RouteGate`, JVM-pinned) and applies the newest
+  on the resume, so no entry point (a re-assert, a camera's speaker switch) moves it either. Opening a call screen while held ONLY shows it, never asks (Vitalik, Nov 21:
   a resume during a carrier call may hold the carrier call). A CallKit reset while held gives
   the audio back first.
 - `CallNotifier.lastEndCause` (the `end` reason): set once per call by its FIRST `_cleanup`,
@@ -192,8 +199,9 @@ decisions in its section 11. Android: `OsCallBridge.kt`, `HollowCallService.kt` 
   wanted) and `enableSpeakerphone` / `enableSpeakerButPreferBluetooth` / `selectAudioOutput`
   go to the bridge's `requestRoute`, mapped by `AudioEndpointMapping.forRequest` (headset wins:
   "loud" = Bluetooth, else wired, else speaker; speaker off = the headset, else the earpiece;
-  an exact pick only if it exists) and sent with `requestEndpointChange`. A request before the
-  add waits for the endpoint list. `hollowSelectedAudioOutput` reads Telecom's
+  an exact pick only if it exists) and sent with `requestEndpointChange`. A request waits in
+  `RouteGate` until the endpoint list is known and while a carrier call holds ours (Telecom's
+  endpoint is then the carrier call's audio); the newest waiting one goes on the resume. `hollowSelectedAudioOutput` reads Telecom's
   `currentCallEndpoint`; every endpoint change fires the fork's `onDeviceChange` for every
   engine. The start route goes in as `preferredStartingCallEndpoint` (`loud` -> speaker, else
   earpiece, nothing while a headset is attached) because core-telecom otherwise may move a call
@@ -279,8 +287,8 @@ decisions in its section 11. Android: `OsCallBridge.kt`, `HollowCallService.kt` 
 ## Traps
 
 - A new call surface or a new way into one needs nothing here as long as it lands in the
-  three providers; a new in-call unmute/undeafen control or call screen entry wraps its action
-  in `unlessOsHeld`.
+  three providers; a new in-call unmute/undeafen/speaker/route control or call screen entry
+  wraps its action in `unlessOsHeld`.
 - Never add `setActive` to the fork on iOS: the session belongs to CallKit or `HollowCallAudio`.
 - The sounds-category restore sees only `HollowCallAudio`'s holders. Audio it does not track (a
   voice note being recorded by `record` or played by audioplayers, inline video, the settings

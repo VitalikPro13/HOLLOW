@@ -322,6 +322,49 @@ void main() {
     });
   });
 
+  // The call notification's Speaker asks for a state, never a flip: it is
+  // judged against the route audio is on, which hands-free can differ from.
+  group('a set from the call notification', () {
+    test('a DM call: on stays on, off goes to the earpiece, and it counts '
+        "as the person's choice", () async {
+      api
+        ..stored = 'false'
+        ..readDelay = const Duration(milliseconds: 300);
+      final c = container();
+      final call = c.read(callProvider.notifier);
+      await call.acceptCall();
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      call.debugVoiceService.onConnected!('peer');
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      expect(c.read(callProvider).isSpeakerOn, isTrue, reason: 'loud default');
+      call.setSpeaker(true);
+      expect(c.read(callProvider).isSpeakerOn, isTrue, reason: 'a set toggled');
+      await Future<void>.delayed(const Duration(milliseconds: 600));
+      expect(c.read(callProvider).isSpeakerOn, isTrue,
+          reason: 'the late read overrode the choice');
+      calls.clear();
+      call.setSpeaker(false);
+      call.setSpeaker(false);
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      expect(c.read(callProvider).isSpeakerOn, isFalse);
+      expect(forcedEarpiece(), isTrue);
+    });
+
+    test('a room: a set never toggles', () async {
+      final c = ProviderContainer(overrides: [
+        callProvider.overrideWith(_Idle.new),
+        voiceChannelProvider.overrideWith(_InRoom.new),
+      ]);
+      addTearDown(c.dispose);
+      final room = c.read(voiceChannelProvider.notifier);
+      room.setSpeaker(true);
+      expect(c.read(voiceChannelProvider).isSpeakerOn, isTrue);
+      room.setSpeaker(false);
+      room.setSpeaker(false);
+      expect(c.read(voiceChannelProvider).isSpeakerOn, isFalse);
+    });
+  });
+
   group("the route reset never lands under someone else's audio", () {
     test('declining a DM ring while in a voice room keeps the room loud',
         () async {

@@ -5,7 +5,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../age_gate.dart';
 import '../hidden_notification.dart';
+import '../services/audio_route.dart' show AudioRouteKind;
 import 'app_lock_provider.dart';
+import 'audio_route_provider.dart';
 import 'call_provider.dart';
 import 'conference_provider.dart';
 import 'device_link_provider.dart';
@@ -38,7 +40,9 @@ class OsSession {
   final bool muted;
   final bool video;
 
-  /// The app's Speaker button, which Android's call notification mirrors.
+  /// The loudspeaker plays the call: the ACTIVE route, never hands-free
+  /// (`isSpeakerOn` is true for a headset too). Android's call notification
+  /// shows it.
   final bool speaker;
 
   /// Informational: both platforms report every session as a placed call.
@@ -136,7 +140,9 @@ OsSession? deriveOsSession({
   required CallState call,
   required VoiceChannelState voice,
   required ConferenceState conference,
+  AudioRouteKind? route,
 }) {
+  final loud = route == AudioRouteKind.speaker;
   final callId = call.callId;
   if (callId != null) {
     final outgoing = call.direction == CallDirection.outgoing;
@@ -147,7 +153,7 @@ OsSession? deriveOsSession({
         kind: OsCallKind.dm,
         live: call.status == CallStatus.active,
         muted: call.isMuted,
-        speaker: call.isSpeakerOn,
+        speaker: loud,
         video: call.isVideoCall ||
             call.isVideoEnabled ||
             call.remoteVideoEnabled ||
@@ -172,7 +178,7 @@ OsSession? deriveOsSession({
       kind: OsCallKind.meeting,
       live: true,
       muted: voice.isMuted,
-      speaker: voice.isSpeakerOn,
+      speaker: loud,
       video: video,
       outgoing: true,
     );
@@ -182,7 +188,7 @@ OsSession? deriveOsSession({
     kind: OsCallKind.room,
     live: true,
     muted: voice.isMuted,
-    speaker: voice.isSpeakerOn,
+    speaker: loud,
     video: video,
     outgoing: true,
   );
@@ -194,6 +200,9 @@ final osSessionProvider = Provider<OsSession?>((ref) {
     call: ref.watch(callProvider),
     voice: ref.watch(voiceChannelProvider),
     conference: ref.watch(conferenceProvider),
+    route: osCallSpeakerAction
+        ? ref.watch(audioRouteProvider).activeKind
+        : null,
   );
 });
 

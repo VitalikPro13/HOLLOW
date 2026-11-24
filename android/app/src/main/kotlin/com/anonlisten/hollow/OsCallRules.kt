@@ -256,3 +256,40 @@ class MuteMirror {
     /** At the end: true = clear the global mute, when our call (or its Telecom side) set it. */
     fun clearAtEnd(globalNow: Boolean): Boolean = !held && globalNow && (wroteMute || telecomMuted)
 }
+
+/**
+ * The app's route requests while Telecom carries the call. A request waits until Telecom has
+ * listed its endpoints, and while a carrier call holds ours: Telecom's endpoint is then the
+ * carrier call's audio, so a move would take that call to the loudspeaker. The newest waiting
+ * request is applied once both clear.
+ */
+class RouteGate {
+    /** The newest request not applied yet. */
+    var waiting: String? = null
+        private set
+    private var held = false
+    private var ready = false
+
+    /** A route request. Returns the route to apply now, or null while it waits. */
+    fun request(route: String): String? {
+        waiting = route
+        return release()
+    }
+
+    /** Telecom's endpoint list changed; [ready] = it lists any. Returns a route to apply now. */
+    fun onEndpoints(ready: Boolean): String? {
+        this.ready = ready
+        return release()
+    }
+
+    /** Telecom held or resumed our call. Returns the route to apply now (on a resume). */
+    fun onHold(held: Boolean): String? {
+        this.held = held
+        return release()
+    }
+
+    private fun release(): String? {
+        if (held || !ready) return null
+        return waiting.also { waiting = null }
+    }
+}
