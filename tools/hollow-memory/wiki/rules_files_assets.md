@@ -80,7 +80,7 @@ stay in CLAUDE.md. Wiki `rust_file_handler`, `emotes`, `hollowpack`.
   holding a movie has the movie walked too (HOL-SEC-307), and so is a HEIC motion photo's clip
   (top-level `mpvd`, offsets from the clip's start, one budget, unparseable = refused); a JPEG
   motion photo's clip after EOI never leaves (WebP decode, or `strip_jpeg` ends the file at the
-  first EOI) (HOL-SEC-308); `camm` tracks, `gps ` boxes and
+  first EOI) (HOL-SEC-308); Samsung's `sefd` box (capture time, country code, path hash, embedded media) becomes `free` at a video's, a clip's or a HEIF's top level and inside `moov`, unread (HOL-SEC-309); `camm` tracks, `gps ` boxes and
   Matroska attached files that are not fonts go too, fonts and Chapters STAY (Vitalik,
   HOL-SEC-306). Residuals: subtitle tracks, dashcam GPS blocks inside `mdat`, chapter
   titles. Media that does not parse is REFUSED

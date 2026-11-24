@@ -270,7 +270,10 @@ fn strip_movie(d: &mut [u8], budget: &mut Budget) -> Result<(), String> {
                 saw_moov = true;
                 strip_moov(d, &b, fragmented, budget)?;
             }
-            b"udta" | b"meta" | b"uuid" | b"gps " => to_free(d, &b),
+            // Samsung's `sefd` (SEF) holds the capture time, the network's
+            // country code, a hash of the original path and embedded media;
+            // only padding says nothing (HOL-SEC-309).
+            b"udta" | b"meta" | b"uuid" | b"gps " | b"sefd" => to_free(d, &b),
             _ => {}
         }
     }
@@ -477,7 +480,7 @@ fn strip_moov(d: &mut [u8], moov: &Bx, fragmented: bool, budget: &mut Budget) ->
             b"trak" => strip_trak(d, &b, fragmented, budget)?,
             // A dashcam's `gps ` box holds its GPS log or an index to it
             // (HOL-SEC-306).
-            b"udta" | b"meta" | b"uuid" | b"gps " => to_free(d, &b),
+            b"udta" | b"meta" | b"uuid" | b"gps " | b"sefd" => to_free(d, &b),
             _ => {}
         }
     }
@@ -695,7 +698,7 @@ fn is_heif(d: &[u8]) -> bool {
 fn strip_heif(d: &mut [u8]) -> Result<(), String> {
     let top = boxes(d, 0..d.len(), true)?;
     for b in top.iter() {
-        if matches!(&b.kind, b"uuid" | b"udta" | b"gps ") {
+        if matches!(&b.kind, b"uuid" | b"udta" | b"gps " | b"sefd") {
             to_free(d, &b);
         }
     }
@@ -1611,6 +1614,39 @@ pub(crate) mod fixtures {
         let hdlr = full(b"hdlr", 0, &[&[0u8; 4][..], b"meta", &[0; 12]].concat());
         let trak = bx(b"trak", &bx(b"mdia", &[hdlr, bx(b"minf", &bx(b"stbl", &[stsz, stsc, stco].concat()))].concat()));
         [ftyp, bx(b"mdat", &vec![7u8; samples as usize]), bx(b"moov", &trak)].concat()
+    }
+
+    /// The capture time `samsung_sef` names, in milliseconds.
+    pub(crate) const SEF_TIME: &[u8] = b"1700000000123";
+
+    /// Samsung's extended data box (`sefd`, HOL-SEC-309) laid out as an S22
+    /// Ultra writes it: entries, then a `SEFH` directory and the `SEFT` mark.
+    pub(crate) fn samsung_sef() -> Vec<u8> {
+        let entries: [(&[u8; 2], &[u8], &[u8]); 4] = [
+            (&[0x01, 0x0a], b"Image_UTC_Data", SEF_TIME),
+            (&[0xa1, 0x0a], b"MCC_Data", b"001"),
+            (&[0xa1, 0x0b], b"Original_Path_Hash_Key", b"639bc73b603a1e8360ba7e17a7833933/1"),
+            (&[0x30, 0x0a], b"MotionPhoto_Data", b"mpv2"),
+        ];
+        let (mut body, mut dir) = (Vec::new(), Vec::new());
+        let mut at = Vec::new();
+        for (kind, name, value) in entries {
+            at.push((kind, body.len()));
+            body.extend([&[0, 0][..], kind, &(name.len() as u32).to_le_bytes(), name, value].concat());
+        }
+        let sefh = body.len();
+        for (k, (kind, start)) in at.iter().enumerate() {
+            let end = at.get(k + 1).map_or(sefh, |n| n.1);
+            dir.extend([&[0, 0][..], &kind[..], &((sefh - start) as u32).to_le_bytes(), &((end - start) as u32).to_le_bytes()].concat());
+        }
+        let head = [b"SEFH".as_slice(), &107u32.to_le_bytes(), &(at.len() as u32).to_le_bytes()].concat();
+        body.extend([&head[..], &dir, &((head.len() + dir.len() + 4) as u32).to_le_bytes(), b"SEFT"].concat());
+        bx(b"sefd", &body)
+    }
+
+    /// A Samsung video: `mp4_with_location` closed by `samsung_sef`.
+    pub(crate) fn samsung_mp4() -> Vec<u8> {
+        [mp4_with_location(), samsung_sef()].concat()
     }
 }
 
@@ -2715,6 +2751,67 @@ mod tests {
             let path = dir.path().join(name);
             std::fs::write(&path, fixture(name)).expect("write");
             assert!(!holds(&read_for_send(&path).expect(name), LOCATION), "{name}");
+        }
+    }
+
+    // HOL-SEC-309: Samsung's `sefd` box closes its videos, its motion photos'
+    // clips and its HEIC photos. It holds the capture time, the mobile country
+    // code, a hash of the original path, edit history and embedded pictures,
+    // sound and depth maps; the strip frees the whole box.
+
+    /// A `free` box as long as `b`, which every strip leaves alone.
+    fn padding_like(b: &[u8]) -> Vec<u8> {
+        [&b[..4], b"free", &vec![0; b.len() - 8]].concat()
+    }
+
+    fn holds_sef(d: &[u8]) -> bool {
+        [SEF_TIME, b"MCC_Data", b"Original_Path_Hash_Key", b"SEFT", b"sefd"].iter().any(|n| holds(d, n))
+    }
+
+    #[test]
+    fn a_samsung_sef_box_becomes_padding() {
+        let (sef, pad) = (samsung_sef(), padding_like(&samsung_sef()));
+        let out = strip_for_send("mp4", samsung_mp4()).expect("strips");
+        assert!(!holds_sef(&out), "the capture time and country code are gone");
+        assert_eq!(out, [strip_for_send("mp4", mp4_with_location()).unwrap(), pad.clone()].concat(), "only that box changes");
+        assert_eq!(strip_for_send("mp4", out.clone()).unwrap(), out, "stripping twice changes nothing");
+        // Its content is never read: an odd or empty one goes the same way.
+        for odd in [bx(b"sefd", &[]), bx(b"sefd", b"not a trailer")] {
+            let want = [strip_for_send("mp4", mp4_with_location()).unwrap(), padding_like(&odd)].concat();
+            assert_eq!(strip_for_send("mp4", [mp4_with_location(), odd].concat()).unwrap(), want);
+        }
+        // Inside the movie box too.
+        let movie = |b: &[u8]| [bx(b"ftyp", b"isom\0\0\0\0"), bx(b"moov", &[full(b"mvhd", 0, &[0; 96]), b.to_vec()].concat())].concat();
+        assert_eq!(strip_for_send("mov", movie(&sef)).unwrap(), movie(&pad), "a sefd in moov");
+    }
+
+    #[test]
+    fn a_samsung_photo_and_its_clip_lose_their_sef_box() {
+        let (sef, pad) = (samsung_sef(), padding_like(&samsung_sef()));
+        let photo = strip_for_send("heic", heic_with_gps()).unwrap();
+        let out = strip_for_send("heic", [heic_with_gps(), sef.clone()].concat()).expect("strips");
+        assert_eq!(out, [photo, pad.clone()].concat(), "a HEIC's own sefd");
+        // A motion photo's clip closes with one, as the S22 Ultra writes it.
+        let clip = |s: &[u8]| [mp4_with_location(), s.to_vec()].concat();
+        let want = strip_for_send("heic", [heic_with_gps(), bx(b"mpvd", &clip(&pad))].concat()).unwrap();
+        let out = strip_for_send("heic", [heic_with_gps(), bx(b"mpvd", &clip(&sef))].concat()).expect("strips");
+        assert!(!holds_sef(&out));
+        assert_eq!(out, want, "a clip's sefd");
+        let (still, _, real_clip) = motion_parts(&fixture("motion_photo.heic"));
+        let samsung = [still.clone(), bx(b"mpvd", &[real_clip.clone(), sef].concat())].concat();
+        let want = strip_for_send("heic", [still, bx(b"mpvd", &[real_clip, pad].concat())].concat()).unwrap();
+        assert_eq!(strip_for_send("heic", samsung).unwrap(), want, "the made motion photo");
+    }
+
+    /// A Samsung video or photo received and sent on leaves without it.
+    #[test]
+    fn a_forwarded_samsung_file_loses_its_sef_box() {
+        let dir = crate::test_tmp::tempdir().expect("tmp");
+        let clip = bx(b"mpvd", &samsung_mp4());
+        for (name, d) in [("video.mp4", samsung_mp4()), ("photo.heic", [heic_with_gps(), clip].concat())] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, d).expect("write");
+            assert!(!holds_sef(&read_for_send(&path).expect(name)), "{name}");
         }
     }
 }

@@ -72200,3 +72200,80 @@ async fn fms308_a_motion_photo_sent_on_leaves_without_its_clips_location() {
         }
     }
 }
+
+// fix-media-strip-309
+/// HOL-SEC-309: a Samsung video received and sent on leaves without its
+/// `sefd` box (capture time, country code, original path hash).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn fms309_a_samsung_video_sent_on_leaves_without_its_sef_box() {
+    use super::media_strip::fixtures::{samsung_mp4, SEF_TIME};
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    const A_MASTER: u8 = 197;
+    const B_MASTER: u8 = 198;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&b_master]).await;
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[&a_master]).await;
+    expect_dm_pair_ready(&relay, &a, &b, 15).await;
+    drain_events(&mut a);
+    drain_events(&mut b);
+
+    let original = samsung_mp4();
+    assert!(original.windows(SEF_TIME.len()).any(|w| w == SEF_TIME), "precondition: the video names its capture time");
+    let path = b.data_root.join("files").join("samsung.mp4");
+    super::at_rest::write_all(&path, &original).expect("kept at rest");
+    b.cmd_tx
+        .send(NodeCommand::SendFile(Box::new(super::types::SendFilePayload {
+            peer_id: Some(a.master_id.clone()),
+            server_id: None,
+            channel_id: None,
+            file_path: path.to_str().unwrap().to_string(),
+            message_id: "samsung-video".into(),
+            message_text: String::new(),
+            vthumb: None,
+            override_width: None,
+            override_height: None,
+            share_ref: None,
+            voice: false,
+            poster: None,
+            album: None,
+        })))
+        .await
+        .unwrap();
+    let wait = std::time::Duration::from_secs(20);
+    let mut fid = None;
+    assert!(
+        wait_event(&mut a, wait, |ev| match ev {
+            NetworkEvent::FileHeaderReceived { file_id, file_name, .. } if file_name.starts_with("samsung") => {
+                fid = Some(file_id.clone());
+                true
+            }
+            _ => false,
+        })
+        .await,
+        "the header arrives"
+    );
+    let fid = fid.unwrap();
+    let mut stored = None;
+    assert!(
+        wait_event(&mut a, wait, |ev| match ev {
+            NetworkEvent::FileCompleted { file_id, disk_path } if *file_id == fid => {
+                stored = Some(disk_path.clone());
+                true
+            }
+            _ => false,
+        })
+        .await,
+        "the transfer completes"
+    );
+    let got = super::at_rest::read_all(std::path::Path::new(&stored.unwrap())).expect("receiver reads its copy");
+    for gone in [SEF_TIME, b"MCC_Data".as_slice(), b"SEFT"] {
+        assert!(!got.windows(gone.len()).any(|w| w == gone), "the receiver holds {}", String::from_utf8_lossy(gone));
+    }
+    assert_eq!(got, super::media_strip::strip_for_send("mp4", original).unwrap(), "the cleaned copy");
+}
