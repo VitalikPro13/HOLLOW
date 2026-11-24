@@ -332,7 +332,7 @@ Three user-configurable tiers stored in `app_settings`:
 `image_convert.rs:strip_gif_metadata()` -- Strips metadata from GIF without re-encoding (preserves animation). Manual binary parser that:
 - Copies: Header, Logical Screen Descriptor, Global Color Table, Image Descriptors, Local Color Tables, LZW data, Graphic Control Extensions, NETSCAPE2.0 Application Extension (animation loop control).
 - Strips: Comment Extension blocks (0xFE), non-NETSCAPE Application Extension blocks (EXIF, XMP, ICC profiles).
-- Returns the original bytes if the file does not start like a GIF; a block it keeps (unknown extension, NETSCAPE) that runs past the end refuses the whole file (HOL-SEC-267); a dropped block cut short ends the copy there.
+- Returns the original bytes if the file does not start like a GIF; one cut inside its 13-byte header or its global colour table refuses (HOL-SEC-304); a block it keeps (unknown extension, NETSCAPE) that runs past the end refuses the whole file (HOL-SEC-267); a dropped block cut short ends the copy there.
 
 ## get_image_dimensions()
 

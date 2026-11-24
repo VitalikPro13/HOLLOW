@@ -482,6 +482,8 @@ mod node;
 mod sentinel;
 mod storage;
 #[cfg(test)]
+mod test_alloc;
+#[cfg(test)]
 mod test_tmp;
 mod vault;
 mod zip_budget;

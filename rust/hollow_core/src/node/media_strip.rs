@@ -125,8 +125,36 @@ struct Bx {
     kind: [u8; 4],
 }
 
-fn boxes(d: &[u8], range: Range<usize>, top: bool) -> Result<Vec<Bx>, String> {
-    let mut out = Vec::new();
+/// The boxes laid end to end in a range, 13 bytes each: a box takes at least
+/// 8 bytes of the file, and a whole `Bx` apiece made the list five times the
+/// file (HOL-SEC-303). A box ends where the next one starts.
+struct Boxes {
+    starts: Vec<u64>,
+    kinds: Vec<[u8; 4]>,
+    /// Header length: 8, or 16 with a 64-bit size.
+    heads: Vec<u8>,
+    end: usize,
+}
+
+impl Boxes {
+    fn get(&self, k: usize) -> Option<Bx> {
+        let start = *self.starts.get(k)? as usize;
+        let end = self.starts.get(k + 1).map_or(self.end, |s| *s as usize);
+        let fields = start + *self.heads.get(k)? as usize;
+        let kind = *self.kinds.get(k)?;
+        let body = fields + if &kind == b"uuid" { 16 } else { 0 };
+        Some(Bx { start, fields, body, end, kind })
+    }
+
+    fn iter(&self) -> impl Iterator<Item = Bx> + '_ {
+        (0..self.starts.len()).filter_map(|k| self.get(k))
+    }
+}
+
+/// Walks the box headers in `range`, handing `each` every box's start, header
+/// length and kind. Returns how many boxes there were and where the last ends.
+fn walk_boxes(d: &[u8], range: Range<usize>, top: bool, mut each: impl FnMut(usize, u8, [u8; 4])) -> Result<(usize, usize), String> {
+    let mut n = 0;
     let mut i = range.start;
     while i < range.end {
         let left = range.end - i;
@@ -147,13 +175,32 @@ fn boxes(d: &[u8], range: Range<usize>, top: bool) -> Result<Vec<Bx>, String> {
         if size < body as u64 || size > left as u64 {
             return Err(format!("box {} overruns its parent", String::from_utf8_lossy(&kind)));
         }
-        out.push(Bx { start: i, fields: i + fields, body: i + body, end: i + size as usize, kind });
+        each(i, fields as u8, kind);
+        n += 1;
         i += size as usize;
     }
-    Ok(out)
+    Ok((n, i))
 }
 
-fn find<'a>(list: &'a [Bx], kind: &[u8; 4]) -> Option<&'a Bx> {
+fn boxes(d: &[u8], range: Range<usize>, top: bool) -> Result<Boxes, String> {
+    // Counted first, so the lists take exactly the room they hold.
+    let (n, _) = walk_boxes(d, range.clone(), top, |_, _, _| {})?;
+    let mut list = Boxes {
+        starts: Vec::with_capacity(n),
+        kinds: Vec::with_capacity(n),
+        heads: Vec::with_capacity(n),
+        end: range.start,
+    };
+    let (_, end) = walk_boxes(d, range, top, |start, head, kind| {
+        list.starts.push(start as u64);
+        list.heads.push(head);
+        list.kinds.push(kind);
+    })?;
+    list.end = end;
+    Ok(list)
+}
+
+fn find(list: &Boxes, kind: &[u8; 4]) -> Option<Bx> {
     list.iter().find(|b| &b.kind == kind)
 }
 
@@ -173,29 +220,47 @@ fn zero_times(d: &mut [u8], b: &Bx) -> Result<(), String> {
     zero(d, b.body + 4..b.body + 4 + span)
 }
 
+/// How many bytes one file's strip may still zero. Honest metadata samples
+/// and extents never overlap, so they cover the file at most once; ones laid
+/// over each other could ask for terabytes (HOL-SEC-269). Twice the file is
+/// the slack an odd but honest file gets.
+struct Budget(u64);
+
+impl Budget {
+    fn for_file(len: usize) -> Self {
+        Budget(2 * len as u64 + 4096)
+    }
+
+    fn charge(&mut self, r: &Range<usize>) -> Result<(), String> {
+        self.0 = self.0.checked_sub(r.len() as u64).ok_or("the metadata to remove overlaps itself")?;
+        Ok(())
+    }
+}
+
 fn strip_isobmff_video(d: &mut [u8]) -> Result<(), String> {
     let top = boxes(d, 0..d.len(), true)?;
     // A fragmented file keeps its samples in `moof` runs this does not walk.
     let fragmented = find(&top, b"moof").is_some();
+    let mut budget = Budget::for_file(d.len());
     let mut saw_moov = false;
-    for b in &top {
+    for b in top.iter() {
         match &b.kind {
             b"moov" => {
                 saw_moov = true;
-                strip_moov(d, b, fragmented)?;
+                strip_moov(d, &b, fragmented, &mut budget)?;
             }
-            b"udta" | b"meta" | b"uuid" => to_free(d, b),
+            b"udta" | b"meta" | b"uuid" => to_free(d, &b),
             _ => {}
         }
     }
     if saw_moov { Ok(()) } else { Err("no movie box".into()) }
 }
 
-fn strip_moov(d: &mut [u8], moov: &Bx, fragmented: bool) -> Result<(), String> {
-    for b in boxes(d, moov.body..moov.end, false)? {
+fn strip_moov(d: &mut [u8], moov: &Bx, fragmented: bool, budget: &mut Budget) -> Result<(), String> {
+    for b in boxes(d, moov.body..moov.end, false)?.iter() {
         match &b.kind {
             b"mvhd" => zero_times(d, &b)?,
-            b"trak" => strip_trak(d, &b, fragmented)?,
+            b"trak" => strip_trak(d, &b, fragmented, budget)?,
             b"udta" | b"meta" | b"uuid" => to_free(d, &b),
             _ => {}
         }
@@ -203,7 +268,7 @@ fn strip_moov(d: &mut [u8], moov: &Bx, fragmented: bool) -> Result<(), String> {
     Ok(())
 }
 
-fn strip_trak(d: &mut [u8], trak: &Bx, fragmented: bool) -> Result<(), String> {
+fn strip_trak(d: &mut [u8], trak: &Bx, fragmented: bool, budget: &mut Budget) -> Result<(), String> {
     let kids = boxes(d, trak.body..trak.end, false)?;
     if let Some(mdia) = find(&kids, b"mdia") {
         let mkids = boxes(d, mdia.body..mdia.end, false)?;
@@ -211,42 +276,77 @@ fn strip_trak(d: &mut [u8], trak: &Bx, fragmented: bool) -> Result<(), String> {
         // A timed-metadata track is where action cameras and phones keep a GPS
         // trace: the whole track goes, samples included.
         if handler == Some(b"meta".as_slice()) && !fragmented {
-            sample_tables(d, &mkids)?.walk(d.len(), |r| zero(d, r))?;
+            sample_tables(d, &mkids)?.walk(d.len(), |r| {
+                budget.charge(&r)?;
+                zero(d, r)
+            })?;
             to_free(d, trak);
             return Ok(());
         }
         if let Some(mdhd) = find(&mkids, b"mdhd") {
-            zero_times(d, mdhd)?;
+            zero_times(d, &mdhd)?;
         }
-        for b in &mkids {
+        for b in mkids.iter() {
             if matches!(&b.kind, b"udta" | b"meta") {
-                to_free(d, b);
+                to_free(d, &b);
             }
         }
     }
-    for b in &kids {
+    for b in kids.iter() {
         match &b.kind {
-            b"tkhd" => zero_times(d, b)?,
-            b"udta" | b"meta" | b"uuid" => to_free(d, b),
+            b"tkhd" => zero_times(d, &b)?,
+            b"udta" | b"meta" | b"uuid" => to_free(d, &b),
             _ => {}
         }
     }
     Ok(())
 }
 
+/// A track's chunk offsets, as wide as the file wrote them.
+enum Offsets {
+    Short(Vec<u32>),
+    Long(Vec<u64>),
+}
+
+impl Offsets {
+    fn len(&self) -> usize {
+        match self {
+            Offsets::Short(v) => v.len(),
+            Offsets::Long(v) => v.len(),
+        }
+    }
+
+    fn get(&self, k: usize) -> Option<u64> {
+        match self {
+            Offsets::Short(v) => v.get(k).map(|o| u64::from(*o)),
+            Offsets::Long(v) => v.get(k).copied(),
+        }
+    }
+}
+
 /// A track's sample tables, read out of the file before its samples are
-/// zeroed.
+/// zeroed. Each entry is held at the width the file gave it.
 struct SampleTables {
     /// Each sample's size; empty when `fixed` gives every one of `count`.
-    sizes: Vec<u64>,
-    fixed: u64,
+    sizes: Vec<u32>,
+    fixed: u32,
     count: usize,
     runs: Vec<(u32, u32)>,
-    offsets: Vec<u64>,
+    offsets: Offsets,
+}
+
+/// Checks that `n` entries of `width` bytes from `from` lie inside the table's
+/// own box. A count reaching further read other boxes' bytes again for every
+/// track, and held them as entries (HOL-SEC-302).
+fn table_fits(b: &Bx, from: usize, width: usize, n: usize) -> Result<(), String> {
+    if n > b.end.saturating_sub(from) / width {
+        return Err(format!("{} table runs past its box", String::from_utf8_lossy(&b.kind)));
+    }
+    Ok(())
 }
 
 /// Where a track's samples sit in the file, from its sample tables.
-fn sample_tables(d: &[u8], mdia_kids: &[Bx]) -> Result<SampleTables, String> {
+fn sample_tables(d: &[u8], mdia_kids: &Boxes) -> Result<SampleTables, String> {
     let minf = find(mdia_kids, b"minf").ok_or("track without minf")?;
     let minf_kids = boxes(d, minf.body..minf.end, false)?;
     let stbl = find(&minf_kids, b"stbl").ok_or("track without stbl")?;
@@ -260,36 +360,51 @@ fn sample_tables(d: &[u8], mdia_kids: &[Bx]) -> Result<SampleTables, String> {
     }
     // A fixed size names up to one sample per byte of the file, so it is
     // never spread into a list (HOL-SEC-302).
-    let sizes: Vec<u64> = if fixed != 0 {
-        Vec::new()
-    } else {
-        (0..count).map(|k| be32(d, stsz.body + 12 + 4 * k).map(u64::from)).collect::<Result<_, _>>()?
-    };
+    let mut sizes = Vec::new();
+    if fixed == 0 {
+        table_fits(&stsz, stsz.body + 12, 4, count)?;
+        sizes.reserve_exact(count);
+        for k in 0..count {
+            sizes.push(be32(d, stsz.body + 12 + 4 * k)?);
+        }
+    }
 
     let stsc = find(&st, b"stsc").ok_or("track without stsc")?;
-    let runs = be32(d, stsc.body + 4)? as usize;
-    if runs > d.len() {
+    let n = be32(d, stsc.body + 4)? as usize;
+    if n > d.len() {
         return Err("chunk runs past the file".into());
     }
-    let runs: Vec<(u32, u32)> = (0..runs)
-        .map(|k| Ok((be32(d, stsc.body + 8 + 12 * k)?, be32(d, stsc.body + 12 + 12 * k)?)))
-        .collect::<Result<_, String>>()?;
+    table_fits(&stsc, stsc.body + 8, 12, n)?;
+    let mut runs = Vec::with_capacity(n);
+    for k in 0..n {
+        runs.push((be32(d, stsc.body + 8 + 12 * k)?, be32(d, stsc.body + 12 + 12 * k)?));
+    }
 
-    let offsets: Vec<u64> = if let Some(co) = find(&st, b"stco") {
+    let offsets = if let Some(co) = find(&st, b"stco") {
         let n = be32(d, co.body + 4)? as usize;
         if n > d.len() {
             return Err("chunk count past the file".into());
         }
-        (0..n).map(|k| be32(d, co.body + 8 + 4 * k).map(u64::from)).collect::<Result<_, _>>()?
+        table_fits(&co, co.body + 8, 4, n)?;
+        let mut v = Vec::with_capacity(n);
+        for k in 0..n {
+            v.push(be32(d, co.body + 8 + 4 * k)?);
+        }
+        Offsets::Short(v)
     } else {
         let co = find(&st, b"co64").ok_or("track without chunk offsets")?;
         let n = be32(d, co.body + 4)? as usize;
         if n > d.len() {
             return Err("chunk count past the file".into());
         }
-        (0..n).map(|k| be_sized(d, co.body + 8 + 8 * k, 8)).collect::<Result<_, _>>()?
+        table_fits(&co, co.body + 8, 8, n)?;
+        let mut v = Vec::with_capacity(n);
+        for k in 0..n {
+            v.push(be_sized(d, co.body + 8 + 8 * k, 8)?);
+        }
+        Offsets::Long(v)
     };
-    Ok(SampleTables { sizes, fixed: fixed as u64, count, runs, offsets })
+    Ok(SampleTables { sizes, fixed, count, runs, offsets })
 }
 
 impl SampleTables {
@@ -313,14 +428,14 @@ impl SampleTables {
                 continue;
             }
             for chunk in first..=last {
-                let mut at = *offsets.get(chunk as usize - 1).ok_or("chunk past the offset table")?;
+                let mut at = offsets.get(chunk as usize - 1).ok_or("chunk past the offset table")?;
                 for _ in 0..per_chunk {
                     if sample >= self.count {
                         return Ok(());
                     }
                     let size = if self.fixed != 0 { self.fixed } else { *self.sizes.get(sample).ok_or("sample past the size table")? };
                     sample += 1;
-                    let end = at.checked_add(size).filter(|e| *e <= len as u64).ok_or("sample past the file")?;
+                    let end = at.checked_add(u64::from(size)).filter(|e| *e <= len as u64).ok_or("sample past the file")?;
                     each(at as usize..end as usize)?;
                     at = end;
                 }
@@ -343,22 +458,28 @@ fn is_heif(d: &[u8]) -> bool {
 /// rotation lives in item properties, so nothing about how it shows changes.
 fn strip_heif(d: &mut [u8]) -> Result<(), String> {
     let top = boxes(d, 0..d.len(), true)?;
-    for b in &top {
+    for b in top.iter() {
         if &b.kind == b"uuid" || &b.kind == b"udta" {
-            to_free(d, b);
+            to_free(d, &b);
         }
     }
-    let meta = *find(&top, b"meta").ok_or("no meta box")?;
+    let meta = find(&top, b"meta").ok_or("no meta box")?;
     let kids = boxes(d, meta.body + 4..meta.end, false)?;
     let Some(iinf) = find(&kids, b"iinf") else { return Ok(()) };
-    let targets = metadata_items(d, iinf)?;
+    let targets = metadata_items(d, &iinf)?;
     if targets.is_empty() {
         return Ok(());
     }
     let iloc = find(&kids, b"iloc").ok_or("metadata items without locations")?;
-    for r in item_extents(d, iloc, find(&kids, b"idat"), &targets)? {
-        zero(d, r)?;
-    }
+    let idat = find(&kids, b"idat").map(|b| b.body);
+    // The extents are counted against the budget first, then zeroed from a
+    // copy of the table as it was read: the zeroing may reach the table itself
+    // (HOL-SEC-269), and a range per extent held four times the file.
+    let mut budget = Budget::for_file(d.len());
+    let read_to = item_extents(d, iloc.body, d.len(), idat, &targets, |r| budget.charge(&r))?;
+    let table = d.get(iloc.body..read_to).ok_or("iloc read past the file")?.to_vec();
+    let len = d.len();
+    item_extents(&table, 0, len, idat, &targets, |r| zero(d, r))?;
     Ok(())
 }
 
@@ -367,7 +488,7 @@ fn metadata_items(d: &[u8], iinf: &Bx) -> Result<Vec<u32>, String> {
     let version = *d.get(iinf.body).ok_or("empty iinf")?;
     let first = iinf.body + 4 + if version == 0 { 2 } else { 4 };
     let mut out = Vec::new();
-    for infe in boxes(d, first..iinf.end, false)? {
+    for infe in boxes(d, first..iinf.end, false)?.iter() {
         if &infe.kind != b"infe" {
             continue;
         }
@@ -391,45 +512,53 @@ fn metadata_items(d: &[u8], iinf: &Bx) -> Result<Vec<u32>, String> {
     Ok(out)
 }
 
-/// File ranges of the given items' data, from `iloc`.
-fn item_extents(d: &[u8], iloc: &Bx, idat: Option<&Bx>, ids: &[u32]) -> Result<Vec<Range<usize>>, String> {
-    let version = *d.get(iloc.body).ok_or("empty iloc")?;
-    let sizes = *d.get(iloc.body + 4).ok_or("truncated iloc")?;
-    let more = *d.get(iloc.body + 5).ok_or("truncated iloc")?;
+/// Walks an `iloc` whose body starts at `at` in `src` and hands `each` the
+/// range, in a file of `len` bytes, of every extent of the given items.
+/// Returns where in `src` the walk stopped reading.
+fn item_extents(
+    src: &[u8],
+    at: usize,
+    len: usize,
+    idat: Option<usize>,
+    ids: &[u32],
+    mut each: impl FnMut(Range<usize>) -> Result<(), String>,
+) -> Result<usize, String> {
+    let version = *src.get(at).ok_or("empty iloc")?;
+    let sizes = *src.get(at + 4).ok_or("truncated iloc")?;
+    let more = *src.get(at + 5).ok_or("truncated iloc")?;
     let (offset_size, length_size) = ((sizes >> 4) as usize, (sizes & 0x0F) as usize);
     let base_size = (more >> 4) as usize;
     let index_size = if version >= 1 { (more & 0x0F) as usize } else { 0 };
     if [offset_size, length_size, base_size, index_size].iter().any(|s| ![0, 4, 8].contains(s)) {
         return Err("iloc field size".into());
     }
-    let mut i = iloc.body + 6;
+    let mut i = at + 6;
     let count = if version < 2 {
         i += 2;
-        be16(d, i - 2)? as usize
+        be16(src, i - 2)? as usize
     } else {
         i += 4;
-        be32(d, i - 4)? as usize
+        be32(src, i - 4)? as usize
     };
     let ids: std::collections::HashSet<u32> = ids.iter().copied().collect();
-    let mut out = Vec::new();
     for _ in 0..count {
         let id = if version < 2 {
             i += 2;
-            be16(d, i - 2)? as u32
+            be16(src, i - 2)? as u32
         } else {
             i += 4;
-            be32(d, i - 4)?
+            be32(src, i - 4)?
         };
         let method = if version >= 1 {
             i += 2;
-            be16(d, i - 2)? & 0x0F
+            be16(src, i - 2)? & 0x0F
         } else {
             0
         };
         i += 2; // data_reference_index
-        let base = be_sized(d, i, base_size)?;
+        let base = be_sized(src, i, base_size)?;
         i += base_size;
-        let extents = be16(d, i)? as usize;
+        let extents = be16(src, i)? as usize;
         i += 2;
         let wanted = ids.contains(&id);
         // An extent with no fields takes no bytes, so an item may list 65535 of
@@ -442,27 +571,27 @@ fn item_extents(d: &[u8], iloc: &Bx, idat: Option<&Bx>, ids: &[u32]) -> Result<V
         }
         for _ in 0..extents {
             i += index_size;
-            let off = be_sized(d, i, offset_size)?;
+            let off = be_sized(src, i, offset_size)?;
             i += offset_size;
-            let len = be_sized(d, i, length_size)?;
+            let size = be_sized(src, i, length_size)?;
             i += length_size;
             if !wanted {
                 continue;
             }
-            if len == 0 {
+            if size == 0 {
                 return Err("metadata item runs to the end of the file".into());
             }
             let origin = match method {
                 0 => 0u64,
-                1 => idat.ok_or("idat item without idat")?.body as u64,
+                1 => idat.ok_or("idat item without idat")? as u64,
                 _ => return Err("metadata item built from other items".into()),
             };
             let start = origin.checked_add(base).and_then(|s| s.checked_add(off)).ok_or("extent overflow")?;
-            let end = start.checked_add(len).filter(|e| *e <= d.len() as u64).ok_or("extent past the file")?;
-            out.push(start as usize..end as usize);
+            let end = start.checked_add(size).filter(|e| *e <= len as u64).ok_or("extent past the file")?;
+            each(start as usize..end as usize)?;
         }
     }
-    Ok(out)
+    Ok(i)
 }
 
 // ── Matroska and WebM ───────────────────────────────────────────────────────
@@ -1184,10 +1313,10 @@ mod tests {
         let top = boxes(&after, 0..after.len(), true).expect("valid boxes");
         let moov = find(&top, b"moov").expect("moov");
         let kids = boxes(&after, moov.body..moov.end, false).expect("moov children");
-        let kinds: Vec<&[u8; 4]> = kids.iter().map(|b| &b.kind).collect();
-        assert_eq!(kinds, [b"mvhd", b"trak", b"free", b"free", b"free"], "GPS track, udta and meta became padding");
-        let trak = kids[1];
-        let mdia = *find(&boxes(&after, trak.body..trak.end, false).unwrap(), b"mdia").unwrap();
+        let kinds: Vec<[u8; 4]> = kids.iter().map(|b| b.kind).collect();
+        assert_eq!(kinds, [*b"mvhd", *b"trak", *b"free", *b"free", *b"free"], "GPS track, udta and meta became padding");
+        let trak = kids.get(1).unwrap();
+        let mdia = find(&boxes(&after, trak.body..trak.end, false).unwrap(), b"mdia").unwrap();
         let mut ranges = Vec::new();
         let tables = sample_tables(&after, &boxes(&after, mdia.body..mdia.end, false).unwrap()).unwrap();
         tables.walk(after.len(), |r| {
@@ -1395,66 +1524,283 @@ mod tests {
     fn a_fixed_size_sample_table_is_walked_without_holding_it() {
         let mp4 = mp4_with_one_byte_samples(4 << 20);
         let len = mp4.len();
-        let (out, peak) = within(20, move || {
-            held::reset();
-            let out = strip_for_send("mp4", mp4);
-            (out, held::peak())
-        })
-        .expect("in time");
+        let (out, peak) = within(20, move || crate::test_alloc::peak_during(|| strip_for_send("mp4", mp4))).expect("in time");
         let out = out.expect("a GPS track of one-byte samples strips");
         assert_eq!(out.len(), len);
         assert!(out.windows(4).all(|w| w != [7; 4]), "every sample was zeroed");
-        assert!(peak < len as i64 / 4, "held {peak} bytes stripping a {len} byte file");
+        assert!(peak < len / 4, "held {peak} bytes stripping a {len} byte file");
     }
 
-    /// Bytes this thread holds, so a test can bound what the strip keeps. The
-    /// counter is per thread: other tests' allocations never reach it.
-    mod held {
-        use std::alloc::{GlobalAlloc, Layout, System};
-        use std::cell::Cell;
-
-        thread_local! {
-            static NOW_PEAK: Cell<(i64, i64)> = const { Cell::new((0, 0)) };
+    /// HOL-SEC-304: a GIF cut inside its header or colour table is refused;
+    /// 0.14 passed it on unchanged, whatever it held.
+    #[test]
+    fn a_gif_cut_inside_its_header_is_refused() {
+        let gif = gif_with_location();
+        for cut in [6, 12, 13, 18] {
+            assert!(strip_for_send("gif", gif[..cut].to_vec()).is_err(), "cut at {cut}");
         }
+        let mut big_table = gif.clone();
+        big_table[10] = 0x87;
+        assert!(strip_for_send("gif", [&big_table[..], LOCATION].concat()).is_err(), "a colour table the file does not hold");
+        assert_eq!(strip_for_send("gif", gif[..19].to_vec()).unwrap(), gif[..19], "a whole header and table strip");
+    }
 
-        fn note(delta: i64) {
-            let _ = NOW_PEAK.try_with(|c| {
-                let (now, peak) = c.get();
-                c.set((now + delta, peak.max(now + delta)));
-            });
+    /// HOL-SEC-269: the samples and extents to zero may cover the file twice
+    /// over, never more.
+    #[test]
+    fn metadata_may_cover_the_file_at_most_twice() {
+        assert!(strip_for_send("mp4", mp4_with_shared_chunk_offsets(2, 1 << 20)).is_ok());
+        assert!(strip_for_send("mp4", mp4_with_shared_chunk_offsets(3, 1 << 20)).is_err());
+        assert!(strip_for_send("heic", heic_with_overlapping_exif_extents(1, 2, 1 << 20, 1 << 20)).is_ok());
+        assert!(strip_for_send("heic", heic_with_overlapping_exif_extents(1, 3, 1 << 20, 1 << 20)).is_err());
+    }
+
+    /// HOL-SEC-302: each sample table must fit its own box; one entry more is
+    /// refused, whichever table it is.
+    #[test]
+    fn a_sample_table_longer_than_its_box_is_refused() {
+        let at = |d: &[u8], kind: &[u8; 4]| d.windows(4).position(|w| w == kind).unwrap() + 4;
+        let honest = mp4_with_one_byte_samples(16);
+        assert!(strip_for_send("mp4", honest.clone()).is_ok());
+        for (kind, count_at) in [(b"stsc", 4), (b"stco", 4)] {
+            let mut d = honest.clone();
+            let p = at(&d, kind) + count_at;
+            let n = u32::from_be_bytes(d[p..p + 4].try_into().unwrap()) + 1;
+            d[p..p + 4].copy_from_slice(&n.to_be_bytes());
+            assert!(strip_for_send("mp4", d).is_err(), "{}", String::from_utf8_lossy(kind));
         }
+        // Variable sizes: one more than the box holds.
+        let mut d = mp4_with_chunk_runs();
+        let p = at(&d, b"stsz") + 8;
+        d[p..p + 4].copy_from_slice(&4u32.to_be_bytes());
+        assert!(strip_for_send("mov", d).is_err(), "stsz");
+        let co64 = mp4_with_co64(16);
+        assert!(strip_for_send("mp4", co64.clone()).is_ok());
+        let mut d = co64;
+        let p = at(&d, b"co64") + 4;
+        d[p..p + 4].copy_from_slice(&2u32.to_be_bytes());
+        assert!(strip_for_send("mp4", d).is_err(), "co64");
+    }
 
-        pub(super) fn reset() {
-            NOW_PEAK.with(|c| c.set((0, 0)));
-        }
-
-        pub(super) fn peak() -> i64 {
-            NOW_PEAK.with(|c| c.get().1)
-        }
-
-        struct Counting;
-
-        unsafe impl GlobalAlloc for Counting {
-            unsafe fn alloc(&self, l: Layout) -> *mut u8 {
-                note(l.size() as i64);
-                unsafe { System.alloc(l) }
+    /// HOL-SEC-302: a sample table whose count reaches past its box to the end
+    /// of the file is refused before any of it is read, whichever table it is.
+    #[test]
+    fn a_sample_table_reaching_past_its_box_holds_nothing() {
+        for table in [b"stsz", b"stsc", b"stco", b"co64"] {
+            let co = if table == b"co64" {
+                full(b"co64", 0, &[&1u32.to_be_bytes()[..], &0u64.to_be_bytes()].concat())
+            } else {
+                full(b"stco", 0, &[1u32.to_be_bytes(), 0u32.to_be_bytes()].concat())
+            };
+            let stsz = full(b"stsz", 0, &[1u32.to_be_bytes(), 1u32.to_be_bytes()].concat());
+            let stsc = full(b"stsc", 0, &[1u32.to_be_bytes(), 1u32.to_be_bytes(), 1u32.to_be_bytes(), 1u32.to_be_bytes()].concat());
+            let mut d = [bx(b"ftyp", b"isom\0\0\0\0"), bx(b"moov", &meta_trak([stsz, stsc, co].concat())), bx(b"free", &vec![0x33u8; 4 << 20])].concat();
+            let body = body_of(&d, table, 0);
+            let (count_at, first, width) = match table {
+                b"stsz" => (8, 12, 4),
+                b"stsc" => (4, 8, 12),
+                b"stco" => (4, 8, 4),
+                _ => (4, 8, 8),
+            };
+            if table == b"stsz" {
+                d[body + 4..body + 8].copy_from_slice(&0u32.to_be_bytes());
             }
-            unsafe fn alloc_zeroed(&self, l: Layout) -> *mut u8 {
-                note(l.size() as i64);
-                unsafe { System.alloc_zeroed(l) }
-            }
-            unsafe fn dealloc(&self, ptr: *mut u8, l: Layout) {
-                note(-(l.size() as i64));
-                unsafe { System.dealloc(ptr, l) }
-            }
-            unsafe fn realloc(&self, ptr: *mut u8, l: Layout, new_size: usize) -> *mut u8 {
-                note(new_size as i64 - l.size() as i64);
-                unsafe { System.realloc(ptr, l, new_size) }
+            let n = ((d.len() - (body + first)) / width) as u32;
+            d[body + count_at..body + count_at + 4].copy_from_slice(&n.to_be_bytes());
+            let len = d.len() as i64;
+            let (refused, peak) = peak_of(move || strip_for_send("mp4", d).is_err());
+            let name = String::from_utf8_lossy(table);
+            assert!(refused, "{name}");
+            assert!(peak < len / 8, "{name}: held {peak} bytes stripping a {len} byte file");
+        }
+    }
+
+    /// HOL-SEC-303: a box list takes exactly the room its boxes need, so a
+    /// count just past a power of two does not double it.
+    #[test]
+    fn a_box_list_takes_the_room_it_holds() {
+        let mp4 = mp4_of_empty_boxes((512 << 10) + 1);
+        let len = mp4.len() as i64;
+        let (_, peak) = peak_of(move || strip_for_send("mp4", mp4).is_ok());
+        assert!(peak < 2 * len, "held {peak} bytes stripping a {len} byte file");
+    }
+
+    /// A box written with a 64-bit size keeps its whole header when freed.
+    #[test]
+    fn a_box_with_a_64_bit_size_keeps_its_header() {
+        let mut udta = vec![0, 0, 0, 1];
+        udta.extend_from_slice(b"udta");
+        udta.extend_from_slice(&(16 + LOCATION.len() as u64).to_be_bytes());
+        udta.extend_from_slice(LOCATION);
+        let out = strip_for_send("mp4", [mp4_with_location(), udta.clone()].concat()).unwrap();
+        let tail = &out[out.len() - udta.len()..];
+        assert_eq!(tail[..16], [&[0, 0, 0, 1][..], b"free", &udta[8..16]].concat());
+        assert!(tail[16..].iter().all(|b| *b == 0));
+    }
+
+    /// `mp4_with_one_byte_samples` with 64-bit chunk offsets.
+    fn mp4_with_co64(samples: u32) -> Vec<u8> {
+        let mp4 = mp4_with_one_byte_samples(samples);
+        let p = mp4.windows(4).position(|w| w == b"stco").unwrap() - 4;
+        let at = u32::from_be_bytes(mp4[p + 16..p + 20].try_into().unwrap());
+        let co64 = full(b"co64", 0, &[&1u32.to_be_bytes()[..], &(u64::from(at)).to_be_bytes()].concat());
+        // The box grows by 4 bytes: every enclosing size grows with it.
+        let mut out = [&mp4[..p], &co64[..], &mp4[p + 20..]].concat();
+        for kind in [b"moov", b"trak", b"mdia", b"minf", b"stbl"] {
+            let q = out.windows(4).position(|w| w == kind).unwrap() - 4;
+            let n = u32::from_be_bytes(out[q..q + 4].try_into().unwrap()) + 4;
+            out[q..q + 4].copy_from_slice(&n.to_be_bytes());
+        }
+        out
+    }
+
+    // Review round (fix-media-strip): HOL-SEC-269, 302, 303.
+
+    fn meta_trak(stbl: Vec<u8>) -> Vec<u8> {
+        let hdlr = full(b"hdlr", 0, &[&[0u8; 4][..], b"meta", &[0; 12]].concat());
+        bx(b"trak", &bx(b"mdia", &[hdlr, bx(b"minf", &bx(b"stbl", &stbl))].concat()))
+    }
+
+    /// A timed metadata track whose `chunks` chunks all start at the same offset,
+    /// each one sample of `sample` bytes: every sample zeroes the same bytes.
+    fn mp4_with_shared_chunk_offsets(chunks: u32, sample: u32) -> Vec<u8> {
+        let ftyp = bx(b"ftyp", b"isom\0\0\0\0");
+        let at = ftyp.len() as u32 + 8;
+        let stsz = full(b"stsz", 0, &[sample.to_be_bytes(), chunks.to_be_bytes()].concat());
+        let stsc = full(b"stsc", 0, &[1u32.to_be_bytes(), 1u32.to_be_bytes(), 1u32.to_be_bytes(), 1u32.to_be_bytes()].concat());
+        let stco = full(b"stco", 0, &[&chunks.to_be_bytes()[..], &at.to_be_bytes().repeat(chunks as usize)].concat());
+        [ftyp, bx(b"mdat", &vec![7u8; sample as usize]), bx(b"moov", &meta_trak([stsz, stsc, stco].concat()))].concat()
+    }
+
+    /// A HEIC whose one Exif item is listed `items` times, each with `extents`
+    /// extents of `len` bytes from offset 0 (no offset field), then `pad` bytes.
+    fn heic_with_overlapping_exif_extents(items: u16, extents: u16, len: u32, pad: usize) -> Vec<u8> {
+        let infe = full(b"infe", 2, &[&[0, 2, 0, 0][..], b"Exif", b"\0"].concat());
+        let iinf = full(b"iinf", 0, &[&[0, 1][..], &infe].concat());
+        let mut iloc = vec![0x04, 0x00];
+        iloc.extend_from_slice(&items.to_be_bytes());
+        for _ in 0..items {
+            iloc.extend_from_slice(&[0, 2, 0, 0]);
+            iloc.extend_from_slice(&extents.to_be_bytes());
+            iloc.extend_from_slice(&len.to_be_bytes().repeat(extents as usize));
+        }
+        let meta = full(b"meta", 0, &[iinf, full(b"iloc", 0, &iloc)].concat());
+        [bx(b"ftyp", b"heic\0\0\0\0mif1heic"), meta, bx(b"mdat", &vec![1u8; pad])].concat()
+    }
+
+    fn body_of(d: &[u8], kind: &[u8; 4], nth: usize) -> usize {
+        let mut seen = 0;
+        for p in 0..d.len() - 4 {
+            if &d[p..p + 4] == kind {
+                if seen == nth {
+                    return p + 4;
+                }
+                seen += 1;
             }
         }
+        panic!("no {:?}", kind);
+    }
 
-        #[global_allocator]
-        static COUNTING: Counting = Counting;
+    /// One timed metadata track whose variable sizes, chunk runs and chunk
+    /// offsets each claim every entry up to the end of the file, so the three
+    /// tables are read over the same `tail` bytes, far past their own boxes.
+    fn mp4_with_tables_past_their_boxes(tail: usize) -> Vec<u8> {
+        let stsz = full(b"stsz", 0, &[0u32.to_be_bytes(), 0u32.to_be_bytes()].concat());
+        let stsc = full(b"stsc", 0, &0u32.to_be_bytes());
+        let stco = full(b"stco", 0, &0u32.to_be_bytes());
+        let mut d = [bx(b"ftyp", b"isom\0\0\0\0"), bx(b"moov", &meta_trak([stsz, stsc, stco].concat())), bx(b"free", &vec![0x11u8; tail])].concat();
+        let len = d.len();
+        let (sz, sc, co) = (body_of(&d, b"stsz", 0), body_of(&d, b"stsc", 0), body_of(&d, b"stco", 0));
+        d[sz + 8..sz + 12].copy_from_slice(&(((len - (sz + 12)) / 4) as u32).to_be_bytes());
+        d[sc + 4..sc + 8].copy_from_slice(&(((len - (sc + 8)) / 12) as u32).to_be_bytes());
+        d[co + 4..co + 8].copy_from_slice(&(((len - (co + 8)) / 4) as u32).to_be_bytes());
+        d
+    }
+
+    /// `tracks` timed metadata tracks, each with one sample and a chunk offset
+    /// table whose count reaches the end of the file: each track re-reads the
+    /// same `tail` bytes.
+    fn mp4_with_many_tracks_reading_one_tail(tracks: usize, tail: usize) -> Vec<u8> {
+        let ftyp = bx(b"ftyp", b"isom\0\0\0\0");
+        let mdat = bx(b"mdat", &[5u8; 64]);
+        let at = (ftyp.len() + 8) as u32;
+        let trak = || {
+            let stsz = full(b"stsz", 0, &[1u32.to_be_bytes(), 1u32.to_be_bytes()].concat());
+            let stsc = full(b"stsc", 0, &[1u32.to_be_bytes(), 1u32.to_be_bytes(), 1u32.to_be_bytes(), 1u32.to_be_bytes()].concat());
+            let stco = full(b"stco", 0, &[0u32.to_be_bytes(), at.to_be_bytes()].concat());
+            meta_trak([stsz, stsc, stco].concat())
+        };
+        let traks: Vec<u8> = (0..tracks).flat_map(|_| trak()).collect();
+        let mut d = [ftyp, mdat, bx(b"moov", &traks), bx(b"free", &vec![0x22u8; tail])].concat();
+        let len = d.len();
+        let bodies: Vec<usize> = d.windows(4).enumerate().filter(|(_, w)| *w == b"stco").map(|(p, _)| p + 4).collect();
+        assert_eq!(bodies.len(), tracks);
+        for co in bodies {
+            d[co + 4..co + 8].copy_from_slice(&(((len - (co + 8)) / 4) as u32).to_be_bytes());
+        }
+        d
+    }
+
+    /// A moov holding nothing but `n` empty 8-byte boxes.
+    fn mp4_of_empty_boxes(n: usize) -> Vec<u8> {
+        let kids: Vec<u8> = (0..n).flat_map(|_| bx(b"free", &[])).collect();
+        [bx(b"ftyp", b"isom\0\0\0\0"), bx(b"moov", &kids)].concat()
+    }
+
+    fn peak_of<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> (T, i64) {
+        let (out, peak) = within(600, move || crate::test_alloc::peak_during(f)).expect("finished");
+        (out, peak as i64)
+    }
+
+    // ── failing tests ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn rev_a_metadata_track_whose_chunks_share_an_offset_takes_one_pass() {
+        // 8 MiB file: 2^20 chunks, each one 4 MiB sample over the same bytes.
+        let mp4 = mp4_with_shared_chunk_offsets(1 << 20, 4 << 20);
+        let out = within(20, move || strip_for_send("mp4", mp4).is_ok());
+        assert!(out.is_some(), "every sample zeroes the same 4 MiB: the strip is still running after 20 s");
+    }
+
+    #[test]
+    fn rev_a_heic_whose_exif_extents_overlap_takes_one_pass() {
+        // ~8 MiB file: 2^20 extents of the Exif item, each the first 4 MiB.
+        let heic = heic_with_overlapping_exif_extents(16, 0xFFFF, 4 << 20, 4 << 20);
+        let out = within(20, move || strip_for_send("heic", heic).is_ok());
+        assert!(out.is_some(), "every extent zeroes the same 4 MiB: the strip is still running after 20 s");
+    }
+
+    #[test]
+    fn rev_many_metadata_tracks_cost_what_the_file_holds() {
+        // ~6 MiB file: 20,000 tracks, each reading the same 3 MiB tail as offsets.
+        let mp4 = mp4_with_many_tracks_reading_one_tail(20_000, 3 << 20);
+        let out = within(20, move || strip_for_send("mp4", mp4).is_ok());
+        assert!(out.is_some(), "each track re-reads the tail past its own box: still running after 20 s");
+    }
+
+    #[test]
+    fn rev_sample_tables_hold_at_most_twice_the_file() {
+        let mp4 = mp4_with_tables_past_their_boxes(4 << 20);
+        let len = mp4.len() as i64;
+        let (_, peak) = peak_of(move || strip_for_send("mp4", mp4).is_ok());
+        assert!(peak < 2 * len, "held {peak} bytes ({}x) stripping a {len} byte file", peak as f64 / len as f64);
+    }
+
+    #[test]
+    fn rev_a_box_list_holds_at_most_twice_the_file() {
+        let mp4 = mp4_of_empty_boxes(512 << 10);
+        let len = mp4.len() as i64;
+        let (_, peak) = peak_of(move || strip_for_send("mp4", mp4).is_ok());
+        assert!(peak < 2 * len, "held {peak} bytes ({}x) stripping a {len} byte file", peak as f64 / len as f64);
+    }
+
+    #[test]
+    fn rev_a_heic_extent_list_holds_at_most_twice_the_file() {
+        // 2^20 one-byte extents of the Exif item, disjoint enough to finish.
+        let heic = heic_with_overlapping_exif_extents(16, 0xFFFF, 1, 16);
+        let len = heic.len() as i64;
+        let (_, peak) = peak_of(move || strip_for_send("heic", heic).is_ok());
+        assert!(peak < 2 * len, "held {peak} bytes ({}x) stripping a {len} byte file", peak as f64 / len as f64);
     }
 
     /// A file received from someone and sent on is read through the same
@@ -1469,6 +1815,9 @@ mod tests {
             ("got.mp4", mp4_with_empty_chunk_runs(150_000, 150_000), true),
             ("got.heic", heic_with_empty_extents(50_000), true),
             ("got.webp", webp_with_many_exif_chunks(500_000), true),
+            ("cut.gif", gif_with_location()[..13].to_vec(), false),
+            ("shared.mp4", mp4_with_shared_chunk_offsets(1 << 16, 1 << 20), false),
+            ("overlap.heic", heic_with_overlapping_exif_extents(1, 4096, 1 << 20, 1 << 20), false),
         ];
         for (name, bytes, sends) in cases {
             let path = dir.path().join(name);
@@ -1479,8 +1828,11 @@ mod tests {
     }
 
     /// Every honest file strips to the bytes 0.14 gave, and every damaged copy
-    /// gets 0.14's answer, a 0.14 panic counting as a refusal. The digest was
-    /// taken on 0.14.3's base 4232da60, before HOL-SEC-267..269.
+    /// gets 0.14's answer, a 0.14 panic counting as a refusal, except where a
+    /// rule added since refuses it: a GIF cut inside its header or colour table
+    /// (HOL-SEC-304) and a sample table longer than its box (HOL-SEC-302). The
+    /// digest was taken on 0.14.3's base 4232da60 with only those two rules
+    /// added.
     #[test]
     fn strip_answers_as_0_14_did() {
         let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/node/image_check_fixtures");
@@ -1533,7 +1885,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(hex::encode(sha2::Digest::finalize(h)), "ddde9e8b52cd4700d0e00f42f162ee0b832ddbc0b1e45c9f67c7e21451b96f1f");
+        assert_eq!(hex::encode(sha2::Digest::finalize(h)), "2dbb1035d1ff01a117ff4263ad85dc82dab23d43526373513037d4cb0368b217");
     }
 
     /// A GPS track whose chunks hold two, none, one and no samples.

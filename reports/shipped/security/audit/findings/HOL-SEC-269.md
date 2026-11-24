@@ -8,7 +8,8 @@ Severity:    Low                         (Impact L: the send of that file never 
                                           Exploitability L: the user has to send or pass on
                                           a crafted video or HEIC someone gave them)
 Category:    Denial of service (algorithmic complexity on peer-supplied bytes)
-Component:   rust/hollow_core/src/node/media_strip.rs (sample_ranges, item_extents)
+Component:   rust/hollow_core/src/node/media_strip.rs (SampleTables::walk, item_extents,
+             strip_trak, strip_heif)
 Boundary:    TB-2 (a peer's file on our device)
 Traces to:   R-RB-03, C-FILES-03
 Attacker:    anyone who can send the user a file
@@ -35,7 +36,13 @@ Two table walks in the strip cost the product of two sizes a file chooses:
 A run of empty chunks costs one step: it reads no sample and only has to name chunks the
 offset table holds. An item whose extents have no fields costs one step: it is refused if
 it is a metadata item, as before, and skipped otherwise. Each item looks itself up once,
-in a set. The answers are 0.14's for every file, whole or damaged.
+in a set. These answers are 0.14's for every file, whole or damaged.
+
+Samples and extents may also lie over each other, and each one was zeroed in full: an
+8 MiB file could ask for terabytes of zeroing. One file now zeroes at most twice its
+length plus 4 KiB (`Budget`, charged by every sample and extent before it is zeroed);
+past that the file is refused. Honest metadata never overlaps, so it covers the file at
+most once.
 
 ## Test
 
@@ -44,4 +51,7 @@ in a set. The answers are 0.14's for every file, whole or damaged.
 against 300,000 items; each under 20 s, and the refusals 0.14 gave), `a_forwarded_crafted_file_is_refused_or_cleaned_in_time`
 (a received file sent on), harness
 `fms_a_crafted_file_sent_on_is_refused_or_cleaned_in_time` (a received file kept at rest,
-sent on through `SendFile`; the node sends the next file), and `strip_answers_as_0_14_did`.
+sent on through `SendFile`; the node sends the next file), `metadata_may_cover_the_file_at_most_twice`,
+`rev_a_metadata_track_whose_chunks_share_an_offset_takes_one_pass`,
+`rev_a_heic_whose_exif_extents_overlap_takes_one_pass` (found by the hostile review), and
+`strip_answers_as_0_14_did`.

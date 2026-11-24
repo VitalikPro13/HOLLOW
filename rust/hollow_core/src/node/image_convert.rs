@@ -81,19 +81,19 @@ pub fn strip_gif_metadata(data: &[u8]) -> Result<Vec<u8>, String> {
     // Everything is copied except Comment and Application Extension blocks;
     // NETSCAPE2.0 is the exception, it carries the animation loop count.
 
-    if data.len() < 13 || &data[0..3] != b"GIF" {
+    if !data.starts_with(b"GIF") {
         return Ok(data.to_vec()); // Not a GIF, return as-is.
+    }
+    // A GIF cut inside its header or colour table is refused like any other
+    // cut file: passing it on as it is sent whatever followed (HOL-SEC-304).
+    let lsd_end = 13;
+    if data.len() < lsd_end {
+        return Err("a GIF cut inside its header".into());
     }
 
     let mut out = Vec::with_capacity(data.len());
-    let mut i = 0;
-
-    let lsd_end = 13;
-    if data.len() < lsd_end {
-        return Ok(data.to_vec());
-    }
     out.extend_from_slice(&data[..lsd_end]);
-    i = lsd_end;
+    let mut i = lsd_end;
 
     let packed = data[10];
     let has_gct = (packed & 0x80) != 0;
@@ -101,7 +101,7 @@ pub fn strip_gif_metadata(data: &[u8]) -> Result<Vec<u8>, String> {
         let gct_size = 3 * (1 << ((packed & 0x07) + 1));
         let gct_end = i + gct_size as usize;
         if gct_end > data.len() {
-            return Ok(data.to_vec());
+            return Err("a GIF cut inside its colour table".into());
         }
         out.extend_from_slice(&data[i..gct_end]);
         i = gct_end;
