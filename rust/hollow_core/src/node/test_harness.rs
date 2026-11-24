@@ -75602,3 +75602,244 @@ async fn f5lr_a_pending_joiner_that_leaves_never_gets_the_server_back() {
     assert!(!back, "N left its pending join, yet holds the server after the owner came back: listed {:?}, pending {:?}", n.servers(), n.pending_joins());
     drop((n, o, relay));
 }
+
+// fix-media-strip
+/// HOL-SEC-267..269: a crafted file someone sent, kept at rest like any received
+/// file, is refused or cleaned in time when the user sends it on, and the node
+/// lives on to send the next file.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn fms_a_crafted_file_sent_on_is_refused_or_cleaned_in_time() {
+    use super::media_strip::fixtures::{avi_nested, gifs_with_a_kept_block_past_the_end, mp4_with_empty_chunk_runs, mp4_with_location, webp_with_many_exif_chunks};
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    const A_MASTER: u8 = 189;
+    const B_MASTER: u8 = 194;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&b_master]).await;
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[&a_master]).await;
+    expect_dm_pair_ready(&relay, &a, &b, 15).await;
+    drain_events(&mut a);
+    drain_events(&mut b);
+
+    let to = a.master_id.clone();
+    let send = |path: &std::path::Path, mid: &str| {
+        NodeCommand::SendFile(Box::new(super::types::SendFilePayload {
+            peer_id: Some(to.clone()),
+            server_id: None,
+            channel_id: None,
+            file_path: path.to_str().unwrap().to_string(),
+            message_id: mid.to_string(),
+            message_text: String::new(),
+            vthumb: None,
+            override_width: None,
+            override_height: None,
+            share_ref: None,
+            voice: false,
+            poster: None,
+            album: None,
+        }))
+    };
+    let [gif, _] = gifs_with_a_kept_block_past_the_end();
+    let received = b.data_root.join("files");
+    for (name, bytes) in [("got.gif", gif), ("got.avi", avi_nested(200_000))] {
+        let path = received.join(name);
+        super::at_rest::write_all(&path, &bytes).expect("kept at rest");
+        assert!(super::at_rest::is_encrypted(&path), "precondition: the copy is sealed like a received file");
+        b.cmd_tx.send(send(&path, name)).await.unwrap();
+        let refused = wait_event(&mut b, std::time::Duration::from_secs(20), |ev| {
+            matches!(ev, NetworkEvent::FileFailed { file_id, error }
+                if file_id == name && error == super::media_strip::REFUSED)
+        })
+        .await;
+        assert!(refused, "{name} is refused with a reason");
+    }
+
+    // HOL-SEC-301: the photo path strips it once the encoder gives up, then
+    // the receivers' image check stops it; it no longer spins first.
+    let exifs = received.join("exifs.webp");
+    super::at_rest::write_all(&exifs, &webp_with_many_exif_chunks(500_000)).expect("kept at rest");
+    b.cmd_tx.send(send(&exifs, "exifs-1")).await.unwrap();
+    let failed = wait_event(&mut b, std::time::Duration::from_secs(20), |ev| {
+        matches!(ev, NetworkEvent::FileFailed { file_id, .. } if file_id == "exifs-1")
+    })
+    .await;
+    assert!(failed, "a WebP of empty EXIF chunks is judged in time");
+
+    let header = |prefix: &'static str| {
+        move |ev: &NetworkEvent| matches!(ev, NetworkEvent::FileHeaderReceived { file_name, .. } if file_name.starts_with(prefix))
+    };
+    let wait = std::time::Duration::from_secs(20);
+    let tracks = received.join("tracks.mp4");
+    super::at_rest::write_all(&tracks, &mp4_with_empty_chunk_runs(60_000, 60_000)).expect("kept at rest");
+    b.cmd_tx.send(send(&tracks, "tracks-1")).await.unwrap();
+    assert!(wait_event(&mut a, wait, header("tracks")).await, "runs of empty chunks are cleaned in time and sent");
+    let clean = received.join("holiday.mp4");
+    super::at_rest::write_all(&clean, &mp4_with_location()).expect("kept at rest");
+    b.cmd_tx.send(send(&clean, "holiday-1")).await.unwrap();
+    assert!(wait_event(&mut a, wait, header("holiday")).await, "the node lives on and sends the next file");
+}
+
+// fix-media-strip-308
+/// HOL-SEC-308: a motion photo received and sent on leaves without its clip's
+/// location: a HEIC's `mpvd` clip is cleaned as a video, a JPEG leaves as its
+/// still alone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn fms308_a_motion_photo_sent_on_leaves_without_its_clips_location() {
+    use super::media_strip::fixtures::LOCATION;
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    const A_MASTER: u8 = 191;
+    const B_MASTER: u8 = 196;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&b_master]).await;
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[&a_master]).await;
+    expect_dm_pair_ready(&relay, &a, &b, 15).await;
+    drain_events(&mut a);
+    drain_events(&mut b);
+
+    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/node/image_check_fixtures");
+    let wait = std::time::Duration::from_secs(20);
+    for name in ["motion_photo.heic", "motion_photo.jpg"] {
+        let original = std::fs::read(fixtures.join(name)).expect("fixture");
+        assert!(original.windows(LOCATION.len()).any(|w| w == LOCATION), "precondition: {name} names a place");
+        let path = b.data_root.join("files").join(name);
+        super::at_rest::write_all(&path, &original).expect("kept at rest");
+        b.cmd_tx
+            .send(NodeCommand::SendFile(Box::new(super::types::SendFilePayload {
+                peer_id: Some(a.master_id.clone()),
+                server_id: None,
+                channel_id: None,
+                file_path: path.to_str().unwrap().to_string(),
+                message_id: format!("motion-{name}"),
+                message_text: String::new(),
+                vthumb: None,
+                override_width: None,
+                override_height: None,
+                share_ref: None,
+                voice: false,
+                poster: None,
+                album: None,
+            })))
+            .await
+            .unwrap();
+        let mut fid = None;
+        assert!(
+            wait_event(&mut a, wait, |ev| match ev {
+                NetworkEvent::FileHeaderReceived { file_id, file_name, .. } if file_name.starts_with("motion_photo") => {
+                    fid = Some(file_id.clone());
+                    true
+                }
+                _ => false,
+            })
+            .await,
+            "{name}: the header arrives"
+        );
+        let fid = fid.unwrap();
+        let mut stored = None;
+        assert!(
+            wait_event(&mut a, wait, |ev| match ev {
+                NetworkEvent::FileCompleted { file_id, disk_path } if *file_id == fid => {
+                    stored = Some(disk_path.clone());
+                    true
+                }
+                _ => false,
+            })
+            .await,
+            "{name}: the transfer completes"
+        );
+        let got = super::at_rest::read_all(std::path::Path::new(&stored.unwrap())).expect("receiver reads its copy");
+        assert!(!got.windows(LOCATION.len()).any(|w| w == LOCATION), "{name}: the receiver holds no location");
+        if name.ends_with("heic") {
+            assert_eq!(got, super::media_strip::strip_for_send("heic", original).unwrap(), "{name}: the cleaned copy");
+        } else {
+            assert!(!got.windows(4).any(|w| w == b"ftyp"), "{name}: no clip arrives");
+        }
+    }
+}
+
+// fix-media-strip-309
+/// HOL-SEC-309: a Samsung video received and sent on leaves without its
+/// `sefd` box (capture time, country code, original path hash).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn fms309_a_samsung_video_sent_on_leaves_without_its_sef_box() {
+    use super::media_strip::fixtures::{samsung_mp4, SEF_TIME};
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    const A_MASTER: u8 = 197;
+    const B_MASTER: u8 = 198;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&b_master]).await;
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[&a_master]).await;
+    expect_dm_pair_ready(&relay, &a, &b, 15).await;
+    drain_events(&mut a);
+    drain_events(&mut b);
+
+    let original = samsung_mp4();
+    assert!(original.windows(SEF_TIME.len()).any(|w| w == SEF_TIME), "precondition: the video names its capture time");
+    let path = b.data_root.join("files").join("samsung.mp4");
+    super::at_rest::write_all(&path, &original).expect("kept at rest");
+    b.cmd_tx
+        .send(NodeCommand::SendFile(Box::new(super::types::SendFilePayload {
+            peer_id: Some(a.master_id.clone()),
+            server_id: None,
+            channel_id: None,
+            file_path: path.to_str().unwrap().to_string(),
+            message_id: "samsung-video".into(),
+            message_text: String::new(),
+            vthumb: None,
+            override_width: None,
+            override_height: None,
+            share_ref: None,
+            voice: false,
+            poster: None,
+            album: None,
+        })))
+        .await
+        .unwrap();
+    let wait = std::time::Duration::from_secs(20);
+    let mut fid = None;
+    assert!(
+        wait_event(&mut a, wait, |ev| match ev {
+            NetworkEvent::FileHeaderReceived { file_id, file_name, .. } if file_name.starts_with("samsung") => {
+                fid = Some(file_id.clone());
+                true
+            }
+            _ => false,
+        })
+        .await,
+        "the header arrives"
+    );
+    let fid = fid.unwrap();
+    let mut stored = None;
+    assert!(
+        wait_event(&mut a, wait, |ev| match ev {
+            NetworkEvent::FileCompleted { file_id, disk_path } if *file_id == fid => {
+                stored = Some(disk_path.clone());
+                true
+            }
+            _ => false,
+        })
+        .await,
+        "the transfer completes"
+    );
+    let got = super::at_rest::read_all(std::path::Path::new(&stored.unwrap())).expect("receiver reads its copy");
+    for gone in [SEF_TIME, b"MCC_Data".as_slice(), b"SEFT"] {
+        assert!(!got.windows(gone.len()).any(|w| w == gone), "the receiver holds {}", String::from_utf8_lossy(gone));
+    }
+    assert_eq!(got, super::media_strip::strip_for_send("mp4", original).unwrap(), "the cleaned copy");
+}

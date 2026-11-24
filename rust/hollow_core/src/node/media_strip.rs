@@ -70,7 +70,7 @@ pub(crate) fn strip_image(data: Vec<u8>) -> Result<Vec<u8>, String> {
     } else if data.len() >= 12 && &data[0..4] == b"RIFF" && &data[8..12] == b"WEBP" {
         strip_webp(&data)
     } else if data.starts_with(b"GIF8") {
-        Ok(super::image_convert::strip_gif_metadata(&data))
+        super::image_convert::strip_gif_metadata(&data)
     } else if data.starts_with(b"BM") {
         // A bitmap has nowhere to keep a location.
         Ok(data)
@@ -125,35 +125,96 @@ struct Bx {
     kind: [u8; 4],
 }
 
-fn boxes(d: &[u8], range: Range<usize>, top: bool) -> Result<Vec<Bx>, String> {
-    let mut out = Vec::new();
-    let mut i = range.start;
-    while i < range.end {
-        let left = range.end - i;
-        if left < 8 {
-            // Some writers pad the file's tail with a few zero bytes.
-            if top && d[i..range.end].iter().all(|b| *b == 0) {
-                break;
-            }
-            return Err("truncated box header".into());
-        }
-        let kind: [u8; 4] = [d[i + 4], d[i + 5], d[i + 6], d[i + 7]];
-        let (size, fields) = match be32(d, i)? {
-            0 => (left as u64, 8),
-            1 => (be_sized(d, i + 8, 8)?, 16),
-            s => (s as u64, 8),
-        };
-        let body = fields + if &kind == b"uuid" { 16 } else { 0 };
-        if size < body as u64 || size > left as u64 {
-            return Err(format!("box {} overruns its parent", String::from_utf8_lossy(&kind)));
-        }
-        out.push(Bx { start: i, fields: i + fields, body: i + body, end: i + size as usize, kind });
-        i += size as usize;
-    }
-    Ok(out)
+/// The boxes laid end to end in a range, 13 bytes each: a box takes at least
+/// 8 bytes of the file, and a whole `Bx` apiece made the list five times the
+/// file (HOL-SEC-303). A box ends where the next one starts.
+struct Boxes {
+    starts: Vec<u64>,
+    kinds: Vec<[u8; 4]>,
+    /// Header length: 8, or 16 with a 64-bit size.
+    heads: Vec<u8>,
+    end: usize,
 }
 
-fn find<'a>(list: &'a [Bx], kind: &[u8; 4]) -> Option<&'a Bx> {
+impl Boxes {
+    fn get(&self, k: usize) -> Option<Bx> {
+        let start = *self.starts.get(k)? as usize;
+        let end = self.starts.get(k + 1).map_or(self.end, |s| *s as usize);
+        let fields = start + *self.heads.get(k)? as usize;
+        let kind = *self.kinds.get(k)?;
+        let body = fields + if &kind == b"uuid" { 16 } else { 0 };
+        Some(Bx { start, fields, body, end, kind })
+    }
+
+    fn iter(&self) -> impl Iterator<Item = Bx> + '_ {
+        (0..self.starts.len()).filter_map(|k| self.get(k))
+    }
+}
+
+/// The box that starts at `i` in a range ending at `end`, or None where the
+/// range ends.
+fn next_box(d: &[u8], i: usize, end: usize, top: bool) -> Result<Option<Bx>, String> {
+    if i >= end {
+        return Ok(None);
+    }
+    let left = end - i;
+    if left < 8 {
+        // Some writers pad the file's tail with a few zero bytes.
+        if top && d[i..end].iter().all(|b| *b == 0) {
+            return Ok(None);
+        }
+        return Err("truncated box header".into());
+    }
+    let kind: [u8; 4] = [d[i + 4], d[i + 5], d[i + 6], d[i + 7]];
+    let (size, fields) = match be32(d, i)? {
+        0 => (left as u64, 8),
+        1 => (be_sized(d, i + 8, 8)?, 16),
+        s => (s as u64, 8),
+    };
+    let body = fields + if &kind == b"uuid" { 16 } else { 0 };
+    if size < body as u64 || size > left as u64 {
+        return Err(format!("box {} overruns its parent", String::from_utf8_lossy(&kind)));
+    }
+    Ok(Some(Bx { start: i, fields: i + fields, body: i + body, end: i + size as usize, kind }))
+}
+
+/// The boxes laid end to end in `range`, read one at a time and never held.
+fn each_box(d: &[u8], range: Range<usize>, top: bool) -> impl Iterator<Item = Result<Bx, String>> + '_ {
+    let mut at = Some(range.start);
+    std::iter::from_fn(move || match next_box(d, at.take()?, range.end, top) {
+        Ok(Some(b)) => {
+            at = Some(b.end);
+            Some(Ok(b))
+        }
+        Ok(None) => None,
+        Err(e) => Some(Err(e)),
+    })
+}
+
+fn boxes(d: &[u8], range: Range<usize>, top: bool) -> Result<Boxes, String> {
+    // Counted first, so the lists take exactly the room they hold.
+    let mut n = 0;
+    for b in each_box(d, range.clone(), top) {
+        b?;
+        n += 1;
+    }
+    let mut list = Boxes {
+        starts: Vec::with_capacity(n),
+        kinds: Vec::with_capacity(n),
+        heads: Vec::with_capacity(n),
+        end: range.start,
+    };
+    for b in each_box(d, range, top) {
+        let b = b?;
+        list.starts.push(b.start as u64);
+        list.heads.push((b.fields - b.start) as u8);
+        list.kinds.push(b.kind);
+        list.end = b.end;
+    }
+    Ok(list)
+}
+
+fn find(list: &Boxes, kind: &[u8; 4]) -> Option<Bx> {
     list.iter().find(|b| &b.kind == kind)
 }
 
@@ -173,29 +234,292 @@ fn zero_times(d: &mut [u8], b: &Bx) -> Result<(), String> {
     zero(d, b.body + 4..b.body + 4 + span)
 }
 
+/// How many bytes one file's strip may still zero. Honest metadata samples
+/// and extents never overlap, so they cover the file at most once; ones laid
+/// over each other could ask for terabytes (HOL-SEC-269). Twice the file is
+/// the slack an odd but honest file gets.
+struct Budget(u64);
+
+impl Budget {
+    fn for_file(len: usize) -> Self {
+        Budget(2 * len as u64 + 4096)
+    }
+
+    fn charge(&mut self, r: &Range<usize>) -> Result<(), String> {
+        self.0 = self.0.checked_sub(r.len() as u64).ok_or("the metadata to remove overlaps itself")?;
+        Ok(())
+    }
+}
+
 fn strip_isobmff_video(d: &mut [u8]) -> Result<(), String> {
+    strip_movie(d, &mut Budget::for_file(d.len()))
+}
+
+/// Strips a movie laid out from the start of `d`, a whole file or a motion
+/// photo's clip, charging what it zeroes to the file's `budget`.
+fn strip_movie(d: &mut [u8], budget: &mut Budget) -> Result<(), String> {
     let top = boxes(d, 0..d.len(), true)?;
-    // A fragmented file keeps its samples in `moof` runs this does not walk.
+    // A fragmented file keeps most samples in `moof` runs, which
+    // `strip_fragments` walks for the timed-metadata tracks.
     let fragmented = find(&top, b"moof").is_some();
+    let meta = fragment_tracks(d, &top)?;
     let mut saw_moov = false;
-    for b in &top {
+    for b in top.iter() {
         match &b.kind {
             b"moov" => {
                 saw_moov = true;
-                strip_moov(d, b, fragmented)?;
+                strip_moov(d, &b, fragmented, budget)?;
             }
-            b"udta" | b"meta" | b"uuid" => to_free(d, b),
+            // Samsung's `sefd` (SEF) holds the capture time, the network's
+            // country code, a hash of the original path and embedded media;
+            // only padding says nothing (HOL-SEC-309).
+            b"udta" | b"meta" | b"uuid" | b"gps " | b"sefd" => to_free(d, &b),
             _ => {}
         }
     }
+    strip_fragments(d, &top, &meta, budget)?;
     if saw_moov { Ok(()) } else { Err("no movie box".into()) }
 }
 
-fn strip_moov(d: &mut [u8], moov: &Bx, fragmented: bool) -> Result<(), String> {
-    for b in boxes(d, moov.body..moov.end, false)? {
+/// A track a fragmented movie's `moof` runs may name.
+#[derive(Clone, Copy)]
+struct FragmentTrack {
+    id: u32,
+    /// The `trex` default sample size, when a whole `trex` gives one.
+    size: Option<u32>,
+    /// Timed metadata, where cameras keep a GPS trace.
+    meta: bool,
+}
+
+/// A fragmented movie's tracks, sorted by id, each id once: a `trex` or track
+/// fragment finds its track in one lookup, where a scan of every track cost
+/// tracks times fragments.
+struct FragmentTracks(Vec<FragmentTrack>);
+
+impl FragmentTracks {
+    fn get(&self, id: u32) -> Option<FragmentTrack> {
+        self.0.binary_search_by_key(&id, |t| t.id).ok().map(|k| self.0[k])
+    }
+
+    fn any_meta(&self) -> bool {
+        self.0.iter().any(|t| t.meta)
+    }
+}
+
+/// Reads, before anything is zeroed, which tracks of a fragmented movie are
+/// timed metadata and the `trex` defaults that place their `moof` runs, which
+/// 0.14 sent as they were, GPS trace included (HOL-SEC-305). A movie without
+/// fragments, or without such a track, reads nothing 0.14 did not.
+fn fragment_tracks(d: &[u8], top: &Boxes) -> Result<FragmentTracks, String> {
+    let none = FragmentTracks(Vec::new());
+    let (Some(moov), true) = (find(top, b"moov"), find(top, b"moof").is_some()) else { return Ok(none) };
+    let kids = boxes(d, moov.body..moov.end, false)?;
+    let mut tracks = Vec::with_capacity(kids.iter().filter(|b| &b.kind == b"trak").count());
+    for trak in kids.iter().filter(|b| &b.kind == b"trak") {
+        let tk = boxes(d, trak.body..trak.end, false)?;
+        let meta = match find(&tk, b"mdia") {
+            Some(mdia) => {
+                let mk = boxes(d, mdia.body..mdia.end, false)?;
+                gps_track(find(&mk, b"hdlr").and_then(|h| d.get(h.body + 8..h.body + 12)))
+            }
+            None => false,
+        };
+        let id = find(&tk, b"tkhd").and_then(|t| {
+            let at = t.body + if *d.get(t.body)? == 1 { 20 } else { 12 };
+            if at + 4 > t.end { None } else { be32(d, at).ok() }
+        });
+        match id {
+            Some(id) => tracks.push(FragmentTrack { id, size: None, meta }),
+            // Its runs could not be told from another track's.
+            None if meta => return Err("timed metadata track without an id".into()),
+            None => {}
+        }
+    }
+    if !tracks.iter().any(|t| t.meta) {
+        return Ok(none);
+    }
+    tracks.sort_unstable_by_key(|t| t.id);
+    // Two tracks giving one id: its runs are timed metadata if either is.
+    tracks.dedup_by(|later, kept| {
+        let same = later.id == kept.id;
+        kept.meta |= same && later.meta;
+        same
+    });
+    // A `trex` cut short, or an `mvex` that does not parse, gives no default:
+    // only a run that needs one refuses the file (`fragment_runs`).
+    if let Some(Ok(mvex)) = find(&kids, b"mvex").map(|m| boxes(d, m.body..m.end, false)) {
+        for trex in mvex.iter().filter(|b| &b.kind == b"trex" && b.body + 24 <= b.end) {
+            let id = be32(d, trex.body + 4)?;
+            if let Ok(k) = tracks.binary_search_by_key(&id, |t| t.id) {
+                tracks[k].size = Some(be32(d, trex.body + 16)?);
+            }
+        }
+    }
+    Ok(FragmentTracks(tracks))
+}
+
+/// Zeroes the data every `moof` gives a timed-metadata track (HOL-SEC-305).
+/// Each `moof` is read from a copy, so zeroing cannot change what a later
+/// fragment of it says.
+fn strip_fragments(d: &mut [u8], top: &Boxes, tracks: &FragmentTracks, budget: &mut Budget) -> Result<(), String> {
+    if !tracks.any_meta() {
+        return Ok(());
+    }
+    for moof in top.iter().filter(|b| &b.kind == b"moof") {
+        let m = d.get(moof.start..moof.end).ok_or("moof past the file")?.to_vec();
+        fragment_runs(&m, moof.start, moof.body - moof.start, tracks, |r| {
+            budget.charge(&r)?;
+            zero(d, r)
+        })?;
+    }
+    Ok(())
+}
+
+/// Hands `each` the file range of every run a timed-metadata track has in one
+/// `moof` as soon as the run is placed. The `moof` is `m` (its bytes, starting
+/// at `at` in the file, its children from `head`). A run's samples lie end to
+/// end, so a run is one range; holding them took more than the file.
+fn fragment_runs(
+    m: &[u8],
+    at: usize,
+    head: usize,
+    tracks: &FragmentTracks,
+    mut each: impl FnMut(Range<usize>) -> Result<(), String>,
+) -> Result<(), String> {
+    // Where the previous track fragment's data ended, if it can be known.
+    let mut prev_end = Some(at as u64);
+    for traf in each_box(m, head..m.len(), false) {
+        let traf = traf?;
+        if &traf.kind != b"traf" {
+            continue;
+        }
+        let mut tfhd = None;
+        for b in each_box(m, traf.body..traf.end, false) {
+            let b = b?;
+            if tfhd.is_none() && &b.kind == b"tfhd" {
+                tfhd = Some(b);
+            }
+        }
+        let tfhd = tfhd.ok_or("track fragment without tfhd")?;
+        if tfhd.body + 8 > tfhd.end {
+            return Err("tfhd too short".into());
+        }
+        let flags = be32(m, tfhd.body)? & 0x00FF_FFFF;
+        let id = be32(m, tfhd.body + 4)?;
+        let mut p = tfhd.body + 8;
+        let mut field = |n: usize| -> Result<u64, String> {
+            if p + n > tfhd.end {
+                return Err("tfhd too short".into());
+            }
+            p += n;
+            be_sized(m, p - n, n)
+        };
+        let base_offset = if flags & 0x01 != 0 { Some(field(8)?) } else { None };
+        if flags & 0x02 != 0 {
+            field(4)?;
+        }
+        if flags & 0x08 != 0 {
+            field(4)?;
+        }
+        let tfhd_size = if flags & 0x10 != 0 { Some(field(4)?) } else { None };
+        let (trex_size, meta) = tracks.get(id).map_or((None, false), |t| (t.size, t.meta));
+        let base = match base_offset {
+            Some(b) => Some(b),
+            None if flags & 0x02_0000 != 0 => Some(at as u64),
+            None => prev_end,
+        };
+        let mut next = base;
+        for trun in each_box(m, traf.body..traf.end, false) {
+            let trun = trun?;
+            if &trun.kind != b"trun" {
+                continue;
+            }
+            if trun.body + 8 > trun.end {
+                return Err("trun too short".into());
+            }
+            let tflags = be32(m, trun.body)? & 0x00FF_FFFF;
+            let count = be32(m, trun.body + 4)? as usize;
+            let mut q = trun.body + 8;
+            let offset = if tflags & 0x001 != 0 { Some(i64::from(be32(m, q)? as i32)) } else { None };
+            q += 4 * (tflags & 0x001) as usize + if tflags & 0x004 != 0 { 4 } else { 0 };
+            let record = 4 * (tflags & 0xF00).count_ones() as usize;
+            if q > trun.end || (record > 0 && count > (trun.end - q) / record) {
+                return Err("trun longer than its box".into());
+            }
+            let start = match offset {
+                Some(off) => base.and_then(|b| b.checked_add_signed(off)),
+                None => next,
+            };
+            let total = if tflags & 0x200 != 0 {
+                // The size follows the duration when a record has both.
+                let size_at = q + if tflags & 0x100 != 0 { 4 } else { 0 };
+                let mut sum = 0u64;
+                for k in 0..count {
+                    sum += u64::from(be32(m, size_at + k * record)?);
+                }
+                Some(sum)
+            } else {
+                tfhd_size.or(trex_size.map(u64::from)).map(|s| (count as u64).saturating_mul(s))
+            };
+            next = start.zip(total).and_then(|(s, t)| s.checked_add(t));
+            if meta {
+                let (s, e) = start.zip(next).ok_or("timed metadata run whose place is unknown")?;
+                let (s, e) = usize::try_from(s).ok().zip(usize::try_from(e).ok()).ok_or("run past the file")?;
+                each(s..e)?;
+            }
+        }
+        prev_end = next;
+    }
+    Ok(())
+}
+
+fn strip_moov(d: &mut [u8], moov: &Bx, fragmented: bool, budget: &mut Budget) -> Result<(), String> {
+    for b in boxes(d, moov.body..moov.end, false)?.iter() {
         match &b.kind {
             b"mvhd" => zero_times(d, &b)?,
-            b"trak" => strip_trak(d, &b, fragmented)?,
+            b"trak" => strip_trak(d, &b, fragmented, budget)?,
+            // A dashcam's `gps ` box holds its GPS log or an index to it
+            // (HOL-SEC-306).
+            b"udta" | b"meta" | b"uuid" | b"gps " | b"sefd" => to_free(d, &b),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn strip_trak(d: &mut [u8], trak: &Bx, fragmented: bool, budget: &mut Budget) -> Result<(), String> {
+    let kids = boxes(d, trak.body..trak.end, false)?;
+    if let Some(mdia) = find(&kids, b"mdia") {
+        let mkids = boxes(d, mdia.body..mdia.end, false)?;
+        let handler = find(&mkids, b"hdlr").and_then(|h| d.get(h.body + 8..h.body + 12));
+        // A timed-metadata track is where action cameras and phones keep a GPS
+        // trace: its samples go, and the whole track unless `moof` runs name
+        // it. A fragmented file may still list samples in the track's own
+        // tables, as ffmpeg's first fragment does (HOL-SEC-305).
+        if gps_track(handler) {
+            if !fragmented || lists_samples(d, &mkids)? {
+                sample_tables(d, &mkids)?.walk(d.len(), |r| {
+                    budget.charge(&r)?;
+                    zero(d, r)
+                })?;
+            }
+            if !fragmented {
+                to_free(d, trak);
+                return Ok(());
+            }
+        }
+        if let Some(mdhd) = find(&mkids, b"mdhd") {
+            zero_times(d, &mdhd)?;
+        }
+        for b in mkids.iter() {
+            if matches!(&b.kind, b"udta" | b"meta") {
+                to_free(d, &b);
+            }
+        }
+    }
+    for b in kids.iter() {
+        match &b.kind {
+            b"tkhd" => zero_times(d, &b)?,
             b"udta" | b"meta" | b"uuid" => to_free(d, &b),
             _ => {}
         }
@@ -203,41 +527,64 @@ fn strip_moov(d: &mut [u8], moov: &Bx, fragmented: bool) -> Result<(), String> {
     Ok(())
 }
 
-fn strip_trak(d: &mut [u8], trak: &Bx, fragmented: bool) -> Result<(), String> {
-    let kids = boxes(d, trak.body..trak.end, false)?;
-    if let Some(mdia) = find(&kids, b"mdia") {
-        let mkids = boxes(d, mdia.body..mdia.end, false)?;
-        let handler = find(&mkids, b"hdlr").and_then(|h| d.get(h.body + 8..h.body + 12));
-        // A timed-metadata track is where action cameras and phones keep a GPS
-        // trace: the whole track goes, samples included.
-        if handler == Some(b"meta".as_slice()) && !fragmented {
-            for r in sample_ranges(d, &mkids)? {
-                zero(d, r)?;
-            }
-            to_free(d, trak);
-            return Ok(());
-        }
-        if let Some(mdhd) = find(&mkids, b"mdhd") {
-            zero_times(d, mdhd)?;
-        }
-        for b in &mkids {
-            if matches!(&b.kind, b"udta" | b"meta") {
-                to_free(d, b);
-            }
+/// Whether a track's handler marks timed metadata, where cameras keep a GPS
+/// trace: `meta`, or Google's camera motion `camm` (HOL-SEC-306).
+fn gps_track(handler: Option<&[u8]>) -> bool {
+    matches!(handler, Some(b"meta") | Some(b"camm"))
+}
+
+/// Whether a track has sample tables at all: a fragmented movie's track may
+/// keep every sample in `moof` runs and have none.
+fn lists_samples(d: &[u8], mdia_kids: &Boxes) -> Result<bool, String> {
+    let Some(minf) = find(mdia_kids, b"minf") else { return Ok(false) };
+    Ok(find(&boxes(d, minf.body..minf.end, false)?, b"stbl").is_some())
+}
+
+/// A track's chunk offsets, as wide as the file wrote them.
+enum Offsets {
+    Short(Vec<u32>),
+    Long(Vec<u64>),
+}
+
+impl Offsets {
+    fn len(&self) -> usize {
+        match self {
+            Offsets::Short(v) => v.len(),
+            Offsets::Long(v) => v.len(),
         }
     }
-    for b in &kids {
-        match &b.kind {
-            b"tkhd" => zero_times(d, b)?,
-            b"udta" | b"meta" | b"uuid" => to_free(d, b),
-            _ => {}
+
+    fn get(&self, k: usize) -> Option<u64> {
+        match self {
+            Offsets::Short(v) => v.get(k).map(|o| u64::from(*o)),
+            Offsets::Long(v) => v.get(k).copied(),
         }
+    }
+}
+
+/// A track's sample tables, read out of the file before its samples are
+/// zeroed. Each entry is held at the width the file gave it.
+struct SampleTables {
+    /// Each sample's size; empty when `fixed` gives every one of `count`.
+    sizes: Vec<u32>,
+    fixed: u32,
+    count: usize,
+    runs: Vec<(u32, u32)>,
+    offsets: Offsets,
+}
+
+/// Checks that `n` entries of `width` bytes from `from` lie inside the table's
+/// own box. A count reaching further read other boxes' bytes again for every
+/// track, and held them as entries (HOL-SEC-302).
+fn table_fits(b: &Bx, from: usize, width: usize, n: usize) -> Result<(), String> {
+    if n > b.end.saturating_sub(from) / width {
+        return Err(format!("{} table runs past its box", String::from_utf8_lossy(&b.kind)));
     }
     Ok(())
 }
 
 /// Where a track's samples sit in the file, from its sample tables.
-fn sample_ranges(d: &[u8], mdia_kids: &[Bx]) -> Result<Vec<Range<usize>>, String> {
+fn sample_tables(d: &[u8], mdia_kids: &Boxes) -> Result<SampleTables, String> {
     let minf = find(mdia_kids, b"minf").ok_or("track without minf")?;
     let minf_kids = boxes(d, minf.body..minf.end, false)?;
     let stbl = find(&minf_kids, b"stbl").ok_or("track without stbl")?;
@@ -249,55 +596,91 @@ fn sample_ranges(d: &[u8], mdia_kids: &[Bx]) -> Result<Vec<Range<usize>>, String
     if count > d.len() {
         return Err("sample count past the file".into());
     }
-    let sizes: Vec<u64> = if fixed != 0 {
-        vec![fixed as u64; count]
-    } else {
-        (0..count).map(|k| be32(d, stsz.body + 12 + 4 * k).map(u64::from)).collect::<Result<_, _>>()?
-    };
+    // A fixed size names up to one sample per byte of the file, so it is
+    // never spread into a list (HOL-SEC-302).
+    let mut sizes = Vec::new();
+    if fixed == 0 {
+        table_fits(&stsz, stsz.body + 12, 4, count)?;
+        sizes.reserve_exact(count);
+        for k in 0..count {
+            sizes.push(be32(d, stsz.body + 12 + 4 * k)?);
+        }
+    }
 
     let stsc = find(&st, b"stsc").ok_or("track without stsc")?;
-    let runs = be32(d, stsc.body + 4)? as usize;
-    if runs > d.len() {
+    let n = be32(d, stsc.body + 4)? as usize;
+    if n > d.len() {
         return Err("chunk runs past the file".into());
     }
-    let runs: Vec<(u32, u32)> = (0..runs)
-        .map(|k| Ok((be32(d, stsc.body + 8 + 12 * k)?, be32(d, stsc.body + 12 + 12 * k)?)))
-        .collect::<Result<_, String>>()?;
+    table_fits(&stsc, stsc.body + 8, 12, n)?;
+    let mut runs = Vec::with_capacity(n);
+    for k in 0..n {
+        runs.push((be32(d, stsc.body + 8 + 12 * k)?, be32(d, stsc.body + 12 + 12 * k)?));
+    }
 
-    let offsets: Vec<u64> = if let Some(co) = find(&st, b"stco") {
+    let offsets = if let Some(co) = find(&st, b"stco") {
         let n = be32(d, co.body + 4)? as usize;
         if n > d.len() {
             return Err("chunk count past the file".into());
         }
-        (0..n).map(|k| be32(d, co.body + 8 + 4 * k).map(u64::from)).collect::<Result<_, _>>()?
+        table_fits(&co, co.body + 8, 4, n)?;
+        let mut v = Vec::with_capacity(n);
+        for k in 0..n {
+            v.push(be32(d, co.body + 8 + 4 * k)?);
+        }
+        Offsets::Short(v)
     } else {
         let co = find(&st, b"co64").ok_or("track without chunk offsets")?;
         let n = be32(d, co.body + 4)? as usize;
         if n > d.len() {
             return Err("chunk count past the file".into());
         }
-        (0..n).map(|k| be_sized(d, co.body + 8 + 8 * k, 8)).collect::<Result<_, _>>()?
-    };
-
-    let mut out = Vec::new();
-    let mut sample = 0usize;
-    for (k, &(first, per_chunk)) in runs.iter().enumerate() {
-        if first == 0 {
-            return Err("chunk numbers start at one".into());
+        table_fits(&co, co.body + 8, 8, n)?;
+        let mut v = Vec::with_capacity(n);
+        for k in 0..n {
+            v.push(be_sized(d, co.body + 8 + 8 * k, 8)?);
         }
-        let last = runs.get(k + 1).map(|n| n.0.saturating_sub(1)).unwrap_or(offsets.len() as u32);
-        for chunk in first..=last {
-            let mut at = *offsets.get(chunk as usize - 1).ok_or("chunk past the offset table")?;
-            for _ in 0..per_chunk {
-                let Some(&len) = sizes.get(sample) else { return Ok(out) };
-                sample += 1;
-                let end = at.checked_add(len).filter(|e| *e <= d.len() as u64).ok_or("sample past the file")?;
-                out.push(at as usize..end as usize);
-                at = end;
+        Offsets::Long(v)
+    };
+    Ok(SampleTables { sizes, fixed, count, runs, offsets })
+}
+
+impl SampleTables {
+    /// Hands `each` the place of every sample in a file of `len` bytes, one at
+    /// a time: holding them took a range per sample (HOL-SEC-302).
+    fn walk(&self, len: usize, mut each: impl FnMut(Range<usize>) -> Result<(), String>) -> Result<(), String> {
+        let (runs, offsets) = (&self.runs, &self.offsets);
+        let mut sample = 0usize;
+        for (k, &(first, per_chunk)) in runs.iter().enumerate() {
+            if first == 0 {
+                return Err("chunk numbers start at one".into());
+            }
+            let last = runs.get(k + 1).map(|n| n.0.saturating_sub(1)).unwrap_or(offsets.len() as u32);
+            if per_chunk == 0 {
+                // Runs may name the same chunks again, so walking an empty one
+                // would cost runs times chunks; it only has to name chunks the
+                // offset table holds (HOL-SEC-269).
+                if first <= last && last as usize > offsets.len() {
+                    return Err("chunk past the offset table".into());
+                }
+                continue;
+            }
+            for chunk in first..=last {
+                let mut at = offsets.get(chunk as usize - 1).ok_or("chunk past the offset table")?;
+                for _ in 0..per_chunk {
+                    if sample >= self.count {
+                        return Ok(());
+                    }
+                    let size = if self.fixed != 0 { self.fixed } else { *self.sizes.get(sample).ok_or("sample past the size table")? };
+                    sample += 1;
+                    let end = at.checked_add(u64::from(size)).filter(|e| *e <= len as u64).ok_or("sample past the file")?;
+                    each(at as usize..end as usize)?;
+                    at = end;
+                }
             }
         }
+        Ok(())
     }
-    Ok(out)
 }
 
 fn is_heif(d: &[u8]) -> bool {
@@ -311,24 +694,45 @@ fn is_heif(d: &[u8]) -> bool {
 
 /// Zeroes the Exif and XMP items of a HEIF or AVIF in place. The picture's own
 /// rotation lives in item properties, so nothing about how it shows changes.
+/// A movie beside the items, or a motion photo's clip, is stripped as a video.
 fn strip_heif(d: &mut [u8]) -> Result<(), String> {
     let top = boxes(d, 0..d.len(), true)?;
-    for b in &top {
-        if &b.kind == b"uuid" || &b.kind == b"udta" {
-            to_free(d, b);
+    for b in top.iter() {
+        if matches!(&b.kind, b"uuid" | b"udta" | b"gps " | b"sefd") {
+            to_free(d, &b);
         }
     }
-    let meta = *find(&top, b"meta").ok_or("no meta box")?;
+    // An image sequence keeps a movie beside its items, with tracks and user
+    // data of its own, which 0.14 never walked (HOL-SEC-307).
+    let mut budget = Budget::for_file(d.len());
+    if let Some(moov) = find(&top, b"moov") {
+        let fragmented = find(&top, b"moof").is_some();
+        let tracks = fragment_tracks(d, &top)?;
+        strip_moov(d, &moov, fragmented, &mut budget)?;
+        strip_fragments(d, &top, &tracks, &mut budget)?;
+    }
+    // A motion photo keeps its clip, a whole movie whose offsets count from
+    // its own start, in a top-level `mpvd` box, which 0.14 sent with the
+    // clip's location (HOL-SEC-308). A clip that does not parse refuses.
+    for clip in top.iter().filter(|b| &b.kind == b"mpvd") {
+        strip_movie(&mut d[clip.body..clip.end], &mut budget)?;
+    }
+    let meta = find(&top, b"meta").ok_or("no meta box")?;
     let kids = boxes(d, meta.body + 4..meta.end, false)?;
     let Some(iinf) = find(&kids, b"iinf") else { return Ok(()) };
-    let targets = metadata_items(d, iinf)?;
+    let targets = metadata_items(d, &iinf)?;
     if targets.is_empty() {
         return Ok(());
     }
     let iloc = find(&kids, b"iloc").ok_or("metadata items without locations")?;
-    for r in item_extents(d, iloc, find(&kids, b"idat"), &targets)? {
-        zero(d, r)?;
-    }
+    let idat = find(&kids, b"idat").map(|b| b.body);
+    // The extents are counted against the budget first, then zeroed from a
+    // copy of the table as it was read: the zeroing may reach the table itself
+    // (HOL-SEC-269), and a range per extent held four times the file.
+    let read_to = item_extents(d, iloc.body, d.len(), idat, &targets, |r| budget.charge(&r))?;
+    let table = d.get(iloc.body..read_to).ok_or("iloc read past the file")?.to_vec();
+    let len = d.len();
+    item_extents(&table, 0, len, idat, &targets, |r| zero(d, r))?;
     Ok(())
 }
 
@@ -337,7 +741,7 @@ fn metadata_items(d: &[u8], iinf: &Bx) -> Result<Vec<u32>, String> {
     let version = *d.get(iinf.body).ok_or("empty iinf")?;
     let first = iinf.body + 4 + if version == 0 { 2 } else { 4 };
     let mut out = Vec::new();
-    for infe in boxes(d, first..iinf.end, false)? {
+    for infe in boxes(d, first..iinf.end, false)?.iter() {
         if &infe.kind != b"infe" {
             continue;
         }
@@ -361,68 +765,86 @@ fn metadata_items(d: &[u8], iinf: &Bx) -> Result<Vec<u32>, String> {
     Ok(out)
 }
 
-/// File ranges of the given items' data, from `iloc`.
-fn item_extents(d: &[u8], iloc: &Bx, idat: Option<&Bx>, ids: &[u32]) -> Result<Vec<Range<usize>>, String> {
-    let version = *d.get(iloc.body).ok_or("empty iloc")?;
-    let sizes = *d.get(iloc.body + 4).ok_or("truncated iloc")?;
-    let more = *d.get(iloc.body + 5).ok_or("truncated iloc")?;
+/// Walks an `iloc` whose body starts at `at` in `src` and hands `each` the
+/// range, in a file of `len` bytes, of every extent of the given items.
+/// Returns where in `src` the walk stopped reading.
+fn item_extents(
+    src: &[u8],
+    at: usize,
+    len: usize,
+    idat: Option<usize>,
+    ids: &[u32],
+    mut each: impl FnMut(Range<usize>) -> Result<(), String>,
+) -> Result<usize, String> {
+    let version = *src.get(at).ok_or("empty iloc")?;
+    let sizes = *src.get(at + 4).ok_or("truncated iloc")?;
+    let more = *src.get(at + 5).ok_or("truncated iloc")?;
     let (offset_size, length_size) = ((sizes >> 4) as usize, (sizes & 0x0F) as usize);
     let base_size = (more >> 4) as usize;
     let index_size = if version >= 1 { (more & 0x0F) as usize } else { 0 };
     if [offset_size, length_size, base_size, index_size].iter().any(|s| ![0, 4, 8].contains(s)) {
         return Err("iloc field size".into());
     }
-    let mut i = iloc.body + 6;
+    let mut i = at + 6;
     let count = if version < 2 {
         i += 2;
-        be16(d, i - 2)? as usize
+        be16(src, i - 2)? as usize
     } else {
         i += 4;
-        be32(d, i - 4)? as usize
+        be32(src, i - 4)? as usize
     };
-    let mut out = Vec::new();
+    let ids: std::collections::HashSet<u32> = ids.iter().copied().collect();
     for _ in 0..count {
         let id = if version < 2 {
             i += 2;
-            be16(d, i - 2)? as u32
+            be16(src, i - 2)? as u32
         } else {
             i += 4;
-            be32(d, i - 4)?
+            be32(src, i - 4)?
         };
         let method = if version >= 1 {
             i += 2;
-            be16(d, i - 2)? & 0x0F
+            be16(src, i - 2)? & 0x0F
         } else {
             0
         };
         i += 2; // data_reference_index
-        let base = be_sized(d, i, base_size)?;
+        let base = be_sized(src, i, base_size)?;
         i += base_size;
-        let extents = be16(d, i)? as usize;
+        let extents = be16(src, i)? as usize;
         i += 2;
+        let wanted = ids.contains(&id);
+        // An extent with no fields takes no bytes, so an item may list 65535 of
+        // them for free; each reads as offset 0, length 0 (HOL-SEC-269).
+        if index_size + offset_size + length_size == 0 {
+            if wanted && extents > 0 {
+                return Err("metadata item runs to the end of the file".into());
+            }
+            continue;
+        }
         for _ in 0..extents {
             i += index_size;
-            let off = be_sized(d, i, offset_size)?;
+            let off = be_sized(src, i, offset_size)?;
             i += offset_size;
-            let len = be_sized(d, i, length_size)?;
+            let size = be_sized(src, i, length_size)?;
             i += length_size;
-            if !ids.contains(&id) {
+            if !wanted {
                 continue;
             }
-            if len == 0 {
+            if size == 0 {
                 return Err("metadata item runs to the end of the file".into());
             }
             let origin = match method {
                 0 => 0u64,
-                1 => idat.ok_or("idat item without idat")?.body as u64,
+                1 => idat.ok_or("idat item without idat")? as u64,
                 _ => return Err("metadata item built from other items".into()),
             };
             let start = origin.checked_add(base).and_then(|s| s.checked_add(off)).ok_or("extent overflow")?;
-            let end = start.checked_add(len).filter(|e| *e <= d.len() as u64).ok_or("extent past the file")?;
-            out.push(start as usize..end as usize);
+            let end = start.checked_add(size).filter(|e| *e <= len as u64).ok_or("extent past the file")?;
+            each(start as usize..end as usize)?;
         }
     }
-    Ok(out)
+    Ok(i)
 }
 
 // ── Matroska and WebM ───────────────────────────────────────────────────────
@@ -432,12 +854,18 @@ const SEGMENT: u32 = 0x1853_8067;
 const CLUSTER: u32 = 0x1F43_B675;
 const INFO: u32 = 0x1549_A966;
 const TAGS: u32 = 0x1254_C367;
+const ATTACHMENTS: u32 = 0x1941_A469;
+const CHAPTERS: u32 = 0x1043_A770;
+const ATTACHED_FILE: u32 = 0x61A7;
+const FILE_NAME: u32 = 0x466E;
+const FILE_MEDIA_TYPE: u32 = 0x4660;
+const CRC_32: u32 = 0xBF;
 const DATE_UTC: u32 = 0x4461;
 const TITLE: u32 = 0x7BA9;
 /// Elements that sit directly in a Segment, so one of them ends an
 /// unknown-size Cluster.
 const SEGMENT_LEVEL: &[u32] =
-    &[0x114D_9B74, INFO, 0x1654_AE6B, CLUSTER, 0x1C53_BB6B, 0x1941_A469, 0x1043_A770, TAGS];
+    &[0x114D_9B74, INFO, 0x1654_AE6B, CLUSTER, 0x1C53_BB6B, ATTACHMENTS, CHAPTERS, TAGS];
 
 fn element_id(d: &[u8], i: usize) -> Result<(u32, usize), String> {
     let b = *d.get(i).ok_or("truncated element")?;
@@ -517,6 +945,7 @@ fn strip_segment(d: &mut [u8], from: usize, to: usize) -> Result<(), String> {
         };
         match id {
             TAGS => void(d, i, end),
+            ATTACHMENTS => strip_attachments(d, body, end)?,
             INFO => {
                 let mut k = body;
                 while k < end {
@@ -533,6 +962,75 @@ fn strip_segment(d: &mut [u8], from: usize, to: usize) -> Result<(), String> {
         i = end;
     }
     Ok(())
+}
+
+/// Voids every attached file but a font: a picture keeps its own Exif
+/// (HOL-SEC-306), and subtitles need their fonts, which hold no capture
+/// details. Chapters stay too (Vitalik's call), titles and all. A CRC-32 of
+/// the list goes once it no longer matches.
+fn strip_attachments(d: &mut [u8], from: usize, to: usize) -> Result<(), String> {
+    let mut voided = false;
+    let mut k = from;
+    while k < to {
+        let (id, body, end) = element(d, k, to)?;
+        let end = end.ok_or("attachment of unknown size")?;
+        if id == ATTACHED_FILE && !is_font(d, body, end)? {
+            void(d, k, end);
+            voided = true;
+        }
+        k = end;
+    }
+    let mut k = from;
+    while voided && k < to {
+        let (id, _, end) = element(d, k, to)?;
+        let end = end.ok_or("attachment of unknown size")?;
+        if id == CRC_32 {
+            void(d, k, end);
+        }
+        k = end;
+    }
+    Ok(())
+}
+
+/// Media types Matroska and players take for a font, besides `font/*`.
+const FONT_TYPES: &[&[u8]] = &[
+    b"application/x-truetype-font",
+    b"application/x-font-ttf",
+    b"application/x-font-otf",
+    b"application/x-font-opentype",
+    b"application/x-font",
+    b"application/vnd.ms-opentype",
+    b"application/font-sfnt",
+    b"application/font-woff",
+];
+const FONT_NAMES: &[&[u8]] = &[b".ttf", b".otf", b".ttc", b".otc", b".woff", b".woff2"];
+
+/// Whether an attached file is a font: by its media type, or by its name
+/// when the type says nothing (none, or `application/octet-stream`). A file
+/// typed as anything else is not one, whatever its name.
+fn is_font(d: &[u8], from: usize, to: usize) -> Result<bool, String> {
+    let (mut name, mut mime): (Option<&[u8]>, Option<&[u8]>) = (None, None);
+    let mut k = from;
+    while k < to {
+        let (id, body, end) = element(d, k, to)?;
+        let end = end.ok_or("attached file part of unknown size")?;
+        // An EBML string may be padded with zero bytes.
+        let value = d[body..end].split(|b| *b == 0).next().unwrap_or_default();
+        match id {
+            FILE_NAME if name.is_none() => name = Some(value),
+            FILE_MEDIA_TYPE if mime.is_none() => mime = Some(value),
+            _ => {}
+        }
+        k = end;
+    }
+    let mime = mime.unwrap_or_default();
+    let mime = mime.split(|b| *b == b';').next().unwrap_or_default().trim_ascii();
+    if mime.get(..5).is_some_and(|t| t.eq_ignore_ascii_case(b"font/")) || FONT_TYPES.iter().any(|t| mime.eq_ignore_ascii_case(t)) {
+        return Ok(true);
+    }
+    let says_nothing = mime.is_empty() || mime.eq_ignore_ascii_case(b"application/octet-stream");
+    let name = name.unwrap_or_default().trim_ascii();
+    Ok(says_nothing && FONT_NAMES.iter().any(|x| name.len() >= x.len() && name[name.len() - x.len()..].eq_ignore_ascii_case(x)))
 }
 
 /// Where a Cluster written without a size ends: at the next Segment-level
@@ -554,11 +1052,15 @@ fn cluster_end(d: &[u8], from: usize, to: usize) -> Result<usize, String> {
 
 fn strip_avi(d: &mut [u8]) -> Result<(), String> {
     let end = 8usize.checked_add(le32(d, 4)? as usize).filter(|e| *e <= d.len()).ok_or("truncated RIFF")?;
-    strip_riff_chunks(d, 12, end)
+    strip_riff_chunks(d, 12, end, 0)
 }
 
+/// How deep header lists may nest. A real AVI nests them once, and each level
+/// is a call, so a crafted file must not choose the depth (HOL-SEC-268).
+const MAX_LIST_DEPTH: usize = 16;
+
 /// Turns the INFO list and the capture date into JUNK chunks of the same size.
-fn strip_riff_chunks(d: &mut [u8], from: usize, to: usize) -> Result<(), String> {
+fn strip_riff_chunks(d: &mut [u8], from: usize, to: usize, depth: usize) -> Result<(), String> {
     let mut i = from;
     while i + 8 <= to {
         let len = le32(d, i + 4)? as usize;
@@ -568,7 +1070,10 @@ fn strip_riff_chunks(d: &mut [u8], from: usize, to: usize) -> Result<(), String>
             d[i..i + 4].copy_from_slice(b"JUNK");
             d[i + 8..end].fill(0);
         } else if &d[i..i + 4] == b"LIST" && d.get(i + 8..i + 12) == Some(b"hdrl".as_slice()) {
-            strip_riff_chunks(d, i + 12, end)?;
+            if depth >= MAX_LIST_DEPTH {
+                return Err("header lists nest too deep".into());
+            }
+            strip_riff_chunks(d, i + 12, end, depth + 1)?;
         }
         i = (end + (len & 1)).min(to);
     }
@@ -598,7 +1103,14 @@ fn exif_orientation(tiff: &[u8]) -> Option<u16> {
     }
     let ifd = rd32(4)? as usize;
     let n = rd16(ifd)? as usize;
-    (0..n).map(|k| ifd + 2 + 12 * k).find(|&e| rd16(e) == Some(0x0112)).and_then(|e| rd16(e + 8)).filter(|v| (1..=8).contains(v))
+    // An entry past the block cannot match, and a crafted count walked 65535
+    // of them for every EXIF chunk of a WebP (HOL-SEC-301).
+    (0..n)
+        .map(|k| ifd + 2 + 12 * k)
+        .take_while(|&e| e + 2 <= tiff.len())
+        .find(|&e| rd16(e) == Some(0x0112))
+        .and_then(|e| rd16(e + 8))
+        .filter(|v| (1..=8).contains(v))
 }
 
 /// A TIFF block holding nothing but an orientation.
@@ -851,7 +1363,7 @@ pub(crate) mod fixtures {
         [ftyp, moov(head as u32, (head + video.len()) as u32), mdat].concat()
     }
 
-    fn ebml(id: &[u8], body: &[u8]) -> Vec<u8> {
+    pub(crate) fn ebml(id: &[u8], body: &[u8]) -> Vec<u8> {
         assert!(body.len() < 0x3FFF);
         [id, &[0x40 | (body.len() >> 8) as u8, body.len() as u8], body].concat()
     }
@@ -988,6 +1500,154 @@ pub(crate) mod fixtures {
         let mdat = bx(b"mdat", &[picture.as_slice(), &exif].concat());
         [ftyp, meta(head as u32, (head + picture.len()) as u32), mdat].concat()
     }
+
+    /// A two-frame GIF with a loop count, an XMP packet and a comment holding
+    /// the location, and a plain text extension the strip keeps.
+    pub(crate) fn gif_with_location() -> Vec<u8> {
+        let mut g = b"GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xFF\xFF\xFF".to_vec();
+        g.extend_from_slice(&[&[0x21, 0xFF, 11][..], b"NETSCAPE2.0", &[3, 1, 0, 0, 0]].concat());
+        g.extend_from_slice(&[&[0x21, 0xFF, 11][..], b"XMP DataXMP", &[LOCATION.len() as u8], LOCATION, &[0]].concat());
+        g.extend_from_slice(&[&[0x21, 0xFE, LOCATION.len() as u8][..], LOCATION, &[0]].concat());
+        let frame = [0x21, 0xF9, 4, 0, 10, 0, 0, 0, 0x2C, 0, 0, 0, 0, 1, 0, 1, 0, 0, 2, 2, 0x44, 0x01, 0];
+        g.extend_from_slice(&frame);
+        g.extend_from_slice(&[0x21, 0x01, 12, 0, 0, 0, 0, 1, 0, 1, 0, 1, 1, 0, 1, 3, b'h', b'i', b'!', 0]);
+        g.extend_from_slice(&frame);
+        g.push(0x3B);
+        g
+    }
+
+    /// GIFs cut inside a last block the strip keeps: an unknown extension and
+    /// the loop count, each claiming more bytes than are left (HOL-SEC-267).
+    pub(crate) fn gifs_with_a_kept_block_past_the_end() -> [Vec<u8>; 2] {
+        let gif = gif_with_location();
+        let body = &gif[..gif.len() - 1];
+        [
+            [body, &[0x21, 0x01, 200, 1, 2, 3]].concat(),
+            [body, &[0x21, 0xFF, 11], b"NETSCAPE2.0", &[200, 1, 0]].concat(),
+        ]
+    }
+
+    /// An AVI whose header list holds another header list `depth` times over
+    /// (HOL-SEC-268).
+    pub(crate) fn avi_nested(depth: usize) -> Vec<u8> {
+        let inner = riff(b"avih", &[0; 56]);
+        let total = 12 + 12 * depth + inner.len();
+        let mut v = Vec::with_capacity(total);
+        v.extend_from_slice(b"RIFF");
+        v.extend_from_slice(&((total - 8) as u32).to_le_bytes());
+        v.extend_from_slice(b"AVI ");
+        for k in 0..depth {
+            v.extend_from_slice(b"LIST");
+            v.extend_from_slice(&((total - 12 * (k + 1) - 8) as u32).to_le_bytes());
+            v.extend_from_slice(b"hdrl");
+        }
+        v.extend_from_slice(&inner);
+        v
+    }
+
+    /// An mp4 whose timed GPS track has `runs` runs of empty chunks, every
+    /// other one starting at the first of `chunks` chunks (HOL-SEC-269).
+    pub(crate) fn mp4_with_empty_chunk_runs(runs: u32, chunks: u32) -> Vec<u8> {
+        let mut stsc = runs.to_be_bytes().to_vec();
+        for k in 0..runs {
+            let first = if k % 2 == 0 { 1 } else { chunks + 1 };
+            stsc.extend_from_slice(&first.to_be_bytes());
+            stsc.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 1]);
+        }
+        let stco = full(b"stco", 0, &[&chunks.to_be_bytes()[..], &vec![0u8; 4 * chunks as usize]].concat());
+        let stbl = bx(b"stbl", &[full(b"stsz", 0, &[0u8; 8]), full(b"stsc", 0, &stsc), stco].concat());
+        let hdlr = full(b"hdlr", 0, &[&[0u8; 4][..], b"meta", &[0; 12]].concat());
+        let trak = bx(b"trak", &bx(b"mdia", &[hdlr, bx(b"minf", &stbl)].concat()));
+        [bx(b"ftyp", b"isom\0\0\0\0"), bx(b"moov", &trak)].concat()
+    }
+
+    /// A HEIC whose `items` items (none of them the Exif item) each list
+    /// 65535 extents written with no fields (HOL-SEC-269).
+    pub(crate) fn heic_with_empty_extents(items: u16) -> Vec<u8> {
+        let mut iloc = vec![0x00, 0x00];
+        iloc.extend_from_slice(&items.to_be_bytes());
+        for id in 0..items {
+            iloc.extend_from_slice(&(id % 60_000 + 3).to_be_bytes());
+            iloc.extend_from_slice(&[0, 0, 0xFF, 0xFF]);
+        }
+        let infe = full(b"infe", 2, &[&[0, 2, 0, 0][..], b"Exif", b"\0"].concat());
+        let iinf = full(b"iinf", 0, &[&[0, 1][..], &infe].concat());
+        let meta = full(b"meta", 0, &[iinf, full(b"iloc", 0, &iloc)].concat());
+        [bx(b"ftyp", b"heic\0\0\0\0mif1heic"), meta].concat()
+    }
+
+    /// A HEIC with `ids` Exif items and `items` other items of `extents`
+    /// extents each, located by a version 2 `iloc` (HOL-SEC-269).
+    pub(crate) fn heic_with_many_exif_items(ids: u16, items: u32, extents: u16) -> Vec<u8> {
+        let mut infes = ids.to_be_bytes().to_vec();
+        for id in 1..=ids {
+            infes.extend_from_slice(&full(b"infe", 2, &[&id.to_be_bytes()[..], &[0, 0], b"Exif", b"\0"].concat()));
+        }
+        let mut iloc = vec![0x04, 0x00];
+        iloc.extend_from_slice(&items.to_be_bytes());
+        for k in 0..items {
+            iloc.extend_from_slice(&(100_000 + k).to_be_bytes());
+            iloc.extend_from_slice(&[0, 0, 0, 0]);
+            iloc.extend_from_slice(&extents.to_be_bytes());
+            iloc.extend_from_slice(&[0, 0, 0, 1].repeat(extents as usize));
+        }
+        let meta = full(b"meta", 0, &[full(b"iinf", 0, &infes), full(b"iloc", 2, &iloc)].concat());
+        [bx(b"ftyp", b"heic\0\0\0\0mif1heic"), meta].concat()
+    }
+
+    /// A WebP of nothing but `chunks` EXIF chunks, each a TIFF header whose
+    /// first IFD claims 18761 entries (HOL-SEC-301).
+    pub(crate) fn webp_with_many_exif_chunks(chunks: usize) -> Vec<u8> {
+        let chunk = [b"EXIF".as_slice(), &8u32.to_le_bytes(), b"II*\0\0\0\0\0"].concat();
+        let body = [b"WEBP".as_slice(), &chunk.repeat(chunks)].concat();
+        [b"RIFF".as_slice(), &(body.len() as u32).to_le_bytes(), &body].concat()
+    }
+
+    /// An mp4 whose timed GPS track holds `samples` samples of one byte each,
+    /// named by a fixed-size sample table (HOL-SEC-302).
+    pub(crate) fn mp4_with_one_byte_samples(samples: u32) -> Vec<u8> {
+        let ftyp = bx(b"ftyp", b"isom\0\0\0\0");
+        let at = ftyp.len() as u32 + 8;
+        let stsz = full(b"stsz", 0, &[1u32.to_be_bytes(), samples.to_be_bytes()].concat());
+        let stsc = full(b"stsc", 0, &[1u32.to_be_bytes(), 1u32.to_be_bytes(), samples.to_be_bytes(), 1u32.to_be_bytes()].concat());
+        let stco = full(b"stco", 0, &[1u32.to_be_bytes(), at.to_be_bytes()].concat());
+        let hdlr = full(b"hdlr", 0, &[&[0u8; 4][..], b"meta", &[0; 12]].concat());
+        let trak = bx(b"trak", &bx(b"mdia", &[hdlr, bx(b"minf", &bx(b"stbl", &[stsz, stsc, stco].concat()))].concat()));
+        [ftyp, bx(b"mdat", &vec![7u8; samples as usize]), bx(b"moov", &trak)].concat()
+    }
+
+    /// The capture time `samsung_sef` names, in milliseconds.
+    pub(crate) const SEF_TIME: &[u8] = b"1700000000123";
+
+    /// Samsung's extended data box (`sefd`, HOL-SEC-309) laid out as an S22
+    /// Ultra writes it: entries, then a `SEFH` directory and the `SEFT` mark.
+    pub(crate) fn samsung_sef() -> Vec<u8> {
+        let entries: [(&[u8; 2], &[u8], &[u8]); 4] = [
+            (&[0x01, 0x0a], b"Image_UTC_Data", SEF_TIME),
+            (&[0xa1, 0x0a], b"MCC_Data", b"001"),
+            (&[0xa1, 0x0b], b"Original_Path_Hash_Key", b"639bc73b603a1e8360ba7e17a7833933/1"),
+            (&[0x30, 0x0a], b"MotionPhoto_Data", b"mpv2"),
+        ];
+        let (mut body, mut dir) = (Vec::new(), Vec::new());
+        let mut at = Vec::new();
+        for (kind, name, value) in entries {
+            at.push((kind, body.len()));
+            body.extend([&[0, 0][..], kind, &(name.len() as u32).to_le_bytes(), name, value].concat());
+        }
+        let sefh = body.len();
+        for (k, (kind, start)) in at.iter().enumerate() {
+            let end = at.get(k + 1).map_or(sefh, |n| n.1);
+            dir.extend([&[0, 0][..], &kind[..], &((sefh - start) as u32).to_le_bytes(), &((end - start) as u32).to_le_bytes()].concat());
+        }
+        let head = [b"SEFH".as_slice(), &107u32.to_le_bytes(), &(at.len() as u32).to_le_bytes()].concat();
+        body.extend([&head[..], &dir, &((head.len() + dir.len() + 4) as u32).to_le_bytes(), b"SEFT"].concat());
+        bx(b"sefd", &body)
+    }
+
+    /// A Samsung video: `mp4_with_location` closed by `samsung_sef`.
+    pub(crate) fn samsung_mp4() -> Vec<u8> {
+        [mp4_with_location(), samsung_sef()].concat()
+    }
 }
 
 #[cfg(test)]
@@ -1015,11 +1675,17 @@ mod tests {
         let top = boxes(&after, 0..after.len(), true).expect("valid boxes");
         let moov = find(&top, b"moov").expect("moov");
         let kids = boxes(&after, moov.body..moov.end, false).expect("moov children");
-        let kinds: Vec<&[u8; 4]> = kids.iter().map(|b| &b.kind).collect();
-        assert_eq!(kinds, [b"mvhd", b"trak", b"free", b"free", b"free"], "GPS track, udta and meta became padding");
-        let trak = kids[1];
-        let mdia = *find(&boxes(&after, trak.body..trak.end, false).unwrap(), b"mdia").unwrap();
-        let ranges = sample_ranges(&after, &boxes(&after, mdia.body..mdia.end, false).unwrap()).unwrap();
+        let kinds: Vec<[u8; 4]> = kids.iter().map(|b| b.kind).collect();
+        assert_eq!(kinds, [*b"mvhd", *b"trak", *b"free", *b"free", *b"free"], "GPS track, udta and meta became padding");
+        let trak = kids.get(1).unwrap();
+        let mdia = find(&boxes(&after, trak.body..trak.end, false).unwrap(), b"mdia").unwrap();
+        let mut ranges = Vec::new();
+        let tables = sample_tables(&after, &boxes(&after, mdia.body..mdia.end, false).unwrap()).unwrap();
+        tables.walk(after.len(), |r| {
+            ranges.push(r);
+            Ok(())
+        })
+        .unwrap();
         assert_eq!(&after[ranges[0].clone()], b"VIDEO-SAMPLE-BYTES");
 
         assert_eq!(strip_for_send("mp4", after.clone()).unwrap(), after, "stripping twice changes nothing");
@@ -1111,5 +1777,1204 @@ mod tests {
         let doc = b"%PDF-1.7 with a location +37.7749-122.4194".to_vec();
         assert_eq!(strip_for_send("pdf", doc.clone()).unwrap(), doc, "a file keeps its bytes");
         assert!(strips_on_send("MOV") && strips_on_send("heic") && !strips_on_send("pdf") && !strips_on_send("ogg"));
+    }
+
+    /// `f`'s answer, if it comes within `secs` on a thread of its own.
+    fn within<T: Send + 'static>(secs: u64, f: impl FnOnce() -> T + Send + 'static) -> Option<T> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .stack_size(1 << 20)
+            .spawn(move || {
+                let _ = tx.send(f());
+            })
+            .expect("spawn");
+        rx.recv_timeout(std::time::Duration::from_secs(secs)).ok()
+    }
+
+    /// HOL-SEC-267: a GIF block the strip keeps that runs past the end of the
+    /// file is refused; 0.14 panicked slicing it.
+    #[test]
+    fn a_kept_gif_block_past_the_end_is_refused() {
+        for gif in gifs_with_a_kept_block_past_the_end() {
+            assert!(strip_for_send("gif", gif).is_err());
+        }
+        let gif = gif_with_location();
+        let out = strip_for_send("gif", gif.clone()).expect("a whole GIF strips");
+        assert!(!holds(&out, LOCATION), "the comment and the XMP packet went");
+        assert!(holds(&out, b"NETSCAPE2.0") && holds(&out, b"hi!"), "the loop count and the text stay");
+        // A dropped block cut short still ends the copy where 0.14 ended it.
+        let cut = [&gif[..gif.len() - 1], &[0x21, 0xFE, 200, 1, 2]].concat();
+        assert_eq!(strip_for_send("gif", cut).unwrap(), out[..out.len() - 1]);
+    }
+
+    /// HOL-SEC-268: AVI header lists nest at most 16 deep; 0.14 recursed into
+    /// each one and a crafted file overflowed the stack.
+    #[test]
+    fn a_deeply_nested_avi_is_refused() {
+        assert!(strip_for_send("avi", avi_nested(16)).is_ok(), "within the bound it strips");
+        assert!(strip_for_send("avi", avi_nested(17)).is_err());
+        let deep = avi_nested(200_000);
+        let answer = within(20, move || strip_for_send("avi", deep).is_err());
+        assert_eq!(answer, Some(true), "refused on a 1 MiB stack");
+    }
+
+    /// HOL-SEC-269: sample tables and item locations that cost 0.14 billions
+    /// of steps take one pass, with 0.14's answer.
+    #[test]
+    fn crafted_tables_take_one_pass() {
+        let mp4 = mp4_with_empty_chunk_runs(150_000, 150_000);
+        let out = within(20, move || strip_for_send("mp4", mp4)).expect("runs of empty chunks take one pass");
+        assert!(!holds(&out.expect("an empty GPS track strips"), b"trak"), "the track went");
+
+        let heic = heic_with_empty_extents(50_000);
+        let out = within(20, move || strip_for_send("heic", heic).is_ok());
+        assert_eq!(out, Some(true), "extents with no fields take one pass");
+
+        let heic = heic_with_many_exif_items(60_000, 4, 0xFFFF);
+        let out = within(20, move || strip_for_send("heic", heic).is_ok());
+        assert_eq!(out, Some(true), "each item is looked up once, not per extent");
+        let heic = heic_with_many_exif_items(60_000, 300_000, 1);
+        let out = within(20, move || strip_for_send("heic", heic).is_ok());
+        assert_eq!(out, Some(true), "each item is looked up in a set");
+
+        // An empty run naming a chunk past the offset table is refused, and so
+        // is the Exif item written with no fields, as in 0.14.
+        let mut bad = mp4_with_empty_chunk_runs(2, 4);
+        let at = bad.windows(4).position(|w| w == b"stsc").unwrap() + 24;
+        bad[at..at + 4].copy_from_slice(&6u32.to_be_bytes());
+        assert!(strip_for_send("mp4", bad).is_err());
+        let mut exif = heic_with_empty_extents(1);
+        let at = exif.windows(4).position(|w| w == b"iloc").unwrap() + 12;
+        exif[at..at + 2].copy_from_slice(&[0, 2]);
+        assert!(strip_for_send("heic", exif).is_err());
+
+        // Empty runs that name no chunk, an Exif item listing no extent, and
+        // extents of index fields alone pass, as in 0.14.
+        let mut fine = mp4_with_empty_chunk_runs(2, 4);
+        let at = fine.windows(4).position(|w| w == b"stsc").unwrap() + 12;
+        fine[at..at + 4].copy_from_slice(&9u32.to_be_bytes());
+        fine[at + 12..at + 16].copy_from_slice(&7u32.to_be_bytes());
+        assert!(strip_for_send("mp4", fine).is_ok());
+        let mut none = heic_with_empty_extents(1);
+        let at = none.windows(4).position(|w| w == b"iloc").unwrap() + 12;
+        none[at..at + 6].copy_from_slice(&[0, 2, 0, 0, 0, 0]);
+        assert!(strip_for_send("heic", none).is_ok());
+        let infe = full(b"infe", 2, &[&[0, 2, 0, 0][..], b"Exif", b"\0"].concat());
+        let items = [&[0, 5, 0, 0, 0, 0, 0, 2][..], &[0, 2, 0, 0, 0, 0, 0, 1], &[0, 2, 0, 0, 0, 0, 0, 0]].concat();
+        let iloc = full(b"iloc", 1, &[&[0x00, 0x04, 0, 2][..], &items].concat());
+        let meta = full(b"meta", 0, &[full(b"iinf", 0, &[&[0, 1][..], &infe].concat()), iloc].concat());
+        assert!(strip_for_send("heic", [bx(b"ftyp", b"heic\0\0\0\0mif1heic"), meta].concat()).is_ok());
+    }
+
+    /// HOL-SEC-301: a WebP's EXIF chunks cost what they hold; 0.14 walked up
+    /// to 65535 IFD entries past the end of each one.
+    #[test]
+    fn a_webp_of_many_exif_chunks_takes_one_pass() {
+        let webp = webp_with_many_exif_chunks(500_000);
+        let out = within(20, move || strip_for_send("webp", webp).map(|o| o.len()));
+        assert_eq!(out, Some(Ok(12)), "every EXIF chunk goes, in one pass");
+        // An orientation past an IFD the count overstates is still found.
+        let mut tiff = exif_with_gps(6);
+        tiff[8..10].copy_from_slice(&0xFFFFu16.to_le_bytes());
+        assert_eq!(exif_orientation(&tiff), Some(6));
+        assert_eq!(exif_orientation(&tiff[..20]), Some(6), "an entry cut after its value still counts");
+    }
+
+    /// HOL-SEC-302: a fixed-size sample table names up to a sample per byte,
+    /// and the strip holds none of them; 0.14 held about 24 bytes a sample.
+    #[test]
+    fn a_fixed_size_sample_table_is_walked_without_holding_it() {
+        let mp4 = mp4_with_one_byte_samples(4 << 20);
+        let len = mp4.len();
+        let (out, peak) = within(20, move || crate::test_alloc::peak_during(|| strip_for_send("mp4", mp4))).expect("in time");
+        let out = out.expect("a GPS track of one-byte samples strips");
+        assert_eq!(out.len(), len);
+        assert!(out.windows(4).all(|w| w != [7; 4]), "every sample was zeroed");
+        assert!(peak < len / 4, "held {peak} bytes stripping a {len} byte file");
+    }
+
+    /// HOL-SEC-304: a GIF cut inside its header or colour table is refused;
+    /// 0.14 passed it on unchanged, whatever it held.
+    #[test]
+    fn a_gif_cut_inside_its_header_is_refused() {
+        let gif = gif_with_location();
+        for cut in [6, 12, 13, 18] {
+            assert!(strip_for_send("gif", gif[..cut].to_vec()).is_err(), "cut at {cut}");
+        }
+        let mut big_table = gif.clone();
+        big_table[10] = 0x87;
+        assert!(strip_for_send("gif", [&big_table[..], LOCATION].concat()).is_err(), "a colour table the file does not hold");
+        assert_eq!(strip_for_send("gif", gif[..19].to_vec()).unwrap(), gif[..19], "a whole header and table strip");
+    }
+
+    /// HOL-SEC-269: the samples and extents to zero may cover the file twice
+    /// over, never more.
+    #[test]
+    fn metadata_may_cover_the_file_at_most_twice() {
+        assert!(strip_for_send("mp4", mp4_with_shared_chunk_offsets(2, 1 << 20)).is_ok());
+        assert!(strip_for_send("mp4", mp4_with_shared_chunk_offsets(3, 1 << 20)).is_err());
+        assert!(strip_for_send("heic", heic_with_overlapping_exif_extents(1, 2, 1 << 20, 1 << 20)).is_ok());
+        assert!(strip_for_send("heic", heic_with_overlapping_exif_extents(1, 3, 1 << 20, 1 << 20)).is_err());
+    }
+
+    /// HOL-SEC-302: each sample table must fit its own box; one entry more is
+    /// refused, whichever table it is.
+    #[test]
+    fn a_sample_table_longer_than_its_box_is_refused() {
+        let at = |d: &[u8], kind: &[u8; 4]| d.windows(4).position(|w| w == kind).unwrap() + 4;
+        let honest = mp4_with_one_byte_samples(16);
+        assert!(strip_for_send("mp4", honest.clone()).is_ok());
+        for (kind, count_at) in [(b"stsc", 4), (b"stco", 4)] {
+            let mut d = honest.clone();
+            let p = at(&d, kind) + count_at;
+            let n = u32::from_be_bytes(d[p..p + 4].try_into().unwrap()) + 1;
+            d[p..p + 4].copy_from_slice(&n.to_be_bytes());
+            assert!(strip_for_send("mp4", d).is_err(), "{}", String::from_utf8_lossy(kind));
+        }
+        // Variable sizes: one more than the box holds.
+        let mut d = mp4_with_chunk_runs();
+        let p = at(&d, b"stsz") + 8;
+        d[p..p + 4].copy_from_slice(&4u32.to_be_bytes());
+        assert!(strip_for_send("mov", d).is_err(), "stsz");
+        let co64 = mp4_with_co64(16);
+        assert!(strip_for_send("mp4", co64.clone()).is_ok());
+        let mut d = co64;
+        let p = at(&d, b"co64") + 4;
+        d[p..p + 4].copy_from_slice(&2u32.to_be_bytes());
+        assert!(strip_for_send("mp4", d).is_err(), "co64");
+    }
+
+    /// HOL-SEC-302: a sample table whose count reaches past its box to the end
+    /// of the file is refused before any of it is read, whichever table it is.
+    #[test]
+    fn a_sample_table_reaching_past_its_box_holds_nothing() {
+        for table in [b"stsz", b"stsc", b"stco", b"co64"] {
+            let co = if table == b"co64" {
+                full(b"co64", 0, &[&1u32.to_be_bytes()[..], &0u64.to_be_bytes()].concat())
+            } else {
+                full(b"stco", 0, &[1u32.to_be_bytes(), 0u32.to_be_bytes()].concat())
+            };
+            let stsz = full(b"stsz", 0, &[1u32.to_be_bytes(), 1u32.to_be_bytes()].concat());
+            let stsc = full(b"stsc", 0, &[1u32.to_be_bytes(), 1u32.to_be_bytes(), 1u32.to_be_bytes(), 1u32.to_be_bytes()].concat());
+            let mut d = [bx(b"ftyp", b"isom\0\0\0\0"), bx(b"moov", &meta_trak([stsz, stsc, co].concat())), bx(b"free", &vec![0x33u8; 4 << 20])].concat();
+            let body = body_of(&d, table, 0);
+            let (count_at, first, width) = match table {
+                b"stsz" => (8, 12, 4),
+                b"stsc" => (4, 8, 12),
+                b"stco" => (4, 8, 4),
+                _ => (4, 8, 8),
+            };
+            if table == b"stsz" {
+                d[body + 4..body + 8].copy_from_slice(&0u32.to_be_bytes());
+            }
+            let n = ((d.len() - (body + first)) / width) as u32;
+            d[body + count_at..body + count_at + 4].copy_from_slice(&n.to_be_bytes());
+            let len = d.len() as i64;
+            let (refused, peak) = peak_of(move || strip_for_send("mp4", d).is_err());
+            let name = String::from_utf8_lossy(table);
+            assert!(refused, "{name}");
+            assert!(peak < len / 8, "{name}: held {peak} bytes stripping a {len} byte file");
+        }
+    }
+
+    /// HOL-SEC-303: a box list takes exactly the room its boxes need, so a
+    /// count just past a power of two does not double it.
+    #[test]
+    fn a_box_list_takes_the_room_it_holds() {
+        let mp4 = mp4_of_empty_boxes((512 << 10) + 1);
+        let len = mp4.len() as i64;
+        let (_, peak) = peak_of(move || strip_for_send("mp4", mp4).is_ok());
+        assert!(peak < 2 * len, "held {peak} bytes stripping a {len} byte file");
+    }
+
+    /// A box written with a 64-bit size keeps its whole header when freed.
+    #[test]
+    fn a_box_with_a_64_bit_size_keeps_its_header() {
+        let mut udta = vec![0, 0, 0, 1];
+        udta.extend_from_slice(b"udta");
+        udta.extend_from_slice(&(16 + LOCATION.len() as u64).to_be_bytes());
+        udta.extend_from_slice(LOCATION);
+        let out = strip_for_send("mp4", [mp4_with_location(), udta.clone()].concat()).unwrap();
+        let tail = &out[out.len() - udta.len()..];
+        assert_eq!(tail[..16], [&[0, 0, 0, 1][..], b"free", &udta[8..16]].concat());
+        assert!(tail[16..].iter().all(|b| *b == 0));
+    }
+
+    /// `mp4_with_one_byte_samples` with 64-bit chunk offsets.
+    fn mp4_with_co64(samples: u32) -> Vec<u8> {
+        let mp4 = mp4_with_one_byte_samples(samples);
+        let p = mp4.windows(4).position(|w| w == b"stco").unwrap() - 4;
+        let at = u32::from_be_bytes(mp4[p + 16..p + 20].try_into().unwrap());
+        let co64 = full(b"co64", 0, &[&1u32.to_be_bytes()[..], &(u64::from(at)).to_be_bytes()].concat());
+        // The box grows by 4 bytes: every enclosing size grows with it.
+        let mut out = [&mp4[..p], &co64[..], &mp4[p + 20..]].concat();
+        for kind in [b"moov", b"trak", b"mdia", b"minf", b"stbl"] {
+            let q = out.windows(4).position(|w| w == kind).unwrap() - 4;
+            let n = u32::from_be_bytes(out[q..q + 4].try_into().unwrap()) + 4;
+            out[q..q + 4].copy_from_slice(&n.to_be_bytes());
+        }
+        out
+    }
+
+    // Review round (fix-media-strip): HOL-SEC-269, 302, 303.
+
+    fn meta_trak(stbl: Vec<u8>) -> Vec<u8> {
+        let hdlr = full(b"hdlr", 0, &[&[0u8; 4][..], b"meta", &[0; 12]].concat());
+        bx(b"trak", &bx(b"mdia", &[hdlr, bx(b"minf", &bx(b"stbl", &stbl))].concat()))
+    }
+
+    /// A timed metadata track whose `chunks` chunks all start at the same offset,
+    /// each one sample of `sample` bytes: every sample zeroes the same bytes.
+    fn mp4_with_shared_chunk_offsets(chunks: u32, sample: u32) -> Vec<u8> {
+        let ftyp = bx(b"ftyp", b"isom\0\0\0\0");
+        let at = ftyp.len() as u32 + 8;
+        let stsz = full(b"stsz", 0, &[sample.to_be_bytes(), chunks.to_be_bytes()].concat());
+        let stsc = full(b"stsc", 0, &[1u32.to_be_bytes(), 1u32.to_be_bytes(), 1u32.to_be_bytes(), 1u32.to_be_bytes()].concat());
+        let stco = full(b"stco", 0, &[&chunks.to_be_bytes()[..], &at.to_be_bytes().repeat(chunks as usize)].concat());
+        [ftyp, bx(b"mdat", &vec![7u8; sample as usize]), bx(b"moov", &meta_trak([stsz, stsc, stco].concat()))].concat()
+    }
+
+    /// A HEIC whose one Exif item is listed `items` times, each with `extents`
+    /// extents of `len` bytes from offset 0 (no offset field), then `pad` bytes.
+    fn heic_with_overlapping_exif_extents(items: u16, extents: u16, len: u32, pad: usize) -> Vec<u8> {
+        let infe = full(b"infe", 2, &[&[0, 2, 0, 0][..], b"Exif", b"\0"].concat());
+        let iinf = full(b"iinf", 0, &[&[0, 1][..], &infe].concat());
+        let mut iloc = vec![0x04, 0x00];
+        iloc.extend_from_slice(&items.to_be_bytes());
+        for _ in 0..items {
+            iloc.extend_from_slice(&[0, 2, 0, 0]);
+            iloc.extend_from_slice(&extents.to_be_bytes());
+            iloc.extend_from_slice(&len.to_be_bytes().repeat(extents as usize));
+        }
+        let meta = full(b"meta", 0, &[iinf, full(b"iloc", 0, &iloc)].concat());
+        [bx(b"ftyp", b"heic\0\0\0\0mif1heic"), meta, bx(b"mdat", &vec![1u8; pad])].concat()
+    }
+
+    fn body_of(d: &[u8], kind: &[u8; 4], nth: usize) -> usize {
+        let mut seen = 0;
+        for p in 0..d.len() - 4 {
+            if &d[p..p + 4] == kind {
+                if seen == nth {
+                    return p + 4;
+                }
+                seen += 1;
+            }
+        }
+        panic!("no {:?}", kind);
+    }
+
+    /// One timed metadata track whose variable sizes, chunk runs and chunk
+    /// offsets each claim every entry up to the end of the file, so the three
+    /// tables are read over the same `tail` bytes, far past their own boxes.
+    fn mp4_with_tables_past_their_boxes(tail: usize) -> Vec<u8> {
+        let stsz = full(b"stsz", 0, &[0u32.to_be_bytes(), 0u32.to_be_bytes()].concat());
+        let stsc = full(b"stsc", 0, &0u32.to_be_bytes());
+        let stco = full(b"stco", 0, &0u32.to_be_bytes());
+        let mut d = [bx(b"ftyp", b"isom\0\0\0\0"), bx(b"moov", &meta_trak([stsz, stsc, stco].concat())), bx(b"free", &vec![0x11u8; tail])].concat();
+        let len = d.len();
+        let (sz, sc, co) = (body_of(&d, b"stsz", 0), body_of(&d, b"stsc", 0), body_of(&d, b"stco", 0));
+        d[sz + 8..sz + 12].copy_from_slice(&(((len - (sz + 12)) / 4) as u32).to_be_bytes());
+        d[sc + 4..sc + 8].copy_from_slice(&(((len - (sc + 8)) / 12) as u32).to_be_bytes());
+        d[co + 4..co + 8].copy_from_slice(&(((len - (co + 8)) / 4) as u32).to_be_bytes());
+        d
+    }
+
+    /// `tracks` timed metadata tracks, each with one sample and a chunk offset
+    /// table whose count reaches the end of the file: each track re-reads the
+    /// same `tail` bytes.
+    fn mp4_with_many_tracks_reading_one_tail(tracks: usize, tail: usize) -> Vec<u8> {
+        let ftyp = bx(b"ftyp", b"isom\0\0\0\0");
+        let mdat = bx(b"mdat", &[5u8; 64]);
+        let at = (ftyp.len() + 8) as u32;
+        let trak = || {
+            let stsz = full(b"stsz", 0, &[1u32.to_be_bytes(), 1u32.to_be_bytes()].concat());
+            let stsc = full(b"stsc", 0, &[1u32.to_be_bytes(), 1u32.to_be_bytes(), 1u32.to_be_bytes(), 1u32.to_be_bytes()].concat());
+            let stco = full(b"stco", 0, &[0u32.to_be_bytes(), at.to_be_bytes()].concat());
+            meta_trak([stsz, stsc, stco].concat())
+        };
+        let traks: Vec<u8> = (0..tracks).flat_map(|_| trak()).collect();
+        let mut d = [ftyp, mdat, bx(b"moov", &traks), bx(b"free", &vec![0x22u8; tail])].concat();
+        let len = d.len();
+        let bodies: Vec<usize> = d.windows(4).enumerate().filter(|(_, w)| *w == b"stco").map(|(p, _)| p + 4).collect();
+        assert_eq!(bodies.len(), tracks);
+        for co in bodies {
+            d[co + 4..co + 8].copy_from_slice(&(((len - (co + 8)) / 4) as u32).to_be_bytes());
+        }
+        d
+    }
+
+    /// A moov holding nothing but `n` empty 8-byte boxes.
+    fn mp4_of_empty_boxes(n: usize) -> Vec<u8> {
+        let kids: Vec<u8> = (0..n).flat_map(|_| bx(b"free", &[])).collect();
+        [bx(b"ftyp", b"isom\0\0\0\0"), bx(b"moov", &kids)].concat()
+    }
+
+    fn peak_of<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> (T, i64) {
+        let (out, peak) = within(600, move || crate::test_alloc::peak_during(f)).expect("finished");
+        (out, peak as i64)
+    }
+
+    // ── failing tests ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn rev_a_metadata_track_whose_chunks_share_an_offset_takes_one_pass() {
+        // 8 MiB file: 2^20 chunks, each one 4 MiB sample over the same bytes.
+        let mp4 = mp4_with_shared_chunk_offsets(1 << 20, 4 << 20);
+        let out = within(20, move || strip_for_send("mp4", mp4).is_ok());
+        assert!(out.is_some(), "every sample zeroes the same 4 MiB: the strip is still running after 20 s");
+    }
+
+    #[test]
+    fn rev_a_heic_whose_exif_extents_overlap_takes_one_pass() {
+        // ~8 MiB file: 2^20 extents of the Exif item, each the first 4 MiB.
+        let heic = heic_with_overlapping_exif_extents(16, 0xFFFF, 4 << 20, 4 << 20);
+        let out = within(20, move || strip_for_send("heic", heic).is_ok());
+        assert!(out.is_some(), "every extent zeroes the same 4 MiB: the strip is still running after 20 s");
+    }
+
+    #[test]
+    fn rev_many_metadata_tracks_cost_what_the_file_holds() {
+        // ~6 MiB file: 20,000 tracks, each reading the same 3 MiB tail as offsets.
+        let mp4 = mp4_with_many_tracks_reading_one_tail(20_000, 3 << 20);
+        let out = within(20, move || strip_for_send("mp4", mp4).is_ok());
+        assert!(out.is_some(), "each track re-reads the tail past its own box: still running after 20 s");
+    }
+
+    #[test]
+    fn rev_sample_tables_hold_at_most_twice_the_file() {
+        let mp4 = mp4_with_tables_past_their_boxes(4 << 20);
+        let len = mp4.len() as i64;
+        let (_, peak) = peak_of(move || strip_for_send("mp4", mp4).is_ok());
+        assert!(peak < 2 * len, "held {peak} bytes ({}x) stripping a {len} byte file", peak as f64 / len as f64);
+    }
+
+    #[test]
+    fn rev_a_box_list_holds_at_most_twice_the_file() {
+        let mp4 = mp4_of_empty_boxes(512 << 10);
+        let len = mp4.len() as i64;
+        let (_, peak) = peak_of(move || strip_for_send("mp4", mp4).is_ok());
+        assert!(peak < 2 * len, "held {peak} bytes ({}x) stripping a {len} byte file", peak as f64 / len as f64);
+    }
+
+    #[test]
+    fn rev_a_heic_extent_list_holds_at_most_twice_the_file() {
+        // 2^20 one-byte extents of the Exif item, disjoint enough to finish.
+        let heic = heic_with_overlapping_exif_extents(16, 0xFFFF, 1, 16);
+        let len = heic.len() as i64;
+        let (_, peak) = peak_of(move || strip_for_send("heic", heic).is_ok());
+        assert!(peak < 2 * len, "held {peak} bytes ({}x) stripping a {len} byte file", peak as f64 / len as f64);
+    }
+
+    /// A fragmented mp4: a video track and a GPS track, one sample each in the
+    /// `mdat` after one `moof`. `mode` picks how the GPS fragment names its
+    /// data: 0 its `moof` as base plus a data offset, 1 an explicit base offset
+    /// (the `moof` start, written out) plus a data offset,
+    /// 2 no base at all (after the video fragment's data), 3 a sample size from
+    /// `trex`, 4 no sample size anywhere. Returns the file and the GPS sample.
+    fn fragmented_mp4_with_gps(mode: u8) -> (Vec<u8>, Range<usize>) {
+        let video = b"VIDEO-FRAGMENT".to_vec();
+        let gps = [b"GPS ".as_slice(), LOCATION].concat();
+        let (vlen, glen) = (video.len() as u32, gps.len() as u32);
+        let flagged = |kind: &[u8; 4], flags: u32, body: &[u8]| bx(kind, &[&flags.to_be_bytes()[..], body].concat());
+        let tkhd = |id: u8| full(b"tkhd", 0, &[&[0u8; 8][..], &[0, 0, 0, id], &[0; 68]].concat());
+        let hdlr = |h: &[u8; 4]| full(b"hdlr", 0, &[&[0u8; 4][..], h, &[0; 12]].concat());
+        let trak = |id: u8, h: &[u8; 4]| bx(b"trak", &[tkhd(id), bx(b"mdia", &hdlr(h))].concat());
+        let trex = |id: u8, size: u32| full(b"trex", 0, &[&[0, 0, 0, id][..], &[0, 0, 0, 1], &[0; 4], &size.to_be_bytes(), &[0; 4]].concat());
+        let mut mvex = trex(1, 0);
+        if mode != 4 {
+            mvex.extend(trex(2, if mode == 3 { glen } else { 0 }));
+        }
+        let ftyp = bx(b"ftyp", b"iso5\0\0\0\0iso5");
+        let moov = bx(b"moov", &[full(b"mvhd", 0, &[0; 96]), trak(1, b"vide"), trak(2, b"meta"), bx(b"mvex", &mvex)].concat());
+        let at = (ftyp.len() + moov.len()) as u32;
+        let moof = |data: u32| {
+            // The video run's records hold a duration and a size.
+            let vbase = if mode == 2 { 0 } else { 0x02_0000 };
+            let vtraf = [flagged(b"tfhd", vbase, &[0, 0, 0, 1]), flagged(b"trun", 0x301, &[&1u32.to_be_bytes()[..], &data.to_be_bytes(), &[0, 0, 0, 1], &vlen.to_be_bytes()].concat())].concat();
+            let gtraf = match mode {
+                0 => [flagged(b"tfhd", 0x02_0010, &[&[0, 0, 0, 2][..], &glen.to_be_bytes()].concat()), flagged(b"trun", 0x001, &[&1u32.to_be_bytes()[..], &(data + vlen).to_be_bytes()].concat())].concat(),
+                1 => [flagged(b"tfhd", 0x11, &[&[0, 0, 0, 2][..], &u64::from(at).to_be_bytes(), &glen.to_be_bytes()].concat()), flagged(b"trun", 0x001, &[&1u32.to_be_bytes()[..], &(data + vlen).to_be_bytes()].concat())].concat(),
+                2 => [flagged(b"tfhd", 0x10, &[&[0, 0, 0, 2][..], &glen.to_be_bytes()].concat()), flagged(b"trun", 0, &1u32.to_be_bytes())].concat(),
+                _ => [flagged(b"tfhd", 0x02_0000, &[0, 0, 0, 2]), flagged(b"trun", 0x001, &[&1u32.to_be_bytes()[..], &(data + vlen).to_be_bytes()].concat())].concat(),
+            };
+            bx(b"moof", &[full(b"mfhd", 0, &[0, 0, 0, 1]), bx(b"traf", &vtraf), bx(b"traf", &gtraf)].concat())
+        };
+        let data = moof(0).len() as u32 + 8;
+        let file = [ftyp, moov, moof(data), bx(b"mdat", &[video, gps.clone()].concat())].concat();
+        let (n, g) = (file.len(), file.len() - gps.len());
+        (file, g..n)
+    }
+
+    /// HOL-SEC-305: a fragmented movie's GPS samples are zeroed in its `moof`
+    /// runs however the fragment names their place, and nothing else changes.
+    #[test]
+    fn a_fragmented_movie_loses_its_gps_samples() {
+        for mode in 0..4 {
+            let (mp4, gps) = fragmented_mp4_with_gps(mode);
+            let mut want = mp4.clone();
+            want[gps].fill(0);
+            assert_eq!(strip_for_send("mp4", mp4).unwrap(), want, "mode {mode}");
+        }
+        // A GPS run whose size nothing gives is refused.
+        assert!(strip_for_send("mp4", fragmented_mp4_with_gps(4).0).is_err());
+        // So is a run longer than its box, in any track of such a movie.
+        let (mut mp4, _) = fragmented_mp4_with_gps(0);
+        let t = mp4.windows(4).position(|w| w == b"trun").unwrap() + 4;
+        mp4[t + 4..t + 8].copy_from_slice(&2u32.to_be_bytes());
+        assert!(strip_for_send("mp4", mp4).is_err());
+        // Without a timed-metadata track every byte stays, as in 0.14.
+        let (mut plain, _) = fragmented_mp4_with_gps(0);
+        let h = plain.windows(4).position(|w| w == b"meta").unwrap();
+        plain[h..h + 4].copy_from_slice(b"vide");
+        assert_eq!(strip_for_send("mp4", plain.clone()).unwrap(), plain);
+    }
+
+    /// A HEIC that also holds a movie whose user data names a place.
+    fn heic_with_a_movie() -> (Vec<u8>, Vec<u8>) {
+        let xyz = bx(b"\xA9xyz", &[&[0, LOCATION.len() as u8 + 1, 0x15, 0xC7][..], LOCATION, b"/"].concat());
+        let moov = bx(b"moov", &[full(b"mvhd", 0, &[0; 96]), bx(b"udta", &xyz)].concat());
+        ([heic_with_gps(), moov.clone()].concat(), moov)
+    }
+
+    /// HOL-SEC-307: a HEIF that also holds a movie has the movie walked as a
+    /// video's is; its items are stripped as before.
+    #[test]
+    fn a_heif_with_a_movie_loses_the_movies_location() {
+        let (heic, moov) = heic_with_a_movie();
+        let mut freed = moov;
+        let u = freed.windows(4).position(|w| w == b"udta").unwrap();
+        freed[u..u + 4].copy_from_slice(b"free");
+        freed[u + 4..].fill(0);
+        let want = [strip_for_send("heic", heic_with_gps()).unwrap(), freed].concat();
+        assert_eq!(strip_for_send("heic", heic).unwrap(), want);
+    }
+
+    /// A fragmented movie or a HEIF with a movie, received and sent on, leaves
+    /// without its location.
+    #[test]
+    fn a_forwarded_fragment_or_sequence_loses_its_location() {
+        let dir = crate::test_tmp::tempdir().expect("tmp");
+        let mut camm = mp4_with_location();
+        let h = nth(&camm, b"hdlr", 1) + 12;
+        camm[h..h + 4].copy_from_slice(b"camm");
+        for (name, bytes) in [("frag.mp4", fragmented_mp4_with_gps(2).0), ("seq.heic", heic_with_a_movie().0), ("camm.mp4", camm)] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, bytes).expect("write");
+            assert!(!holds(&read_for_send(&path).expect(name), LOCATION), "{name}");
+        }
+    }
+
+    /// Where `kind` occurs the `n`th time (from 0).
+    fn nth(d: &[u8], kind: &[u8], n: usize) -> usize {
+        d.windows(kind.len()).enumerate().filter(|(_, w)| *w == kind).nth(n).expect("present").0
+    }
+
+    /// HOL-SEC-306: the other places a location is kept lose it, and only
+    /// those bytes change: a `camm` track goes like a `meta` one, a `gps ` box
+    /// in `moov` or at the top becomes padding, and Matroska Attachments and
+    /// Chapters become Void (ported from the 0.16 walker's test).
+    #[test]
+    fn other_location_carriers_lose_the_location() {
+        let freed = |b: &[u8]| [&b[..4], b"free", &vec![0; b.len() - 8]].concat();
+        // Google's camera motion track (`camm` handler) carries GPS packets.
+        let mut camm = mp4_with_location();
+        let h = nth(&camm, b"hdlr", 1) + 12;
+        assert_eq!(&camm[h..h + 4], b"meta");
+        camm[h..h + 4].copy_from_slice(b"camm");
+        assert_eq!(strip_for_send("mp4", camm).unwrap(), strip_for_send("mp4", mp4_with_location()).unwrap(), "camm track");
+        // A Novatek dashcam's `gps ` box in `moov`, and one at the top level.
+        let gps = bx(b"gps ", LOCATION);
+        let mvhd = full(b"mvhd", 0, &[0u8; 96]);
+        let in_moov = |g: &[u8]| [bx(b"ftyp", b"isom\0\0\0\0"), bx(b"moov", &[&mvhd[..], g].concat())].concat();
+        assert_eq!(strip_for_send("mp4", in_moov(&gps)).unwrap(), in_moov(&freed(&gps)), "gps box in moov");
+        let top = [mp4_with_location(), gps.clone()].concat();
+        let want = [strip_for_send("mp4", mp4_with_location()).unwrap(), freed(&gps)].concat();
+        assert_eq!(strip_for_send("mp4", top).unwrap(), want, "top-level gps box");
+        let heic = [heic_with_gps(), gps.clone()].concat();
+        let want = [strip_for_send("heic", heic_with_gps()).unwrap(), freed(&gps)].concat();
+        assert_eq!(strip_for_send("heic", heic).unwrap(), want, "gps box beside a HEIF's items");
+        // A Matroska attached file that is not a font (here one with no type
+        // or name at all) becomes Void; Chapters stay as they are.
+        let mut webm = webm_with_location();
+        webm.truncate(nth(&webm, &[0x12, 0x54, 0xC3, 0x67], 0));
+        let file = ebml(&[0x61, 0xA7], &ebml(&[0x46, 0x5C], LOCATION));
+        let el = ebml(&[0x19, 0x41, 0xA4, 0x69], &file);
+        let mut voided = el.clone();
+        let n = voided.len();
+        void(&mut voided, n - file.len(), n);
+        let want = [strip_for_send("mkv", webm.clone()).unwrap(), voided].concat();
+        assert_eq!(strip_for_send("mkv", [webm.clone(), el].concat()).unwrap(), want, "attachments");
+        let chapters = ebml(&[0x10, 0x43, 0xA7, 0x70], &ebml(&[0x45, 0xB9], &ebml(&[0xB6], &ebml(&[0x80], &ebml(&[0x85], b"Opening")))));
+        let want = [strip_for_send("mkv", webm.clone()).unwrap(), chapters.clone()].concat();
+        assert_eq!(strip_for_send("mkv", [webm, chapters].concat()).unwrap(), want, "chapters");
+    }
+
+    /// A file received from someone and sent on is read through the same
+    /// strip, so each crafted file above is refused or cleaned in time.
+    #[test]
+    fn a_forwarded_crafted_file_is_refused_or_cleaned_in_time() {
+        let dir = crate::test_tmp::tempdir().expect("tmp");
+        let [gif, _] = gifs_with_a_kept_block_past_the_end();
+        let cases = [
+            ("got.gif", gif, false),
+            ("got.avi", avi_nested(200_000), false),
+            ("got.mp4", mp4_with_empty_chunk_runs(150_000, 150_000), true),
+            ("got.heic", heic_with_empty_extents(50_000), true),
+            ("got.webp", webp_with_many_exif_chunks(500_000), true),
+            ("cut.gif", gif_with_location()[..13].to_vec(), false),
+            ("shared.mp4", mp4_with_shared_chunk_offsets(1 << 16, 1 << 20), false),
+            ("overlap.heic", heic_with_overlapping_exif_extents(1, 4096, 1 << 20, 1 << 20), false),
+        ];
+        for (name, bytes, sends) in cases {
+            let path = dir.path().join(name);
+            std::fs::write(&path, bytes).expect("write");
+            let answer = within(20, move || read_for_send(&path).map(|_| ()));
+            assert_eq!(answer, Some(if sends { Ok(()) } else { Err(REFUSED.to_string()) }), "{name}");
+        }
+    }
+
+    /// Every honest file strips to the bytes 0.14 gave, and every damaged copy
+    /// gets 0.14's answer, a 0.14 panic counting as a refusal, except where a
+    /// rule added since refuses it: a GIF cut inside its header or colour table
+    /// (HOL-SEC-304) and a sample table longer than its box (HOL-SEC-302). The
+    /// digest was taken on 0.14.3's base 4232da60 with only those two rules
+    /// added. A Matroska file is not damaged byte by byte here: a changed media
+    /// type turns a kept font into a voided file (HOL-SEC-306).
+    #[test]
+    fn strip_answers_as_0_14_did() {
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/node/image_check_fixtures");
+        let honest: Vec<(&str, Vec<u8>)> = vec![
+            ("mp4", mp4_with_location()),
+            ("mov", mp4_with_chunk_runs()),
+            ("webm", webm_with_location()),
+            ("avi", avi_with_location()),
+            ("avi", avi_nested(3)),
+            ("jpg", jpeg_with_gps(1)),
+            ("jpg", jpeg_with_gps(6)),
+            ("png", png_with_gps()),
+            ("webp", webp_with_gps(1)),
+            ("webp", webp_with_gps(8)),
+            ("heic", heic_with_gps()),
+            ("heic", heic_with_split_exif()),
+            ("gif", gif_with_location()),
+            // Containers 0.14 never walked further, with nothing of the kind
+            // HOL-SEC-305/306 remove: ffmpeg's fragmented layout (real, and as
+            // the review built it) and a Matroska file with a font and chapters.
+            ("mp4", fixture("frag_keyframe.mp4")),
+            ("mp4", super::rev3::layout_for_test(b"vide", 0x02_0010)),
+            ("mkv", fixture("fonts_chapters.mkv")),
+        ];
+        // A HEIF whose movie 0.14 sent whole loses only what a video's walk
+        // takes (HOL-SEC-307); its items strip to the bytes 0.14 gave.
+        let (heic, moov) = heic_with_a_movie();
+        let moved = strip_for_send("heic", heic).unwrap();
+        assert_eq!(moved[..moved.len() - moov.len()], strip_for_send("heic", heic_with_gps()).unwrap());
+        let crafted: Vec<Vec<u8>> = (1..=8)
+            .map(|k| std::fs::read(fixtures.join(format!("webp_panic_{k}.webp"))).expect("fixture"))
+            .collect();
+        let mut h = <sha2::Sha256 as sha2::Digest>::new();
+        let mut answer = |ext: &str, data: &[u8]| {
+            let out = std::panic::catch_unwind(|| strip_for_send(ext, data.to_vec()));
+            let ok = matches!(out, Ok(Ok(_)));
+            match out {
+                Ok(Ok(b)) => {
+                    sha2::Digest::update(&mut h, (b.len() as u64).to_le_bytes());
+                    sha2::Digest::update(&mut h, &b);
+                }
+                _ => sha2::Digest::update(&mut h, b"refused"),
+            }
+            ok
+        };
+        for (ext, data) in &honest {
+            assert!(answer(ext, data), "an honest {ext} strips");
+        }
+        for data in &crafted {
+            answer("webp", data);
+        }
+        for (ext, data) in honest.iter().filter(|(ext, _)| ["mov", "mp4", "avi", "heic", "gif", "webm", "jpg", "webp"].contains(ext)) {
+            for k in 0..data.len() {
+                answer(ext, &data[..k]);
+                for v in [0x00, 0x01, 0x7F, 0xFF, data[k] ^ 0x80] {
+                    if v != data[k] {
+                        let mut d = data.clone();
+                        d[k] = v;
+                        answer(ext, &d);
+                    }
+                }
+            }
+        }
+        assert_eq!(hex::encode(sha2::Digest::finalize(h)), "a04e9de68cb83f508e85cdee71ee3c4d5e0a6d01114b865391dbeb6ceae16a4f");
+    }
+
+    /// A GPS track whose chunks hold two, none, one and no samples.
+    fn mp4_with_chunk_runs() -> Vec<u8> {
+        let ftyp = bx(b"ftyp", b"qt  \0\0\x02\0qt  ");
+        let samples: [&[u8]; 3] = [b"GPS1+37", b"GPS2.7749", b"GPS3-122.4194"];
+        let at = ftyp.len() as u32 + 8;
+        let mdat = bx(b"mdat", &samples.concat());
+        let len = |k: usize| samples[k].len() as u32;
+        let run = |first: u32, n: u32| [first.to_be_bytes(), n.to_be_bytes(), 1u32.to_be_bytes()].concat();
+        let stsc = full(b"stsc", 0, &[&4u32.to_be_bytes()[..], &run(1, 2), &run(2, 0), &run(3, 1), &run(4, 0)].concat());
+        let sizes = [3u32, len(0), len(1), len(2)].iter().flat_map(|v| v.to_be_bytes()).collect::<Vec<_>>();
+        let stsz = full(b"stsz", 0, &[&[0u8; 4][..], &sizes].concat());
+        let offsets = [4, at, at, at + len(0) + len(1), at].iter().flat_map(|v| v.to_be_bytes()).collect::<Vec<_>>();
+        let stco = full(b"stco", 0, &offsets);
+        let stbl = bx(b"stbl", &[full(b"stsd", 0, &[0, 0, 0, 0]), stsc, stsz, stco].concat());
+        let hdlr = full(b"hdlr", 0, &[&[0u8; 4][..], b"meta", &[0; 12]].concat());
+        let trak = bx(b"trak", &bx(b"mdia", &[hdlr, bx(b"minf", &stbl)].concat()));
+        let moov = bx(b"moov", &[full(b"mvhd", 0, &[0x11; 96]), trak].concat());
+        [ftyp, mdat, moov].concat()
+    }
+
+    /// A HEIC whose Exif item sits in two extents past a base offset, located
+    /// by a version 1 `iloc`.
+    fn heic_with_split_exif() -> Vec<u8> {
+        let ftyp = bx(b"ftyp", b"heic\0\0\0\0mif1heic");
+        let exif = [&[0u8, 0, 0, 6][..], b"Exif\0\0", &exif_with_gps(6)].concat();
+        let half = exif.len() / 2;
+        let meta = |base: u32| {
+            let infe = |id: u8, t: &[u8; 4]| full(b"infe", 2, &[&[0, id, 0, 0][..], t, b"\0"].concat());
+            let iinf = full(b"iinf", 0, &[&[0, 2][..], &infe(1, b"hvc1"), &infe(2, b"Exif")].concat());
+            let ext = |off: usize, len: usize| [(off as u32).to_be_bytes(), (len as u32).to_be_bytes()].concat();
+            let item1 = [&[0, 1, 0, 0, 0, 0][..], &base.to_be_bytes(), &[0, 1], &ext(0, 4)].concat();
+            let item2 = [&[0, 2, 0, 0, 0, 0][..], &base.to_be_bytes(), &[0, 2], &ext(4, half), &ext(4 + half, exif.len() - half)].concat();
+            full(b"meta", 0, &[iinf, full(b"iloc", 1, &[&[0x44, 0x40, 0, 2][..], &item1, &item2].concat())].concat())
+        };
+        let head = ftyp.len() + meta(0).len() + 8;
+        let mdat = bx(b"mdat", &[b"HEVC".as_slice(), &exif].concat());
+        [ftyp, meta(head as u32), mdat].concat()
+    }
+
+    fn fixture(name: &str) -> Vec<u8> {
+        std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/node/image_check_fixtures").join(name)).expect("fixture")
+    }
+
+    /// Where the box `kind` sits in a file, `nth` from 0: its start and end.
+    fn box_at(d: &[u8], kind: &[u8; 4], nth: usize) -> Range<usize> {
+        let at = d.windows(4).enumerate().filter(|(_, w)| *w == kind).nth(nth).expect("box").0 - 4;
+        at..at + u32::from_be_bytes(d[at..at + 4].try_into().unwrap()) as usize
+    }
+
+    /// HOL-SEC-305: ffmpeg's `-movflags frag_keyframe` (no `empty_moov`)
+    /// lists the first fragment's samples in `moov`; a real file of that kind,
+    /// with a GoPro-style GPS data track (handler `meta`), leaves without them.
+    /// Nothing else of the media changes.
+    #[test]
+    fn rev3_a_real_frag_keyframe_movie_loses_its_gps_data_track() {
+        let mov = fixture("frag_keyframe_gps.mov");
+        let gps = mov.windows(LOCATION.len()).position(|w| w == LOCATION).expect("gps sample") - 4..;
+        let gps = gps.start..gps.start + 44;
+        let out = strip_for_send("mov", mov.clone()).expect("strips");
+        assert_eq!(out.len(), mov.len());
+        assert!(!holds(&out, LOCATION) && !holds(&out, b"+48.8584"), "the GPS sample left with the file");
+        assert!(out[gps.clone()].iter().all(|b| *b == 0));
+        let mdat = box_at(&mov, b"mdat", 0);
+        assert_eq!(out[mdat.start..gps.start], mov[mdat.start..gps.start], "the first fragment's video stays");
+        let moof = box_at(&mov, b"moof", 0).start;
+        assert_eq!(out[moof..], mov[moof..], "the later fragments stay");
+        assert!(holds(&out[box_at(&out, b"moov", 0)], b"meta"), "the GPS track stays, its fragments name it");
+    }
+
+    /// The ffmpeg layout of the review's test with the second track's `trex`
+    /// cut to 16 body bytes (the 8 it lost become a `free` box).
+    fn frag_layout_with_a_short_trex(handler: &[u8; 4], tfhd_flags: u32) -> Vec<u8> {
+        let mut f = super::rev3::layout_for_test(handler, tfhd_flags);
+        let t = box_at(&f, b"trex", 1);
+        f[t.start..t.start + 4].copy_from_slice(&24u32.to_be_bytes());
+        f[t.start + 24..t.end].copy_from_slice(&[0, 0, 0, 8, b'f', b'r', b'e', b'e']);
+        f
+    }
+
+    /// Info 1 of the final review: a fragmented movie without a timed-metadata
+    /// track reads nothing 0.14 did not, so a `trex` shorter than the standard's
+    /// is no reason to refuse it; with one, only a run that needs the missing
+    /// default is refused.
+    #[test]
+    fn rev3_a_short_trex_refuses_only_where_a_gps_track_needs_it() {
+        let plain = frag_layout_with_a_short_trex(b"vide", 0x02_0010);
+        assert_eq!(strip_for_send("mp4", plain.clone()).unwrap(), plain, "no carrier: every byte as in 0.14");
+        let mut mvex_broken = super::rev3::layout_for_test(b"vide", 0x02_0010);
+        let t = box_at(&mvex_broken, b"trex", 1);
+        mvex_broken[t.start..t.start + 4].copy_from_slice(&40u32.to_be_bytes());
+        assert_eq!(strip_for_send("mp4", mvex_broken.clone()).unwrap(), mvex_broken, "no carrier: mvex is not read");
+        // The GPS fragment names its own sample size, so the short trex is not needed.
+        let out = strip_for_send("mp4", frag_layout_with_a_short_trex(b"meta", 0x02_0010)).expect("strips");
+        assert!(!holds(&out, LOCATION) && !holds(&out, b"+48.8584"));
+        // Here the size can come only from the trex the file cut short.
+        assert!(strip_for_send("mp4", frag_layout_with_a_short_trex(b"meta", 0x02_0000)).is_err());
+        assert!(strip_for_send("mp4", super::rev3::layout_for_test(b"meta", 0x02_0000)).is_ok(), "the whole trex gives it");
+        // An mvex that does not parse gives no defaults, and refuses nothing
+        // that needs none.
+        let mut mvex_broken = super::rev3::layout_for_test(b"meta", 0x02_0010);
+        let t = box_at(&mvex_broken, b"trex", 1);
+        mvex_broken[t.start..t.start + 4].copy_from_slice(&40u32.to_be_bytes());
+        let out = strip_for_send("mp4", mvex_broken).expect("strips");
+        assert!(!holds(&out, b"+48.8584"));
+    }
+
+    /// Two tracks giving one id: that id's `moof` runs count as timed metadata
+    /// if either track is, whichever comes first.
+    #[test]
+    fn rev3_two_tracks_with_one_id_count_as_timed_metadata() {
+        for first_is_gps in [false, true] {
+            let mut f = super::rev3::layout_for_test(b"meta", 0x02_0010);
+            let t = box_at(&f, b"tkhd", 0).start + 20;
+            f[t..t + 4].copy_from_slice(&2u32.to_be_bytes());
+            if first_is_gps {
+                let (a, b) = (box_at(&f, b"hdlr", 0).start + 16, box_at(&f, b"hdlr", 1).start + 16);
+                f[a..a + 4].copy_from_slice(b"meta");
+                f[b..b + 4].copy_from_slice(b"vide");
+            }
+            let out = strip_for_send("mp4", f).expect("strips");
+            assert!(!holds(&out, b"+48.8584"), "first_is_gps {first_is_gps}");
+        }
+    }
+
+    /// A fragmented movie's GPS track whose `tkhd` holds no id is refused: its
+    /// runs could not be told from another track's. A video track without one
+    /// is no reason to refuse.
+    #[test]
+    fn rev3_a_gps_track_without_an_id_is_refused() {
+        let cut = |nth: usize| {
+            let mut f = super::rev3::layout_for_test(b"meta", 0x02_0010);
+            let t = box_at(&f, b"tkhd", nth);
+            f[t.start..t.start + 4].copy_from_slice(&20u32.to_be_bytes());
+            f[t.start + 20..t.start + 28].copy_from_slice(&[0, 0, 0, (t.len() - 20) as u8, b'f', b'r', b'e', b'e']);
+            f
+        };
+        assert!(strip_for_send("mp4", cut(1)).is_err());
+        let out = strip_for_send("mp4", cut(0)).expect("strips");
+        assert!(!holds(&out, b"+48.8584"));
+    }
+
+    /// A GPS track's `moof` runs count against the file's budget like its
+    /// samples: runs laid over each other cannot zero the file again and
+    /// again (HOL-SEC-269, HOL-SEC-305).
+    #[test]
+    fn rev3_overlapping_moof_runs_are_refused() {
+        let file = |runs: usize| {
+            let ftyp = bx(b"ftyp", b"iso5\0\0\0\0iso5");
+            let hdlr = full(b"hdlr", 0, &[&[0u8; 4][..], b"meta", &[0; 12]].concat());
+            let trak = bx(b"trak", &[full(b"tkhd", 0, &[&[0u8; 8][..], &[0, 0, 0, 1]].concat()), bx(b"mdia", &hdlr)].concat());
+            let moov = bx(b"moov", &[full(b"mvhd", 0, &[0; 96]), trak].concat());
+            // Every run starts at the moof and runs to the end of the file.
+            let moof = |tail: u32| {
+                let tfhd = bx(b"tfhd", &[&0x02_0010u32.to_be_bytes()[..], &[0, 0, 0, 1], &tail.to_be_bytes()].concat());
+                let trun = bx(b"trun", &[&1u32.to_be_bytes()[..], &1u32.to_be_bytes(), &0u32.to_be_bytes()].concat());
+                bx(b"moof", &[full(b"mfhd", 0, &[0, 0, 0, 1]), bx(b"traf", &[tfhd, trun.repeat(runs)].concat())].concat())
+            };
+            let mdat = bx(b"mdat", &[0x55; 8192]);
+            let tail = (moof(0).len() + mdat.len()) as u32;
+            [ftyp, moov, moof(tail), mdat].concat()
+        };
+        assert!(strip_for_send("mp4", file(1)).is_ok(), "one run covers the tail once");
+        assert!(strip_for_send("mp4", file(4)).is_err(), "four runs over the same bytes");
+    }
+
+    fn mkv_with_attachments(files: &[Vec<u8>]) -> Vec<u8> {
+        let header = ebml(&[0x1A, 0x45, 0xDF, 0xA3], &ebml(&[0x42, 0x82], b"matroska"));
+        let tracks = ebml(&[0x16, 0x54, 0xAE, 0x6B], &ebml(&[0xAE], &ebml(&[0xD7], &[1])));
+        let attachments = ebml(&[0x19, 0x41, 0xA4, 0x69], &files.concat());
+        let cluster = ebml(&[0x1F, 0x43, 0xB6, 0x75], &[ebml(&[0xE7], &[0]), ebml(&[0xA3], b"\x81\0\0\x80FRAME")].concat());
+        [header, ebml(&[0x18, 0x53, 0x80, 0x67], &[tracks, attachments, cluster].concat())].concat()
+    }
+
+    fn attached(name: &[u8], mime: Option<&[u8]>, data: &[u8]) -> Vec<u8> {
+        let mut kids = ebml(&[0x46, 0x6E], name);
+        if let Some(m) = mime {
+            kids.extend(ebml(&[0x46, 0x60], m));
+        }
+        kids.extend(ebml(&[0x46, 0x5C], data));
+        ebml(&[0x61, 0xA7], &kids)
+    }
+
+    /// Vitalik's call on HOL-SEC-306: Matroska fonts (by media type, or by
+    /// name when the type says nothing) and Chapters stay; every other attached
+    /// file, a picture with its Exif above all, becomes Void.
+    #[test]
+    fn rev3_an_mkv_image_attachment_is_still_voided() {
+        let font = attached(b"Typeset.ttf", Some(b"font/ttf"), b"TRUETYPE-FONT-BYTES");
+        let cover = attached(b"cover.jpg", Some(b"image/jpeg"), LOCATION);
+        let mkv = mkv_with_attachments(&[font.clone(), cover.clone()]);
+        let at = nth(&mkv, &cover, 0);
+        let mut want = mkv.clone();
+        void(&mut want, at, at + cover.len());
+        assert_eq!(strip_for_send("mkv", mkv).unwrap(), want, "only the picture goes");
+        for (name, mime, kept) in [
+            (&b"a.otf"[..], Some(&b"application/vnd.ms-opentype"[..]), true),
+            (b"a.TTF", Some(b"application/octet-stream"), true),
+            (b"a.ttf", None, true),
+            (b"a.woff2", Some(b"APPLICATION/X-TRUETYPE-FONT"), true),
+            (b"a.ttf", Some(b"image/png"), false),
+            (b"a.bin", Some(b"application/octet-stream"), false),
+            (b"a.jpg", None, false),
+            (b"notes.txt", Some(b"text/plain"), false),
+            (b"a.ttf\0\0", Some(b"application/octet-stream\0"), true),
+            (b"a.otf", Some(b"application/x-font-otf; charset=binary"), true),
+        ] {
+            let mkv = mkv_with_attachments(&[attached(name, mime, LOCATION)]);
+            let out = strip_for_send("mkv", mkv.clone()).unwrap();
+            assert_eq!(out == mkv, kept, "{}", String::from_utf8_lossy(name));
+            assert_eq!(holds(&out, LOCATION), kept);
+        }
+    }
+
+    /// The same rules on real files ffmpeg wrote (with its CRC-32 elements):
+    /// the cover's Exif goes, the font and both chapters stay.
+    #[test]
+    fn rev3_a_real_mkv_keeps_its_font_and_chapters_and_loses_its_cover() {
+        let mkv = fixture("font_and_cover.mkv");
+        let out = strip_for_send("mkv", mkv.clone()).expect("strips");
+        assert_eq!(out.len(), mkv.len());
+        assert!(!holds(&out, LOCATION) && !holds(&out, b"image/jpeg"), "the cover left with the file");
+        assert!(holds(&out, b"TRUETYPE-FONT-BYTES") && holds(&out, b"font/ttf"), "the font was voided");
+        assert!(holds(&out, b"Opening") && holds(&out, b"Part A"), "the chapters were voided");
+        strip_matroska(&mut out.clone()).expect("the voided file still walks");
+        // The Attachments element's CRC-32 no longer matches, so it goes too.
+        let crc = nth(&mkv, &[0x19, 0x41, 0xA4, 0x69], 1) + 6;
+        assert_eq!((mkv[crc], out[crc]), (0xBF, 0xEC));
+        let fonts = fixture("fonts_chapters.mkv");
+        let out = strip_for_send("mkv", fonts.clone()).expect("strips");
+        assert!(holds(&out, b"TRUETYPE-FONT-BYTES") && holds(&out, b"Opening"));
+        let at = nth(&fonts, &[0x19, 0x41, 0xA4, 0x69], 1);
+        assert_eq!(out[at..at + 0x97 + 6], fonts[at..at + 0x97 + 6], "nothing voided, its CRC-32 stays");
+    }
+
+    // HOL-SEC-308: motion photos. The made samples are a sips HEIC and JPEG
+    // with an ffmpeg clip whose `udta` names LOCATION: in a top-level `mpvd`
+    // box (Samsung and Google HEIC), and appended after the JPEG's end with
+    // Google's Motion Photo XMP (Pixel).
+
+    /// A motion HEIC's still, its `mpvd` header and the clip it holds.
+    fn motion_parts(d: &[u8]) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        let at = box_at(d, b"mpvd", 0).start;
+        // Google writes the box with a 64-bit size.
+        let b = next_box(d, at, d.len(), true).unwrap().unwrap();
+        (d[..b.start].to_vec(), d[b.start..b.body].to_vec(), d[b.body..b.end].to_vec())
+    }
+
+    /// Where a motion JPEG's appended clip starts.
+    fn clip_start(jpg: &[u8]) -> usize {
+        nth(jpg, b"ftyp", 0) - 4
+    }
+
+    #[test]
+    fn a_heic_motion_photo_clip_loses_its_location() {
+        let heic = fixture("motion_photo.heic");
+        assert!(holds(&heic, LOCATION), "precondition: the clip names a place");
+        let (still, head, clip) = motion_parts(&heic);
+        let want = [strip_for_send("heic", still).unwrap(), head, strip_for_send("mp4", clip).unwrap()].concat();
+        let out = strip_for_send("heic", heic.clone()).expect("strips");
+        assert!(!holds(&out, LOCATION), "the clip's location is gone");
+        assert_eq!(out, want, "only the clip's metadata changes");
+        assert_eq!(strip_for_send("heic", out.clone()).unwrap(), out, "stripping twice changes nothing");
+        // A clip's offsets count from its own start: its GPS samples, listed
+        // in its tables or in fragment runs, are zeroed where they lie.
+        for clip in [mp4_with_location(), fragmented_mp4_with_gps(0).0, fragmented_mp4_with_gps(2).0] {
+            let d = [heic_with_gps(), bx(b"mpvd", &clip)].concat();
+            let want = [strip_for_send("heic", heic_with_gps()).unwrap(), bx(b"mpvd", &strip_for_send("mp4", clip).unwrap())].concat();
+            assert_eq!(strip_for_send("heic", d).unwrap(), want);
+        }
+    }
+
+    /// A real motion photo without a location: androidx/media's test file
+    /// `libraries/test_data/src/test/assets/media/heif/sample_MP.heic`
+    /// (Apache-2.0). It strips, its clip as a video, and nothing else changes.
+    #[test]
+    fn a_real_heic_motion_photo_strips_its_clip_as_a_video() {
+        let heic = fixture("androidx_sample_MP.heic");
+        let (still, head, clip) = motion_parts(&heic);
+        let movie = strip_for_send("mp4", clip.clone()).expect("the clip strips as a video");
+        assert_ne!(movie, clip, "the clip's times are zeroed");
+        let want = [strip_for_send("heic", still).unwrap(), head, movie].concat();
+        assert_eq!(strip_for_send("heic", heic).expect("strips"), want);
+    }
+
+    #[test]
+    fn a_motion_clip_that_does_not_parse_is_refused() {
+        let mut cut = mp4_with_location();
+        cut.truncate(cut.len() - 30);
+        let no_movie = [bx(b"ftyp", b"isom\0\0\0\0"), bx(b"mdat", LOCATION)].concat();
+        for clip in [Vec::new(), LOCATION.to_vec(), no_movie, cut] {
+            assert!(strip_for_send("heic", [heic_with_gps(), bx(b"mpvd", &clip)].concat()).is_err());
+        }
+    }
+
+    /// The clip's samples and the photo's Exif extents share the one budget a
+    /// file has (HOL-SEC-269): each may cover the file twice, not both.
+    #[test]
+    fn a_motion_clip_shares_the_photos_budget() {
+        let s = 1u32 << 20;
+        let file = |pad: usize, chunks: u32, sample: u32, extents: u16, len: u32| {
+            let clip = mp4_with_shared_chunk_offsets(chunks, sample);
+            [heic_with_overlapping_exif_extents(1, extents, len, pad), bx(b"mpvd", &clip)].concat()
+        };
+        assert!(strip_for_send("heic", file(16, 2, s, 1, 1)).is_ok(), "the clip twice");
+        assert!(strip_for_send("heic", file(s as usize, 1, 1, 3, s * 2 / 3)).is_ok(), "the Exif twice");
+        assert!(strip_for_send("heic", file(16, 2, s, 3, s * 2 / 3)).is_err(), "both twice");
+    }
+
+    #[test]
+    fn a_jpeg_motion_photo_leaves_as_its_still_alone() {
+        let jpg = fixture("motion_photo.jpg");
+        assert!(holds(&jpg, LOCATION) && holds(&jpg, b"GCamera:MicroVideoOffset"), "precondition");
+        let still = jpg[..clip_start(&jpg)].to_vec();
+        let alone = strip_for_send("jpg", still.clone()).unwrap();
+        assert!(!holds(&alone, b"MicroVideo"), "the XMP naming the clip goes");
+        assert_eq!(strip_for_send("jpg", jpg.clone()).unwrap(), alone, "Pixel: nothing after the picture's end leaves");
+        // Samsung's shape: a marker, the clip, and a trailer indexing both.
+        let samsung = [&still[..], b"MotionPhoto_Data", &jpg[clip_start(&jpg)..], b"\0\0\0\0SEFH\0\0\0\0SEFT"].concat();
+        assert_eq!(strip_for_send("jpg", samsung.clone()).unwrap(), alone, "Samsung");
+        // The photo path converts it, and the decode keeps only pixels.
+        for d in [jpg, samsung] {
+            let (webp, ..) = crate::node::image_convert::convert_to_webp_with_quality(&d, Default::default()).expect("converts");
+            assert!(!holds(&webp, LOCATION) && !holds(&webp, b"ftyp"));
+        }
+    }
+
+    /// A HEIC or JPEG without a clip strips to the bytes it gave before
+    /// HOL-SEC-308 (digests taken on 539f05d5).
+    #[test]
+    fn a_photo_without_a_clip_strips_as_before() {
+        let digest = |ext: &str, d: Vec<u8>| hex::encode(<sha2::Sha256 as sha2::Digest>::digest(strip_for_send(ext, d).unwrap()));
+        let heic = fixture("motion_photo.heic");
+        let jpg = fixture("motion_photo.jpg");
+        let got = (digest("heic", motion_parts(&heic).0), digest("jpg", jpg[..clip_start(&jpg)].to_vec()));
+        assert_eq!(got, ("b480913dc67850a0c51c609a9759d202c26f855161a6898907b814e3eb9af770".into(), "e3d0f3642e03fdb04b074620b3a531a70a410ceb1b7f609b60246ba703154b2e".into()));
+    }
+
+    /// A motion photo received and sent on leaves without its clip's location.
+    #[test]
+    fn a_forwarded_motion_photo_loses_its_clips_location() {
+        let dir = crate::test_tmp::tempdir().expect("tmp");
+        for name in ["motion_photo.heic", "motion_photo.jpg"] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, fixture(name)).expect("write");
+            assert!(!holds(&read_for_send(&path).expect(name), LOCATION), "{name}");
+        }
+    }
+
+    // HOL-SEC-309: Samsung's `sefd` box closes its videos, its motion photos'
+    // clips and its HEIC photos. It holds the capture time, the mobile country
+    // code, a hash of the original path, edit history and embedded pictures,
+    // sound and depth maps; the strip frees the whole box.
+
+    /// A `free` box as long as `b`, which every strip leaves alone.
+    fn padding_like(b: &[u8]) -> Vec<u8> {
+        [&b[..4], b"free", &vec![0; b.len() - 8]].concat()
+    }
+
+    fn holds_sef(d: &[u8]) -> bool {
+        [SEF_TIME, b"MCC_Data", b"Original_Path_Hash_Key", b"SEFT", b"sefd"].iter().any(|n| holds(d, n))
+    }
+
+    #[test]
+    fn a_samsung_sef_box_becomes_padding() {
+        let (sef, pad) = (samsung_sef(), padding_like(&samsung_sef()));
+        let out = strip_for_send("mp4", samsung_mp4()).expect("strips");
+        assert!(!holds_sef(&out), "the capture time and country code are gone");
+        assert_eq!(out, [strip_for_send("mp4", mp4_with_location()).unwrap(), pad.clone()].concat(), "only that box changes");
+        assert_eq!(strip_for_send("mp4", out.clone()).unwrap(), out, "stripping twice changes nothing");
+        // Its content is never read: an odd or empty one goes the same way.
+        for odd in [bx(b"sefd", &[]), bx(b"sefd", b"not a trailer")] {
+            let want = [strip_for_send("mp4", mp4_with_location()).unwrap(), padding_like(&odd)].concat();
+            assert_eq!(strip_for_send("mp4", [mp4_with_location(), odd].concat()).unwrap(), want);
+        }
+        // Inside the movie box too.
+        let movie = |b: &[u8]| [bx(b"ftyp", b"isom\0\0\0\0"), bx(b"moov", &[full(b"mvhd", 0, &[0; 96]), b.to_vec()].concat())].concat();
+        assert_eq!(strip_for_send("mov", movie(&sef)).unwrap(), movie(&pad), "a sefd in moov");
+    }
+
+    #[test]
+    fn a_samsung_photo_and_its_clip_lose_their_sef_box() {
+        let (sef, pad) = (samsung_sef(), padding_like(&samsung_sef()));
+        let photo = strip_for_send("heic", heic_with_gps()).unwrap();
+        let out = strip_for_send("heic", [heic_with_gps(), sef.clone()].concat()).expect("strips");
+        assert_eq!(out, [photo, pad.clone()].concat(), "a HEIC's own sefd");
+        // A motion photo's clip closes with one, as the S22 Ultra writes it.
+        let clip = |s: &[u8]| [mp4_with_location(), s.to_vec()].concat();
+        let want = strip_for_send("heic", [heic_with_gps(), bx(b"mpvd", &clip(&pad))].concat()).unwrap();
+        let out = strip_for_send("heic", [heic_with_gps(), bx(b"mpvd", &clip(&sef))].concat()).expect("strips");
+        assert!(!holds_sef(&out));
+        assert_eq!(out, want, "a clip's sefd");
+        let (still, _, real_clip) = motion_parts(&fixture("motion_photo.heic"));
+        let samsung = [still.clone(), bx(b"mpvd", &[real_clip.clone(), sef].concat())].concat();
+        let want = strip_for_send("heic", [still, bx(b"mpvd", &[real_clip, pad].concat())].concat()).unwrap();
+        assert_eq!(strip_for_send("heic", samsung).unwrap(), want, "the made motion photo");
+    }
+
+    /// A Samsung video or photo received and sent on leaves without it.
+    #[test]
+    fn a_forwarded_samsung_file_loses_its_sef_box() {
+        let dir = crate::test_tmp::tempdir().expect("tmp");
+        let clip = bx(b"mpvd", &samsung_mp4());
+        for (name, d) in [("video.mp4", samsung_mp4()), ("photo.heic", [heic_with_gps(), clip].concat())] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, d).expect("write");
+            assert!(!holds_sef(&read_for_send(&path).expect(name)), "{name}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod rev3 {
+    use super::*;
+
+    const LOCATION: &[u8] = b"+37.7749-122.4194";
+    const LOCATION2: &[u8] = b"+48.8584+002.2945";
+
+    fn bx(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
+        let mut v = ((8 + body.len()) as u32).to_be_bytes().to_vec();
+        v.extend_from_slice(kind);
+        v.extend_from_slice(body);
+        v
+    }
+    fn full(kind: &[u8; 4], version: u8, body: &[u8]) -> Vec<u8> {
+        bx(kind, &[&[version, 0, 0, 0][..], body].concat())
+    }
+    fn holds(d: &[u8], needle: &[u8]) -> bool {
+        d.windows(needle.len()).any(|w| w == needle)
+    }
+    fn within<T: Send + 'static>(secs: u64, f: impl FnOnce() -> T + Send + 'static) -> Option<T> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(f());
+        });
+        rx.recv_timeout(std::time::Duration::from_secs(secs)).ok()
+    }
+    /// One track with one sample in its sample tables (the fixtures' `track`).
+    fn track(id: u8, handler: &[u8; 4], sample_offset: u32, sample_len: u32) -> Vec<u8> {
+        let tkhd = full(b"tkhd", 0, &[&[0u8; 8][..], &[0, 0, 0, id], &[0; 68]].concat());
+        let mdhd = full(b"mdhd", 0, &[0u8; 20]);
+        let hdlr = full(b"hdlr", 0, &[&[0u8; 4][..], handler, &[0; 12]].concat());
+        let stsc = full(b"stsc", 0, &[0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1]);
+        let stsz = full(b"stsz", 0, &[&[0u8; 4][..], &[0, 0, 0, 1], &sample_len.to_be_bytes()].concat());
+        let stco = full(b"stco", 0, &[&[0, 0, 0, 1][..], &sample_offset.to_be_bytes()].concat());
+        let stbl = bx(b"stbl", &[full(b"stsd", 0, &[0, 0, 0, 0]), stsc, stsz, stco].concat());
+        bx(b"trak", &[tkhd, bx(b"mdia", &[mdhd, hdlr, bx(b"minf", &stbl)].concat())].concat())
+    }
+
+    /// ffmpeg `-movflags frag_keyframe` (no empty_moov): the first fragment is
+    /// an ordinary moov + mdat, the rest are moof + mdat. `tfhd_flags` says how
+    /// the GPS fragment names its sample size (0x10: in its tfhd).
+    fn ffmpeg_frag_keyframe_layout(handler: &[u8; 4], tfhd_flags: u32) -> Vec<u8> {
+        let ftyp = bx(b"ftyp", b"isom\0\0\x02\0isomiso2");
+        let (video, gps1, gps2) = (b"VIDEO-KEYFRAME".to_vec(), [b"GPS ".as_slice(), LOCATION].concat(), [b"GPS ".as_slice(), LOCATION2].concat());
+        let size = gps2.len() as u32;
+        let trex = |id: u8| full(b"trex", 0, &[&[0, 0, 0, id][..], &[0, 0, 0, 1], &[0; 4], &size.to_be_bytes(), &[0; 4]].concat());
+        let moov = |v_at: u32, g_at: u32| bx(b"moov", &[full(b"mvhd", 0, &[0; 96]), track(1, b"vide", v_at, video.len() as u32), track(2, handler, g_at, gps1.len() as u32), bx(b"mvex", &[trex(1), trex(2)].concat())].concat());
+        let head = (ftyp.len() + moov(0, 0).len() + 8) as u32;
+        let mdat1 = bx(b"mdat", &[video.clone(), gps1.clone()].concat());
+        let flagged = |kind: &[u8; 4], flags: u32, body: &[u8]| bx(kind, &[&flags.to_be_bytes()[..], body].concat());
+        let tfhd_size = if tfhd_flags & 0x10 != 0 { size.to_be_bytes().to_vec() } else { Vec::new() };
+        let moof = |data: u32| bx(b"moof", &[full(b"mfhd", 0, &[0, 0, 0, 2]), bx(b"traf", &[flagged(b"tfhd", tfhd_flags, &[&[0, 0, 0, 2][..], &tfhd_size].concat()), flagged(b"trun", 0x001, &[&1u32.to_be_bytes()[..], &data.to_be_bytes()].concat())].concat())].concat());
+        let data = moof(0).len() as u32 + 8;
+        [ftyp, moov(head, head + video.len() as u32), mdat1, moof(data), bx(b"mdat", &gps2)].concat()
+    }
+
+    pub(super) fn layout_for_test(handler: &[u8; 4], tfhd_flags: u32) -> Vec<u8> {
+        ffmpeg_frag_keyframe_layout(handler, tfhd_flags)
+    }
+
+    /// HOL-SEC-305 incomplete: in a fragmented file the samples the moov's own
+    /// sample tables list (ffmpeg's first fragment) are never zeroed.
+    #[test]
+    fn rev3_a_fragmented_movie_loses_the_gps_its_moov_lists() {
+        for h in [b"meta", b"camm"] {
+            let out = strip_for_send("mp4", ffmpeg_frag_keyframe_layout(h, 0x02_0010)).expect("strips");
+            assert!(!holds(&out, LOCATION2), "moof run zeroed");
+            assert!(!holds(&out, LOCATION), "{}: the first fragment's GPS sample, listed in moov, left with the file", String::from_utf8_lossy(h));
+        }
+    }
+
+    #[test]
+    fn rev3_sanity_without_the_moof_the_gps_goes() {
+        // Same file cut before its moof: the moov-listed GPS sample is zeroed.
+        let f = ffmpeg_frag_keyframe_layout(b"meta", 0x02_0010);
+        let m = f.windows(4).position(|w| w == b"moof").unwrap() - 4;
+        let out = strip_for_send("mp4", f[..m].to_vec()).unwrap();
+        assert!(!holds(&out, LOCATION));
+    }
+
+    /// `tracks` traks, `trex` trex boxes and `trafs` track fragments, none of
+    /// them naming each other, plus one timed-metadata track.
+    fn mp4_of_many_tracks_and_fragments(tracks: u32, trex: u32, trafs: u32) -> Vec<u8> {
+        let ftyp = bx(b"ftyp", b"iso5\0\0\0\0iso5");
+        let mut moov = full(b"mvhd", 0, &[0; 96]);
+        moov.extend(bx(b"trak", &[full(b"tkhd", 0, &[&[0u8; 8][..], &[0, 0, 0, 1]].concat()), bx(b"mdia", &full(b"hdlr", 0, &[&[0u8; 4][..], b"meta", &[0; 12]].concat()))].concat()));
+        for k in 0..tracks {
+            moov.extend(bx(b"trak", &full(b"tkhd", 0, &[&[0u8; 8][..], &(k + 100).to_be_bytes()].concat())));
+        }
+        let mut mvex = Vec::new();
+        for _ in 0..trex {
+            mvex.extend(full(b"trex", 0, &[&u32::MAX.to_be_bytes()[..], &[0; 16]].concat()));
+        }
+        moov.extend(bx(b"mvex", &mvex));
+        let mut moof = full(b"mfhd", 0, &[0, 0, 0, 1]);
+        for _ in 0..trafs {
+            moof.extend(bx(b"traf", &full(b"tfhd", 0, &(u32::MAX - 1).to_be_bytes())));
+        }
+        [ftyp, bx(b"moov", &moov), bx(b"moof", &moof)].concat()
+    }
+
+    /// Same class as HOL-SEC-269: every trex and every traf looks its track up
+    /// in a list of every trak, so the cost is tracks x (trex + trafs).
+    #[test]
+    fn rev3_many_tracks_and_fragments_take_one_pass() {
+        // About 3 MiB of each.
+        let mp4 = mp4_of_many_tracks_and_fragments(98_304, 98_304, 131_072);
+        let len = mp4.len();
+        let answer = within(20, move || strip_for_send("mp4", mp4).is_ok());
+        assert!(answer.is_some(), "a {len} byte fragmented mp4 was still being stripped after 20 s");
+    }
+
+    /// One moof whose timed-metadata fragment has `runs` empty runs.
+    fn mp4_of_many_empty_runs(runs: u32) -> Vec<u8> {
+        let ftyp = bx(b"ftyp", b"iso5\0\0\0\0iso5");
+        let trak = bx(b"trak", &[full(b"tkhd", 0, &[&[0u8; 8][..], &[0, 0, 0, 1]].concat()), bx(b"mdia", &full(b"hdlr", 0, &[&[0u8; 4][..], b"meta", &[0; 12]].concat()))].concat());
+        let moov = bx(b"moov", &[full(b"mvhd", 0, &[0; 96]), trak].concat());
+        let mut traf = full(b"tfhd", 0, &[0, 0, 0, 1, 0, 0, 0, 0]);
+        traf[9..12].copy_from_slice(&[0, 0, 0x10]);
+        for _ in 0..runs {
+            traf.extend(full(b"trun", 0, &0u32.to_be_bytes()));
+        }
+        let moof = bx(b"moof", &[full(b"mfhd", 0, &[0, 0, 0, 1]), bx(b"traf", &traf)].concat());
+        [ftyp, moov, moof].concat()
+    }
+
+    /// R-RB-04 says the strip holds about twice a video at most; a moof's runs
+    /// are copied, listed and collected before any is zeroed.
+    #[test]
+    fn rev3_a_moof_of_many_runs_holds_at_most_twice_the_file() {
+        let mp4 = mp4_of_many_empty_runs(256 << 10);
+        let len = mp4.len();
+        let (ok, peak) = within(60, move || crate::test_alloc::peak_during(|| strip_for_send("mp4", mp4).is_ok())).expect("finished");
+        assert!(ok, "strips");
+        assert!(peak < 2 * len, "held {peak} bytes ({:.1}x) stripping a {len} byte file", peak as f64 / len as f64);
+    }
+}
+
+#[cfg(test)]
+mod rev3_mkv {
+    use super::*;
+    fn ebml(id: &[u8], body: &[u8]) -> Vec<u8> {
+        [id, &[0x40 | (body.len() >> 8) as u8, body.len() as u8], body].concat()
+    }
+    /// An MKV whose subtitles need an attached font and whose chapters name
+    /// the episode's parts: neither is capture metadata.
+    #[test]
+    fn rev3_an_mkv_keeps_its_subtitle_fonts_and_chapters() {
+        let header = ebml(&[0x1A, 0x45, 0xDF, 0xA3], &ebml(&[0x42, 0x82], b"matroska"));
+        let tracks = ebml(&[0x16, 0x54, 0xAE, 0x6B], &ebml(&[0xAE], &ebml(&[0xD7], &[1])));
+        let font = ebml(&[0x61, 0xA7], &[ebml(&[0x46, 0x6E], b"Typeset.ttf"), ebml(&[0x46, 0x60], b"font/ttf"), ebml(&[0x46, 0x5C], b"TRUETYPE-FONT-BYTES")].concat());
+        let attachments = ebml(&[0x19, 0x41, 0xA4, 0x69], &font);
+        let atom = ebml(&[0xB6], &[ebml(&[0x91], &[0]), ebml(&[0x80], &ebml(&[0x85], b"Opening"))].concat());
+        let chapters = ebml(&[0x10, 0x43, 0xA7, 0x70], &ebml(&[0x45, 0xB9], &atom));
+        let cluster = ebml(&[0x1F, 0x43, 0xB6, 0x75], &[ebml(&[0xE7], &[0]), ebml(&[0xA3], b"\x81\0\0\x80FRAME")].concat());
+        let segment = ebml(&[0x18, 0x53, 0x80, 0x67], &[tracks, attachments, chapters, cluster].concat());
+        let out = strip_for_send("mkv", [header, segment].concat()).unwrap();
+        let has = |n: &[u8]| out.windows(n.len()).any(|w| w == n);
+        assert!(has(b"TRUETYPE-FONT-BYTES"), "the subtitle font was voided");
+        assert!(has(b"Opening"), "the chapter was voided");
     }
 }

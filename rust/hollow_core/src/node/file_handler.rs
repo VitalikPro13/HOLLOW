@@ -4632,6 +4632,19 @@ mod tests {
         );
     }
 
+    /// HOL-SEC-267: a GIF the encoder cannot read whose kept block runs past
+    /// the end is refused on the photo path; 0.14's strip panicked on it.
+    #[test]
+    fn a_gif_the_strip_refuses_is_not_sent() {
+        use super::super::media_strip::fixtures::gifs_with_a_kept_block_past_the_end;
+        for gif in gifs_with_a_kept_block_past_the_end() {
+            assert_eq!(
+                convert_image_for_send(gif, "gif", image_convert::WebpQuality::Balanced, None, None).err(),
+                Some(super::super::media_strip::REFUSED.to_string()),
+            );
+        }
+    }
+
     /// FILE-2 regression. The auto-download exemption is the one way a pushed
     /// transfer writes bytes in a conversation the user gated, so it has to name a
     /// real voice note: flag, filename, extension and size all have to agree.

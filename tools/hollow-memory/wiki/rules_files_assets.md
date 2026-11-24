@@ -74,9 +74,22 @@ stay in CLAUDE.md. Wiki `rust_file_handler`, `emotes`, `hollowpack`.
   `vault_upload_file`, `share_create_for_send`, which shares a cleaned copy from
   `shares/send_*/`); the image conversion's fallback arms strip the container too. A video
   keeps every byte position (metadata becomes `free`/Void/JUNK padding), so the file id,
-  `vthumb.size` and the share manifest still match. Media that does not parse is REFUSED
+  `vthumb.size` and the share manifest still match. A timed GPS track goes with its
+  samples; in a fragmented file it keeps its `trak` and loses the samples its own tables
+  list (ffmpeg's `frag_keyframe` first fragment) and its `moof` runs (HOL-SEC-305); a HEIF
+  holding a movie has the movie walked too (HOL-SEC-307), and so is a HEIC motion photo's clip
+  (top-level `mpvd`, offsets from the clip's start, one budget, unparseable = refused); a JPEG
+  motion photo's clip after EOI never leaves (WebP decode, or `strip_jpeg` ends the file at the
+  first EOI) (HOL-SEC-308); Samsung's `sefd` box (capture time, country code, path hash, embedded media) becomes `free` at a video's, a clip's or a HEIF's top level and inside `moov`, unread (HOL-SEC-309); `camm` tracks, `gps ` boxes and
+  Matroska attached files that are not fonts go too, fonts and Chapters STAY (Vitalik,
+  HOL-SEC-306). Residuals: subtitle tracks, dashcam GPS blocks inside `mdat`, chapter
+  titles. Media that does not parse is REFUSED
   (`media_strip::REFUSED`), never sent raw; other files keep their bytes. Harness
-  `dm_video_send_strips_location_before_it_leaves`.
+  `dm_video_send_strips_location_before_it_leaves`. The strip parses a stranger's
+  bytes (a received file sent on): it never panics, never recurses or walks a table
+  without a bound, holds nothing per sample (HOL-SEC-267..269, 301, 302), and an honest file's output stays byte for byte
+  what it was (`strip_answers_as_0_14_did` digests every answer; change it only with
+  a reason).
 - A received file reaches NO decoder before a tap (C-FILES-02): `VideoMessageBubble` cuts
   its own poster only for `isMine` or after the user opens it (the sender's header poster
   stands in); a voice note's duration comes from its Ogg pages in Dart
