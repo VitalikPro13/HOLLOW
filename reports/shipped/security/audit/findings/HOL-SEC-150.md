@@ -24,9 +24,10 @@ cannot be parsed is refused with a message.
 
 ## Residual risk
 
-Subtitle tracks and TIFF/RAW sent as files keep their metadata. Timed GPS tracks in
-fragmented MP4 kept theirs until HOL-SEC-305; `camm` tracks, `gps ` boxes and Matroska
-Attachments and Chapters until HOL-SEC-306.
+Subtitle tracks, the GPS blocks some dashcams write inside `mdat`, Matroska chapter titles,
+and TIFF/RAW sent as files keep their metadata. Timed GPS tracks in fragmented MP4 kept
+theirs until HOL-SEC-305; `camm` tracks, `gps ` boxes and Matroska attached files other than
+fonts until HOL-SEC-306.
 
 ## Test
 
