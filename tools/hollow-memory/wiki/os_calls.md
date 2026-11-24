@@ -67,9 +67,21 @@ decisions in its section 11. Android: `OsCallBridge.kt`, `HollowCallService.kt` 
   `leaveVoiceForDmCall` (a meeting guest leaves the meeting, a HOST STEPS OUT, never "end for
   everyone"); `osMute` -> the provider's `toggleMute()`, then the OS is told the truth
   (`setMuted`), so a refused mute (not connected, moderator, PTT) snaps back; an `osMute` that
-  repeats what Dart last sent is an echo and is dropped.
+  repeats what Dart last sent is an echo and is dropped. An `osMute(false)` WHILE HELD (the
+  notification's Unmute during a carrier call) is the app's Unmute: it asks `requestUnhold` and
+  changes nothing itself (under the mute/deafen model an unmute also undeafens, which would put us
+  back into the room during the carrier call); the OS is still told the truth. `osSpeaker`
+  (Android's notification Speaker) -> the provider's `toggleSpeaker()` (DM or room), so the
+  headset rule holds (a connected headset keeps the audio); ignored while held (the route would
+  move the carrier call). Dart keeps the notification's Speaker in step with `setSpeaker`
+  (`OsSession.speaker`, Android only: `osCallSpeakerAction`), and `begin` carries the first value.
+- Mute and deafen are ONE model (`MuteDeafen`, `lib/src/core/mute_deafen.dart`, Nov 24): deafen
+  mutes the mic, Unmute while deafened also undeafens, undeafen gives back the mic from before
+  the deafen. Both notifiers go through it (`_setMic`), so the button, the transmit gate and the
+  `audio_state` the others see never disagree.
 - Hold (`osHold`): deafen (mutes the mic and tells the others), remember (muted, deafened),
-  restore exactly on `osHold(false)` only. While held, the app's unmute and undeafen do NOT
+  restore exactly on `osHold(false)` only (the undeafen gives the pre-hold mic back by the model;
+  the mute compare after it is a safety net). While held, the app's unmute and undeafen do NOT
   act: they ask the OS (`requestUnhold`) through `unlessOsHeld` (`CallMuteButton`, the phone
   control rows). Opening a call screen while held ONLY shows it, never asks (Vitalik, Nov 21:
   a resume during a carrier call may hold the carrier call). A CallKit reset while held gives
@@ -202,7 +214,8 @@ decisions in its section 11. Android: `OsCallBridge.kt`, `HollowCallService.kt` 
   Telecom side set. HELD: the global mute also mutes the carrier call, so the hold LIFTS a mute
   our call set, nothing is written or mirrored while held, and the resume writes the app's mute
   back; a Hollow call ending during the carrier call leaves that call unmuted. The CallStyle's
-  Mute button sends `osMute(!appMuted)`; Dart answers with `setMuted`.
+  Mute button sends `osMute(!appMuted)`; Dart answers with `setMuted`. Its Speaker button sends
+  `osSpeaker(!speaker)`; Dart answers with `setSpeaker`.
 - Hold (spike D3): `onSetInactive` -> `osHold(true)`; Telecom NEVER resumes a call it put on
   hold for a carrier call and raises `onSetActive` only for its own requests, so
   `requestUnhold` = `setActive()` and on Success the bridge sends `osHold(false)` itself; a
@@ -220,9 +233,18 @@ decisions in its section 11. Android: `OsCallBridge.kt`, `HollowCallService.kt` 
   the service and the call goes on without one, a refused microphone upgrade keeps the running
   phoneCall foreground. Its notification is the CallStyle
   (`CallNotification`, channel `hollow_ongoing_call`, DEFAULT importance, no sound or vibration:
-  LOW may hide the status-bar call chip): Person = the title, Hang up + Mute/Unmute through
-  `CallActionReceiver` (not exported, explicit immutable PendingIntents) -> `osEnd` / `osMute`
-  (a ring-out's plain notification has Hang up only -> `osRingOutEnd`); a chronometer from
+  LOW may hide the status-bar call chip): Person = the title, then Hang up, Speaker, Mute/Unmute
+  (Nov 24, the Pixel's own order) through `CallActionReceiver` (not exported, explicit immutable
+  PendingIntents) -> `osEnd` / `osSpeaker` / `osMute` (a ring-out's plain notification has Hang
+  up only -> `osRingOutEnd`). WHAT THE SYSTEM DECIDES: CallStyle's hang-up is the system's own
+  action (its label, its red, its place FIRST, left); app actions follow in `addAction` order;
+  at most 3 buttons show (`MAX_ACTION_BUTTONS`; androidx core 1.18, which the app resolves, keeps
+  every non-contextual action like the platform; core 1.15 kept only one beside the hang-up).
+  WHAT WE DECIDE: our two buttons and their order (`OsCallRules.callButtons`, JVM-pinned), labels
+  ("Speaker" always; "Mute"/"Unmute" say what a press does) and icons (`isOn`: speaker
+  `ic_call_speaker` vs earpiece `ic_call_earpiece`, as the app's route button shows; mic vs
+  mic-off; Lucide outlines in `res/drawable`). Android has no toggled look for a notification
+  action, so the Speaker state lives in its icon only; a chronometer from
   `connected`. Titles are one-way natively too (`TitleLatch`, per Call and per ring; a new ring
   or Dart's `fresh` starts it over): once "Hollow", a later named title stays "Hollow". The face:
   `OsCallRules.avatarFor` keeps an `avatar` only for a DM, only beside a name that is not

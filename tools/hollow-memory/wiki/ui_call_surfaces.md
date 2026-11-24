@@ -26,13 +26,30 @@ The same adapters feed the phone: `MobileCallScreen` builds `DmCallStageSource(m
 
 - **One top bar** (`MobileCallTopBar`, 56): "Minimise the call" chevron, the title over a mono subtitle (DM: Ringing / Connecting / the timer; room: "Synth Lab · 42:17", a meeting just the timer), "Open the chat" (`openMobileCallChat`: pops back to the chat under the call, or opens it; a room's chat opens through `openMobileChannelOn`, so it lands on its server page, wiki `ui_mobile` "Server page"; none for a meeting).
 - **One control row** (`MobileCallControlRow` + `MobileCallControl`): see wiki `ui_mobile`. Speaker = `speakerControl`, which toggles through the providers' `preferLoudRoute` (headset beats speaker) and long-presses to the route sheet. Share on a phone = the OS sheet (`toggleMobileShare`), a narrow desktop window keeps the desktop picker. `isPhoneCallPlatform` reads `defaultTargetPlatform`, so renders can show the phone set.
-- **DM audio:** the other person's 132 avatar with `SpeakingRing.large` in their colour, the name in `heading` in that colour, "Weak connection" badge only when their link is weak, the offer strip ("Sharing their screen" + Watch) or your own share card under it; you at 56 top-right, "You" in the accent. **DM video:** their camera as a large `CallPersonTile` (ring and marks on the frame), yours a draggable 90x120 strip tile; the offer stays reachable over the video.
+- **DM audio:** the other person's 132 avatar with `SpeakingRing.large` in their colour, the name in `heading` in that colour, a badge naming the link's state only while it is not healthy ("Unstable connection", "Reconnecting", "Connection lost", from `LinkHealthSnapshot.label`; never a catch-all), the offer strip ("Sharing their screen" + Watch) or your own share card under it; you at 56 top-right, "You" in the accent. **DM video:** their camera as a large `CallPersonTile` (ring and marks on the frame), yours a draggable 90x120 strip tile; the offer stays reachable over the video.
 - **Room:** offers as full-width cards (`MobileShareOffer`), your share card (`MobileOwnShare`, never previewed), then `MobileRoomGrid`: two columns of 128 tall `CallPersonTile`s (avatar 56 via the new `avatarSize`), a camera fills its person's tile (nobody drops out), long press = the person's menu.
 - **Watching** (`MobileWatchingView`, any watched share of someone else's): `MobileLiveShare` on top (the desktop `ShareTile`, plus Share volume and Full screen corners), other offers, then "In the room" / "In the call" and a row of 52 px faces. Full screen = `MobileShareFullscreen` (landscape, pinch zoom via `ZoomSurface`, controls fade). Never for your own share: `watchedShareOf` and `MobileShareFullscreen` skip `isMine`, and `MobileLiveShare` drops its tap and corner button for one.
 - **The minimised call** (`MobileMinimisedCall`, B3): 56 tall, `radiusXl`, `overlay`, hairline, no shadow (it docks, never floats): in `MobileShell`'s column between the tab and the status strips (#154: floating 12 px above the nav bar it covered the last rows and the status strip's close), at the foot of a server page, under the header in `MobileChatRoute`. DM: the person's 36 avatar with their ring, the name, the mono timer in success ("Calling" while it rings), `CallMuteButton` and `CallLeaveButton` (Cancel while ringing). Room: the server's avatar, the channel, the timer, Mute, Leave through `leaveVoiceRoom` (B6: a meeting leaves or ends the meeting). The BODY opens the call (`openMobileDmCall` / `openMobileVoiceRoom`). No dragging.
 - **Incoming** (`MobileIncomingCallOverlay`, mounted in `app.dart`'s mobile Stack in place of the desktop card): full screen canvas, avatar 128 (its frame kept: a ringing screen has no speaking cue), the name in `display` in their colour, "Voice call" / "Video call", the leave-the-room warning, a red Decline and a teal Accept (72, labels under). Accept answers AND opens the call screen through `hollowNavigatorKey` (B3). No countdown dial, no glow. The ringtone is `CallRingtone` (`call/call_ringtone.dart`), shared with the desktop card.
 - Wakelock while video or a share is on screen; both screens close themselves (`removeRoute` when not on top) when the call or room ends.
 - **The OS sees the call** (#154, wiki `os_calls`): CallKit / Telecom mirror a DM call from the moment it is answered; rooms and meetings never become system calls (Vitalik, Nov 22). While the OS holds it (a carrier call), `CallMuteButton` and the screens' mute and deafen controls ask the OS to resume instead of acting (`unlessOsHeld`); a new control of that kind does the same. Opening a call screen while held only shows it (Vitalik, Nov 21).
+
+## A call the link ended (#154, Nov 24)
+
+- Link labels are the real state from `LinkHealthSnapshot.label` everywhere (DM call row, person
+  tile and its screen-reader mark, the phone call screen): "Unstable connection" (warning,
+  `wifiLow`), "Reconnecting" (warning, `wifiOff`), "Connection lost" (error, `wifiOff`); helpers in
+  `ui/call/call_link_marks.dart`. "Weak connection" is gone (swept by `call_link_labels_test`).
+- A DM call that ENDS because its link gave out (`_endCallForLinkLoss` while `active`, i.e. the
+  watchdog's `onGiveUp`) lingers 5 s: `lostCallProvider` (`LostCall`: callId, peer MASTER,
+  seconds left, a 1 s `Timer.periodic`, never a Ticker), set BEFORE the teardown so nothing blinks.
+  It is outside CallState like link health: the call is idle, no `CallStatus` guard sees it. The
+  desktop `DmCallRow`, the phone `MobileCallScreen` (its idle listener skips the close while a
+  linger names this peer, and closes when the linger ends) and `MobileMinimisedCall` show the
+  person, "Connection lost" and a `LostCallCountdown` badge ("5 s" .. "1 s", hidden from screen
+  readers). A hang-up, decline, cancel or a call that never connected closes at once; any new
+  call id clears it at once (`LostCallNotifier.build` listens). Voice rooms get the labels only.
+  Tests: `test/lost_call_test.dart`, `test/widget/call_link_labels_test.dart`.
 
 ## Route badge (0.14)
 

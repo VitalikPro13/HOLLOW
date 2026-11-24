@@ -33,6 +33,29 @@ object OsCallRules {
     /** Only a begun session's notification is a CallStyle call; a ring-out's is a plain one. */
     fun showsAsCall(look: CallLook): Boolean = !look.ringing
 
+    /** What a CallStyle shows: the system's hang-up and the app's actions, three at most. */
+    const val CALL_STYLE_MAX_BUTTONS = 3
+
+    /**
+     * Our buttons on a call's notification, in order. The system puts its hang-up first (left)
+     * and ours after it as added, so Speaker sits in the centre and Mute on the right, as the
+     * phone's own calls show them. A ring-out's only button is its own Hang up.
+     */
+    fun callButtons(look: CallLook): List<CallButton> =
+        if (look.ringing) emptyList() else listOf(CallButton.SPEAKER, CallButton.MUTE)
+
+    /** Mute says what a press does; Speaker keeps its name and shows its state by [isOn]. */
+    fun label(button: CallButton, look: CallLook): String = when (button) {
+        CallButton.SPEAKER -> "Speaker"
+        CallButton.MUTE -> if (look.muted) "Unmute" else "Mute"
+    }
+
+    /** Whether [button]'s icon shows the on state: the loudspeaker on, the mic muted. */
+    fun isOn(button: CallButton, look: CallLook): Boolean = when (button) {
+        CallButton.SPEAKER -> look.speaker
+        CallButton.MUTE -> look.muted
+    }
+
     /**
      * The foreground types to try, in order: phoneCall + microphone, then phoneCall alone (the
      * microphone type is the one Android refuses from the background), then microphone alone.
@@ -92,6 +115,9 @@ class TitleLatch {
         blanked = false
     }
 }
+
+/** A button of ours on the call notification ([OsCallRules.callButtons]). */
+enum class CallButton { SPEAKER, MUTE }
 
 /** A square avatar as premultiplied RGBA bytes, row by row ([OsCallRules.avatarFor]). */
 class CallAvatar(val side: Int, val rgba: ByteArray)

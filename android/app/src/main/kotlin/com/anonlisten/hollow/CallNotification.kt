@@ -15,7 +15,7 @@ import java.nio.ByteBuffer
 /**
  * What the call notification shows; [title] is already the privacy-ruled name Dart sent (1.6).
  * [ringing] = a call we placed, not answered yet: hang-up only, nothing to mute. [avatar] = the DM
- * friend's face, already ruled by [OsCallRules.avatarFor].
+ * friend's face, already ruled by [OsCallRules.avatarFor]. [speaker] = the app's Speaker button.
  */
 data class CallLook(
     val title: String,
@@ -23,6 +23,7 @@ data class CallLook(
     val connectedAt: Long?,
     val ringing: Boolean = false,
     val avatar: CallAvatar? = null,
+    val speaker: Boolean = false,
 )
 
 /** The call service's notification (#154): a CallStyle for a session, plain while ringing out. */
@@ -45,11 +46,6 @@ object CallNotification {
             .setImportant(false)
             .apply { face?.let { setIcon(IconCompat.createWithBitmap(it)) } }
             .build()
-        val mute = NotificationCompat.Action.Builder(
-            IconCompat.createWithResource(context, android.R.drawable.ic_btn_speak_now),
-            if (look.muted) "Unmute" else "Mute",
-            CallActionReceiver.pendingIntent(context, CallActionReceiver.ACTION_MUTE),
-        ).build()
         val builder = NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_stat_hollow)
             .setOngoing(true)
@@ -61,7 +57,7 @@ object CallNotification {
         if (OsCallRules.showsAsCall(look)) {
             builder.setStyle(NotificationCompat.CallStyle.forOngoingCall(person, hangUp))
                 .setCategory(NotificationCompat.CATEGORY_CALL)
-                .addAction(mute)
+            for (button in OsCallRules.callButtons(look)) builder.addAction(action(context, button, look))
         } else {
             // Ringing out is no call to the system: a plain notification, only there
             // because a foreground service must show one.
@@ -78,6 +74,21 @@ object CallNotification {
         open?.let { builder.setContentIntent(it) }
         look.connectedAt?.let { builder.setWhen(it).setShowWhen(true).setUsesChronometer(true) }
         return builder.build()
+    }
+
+    private fun action(context: Context, button: CallButton, look: CallLook): NotificationCompat.Action {
+        val on = OsCallRules.isOn(button, look)
+        val (icon, intent) = when (button) {
+            CallButton.SPEAKER ->
+                (if (on) R.drawable.ic_call_speaker else R.drawable.ic_call_earpiece) to CallActionReceiver.ACTION_SPEAKER
+            CallButton.MUTE ->
+                (if (on) R.drawable.ic_call_mic_off else R.drawable.ic_call_mic) to CallActionReceiver.ACTION_MUTE
+        }
+        return NotificationCompat.Action.Builder(
+            IconCompat.createWithResource(context, icon),
+            OsCallRules.label(button, look),
+            CallActionReceiver.pendingIntent(context, intent),
+        ).build()
     }
 
     // Raw pixels Dart drew, copied as they are: no image decoder runs on them.

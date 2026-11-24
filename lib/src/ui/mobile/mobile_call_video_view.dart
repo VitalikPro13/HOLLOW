@@ -5,25 +5,30 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/services/os_call_service.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
+import 'package:hollow/src/core/providers/lost_call_provider.dart';
+import 'package:hollow/src/core/providers/name_color_provider.dart';
 import 'package:hollow/src/core/services/link_resilience.dart';
 import 'package:hollow/src/rust/api/network.dart' as network_api;
 import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/call/call_actions.dart';
+import 'package:hollow/src/ui/call/call_link_marks.dart';
 import 'package:hollow/src/ui/call/call_route.dart';
 import 'package:hollow/src/ui/call/call_person_tile.dart';
 import 'package:hollow/src/ui/call/call_stage_data.dart';
 import 'package:hollow/src/ui/call/call_stage_sources.dart';
+import 'package:hollow/src/ui/call/call_theme.dart';
 import 'package:hollow/src/ui/components/call_duration_text.dart';
 import 'package:hollow/src/ui/components/drop_when_tight.dart';
+import 'package:hollow/src/ui/components/hollow_avatar.dart';
 import 'package:hollow/src/ui/components/hollow_badge.dart';
+import 'package:hollow/src/ui/components/peer_id_text.dart';
 import 'package:hollow/src/ui/mobile/mobile_call_chrome.dart';
 import 'package:hollow/src/ui/mobile/mobile_connection_indicator.dart';
 import 'package:hollow/src/ui/mobile/mobile_share_fullscreen.dart';
 import 'package:hollow/src/ui/mobile/mobile_sheet_drag.dart';
 import 'package:hollow/src/ui/shell/system_status_banner.dart';
-import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
 
@@ -85,10 +90,19 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
     final call = ref.watch(callProvider);
 
     ref.listen<CallStatus>(callProvider.select((c) => c.status), (prev, next) {
-      if (next == CallStatus.idle && prev != CallStatus.idle && mounted) {
+      // A call the link ended stays a few seconds to say so (lostCallProvider).
+      if (next == CallStatus.idle &&
+          prev != CallStatus.idle &&
+          mounted &&
+          ref.read(lostCallProvider)?.peerMaster != master) {
         _close();
       }
     });
+    ref.listen<LostCall?>(lostCallProvider, (prev, next) {
+      if (prev?.peerMaster == master && next == null && mounted) _close();
+    });
+    final lost = lostDmCallWith(ref, master);
+    if (lost != null) return _lostScreen(master, lost);
 
     final source = DmCallStageSource(master);
     final data = source.watchData(context, ref);
@@ -135,6 +149,64 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
               MobileCallControlRow(controls: _controls(call)),
             ],
           ),
+        ),
+      ),
+    );
+  }
+
+  /// The link ended the call: them, "Connection lost" and the seconds left.
+  Widget _lostScreen(String master, LostCall lost) {
+    final hollow = HollowTheme.of(context);
+    final name = dmCallPeerName(ref, master);
+    return Scaffold(
+      backgroundColor: hollow.background,
+      body: SafeArea(
+        child: Column(
+          children: [
+            MobileCallTopBar(
+              title: name,
+              onMinimise: () => Navigator.of(context).maybePop(),
+              onOpenChat: () => openMobileCallChat(context, peer: master),
+            ),
+            Expanded(
+              child: Center(
+                child: SingleChildScrollView(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: HollowSpacing.lg),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      HollowAvatar(
+                          peerId: master,
+                          size: MobileCallMetrics.peerAvatar,
+                          frameId: ''),
+                      const SizedBox(height: HollowSpacing.md),
+                      PeerNameText(
+                        name: name,
+                        peerId: master,
+                        // As the call face drew it a moment ago.
+                        paint: callNamePaint(hollow,
+                            isSelf: false,
+                            master: master,
+                            field:
+                                ref.watch(shownNameColorProvider(master))),
+                        style: HollowTypography.heading,
+                      ),
+                      const SizedBox(height: HollowSpacing.sm),
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          lostCallMark(),
+                          const SizedBox(width: HollowSpacing.sm),
+                          LostCallCountdown(lost: lost),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ],
         ),
       ),
     );
@@ -355,8 +427,8 @@ class _MobileCallScreenState extends ConsumerState<MobileCallScreen> {
   }
 }
 
-/// "Weak connection" under the other person's name while their link is poor,
-/// nothing while it is fine.
+/// What their link is doing (Unstable connection, Reconnecting, Connection
+/// lost) under the other person's name, nothing while it is fine.
 class _WeakLinkLine extends ConsumerWidget {
   final CallPerson person;
   const _WeakLinkLine({required this.person});
@@ -368,10 +440,11 @@ class _WeakLinkLine extends ConsumerWidget {
     if (link == null || link.health == LinkHealth.healthy) {
       return const SizedBox.shrink();
     }
-    return const Padding(
-      padding: EdgeInsets.only(top: HollowSpacing.sm),
-      child: HollowBadge('Weak connection',
-          kind: HollowBadgeKind.warning, icon: LucideIcons.wifiLow),
+    return Padding(
+      padding: const EdgeInsets.only(top: HollowSpacing.sm),
+      child: HollowBadge(link.label!,
+          kind: linkTroubleBadgeKind(link.health),
+          icon: linkTroubleIcon(link.health)),
     );
   }
 }

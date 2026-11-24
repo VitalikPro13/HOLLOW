@@ -136,9 +136,8 @@ Called by event_provider on the `VoiceChannelLeft` event for the local peer. Two
 
 ### Methods: Audio Controls
 
-**`toggleMute()`** -- flips `isMuted`, calls `_service.setMuted()`, broadcasts audio state to all peers.
+**`toggleMute()`** / **`toggleDeafen()`** -- one model (`MuteDeafen`, #154 Nov 24): deafen mutes the mic, Unmute while deafened also undeafens, undeafen gives back the mic from before the deafen (`_mutedBeforeDeafen`). Both go through `_setMic`: state, the tx gate (`_service.setMuted`), `_service.setDeafened` + `ShareAudioLevel.setDeafened` only when deafen changed (fire-and-forget, own `.catchError`), then the audio state broadcast.
 
-**`toggleDeafen()`** -- flips `isDeafened` (which also forces mute), calls `_service.setMuted()` and `_service.setDeafened()` (fire-and-forget, so it carries its own `.catchError`), broadcasts audio state.
 
 **`setPeerVolume(peerId, volume)`** -- stores in `peerVolumes` map, calls `_service.setRemoteVolume()` (receiver-keyed, HOL-SEC-190; only recorded while deafened).
 
@@ -823,7 +822,7 @@ Received screen-share audio (the 0x03 pure-Opus stream) used to play RAW at unit
 `isSpeakerOn` (mobile audio route), `isDeafened` (local), `remoteMuted` + `remoteDeafened` (synced from the peer). All reset by `_cleanup()` (state → `CallState()`).
 
 ### toggleDeafen() / toggleSpeaker() (CallNotifier)
-- `toggleDeafen`: silences the remote via `_service.setRemoteAudioVolume(0.0)` AND forces mic mute; un-deafen restores `_lastRemoteVolume` (tracked in `setRemoteVolume`, which becomes store-only while deafened) and KEEPS the mic muted (mirrors voice channels).
+- `toggleDeafen` / `toggleMute`: the same `MuteDeafen` model as voice channels (`_setMic`): a deafen silences the remote via `_service.setRemoteAudioVolume(0.0)` AND mutes the mic; undeafen (or Unmute while deafened, which undeafens too) restores `_lastRemoteVolume` (tracked in `setRemoteVolume`, which becomes store-only while deafened) and gives back the mic from before the deafen. Proven through both real notifiers in `test/mute_deafen_test.dart` (button = tx gate = what the peer is told).
 - `toggleSpeaker` / `_setSpeakerRoute`: `Helper.setSpeakerphoneOn` (Android/iOS only). Defaults applied in `onConnected` (video call → speaker, voice → earpiece); camera-on mid-call in `toggleVideo` auto-switches to speaker; `_cleanup()` resets the OS route to earpiece.
 
 ### audio_state signal (1:1 mute/deafen badge sync)

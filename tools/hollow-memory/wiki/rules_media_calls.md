@@ -81,6 +81,12 @@ the signal whitelist's four touches, the stream overlay consent detail, share ba
   the session ahead of CallKit (`HollowSfxPlayer` waits or drops).
 - A new in-call unmute or undeafen control asks the hold guard first (`unlessOsHeld`): a held
   call resumes only through the OS. Opening a call screen while held only shows it.
+- Mute and deafen are ONE model, `MuteDeafen` (Nov 24, DM calls and rooms): deafen mutes the
+  mic, Unmute while deafened undeafens too, undeafen gives back the mic from before the deafen.
+  A new path that changes mute or deafen goes through the notifier's `_setMic`, never a bare
+  `copyWith(isMuted:)`, or the button, the tx gate and the peers' badge drift apart. An OS
+  unmute while held asks the OS to resume, like the app's Unmute (`test/mute_deafen_test.dart`,
+  `os_call_service_test` hold group).
 - The OS title follows the phone notification rule (HOL-SEC-155) and is fixed at begin;
   the OS call uuid is random, never an id.
 - Android audio belongs to Telecom while a core-telecom call lives (it is the mode owner): the

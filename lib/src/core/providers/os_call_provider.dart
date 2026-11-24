@@ -38,6 +38,9 @@ class OsSession {
   final bool muted;
   final bool video;
 
+  /// The app's Speaker button, which Android's call notification mirrors.
+  final bool speaker;
+
   /// Informational: both platforms report every session as a placed call.
   final bool outgoing;
 
@@ -48,6 +51,7 @@ class OsSession {
     required this.muted,
     required this.video,
     required this.outgoing,
+    this.speaker = false,
   });
 
   @override
@@ -58,14 +62,16 @@ class OsSession {
       other.live == live &&
       other.muted == muted &&
       other.video == video &&
+      other.speaker == speaker &&
       other.outgoing == outgoing;
 
   @override
-  int get hashCode => Object.hash(key, kind, live, muted, video, outgoing);
+  int get hashCode =>
+      Object.hash(key, kind, live, muted, video, speaker, outgoing);
 
   @override
-  String toString() =>
-      'OsSession($key, ${kind.name}, live=$live, muted=$muted, video=$video)';
+  String toString() => 'OsSession($key, ${kind.name}, live=$live, '
+      'muted=$muted, video=$video, speaker=$speaker)';
 }
 
 /// Lets host tests stand in for a phone.
@@ -94,6 +100,14 @@ bool? debugOsCallAvatars;
 /// Only Android's call notification shows the DM friend's face; CallKit has
 /// no place for one.
 bool get osCallAvatars => debugOsCallAvatars ?? Platform.isAndroid;
+
+/// Lets host tests stand in for an Android phone's call notification.
+@visibleForTesting
+bool? debugOsCallSpeakerAction;
+
+/// Only Android's call notification has a Speaker button to keep in step;
+/// CallKit has its own.
+bool get osCallSpeakerAction => debugOsCallSpeakerAction ?? Platform.isAndroid;
 
 /// Whether a DM call titled [title] may carry the friend's face: on Android,
 /// and only while its title is a name. Whatever hides the name (HOL-SEC-155,
@@ -133,6 +147,7 @@ OsSession? deriveOsSession({
         kind: OsCallKind.dm,
         live: call.status == CallStatus.active,
         muted: call.isMuted,
+        speaker: call.isSpeakerOn,
         video: call.isVideoCall ||
             call.isVideoEnabled ||
             call.remoteVideoEnabled ||
@@ -157,6 +172,7 @@ OsSession? deriveOsSession({
       kind: OsCallKind.meeting,
       live: true,
       muted: voice.isMuted,
+      speaker: voice.isSpeakerOn,
       video: video,
       outgoing: true,
     );
@@ -166,6 +182,7 @@ OsSession? deriveOsSession({
     kind: OsCallKind.room,
     live: true,
     muted: voice.isMuted,
+    speaker: voice.isSpeakerOn,
     video: video,
     outgoing: true,
   );

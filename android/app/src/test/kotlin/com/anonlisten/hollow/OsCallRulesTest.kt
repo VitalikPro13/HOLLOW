@@ -176,6 +176,33 @@ class OsCallRulesTest {
         assertTrue(OsCallRules.showsAsCall(CallLook("Ada", muted = false, connectedAt = null)))
     }
 
+    // Like the phone's own calls (Vitalik, Nov 24): the system's Hang up first (left), then ours in
+    // order, Speaker in the centre and Mute on the right. CallStyle shows three buttons at most.
+    @Test
+    fun aCallShowsSpeakerThenMuteBesideTheSystemHangUp() {
+        val buttons = OsCallRules.callButtons(CallLook("Ada", muted = false, connectedAt = null))
+        assertEquals(listOf(CallButton.SPEAKER, CallButton.MUTE), buttons)
+        assertTrue(1 + buttons.size <= OsCallRules.CALL_STYLE_MAX_BUTTONS)
+    }
+
+    @Test
+    fun aRingOutHasNoButtonsOfItsOwn() {
+        assertTrue(OsCallRules.callButtons(CallLook("Ada", muted = false, connectedAt = null, ringing = true)).isEmpty())
+    }
+
+    @Test
+    fun speakerKeepsItsLabelAndShowsItsStateMuteSaysWhatItDoes() {
+        val quiet = CallLook("Ada", muted = false, connectedAt = null)
+        val loud = CallLook("Ada", muted = true, connectedAt = null, speaker = true)
+        assertEquals("Speaker", OsCallRules.label(CallButton.SPEAKER, quiet))
+        assertEquals("Speaker", OsCallRules.label(CallButton.SPEAKER, loud))
+        assertFalse(OsCallRules.isOn(CallButton.SPEAKER, quiet))
+        assertTrue(OsCallRules.isOn(CallButton.SPEAKER, loud))
+        assertEquals("Mute", OsCallRules.label(CallButton.MUTE, quiet))
+        assertEquals("Unmute", OsCallRules.label(CallButton.MUTE, loud))
+        assertTrue(OsCallRules.isOn(CallButton.MUTE, loud))
+    }
+
     @Test
     fun aRingOutDuringASessionStartsNothing() {
         val r = RingOut()

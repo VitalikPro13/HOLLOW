@@ -12,6 +12,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hollow/src/core/hidden_notification.dart';
 import 'package:hollow/src/core/models/call_record.dart';
 import 'package:hollow/src/core/models/server_info.dart';
+import 'package:hollow/src/core/mute_deafen.dart';
 import 'package:hollow/src/core/providers/app_lock_provider.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/providers/conference_provider.dart';
@@ -71,7 +72,7 @@ class _Native implements OsCallChannel {
 class _Call extends CallNotifier {
   CallState seed;
   _Call(this.seed);
-  int ends = 0, mutes = 0, deafens = 0;
+  int ends = 0, mutes = 0, deafens = 0, speakers = 0;
   bool refuseMute = false;
   CallEndCause? cause;
 
@@ -94,22 +95,39 @@ class _Call extends CallNotifier {
   void toggleMute() {
     mutes++;
     if (refuseMute || state.status != CallStatus.active) return;
-    state = state.copyWith(isMuted: !state.isMuted);
+    _apply(_model.tapMute());
   }
 
   @override
   void toggleDeafen() {
     deafens++;
     if (state.status != CallStatus.active) return;
-    final d = !state.isDeafened;
-    state = state.copyWith(isDeafened: d, isMuted: d ? true : state.isMuted);
+    _apply(_model.tapDeafen());
+  }
+
+  @override
+  void toggleSpeaker() {
+    speakers++;
+    if (state.status == CallStatus.idle) return;
+    state = state.copyWith(isSpeakerOn: !state.isSpeakerOn);
+  }
+
+  // The real notifiers' rule (test/mute_deafen_test.dart pins it there).
+  bool _before = false;
+  MuteDeafen get _model => MuteDeafen(
+      muted: state.isMuted,
+      deafened: state.isDeafened,
+      mutedBeforeDeafen: _before);
+  void _apply(MuteDeafen next) {
+    _before = next.mutedBeforeDeafen;
+    state = state.copyWith(isMuted: next.muted, isDeafened: next.deafened);
   }
 }
 
 class _Voice extends VoiceChannelNotifier {
   VoiceChannelState seed;
   _Voice(this.seed);
-  int leaves = 0, mutes = 0, deafens = 0;
+  int leaves = 0, mutes = 0, deafens = 0, speakers = 0;
 
   @override
   VoiceChannelState build() => seed;
@@ -125,14 +143,29 @@ class _Voice extends VoiceChannelNotifier {
   @override
   void toggleMute() {
     mutes++;
-    state = state.copyWith(isMuted: !state.isMuted);
+    _apply(_model.tapMute());
   }
 
   @override
   void toggleDeafen() {
     deafens++;
-    final d = !state.isDeafened;
-    state = state.copyWith(isDeafened: d, isMuted: d ? true : state.isMuted);
+    _apply(_model.tapDeafen());
+  }
+
+  @override
+  void toggleSpeaker() {
+    speakers++;
+    state = state.copyWith(isSpeakerOn: !state.isSpeakerOn);
+  }
+
+  bool _before = false;
+  MuteDeafen get _model => MuteDeafen(
+      muted: state.isMuted,
+      deafened: state.isDeafened,
+      mutedBeforeDeafen: _before);
+  void _apply(MuteDeafen next) {
+    _before = next.mutedBeforeDeafen;
+    state = state.copyWith(isMuted: next.muted, isDeafened: next.deafened);
   }
 }
 
@@ -223,11 +256,13 @@ CallState _incoming(String id) => CallState(
     peerId: 'ada',
     callId: id);
 
-VoiceChannelState _room({bool muted = false}) => VoiceChannelState(
-    currentServerId: 's1',
-    currentChannelId: 'ch1',
-    currentChannelName: 'Lounge',
-    isMuted: muted);
+VoiceChannelState _room({bool muted = false, bool speaker = false}) =>
+    VoiceChannelState(
+        currentServerId: 's1',
+        currentChannelId: 'ch1',
+        currentChannelName: 'Lounge',
+        isMuted: muted,
+        isSpeakerOn: speaker);
 
 VoiceChannelState _meetingSeat() => VoiceChannelState(
     currentServerId: conferenceServerId(_confId),
@@ -664,6 +699,64 @@ void main() {
     });
   });
 
+  group('speaker', () {
+    setUp(() => debugOsCallSpeakerAction = true);
+    tearDown(() => debugOsCallSpeakerAction = null);
+
+    test('begin carries the speaker; a change reaches the notification',
+        () async {
+      final r = await _rig(voice: _room(speaker: true));
+      expect(r.native.lastOf('begin')['speaker'], isTrue);
+      r.native.clear();
+      r.voice.set(_room());
+      await r.settle();
+      expect(r.native.methods, ['setSpeaker']);
+      expect(r.native.lastOf('setSpeaker')['speaker'], isFalse);
+    });
+
+    test("the notification's Speaker runs the app's own toggle", () async {
+      final r = await _rig(
+          call: _outgoing('c1').copyWith(status: CallStatus.active));
+      final uuid = r.service.liveUuid;
+      r.native.clear();
+      await r.native.send('osSpeaker', {'uuid': uuid, 'speaker': true});
+      await r.settle();
+      expect(r.call.speakers, 1);
+      expect(r.call.state.isSpeakerOn, isTrue);
+      expect(r.native.lastOf('setSpeaker')['speaker'], isTrue);
+    });
+
+    test('a room toggles the room speaker', () async {
+      final r = await _rig(voice: _room());
+      await r.native
+          .send('osSpeaker', {'uuid': r.service.liveUuid, 'speaker': true});
+      await r.settle();
+      expect(r.voice.speakers, 1);
+      expect(r.voice.state.isSpeakerOn, isTrue);
+    });
+
+    test('our own echo, a stranger uuid and a held call toggle nothing',
+        () async {
+      final r = await _rig(voice: _room(speaker: true));
+      final uuid = r.service.liveUuid;
+      await r.native.send('osSpeaker', {'uuid': uuid, 'speaker': true});
+      await r.native.send('osSpeaker', {'uuid': 'stranger', 'speaker': false});
+      await r.native.send('osHold', {'uuid': uuid, 'held': true});
+      await r.native.send('osSpeaker', {'uuid': uuid, 'speaker': false});
+      await r.settle();
+      expect(r.voice.speakers, 0);
+    });
+
+    test('iOS (CallKit) is never sent a speaker', () async {
+      debugOsCallSpeakerAction = false;
+      final r = await _rig(voice: _room(speaker: true));
+      r.voice.set(_room());
+      await r.settle();
+      expect(r.native.lastOf('begin').containsKey('speaker'), isFalse);
+      expect(r.native.of('setSpeaker'), isEmpty);
+    });
+  });
+
   group('hold', () {
     test('held deafens; the app cannot undo it; the OS resume restores it',
         () async {
@@ -702,6 +795,38 @@ void main() {
       await r.settle();
       expect(r.voice.state.isDeafened, isFalse);
       expect(r.voice.state.isMuted, isTrue);
+    });
+
+    test('a DM held unmuted comes back unmuted, through the real rule',
+        () async {
+      final r = await _rig(
+          call: _outgoing('c1').copyWith(status: CallStatus.active));
+      final uuid = r.service.liveUuid;
+      await r.native.send('osHold', {'uuid': uuid, 'held': true});
+      await r.settle();
+      expect((r.call.state.isMuted, r.call.state.isDeafened), (true, true));
+      await r.native.send('osHold', {'uuid': uuid, 'held': false});
+      await r.settle();
+      expect((r.call.state.isMuted, r.call.state.isDeafened), (false, false));
+    });
+
+    // An Unmute pressed on the notification during the carrier call is the
+    // app's Unmute: it asks the OS to resume and changes nothing itself (the
+    // model would undeafen us into the carrier call).
+    test('an OS unmute while held asks to resume and changes nothing',
+        () async {
+      final r = await _rig(voice: _room());
+      final uuid = r.service.liveUuid;
+      await r.native.send('osHold', {'uuid': uuid, 'held': true});
+      await r.settle();
+      r.native.clear();
+      await r.native.send('osMute', {'uuid': uuid, 'muted': false});
+      await r.settle();
+      expect(r.voice.mutes, 0);
+      expect((r.voice.state.isMuted, r.voice.state.isDeafened), (true, true));
+      expect(r.native.methods, contains('requestUnhold'));
+      expect(r.native.lastOf('setMuted')['muted'], isTrue,
+          reason: 'the OS hears the truth');
     });
 
     test('an unhold that was never a hold changes nothing', () async {

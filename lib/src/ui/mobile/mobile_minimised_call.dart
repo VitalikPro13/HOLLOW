@@ -4,6 +4,7 @@ import 'package:hollow/src/core/providers/sibling_call_provider.dart';
 import 'package:hollow/src/core/providers/call_provider.dart';
 import 'package:hollow/src/core/color_utils.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
+import 'package:hollow/src/core/providers/lost_call_provider.dart';
 import 'package:hollow/src/core/providers/server_provider.dart';
 import 'package:hollow/src/core/providers/speaking_provider.dart';
 import 'package:hollow/src/core/providers/voice_channel_provider.dart';
@@ -11,6 +12,7 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/call/call_actions.dart';
+import 'package:hollow/src/ui/call/call_link_marks.dart';
 import 'package:hollow/src/ui/call/call_stage_bar.dart';
 import 'package:hollow/src/ui/call/call_stage_sources.dart';
 import 'package:hollow/src/ui/call/call_theme.dart';
@@ -42,9 +44,18 @@ class MobileMinimisedCall extends ConsumerWidget {
             c.direction == CallDirection.incoming)));
     final inRoom =
         ref.watch(voiceChannelProvider.select((s) => s.isInVoiceChannel));
-    if (!dm && !inRoom) return const SizedBox.shrink();
+    final lost = dm || inRoom ? null : ref.watch(lostCallProvider);
+    final idle =
+        ref.watch(callProvider.select((c) => c.status == CallStatus.idle));
+    if (!dm && !inRoom && (lost == null || !idle)) {
+      return const SizedBox.shrink();
+    }
 
-    final bar = dm ? const _DmCallBar() : const _RoomCallBar();
+    final Widget bar = dm
+        ? const _DmCallBar()
+        : inRoom
+            ? const _RoomCallBar()
+            : _LostCallBar(lost: lost!);
     final hollow = HollowTheme.of(context);
     return Padding(
       padding: const EdgeInsets.fromLTRB(
@@ -205,6 +216,41 @@ class _DmCallBar extends ConsumerWidget {
         width: MobileCallMetrics.touch,
         height: MobileCallMetrics.touch,
         onPressed: () => leaveDmCall(context, ref),
+      ),
+    );
+  }
+}
+
+/// A DM call the link ended, for a few seconds: who, "Connection lost" and
+/// the seconds left. Nothing to press: the call is over.
+class _LostCallBar extends ConsumerWidget {
+  final LostCall lost;
+  const _LostCallBar({required this.lost});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final hollow = HollowTheme.of(context);
+    final master = lost.peerMaster;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: HollowSpacing.md),
+      child: Row(
+        children: [
+          HollowAvatar(
+              peerId: master, size: MobileCallMetrics.barAvatar, frameId: ''),
+          const SizedBox(width: HollowSpacing.md),
+          Expanded(
+            child: PeerNameText(
+              name: dmCallPeerName(ref, master),
+              peerId: master,
+              paint: ref.chosenNamePaintOf(master, hollow),
+              style: HollowTypography.label.copyWith(color: hollow.textPrimary),
+            ),
+          ),
+          const SizedBox(width: HollowSpacing.sm),
+          lostCallMark(),
+          const SizedBox(width: HollowSpacing.sm),
+          LostCallCountdown(lost: lost),
+        ],
       ),
     );
   }

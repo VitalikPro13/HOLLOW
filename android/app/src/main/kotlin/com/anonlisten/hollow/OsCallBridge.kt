@@ -80,8 +80,11 @@ object OsCallBridge {
         var connectedAt: Long? = null
         var addedAt = 0L
 
+        /** The app's Speaker button as Dart last told it; the notification only shows it. */
+        var speaker = loud
+
         val telecomLive get() = control != null && session.path == OsCallSession.Path.TELECOM
-        fun look() = CallLook(title, mute.appMuted, connectedAt, avatar = avatar)
+        fun look() = CallLook(title, mute.appMuted, connectedAt, avatar = avatar, speaker = speaker)
     }
 
     private var call: Call? = null
@@ -141,6 +144,7 @@ object OsCallBridge {
             }
             "connected" -> { connected(uuid); null }
             "setMuted" -> { setMuted(uuid, c.argument<Boolean>("muted") ?: false); null }
+            "setSpeaker" -> { setSpeaker(uuid, c.argument<Boolean>("speaker") ?: false); null }
             "requestUnhold" -> { requestUnhold(uuid); null }
             "update" -> { update(uuid, c.argument<String>("title"), c); null }
             "end" -> { if (uuid != null) endCall(uuid, c.argument<String>("reason") ?: "local"); null }
@@ -245,6 +249,7 @@ object OsCallBridge {
         val titles = TitleLatch()
         val shown = titles.take(title)
         val c = Call(uuid, kind, titles, shown, avatarOf(kind, shown, args), video, loud, telecom)
+        args.argument<Boolean>("speaker")?.let { c.speaker = it }
         call = c
         ringOut.onBegin()
         HollowCallService.start(ctx, c.look())
@@ -411,6 +416,12 @@ object OsCallBridge {
         debugStatus(if (muted) "muted" else "unmuted")
     }
 
+    private fun setSpeaker(uuid: String?, speaker: Boolean) {
+        val c = callFor(uuid) ?: return
+        c.speaker = speaker
+        HollowCallService.update(c.look())
+    }
+
     // Telecom never resumes a call it put on hold for a carrier call (spike D3), and it raises
     // onSetActive only for its own requests: our setActive succeeding IS the resume.
     private fun requestUnhold(uuid: String?) {
@@ -486,6 +497,15 @@ object OsCallBridge {
     fun onUserToggleMute() {
         val c = call ?: return
         send("osMute", mapOf("uuid" to c.uuid, "muted" to !c.mute.appMuted))
+    }
+
+    /**
+     * The notification's Speaker: the app's own toggle decides (a connected headset keeps the
+     * audio) and answers with setSpeaker.
+     */
+    fun onUserToggleSpeaker() {
+        val c = call ?: return
+        send("osSpeaker", mapOf("uuid" to c.uuid, "speaker" to !c.speaker))
     }
 
     private val router = object : AudioSwitchManager.TelecomAudio {

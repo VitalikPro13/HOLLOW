@@ -9,6 +9,7 @@ import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/name_text.dart';
 import 'package:hollow/src/ui/call/call_stage_data.dart';
+import 'package:hollow/src/ui/call/call_link_marks.dart';
 import 'package:hollow/src/ui/call/call_theme.dart';
 import 'package:hollow/src/ui/call/speaking_ring.dart';
 import 'package:hollow/src/ui/components/hollow_avatar.dart';
@@ -82,7 +83,7 @@ class CallPersonTile extends ConsumerWidget {
     final marks = [
       if (person.muted) 'muted',
       if (person.deafened) 'deafened',
-      if (weak) 'weak connection',
+      if (weak) link.label!,
     ];
     tile = Semantics(
       label: [person.name, ...marks].join(', '),
@@ -283,10 +284,12 @@ class CallPersonTile extends ConsumerWidget {
 
   Widget _weakMark(
       HollowTheme hollow, LinkHealthSnapshot link, bool large) {
-    final tip = [link.label, link.detail].whereType<String>().join('. ');
+    final label = link.label!;
+    final icon = linkTroubleIcon(link.health);
+    final tip = [label, link.detail].whereType<String>().join('. ');
     final Widget mark;
     if (person.cameraOn) {
-      final media = callMediaTheme(hollow);
+      final color = linkTroubleColor(callMediaTheme(hollow), link.health);
       mark = CallMediaLabel(
         padding: const EdgeInsets.symmetric(
           horizontal: HollowSpacing.xs,
@@ -295,22 +298,21 @@ class CallPersonTile extends ConsumerWidget {
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(LucideIcons.wifiLow, size: 14, color: media.warning),
+            Icon(icon, size: 14, color: color),
             if (large) ...[
               const SizedBox(width: HollowSpacing.xs),
-              Text('Weak connection',
-                  style: HollowTypography.caption
-                      .copyWith(color: media.warning)),
+              Text(label,
+                  style: HollowTypography.caption.copyWith(color: color)),
             ],
           ],
         ),
       );
     } else if (large) {
-      mark = const HollowBadge('Weak connection',
-          kind: HollowBadgeKind.warning, icon: LucideIcons.wifiLow);
+      mark = HollowBadge(label,
+          kind: linkTroubleBadgeKind(link.health), icon: icon);
     } else {
-      mark = Icon(LucideIcons.wifiLow, size: 14, color: hollow.warning);
+      mark = Icon(icon, size: 14, color: linkTroubleColor(hollow, link.health));
     }
-    return HollowTooltip(message: tip.isEmpty ? 'Weak connection' : tip, child: mark);
+    return HollowTooltip(message: tip, child: mark);
   }
 }

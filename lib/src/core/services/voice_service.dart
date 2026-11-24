@@ -561,6 +561,9 @@ class VoiceService {
 
   void toggleMute() => setMuted(!_isMuted);
 
+  @visibleForTesting
+  double get debugRemoteVolume => _remoteVolume;
+
   /// Sets how loud the remote peer is heard: 0.0 silent, 1.0 normal, 2.0
   /// double.
   ///

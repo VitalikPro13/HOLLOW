@@ -8,7 +8,9 @@ import 'package:hollow/src/theme/hollow_spacing.dart';
 import 'package:hollow/src/theme/hollow_theme.dart';
 import 'package:hollow/src/theme/hollow_typography.dart';
 import 'package:hollow/src/ui/components/name_text.dart';
+import 'package:hollow/src/core/providers/lost_call_provider.dart';
 import 'package:hollow/src/ui/call/call_actions.dart';
+import 'package:hollow/src/ui/call/call_link_marks.dart';
 import 'package:hollow/src/ui/call/call_person_tile.dart';
 import 'package:hollow/src/ui/call/call_route.dart';
 import 'package:hollow/src/ui/call/call_stage_bar.dart';
@@ -38,6 +40,8 @@ class DmCallRow extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final call = ref.watch(callProvider);
+    final lost = lostDmCallWith(ref, peerMaster);
+    if (lost != null) return _frame(HollowTheme.of(context), _lost(lost));
     if (!isDmCallWith(ref, call, peerMaster)) {
       return CallElsewhereRow(peerMaster: peerMaster);
     }
@@ -53,6 +57,10 @@ class DmCallRow extends ConsumerWidget {
     final content = call.status == CallStatus.ringing
         ? _ringing(context, ref, hollow)
         : _inCall(context, ref, hollow, call);
+    return _frame(hollow, content);
+  }
+
+  Widget _frame(HollowTheme hollow, Widget content) {
     return Container(
       height: kDmCallRowHeight,
       padding: const EdgeInsets.only(
@@ -64,6 +72,20 @@ class DmCallRow extends ConsumerWidget {
         border: Border(bottom: BorderSide(color: hollow.border)),
       ),
       child: Semantics(container: true, label: 'Call', child: content),
+    );
+  }
+
+  /// The link ended the call: it stays a few seconds to say so, then goes.
+  Widget _lost(LostCall lost) {
+    return Row(
+      children: [
+        HollowAvatar(
+            peerId: peerMaster, size: CallMetrics.compactAvatar, frameId: ''),
+        const SizedBox(width: HollowSpacing.md),
+        lostCallMark(),
+        const SizedBox(width: HollowSpacing.sm),
+        LostCallCountdown(lost: lost),
+      ],
     );
   }
 
@@ -102,7 +124,7 @@ class DmCallRow extends ConsumerWidget {
     final calls = ref.read(callProvider.notifier);
     final active = call.status == CallStatus.active;
     final link = ref.watch(callLinkHealthProvider);
-    final weak = link.health != LinkHealth.healthy;
+    final trouble = link.health == LinkHealth.healthy ? null : link.label;
     final offer = data.shares.where((s) => s.isOffer).firstOrNull;
 
     return Row(
@@ -121,11 +143,13 @@ class DmCallRow extends ConsumerWidget {
             DropWhenTight(
               gap: HollowSpacing.sm,
               lead: Text(
-                weak ? 'Weak connection' : 'Voice call',
+                trouble ?? 'Voice call',
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: HollowTypography.label.copyWith(
-                    color: weak ? hollow.warning : hollow.textPrimary),
+                    color: trouble == null
+                        ? hollow.textPrimary
+                        : linkTroubleColor(hollow, link.health)),
               ),
               extra: active
                   ? CallRouteIndicator(

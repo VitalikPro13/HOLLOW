@@ -11,6 +11,7 @@ class CallActionReceiver : BroadcastReceiver() {
     companion object {
         const val ACTION_HANG_UP = "com.anonlisten.hollow.call.HANG_UP"
         const val ACTION_MUTE = "com.anonlisten.hollow.call.MUTE"
+        const val ACTION_SPEAKER = "com.anonlisten.hollow.call.SPEAKER"
         const val ACTION_DISMISSED = "com.anonlisten.hollow.call.DISMISSED"
 
         fun pendingIntent(context: Context, action: String): PendingIntent {
@@ -25,6 +26,7 @@ class CallActionReceiver : BroadcastReceiver() {
         when (intent.action) {
             ACTION_HANG_UP -> OsCallBridge.onUserHangUp()
             ACTION_MUTE -> OsCallBridge.onUserToggleMute()
+            ACTION_SPEAKER -> OsCallBridge.onUserToggleSpeaker()
             ACTION_DISMISSED -> HollowCallService.repost()
         }
     }

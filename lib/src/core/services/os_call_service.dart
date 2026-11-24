@@ -114,6 +114,9 @@ class _Mirror {
   bool sentMuted = false;
   bool sentVideo;
 
+  /// The Speaker state Android's call notification was last given.
+  bool sentSpeaker = false;
+
   /// Native runs it without the OS (CallKit refused or late, Telecom absent):
   /// never begun again on a reset, still ended.
   bool unmirrored = false;
@@ -348,6 +351,11 @@ class OsCallService {
       mirror.sentMuted = want.muted;
       await _send('setMuted', {'uuid': mirror.uuid, 'muted': want.muted});
     }
+    if (osCallSpeakerAction && want.speaker != mirror.sentSpeaker) {
+      mirror.sentSpeaker = want.speaker;
+      await _send(
+          'setSpeaker', {'uuid': mirror.uuid, 'speaker': want.speaker});
+    }
     // One way only: a title that may no longer show turns "Hollow" and is
     // never named again in this session (1.6).
     var retitle = false;
@@ -371,7 +379,8 @@ class OsCallService {
 
   Future<_Mirror> _begin(OsSession want) async {
     final mirror = _Mirror(want.key, want.kind, _mintUuid(),
-        osCallTitle(_read, want), want.video);
+        osCallTitle(_read, want), want.video)
+      ..sentSpeaker = want.speaker;
     _live = mirror;
     await _sendBegin(mirror, outgoing: want.outgoing);
     final master = osCallPeerMaster(_read);
@@ -407,6 +416,7 @@ class OsCallService {
       'video': mirror.sentVideo,
       'outgoing': outgoing,
       'loud': _startsLoud(mirror),
+      if (osCallSpeakerAction) 'speaker': mirror.sentSpeaker,
       'live': List<String>.of(_open),
       ..._avatarArgs(mirror.avatar),
     });
@@ -497,6 +507,8 @@ class OsCallService {
         _osEnd(mirror);
       case 'osMute':
         _osMute(mirror, args['muted'] == true);
+      case 'osSpeaker':
+        _osSpeaker(mirror, args['speaker'] == true);
       case 'osHold':
         _osHold(mirror, args['held'] == true);
       case 'osFailed':
@@ -547,13 +559,33 @@ class OsCallService {
   /// that only repeats what we last told it is our own echo.
   void _osMute(_Mirror mirror, bool muted) {
     if (muted == _audio(mirror.kind).muted && muted == mirror.sentMuted) return;
-    if (muted != _audio(mirror.kind).muted) _toggleMute(mirror.kind);
+    if (mirror.held) {
+      // The app's Unmute while held asks the OS to resume (A2-4); acting here
+      // would undeafen us into the carrier call. Held is already muted.
+      if (!muted) requestUnhold();
+    } else if (muted != _audio(mirror.kind).muted) {
+      _toggleMute(mirror.kind);
+    }
     _enqueue(() async {
       if (!identical(_live, mirror)) return;
       final truth = _audio(mirror.kind).muted;
       mirror.sentMuted = truth;
       await _send('setMuted', {'uuid': mirror.uuid, 'muted': truth});
     });
+  }
+
+  /// Android's notification Speaker: the app's own toggle, so the headset
+  /// rule holds (a connected headset keeps the audio). Never while held: the
+  /// route would move the carrier call.
+  void _osSpeaker(_Mirror mirror, bool speaker) {
+    if (mirror.held) return;
+    if (mirror.kind == OsCallKind.dm) {
+      if (speaker != _read(callProvider).isSpeakerOn) {
+        _read(callProvider.notifier).toggleSpeaker();
+      }
+    } else if (speaker != _read(voiceChannelProvider).isSpeakerOn) {
+      _read(voiceChannelProvider.notifier).toggleSpeaker();
+    }
   }
 
   /// A carrier call, headset or car put us on hold: deafen (which mutes the

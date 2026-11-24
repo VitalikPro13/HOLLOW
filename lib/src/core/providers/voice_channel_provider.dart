@@ -30,6 +30,7 @@ import 'package:hollow/src/core/providers/voice_level_provider.dart';
 import 'package:hollow/src/core/services/overlay_mic.dart';
 import 'package:hollow/src/core/services/audio_route.dart';
 import 'package:hollow/src/core/services/desktop_capture_support.dart';
+import 'package:hollow/src/core/mute_deafen.dart';
 import 'package:hollow/src/core/services/frame_cryptor_service.dart';
 import 'package:hollow/src/core/services/ice_route_probe.dart';
 import 'package:hollow/src/core/services/macos_version.dart';
@@ -1509,30 +1510,43 @@ class VoiceChannelNotifier extends Notifier<VoiceChannelState> {
     _applyTxGate();
   }
 
+  /// The mic before the current deafen ([MuteDeafen]); read only while deafened.
+  bool _mutedBeforeDeafen = false;
+
+  /// While deafened this unmutes AND undeafens (#154, [MuteDeafen]).
   void toggleMute() {
     if (_leaving) return;
-    final newMuted = !state.isMuted;
-    state = state.copyWith(isMuted: newMuted);
-    SoundService.instance.play(HollowSound.toggle, duringCall: true);
-    _applyTxGate();
-    _broadcastAudioState();
+    _setMic(_micModel.tapMute());
   }
 
+  /// Deafen silences the room and mutes our mic; undeafen gives back the mic
+  /// from before the deafen ([MuteDeafen]).
   void toggleDeafen() {
     if (_leaving) return;
+    _setMic(_micModel.tapDeafen());
+  }
+
+  MuteDeafen get _micModel => MuteDeafen(
+      muted: state.isMuted,
+      deafened: state.isDeafened,
+      mutedBeforeDeafen: _mutedBeforeDeafen);
+
+  void _setMic(MuteDeafen next) {
     SoundService.instance.play(HollowSound.toggle, duringCall: true);
-    final newDeafened = !state.isDeafened;
-    state = state.copyWith(
-      isMuted: newDeafened ? true : state.isMuted,
-      isDeafened: newDeafened,
-    );
+    final deafenChanged = next.deafened != state.isDeafened;
+    _mutedBeforeDeafen = next.mutedBeforeDeafen;
+    state = state.copyWith(isMuted: next.muted, isDeafened: next.deafened);
     _applyTxGate();
-    // Fire-and-forget, so it carries its own catch: a sync try/catch around an
-    // un-awaited future catches nothing and the rejection hits the zone handler.
-    unawaited(_service?.setDeafened(newDeafened).catchError((_) {}) ??
-        Future.value());
-    // setDeafened only zeroes WebRTC voice tracks; share audio has its own player.
-    ShareAudioLevel.setDeafened(newDeafened);
+    if (deafenChanged) {
+      // Fire-and-forget, so it carries its own catch: a sync try/catch around
+      // an un-awaited future catches nothing and the rejection hits the zone
+      // handler.
+      unawaited(_service?.setDeafened(next.deafened).catchError((_) {}) ??
+          Future.value());
+      // setDeafened only zeroes WebRTC voice tracks; share audio has its own
+      // player.
+      ShareAudioLevel.setDeafened(next.deafened);
+    }
     _broadcastAudioState();
   }
 

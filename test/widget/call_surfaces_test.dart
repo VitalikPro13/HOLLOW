@@ -218,7 +218,7 @@ void main() {
   });
 
   group('person tile', () {
-    testWidgets('nothing at rest; muted and a weak link say so',
+    testWidgets('nothing at rest; muted and an unstable link say so',
         (tester) async {
       Widget tile(CallPerson p) => SizedBox(
           width: 480,
@@ -227,13 +227,13 @@ void main() {
 
       await _pump(tester, tile(_person(_mira)));
       expect(find.byIcon(LucideIcons.micOff), findsNothing);
-      expect(find.text('Weak connection'), findsNothing);
+      expect(find.text('Unstable connection'), findsNothing);
 
       final weak = Provider<LinkHealthSnapshot?>((_) =>
           const LinkHealthSnapshot(health: LinkHealth.unstable));
       await _pump(tester, tile(_person(_mira, muted: true, link: weak)));
       expect(find.byIcon(LucideIcons.micOff), findsOneWidget);
-      expect(find.text('Weak connection'), findsOneWidget);
+      expect(find.text('Unstable connection'), findsOneWidget);
     });
 
     testWidgets('a muted person is never drawn speaking', (tester) async {

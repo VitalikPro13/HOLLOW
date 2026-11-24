@@ -12,6 +12,7 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:hollow/src/core/call_invite_decision.dart';
 import 'package:hollow/src/core/call_setup_trace.dart';
 import 'package:hollow/src/core/models/call_record.dart';
+import 'package:hollow/src/core/mute_deafen.dart';
 import 'package:hollow/src/core/providers/call_records_provider.dart';
 import 'package:hollow/src/core/providers/blocked_users_provider.dart';
 import 'package:hollow/src/core/providers/device_link_provider.dart';
@@ -20,6 +21,7 @@ import 'package:hollow/src/core/providers/ice_config_provider.dart';
 import 'package:hollow/src/core/providers/connection_status_provider.dart';
 import 'package:hollow/src/core/providers/identity_provider.dart';
 import 'package:hollow/src/core/providers/link_health_provider.dart';
+import 'package:hollow/src/core/providers/lost_call_provider.dart';
 import 'package:hollow/src/core/providers/media_route_provider.dart';
 import 'package:hollow/src/core/providers/profile_provider.dart';
 import 'package:hollow/src/core/providers/recording_provider.dart';
@@ -930,6 +932,17 @@ class CallNotifier extends Notifier<CallState> {
     }
     _callLog('[HOLLOW-CALL] Ending call: $reason');
     _endCause = CallEndCause.linkLost;
+    // A live call's surfaces stay a few seconds to say the link went, set
+    // before the teardown so they never blink out first.
+    final lostCallId = state.callId;
+    final lostPeer = state.peerId;
+    if (state.status == CallStatus.active &&
+        lostCallId != null &&
+        lostPeer != null) {
+      ref.read(lostCallProvider.notifier).show(
+          callId: lostCallId,
+          peerMaster: ref.read(deviceLinkProvider).identityOf(lostPeer));
+    }
     // With the relay unreachable the `end` below is dropped before it leaves.
     final peerId = state.peerId;
     final callId = state.callId;
@@ -1209,9 +1222,15 @@ class CallNotifier extends Notifier<CallState> {
   bool _pttMode = false;
   bool _pttTransmit = false;
 
+  bool get _txGated =>
+      state.isMuted || state.isDeafened || (_pttMode && !_pttTransmit);
+
+  /// Whether the mic is gated off right now (mute, deafen, push-to-talk).
+  @visibleForTesting
+  bool get debugTxGated => _txGated;
+
   void _applyTxGate({bool force = false}) {
-    final gated =
-        state.isMuted || state.isDeafened || (_pttMode && !_pttTransmit);
+    final gated = _txGated;
     if (_pttMode && state.status == CallStatus.active) {
       _callLog('[HOLLOW-HOTKEY] DM tx gate: gated=$gated '
           '(muted=${state.isMuted} deafened=${state.isDeafened} '
@@ -1239,27 +1258,36 @@ class CallNotifier extends Notifier<CallState> {
     if (state.status == CallStatus.active) _applyTxGate();
   }
 
+  /// The mic before the current deafen ([MuteDeafen]); read only while deafened.
+  bool _mutedBeforeDeafen = false;
+
+  MuteDeafen get _micModel => MuteDeafen(
+      muted: state.isMuted,
+      deafened: state.isDeafened,
+      mutedBeforeDeafen: _mutedBeforeDeafen);
+
+  /// While deafened this unmutes AND undeafens (#154, [MuteDeafen]).
   void toggleMute() {
     if (state.status != CallStatus.active) return;
-    state = state.copyWith(isMuted: !state.isMuted);
-    SoundService.instance.play(HollowSound.toggle, duringCall: true);
-    _applyTxGate();
-    _sendAudioState();
+    _setMic(_micModel.tapMute());
   }
 
-  /// Toggle deafen: silence the remote peer AND mute our mic. Mirrors voice
-  /// channels — un-deafening keeps the mic muted.
+  /// Deafen silences the remote peer and mutes our mic; undeafen gives back
+  /// the mic from before the deafen ([MuteDeafen]).
   void toggleDeafen() {
     if (state.status != CallStatus.active) return;
+    _setMic(_micModel.tapDeafen());
+  }
+
+  void _setMic(MuteDeafen next) {
     SoundService.instance.play(HollowSound.toggle, duringCall: true);
-    final newDeafened = !state.isDeafened;
-    unawaited(_service
-        .setRemoteAudioVolume(newDeafened ? 0.0 : _lastRemoteVolume)
-        .catchError((_) {}));
-    state = state.copyWith(
-      isDeafened: newDeafened,
-      isMuted: newDeafened ? true : state.isMuted,
-    );
+    if (next.deafened != state.isDeafened) {
+      unawaited(_service
+          .setRemoteAudioVolume(next.deafened ? 0.0 : _lastRemoteVolume)
+          .catchError((_) {}));
+    }
+    _mutedBeforeDeafen = next.mutedBeforeDeafen;
+    state = state.copyWith(isMuted: next.muted, isDeafened: next.deafened);
     _applyTxGate();
     _sendAudioState();
   }
