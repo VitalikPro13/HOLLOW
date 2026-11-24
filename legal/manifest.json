@@ -1,21 +1,21 @@
 {
-  "latest": "0.14.2",
+  "latest": "0.14.3",
   "versions": [
     {
-      "version": "0.14.2",
-      "date": "November 21, 2026",
-      "url_windows": "https://anonlisten.com/hollow/releases/hollow-0.14.2-win64.zip",
-      "url_windows_setup": "https://anonlisten.com/hollow/releases/hollow-0.14.2-win64-setup.exe",
-      "url_macos": "https://anonlisten.com/hollow/releases/hollow-0.14.2-macos.zip",
-      "url_macos_dmg": "https://anonlisten.com/hollow/releases/hollow-0.14.2.dmg",
-      "url_linux": "https://anonlisten.com/hollow/releases/hollow-0.14.2-linux-x86_64.flatpak",
-      "url_linux_targz": "https://anonlisten.com/hollow/releases/hollow-0.14.2-linux.tar.gz",
-      "url_android": "https://anonlisten.com/hollow/releases/hollow-0.14.2-android.apk",
-      "notes": "Name Colors Everywhere, File Paste, DM Catch-Up & Safer Updates",
-      "sha256_windows": "ecf6422eb01bb18132f8fe541e272c3888762ba6109ca5777f48def7faa127e3",
-      "sha256_macos": "902b852de43c2618c53ae0f735eb9f87a33e77f3e1dfb297ac7dbdf501bfdc2c",
-      "sha256_linux": "a532125a286977418d614ee0723f20c2cf5d294dee149c53f7a700b25c511259",
-      "sha256_linux_targz": "af2c535146f41adad77e8f27e06d27f3ad7e5dc839183efaa2edfb28a4b9a974"
+      "version": "0.14.3",
+      "date": "November 24, 2026",
+      "url_windows": "https://anonlisten.com/hollow/releases/hollow-0.14.3-win64.zip",
+      "url_windows_setup": "https://anonlisten.com/hollow/releases/hollow-0.14.3-win64-setup.exe",
+      "url_macos": "https://anonlisten.com/hollow/releases/hollow-0.14.3-macos.zip",
+      "url_macos_dmg": "https://anonlisten.com/hollow/releases/hollow-0.14.3.dmg",
+      "url_linux": "https://anonlisten.com/hollow/releases/hollow-0.14.3-linux-x86_64.flatpak",
+      "url_linux_targz": "https://anonlisten.com/hollow/releases/hollow-0.14.3-linux.tar.gz",
+      "url_android": "https://anonlisten.com/hollow/releases/hollow-0.14.3-android.apk",
+      "notes": "Phrase Restore, Phone Servers, System Calls & Sticker Previews",
+      "sha256_windows": "81375a20eb282f0ae2db9ab4efd124daf476df63b11716fdfd6ddc3c524fa026",
+      "sha256_macos": "b3bd99593dc3fde7fdfe2cc585a30efa79868d50e5f0676bd87c153d6dcdbf7f",
+      "sha256_linux": "72ac2e35a2a8703e05c21ec3dcef8ede7e1a3ff22dace12f56f200ce47279484",
+      "sha256_linux_targz": "43748ac7d6260227c4ee670ff35fc1b47456a6dcb48b22ba2c425e8014b1cba3"
     }
   ]
 }

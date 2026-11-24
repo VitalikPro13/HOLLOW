@@ -1,5 +1,11 @@
 [
   {
+    "id": "2026-11-24-v0143",
+    "date": "November 24, 2026",
+    "title": "v0.14.3 - Phrase Restore, Phone Servers, System Calls & Sticker Previews",
+    "body": "The only thing I want to say is that implementing calls on mobile is what made me realize something... Mobile calls without system calling are not proper calls. Yes, sounds fascinating, I know. Not a big patch for this update, but it got an additional fix for the name colors, added the recovery phrase as an identity restore option, the relay was upgraded to work on more systems, etc. Check the changelog for everything. TestFlight is also closed now, so the App Store will receive all the updates! This one included. I didn't upload the previous one because I did this one pretty quickly, and since it would probably be processing for days, it was better to just skip it. But alright, thanks once again! Report all the issues to GitHub, as usual. The next epic is Storage Nodes, and it's going pretty strong."
+  },
+  {
     "id": "2026-11-21-v0142",
     "date": "November 21, 2026",
     "title": "v0.14.2 - Name Colors Everywhere, File Paste, DM Catch-Up & Safer Updates",

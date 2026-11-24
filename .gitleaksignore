@@ -112,3 +112,11 @@ bb5f57b0d279319f362f53bec4c8d71f32e88e53:tools/hollow-memory/wiki/conferences.md
 # Reviewed 2026-11-15.
 883aa238520ca73a9703b8133f36caad9742f7b5:relay-uws/test/test_license_pool.cpp:generic-api-key:75
 883aa238520ca73a9703b8133f36caad9742f7b5:relay-uws/test/test_relay_live.cpp:hollow-relay-license-key:6868
+
+# Reviewed 2026-11-24 (0.14.3). A harness post label ("f5sl-sub-after-removal")
+# beside a variable named secret; no credential.
+fb1a1b274482c1a1e3bfcbafb1bdfc6e8916ed8a:rust/hollow_core/src/node/test_harness.rs:generic-api-key:75222
+# The placeholder access key ABCD-1234-EFGH-5678 a widget test types; no relay
+# ever issued it.
+da376655b629f35553e0b72812e2e08ec2893d98:test/widget/relay_switch_close_test.dart:generic-api-key:317
+96a569bcaabecb7aa4c37e1c9bbf608ee412134f:test/widget/relay_switch_close_test.dart:generic-api-key:266
