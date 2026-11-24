@@ -461,6 +461,11 @@ pub(crate) fn author_home_relays(
     }
 }
 
+/// Harness: owners whose devices never set a missing join key, so a test sees which key
+/// the settling's own key rule leaves.
+#[cfg(test)]
+pub(crate) static MISSING_KEY_OFF: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::LazyLock::new(Default::default);
+
 /// Whether this device sets a server's missing join key now. A second key is an invite
 /// reset, so only a device that knows none exists sets one: the lowest of the owner's
 /// devices the relay shows us in the room, with no join or whole-log fetch under way,
@@ -479,6 +484,10 @@ fn sets_missing_join_key(
     local_device: &str,
 ) -> bool {
     if super::ws_client::backgrounded() || pending_server_joins.contains_key(server_id) || crdt_resync.whole_log_due(server_id) {
+        return false;
+    }
+    #[cfg(test)]
+    if MISSING_KEY_OFF.lock().unwrap_or_else(|e| e.into_inner()).contains(local_master) {
         return false;
     }
     let lower_sibling = ws_room_peers.get(server_id).is_some_and(|peers| {

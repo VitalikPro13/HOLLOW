@@ -74169,6 +74169,11 @@ async fn pr_a_early_checkpoint_restore(tags: [u8; 5], (k_tag, f_tag): (u8, u8), 
     })
     .await;
     let f_dev = f.device_id.clone();
+    // F's own state names no key until the settling, and its missing-key tick would set
+    // one first: then the settling finds that key F's and the rule under test never runs.
+    if check_key {
+        super::sync_handler::MISSING_KEY_OFF.lock().unwrap_or_else(|e| e.into_inner()).insert(m_id.clone());
+    }
     for friend in [&j_master, &k_master] {
         f.cmd_tx.send(NodeCommand::SendFriendRequest { peer_id: friend.clone() }).await.unwrap();
     }
@@ -74213,6 +74218,7 @@ async fn pr_a_early_checkpoint_restore(tags: [u8; 5], (k_tag, f_tag): (u8, u8), 
         );
         let settled_key = j.live_server_state(&server_id).await.and_then(|s| s.base.as_ref().and_then(|b| b.state.join_public_text()));
         assert_eq!(settled_key, Some(new_key), "the fresh key is not in the settled state itself (a later tick set it)");
+        super::sync_handler::MISSING_KEY_OFF.lock().unwrap_or_else(|e| e.into_inner()).remove(&m_id);
     }
     drop(k);
 }
@@ -74385,7 +74391,8 @@ async fn pr_f5_a_server_that_never_checkpointed_comes_back_by_sync_and_records()
 /// Note test 8 (revision 1 test 2): a device the thief mints with the master key, named
 /// by no roster the phrase signed, gets nothing back. The friend refuses its shared
 /// servers ask and serves its sync ask no op, while F's ask is served; it never holds
-/// the server or a leaf.
+/// the server or a leaf. Nor is the cut-off phone served: its identity is kept, but no
+/// roster the phrase signed counts it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)]
 async fn pr_f5_a_master_key_holders_fresh_device_is_never_re_added() {
@@ -74413,6 +74420,15 @@ async fn pr_f5_a_master_key_holders_fresh_device_is_never_re_added() {
     assert!(!wait_until(5, async || super::op_sync::served_for_test(&j_dev, &sid, &x_id) > 0).await, "J served the server's ops to a device the phrase never counted");
     assert!(x.live_server_state(&sid).await.is_none_or(|s| !s.is_member(&m_id)), "X holds the server");
     assert!(!j.mls_members(&sid).await.contains(&x_id), "X has a leaf at J");
+
+    // The cut-off phone: an identity the server keeps, a device J's view no longer counts.
+    let d1_dev = d1.device_id.clone();
+    relay.set_online(&d1_dev, true);
+    let ask = super::crdt_resync::CrdtResync::for_test().sync_ask(&ServerState::skeleton(sid.clone()), &j_dev, None, None);
+    carry_as(&d1, &j, ask).await;
+    assert!(wait_until(30, async || super::op_sync::heard_for_test(&j_dev, &sid, &d1_dev) > 0).await, "precondition: D1's sync ask reached J's handler");
+    // ABSENCE: an answer would leave J at once (the ask was heard above).
+    assert!(!wait_until(5, async || super::op_sync::served_for_test(&j_dev, &sid, &d1_dev) > 0).await, "J served the server's ops to the device the recovery cut off");
     drop((d1, j, k, f, x));
 }
 
@@ -74558,7 +74574,14 @@ async fn pr_f5_two_owner_devices_rotate_the_key_once() {
         assert!(wait_until(30, async || n.live_server_state(&sid).await.is_some_and(|s| s.is_member(&who) && s.cut)).await, "precondition: {} holds the server", n.device_id);
     }
     let old_key = pr_f5_key(&j, &sid).await.expect("precondition: J holds the key");
-    let stored = j.store().op_seen_ms(&sid).unwrap_or_default().into_values().max().unwrap_or(0);
+    // T after the settling devices stored all J holds: an op one first stored after T is
+    // left out of its settling (J's own admission among them, under load).
+    let seen = |n: &TestNode| n.store().op_seen_ms(&sid).unwrap_or_default();
+    assert!(
+        wait_until(30, async || [&d2, &d3].iter().all(|n| seen(&j).keys().all(|k| seen(n).contains_key(k)))).await,
+        "precondition: D2 and D3 stored every op J holds",
+    );
+    let stored = [&d2, &d3, &j].iter().flat_map(|n| seen(n).into_values()).max().unwrap_or(0);
     assert!(wait_until(5, async || crate::crdt::hlc::wall_clock_ms() > stored).await);
     let t_ms = crate::crdt::hlc::wall_clock_ms() as i64;
     relay.set_online(&d1.device_id, false);
