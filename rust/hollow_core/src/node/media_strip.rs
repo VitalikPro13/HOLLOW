@@ -239,8 +239,10 @@ impl Budget {
 
 fn strip_isobmff_video(d: &mut [u8]) -> Result<(), String> {
     let top = boxes(d, 0..d.len(), true)?;
-    // A fragmented file keeps its samples in `moof` runs this does not walk.
+    // A fragmented file keeps its samples in `moof` runs, which
+    // `strip_fragments` walks for the timed-metadata tracks.
     let fragmented = find(&top, b"moof").is_some();
+    let meta = fragment_tracks(d, &top)?;
     let mut budget = Budget::for_file(d.len());
     let mut saw_moov = false;
     for b in top.iter() {
@@ -249,11 +251,159 @@ fn strip_isobmff_video(d: &mut [u8]) -> Result<(), String> {
                 saw_moov = true;
                 strip_moov(d, &b, fragmented, &mut budget)?;
             }
-            b"udta" | b"meta" | b"uuid" => to_free(d, &b),
+            b"udta" | b"meta" | b"uuid" | b"gps " => to_free(d, &b),
             _ => {}
         }
     }
+    strip_fragments(d, &top, &meta, &mut budget)?;
     if saw_moov { Ok(()) } else { Err("no movie box".into()) }
+}
+
+/// The tracks a fragmented movie's `moof` runs name, with their `trex` default
+/// sample sizes, and which of them carry timed metadata.
+struct FragmentTracks {
+    /// (track id, default sample size, timed metadata)
+    tracks: Vec<(u32, Option<u32>, bool)>,
+}
+
+impl FragmentTracks {
+    fn get(&self, id: u32) -> Option<(Option<u32>, bool)> {
+        self.tracks.iter().find(|t| t.0 == id).map(|t| (t.1, t.2))
+    }
+
+    fn any_meta(&self) -> bool {
+        self.tracks.iter().any(|t| t.2)
+    }
+}
+
+/// Reads, before anything is zeroed, which tracks of a fragmented movie are
+/// timed metadata: their samples sit in `moof` runs, which 0.14 sent as they
+/// were, GPS trace included (HOL-SEC-305). A movie without fragments needs none.
+fn fragment_tracks(d: &[u8], top: &Boxes) -> Result<FragmentTracks, String> {
+    let mut out = FragmentTracks { tracks: Vec::new() };
+    let (Some(moov), true) = (find(top, b"moov"), find(top, b"moof").is_some()) else { return Ok(out) };
+    let kids = boxes(d, moov.body..moov.end, false)?;
+    for trak in kids.iter().filter(|b| &b.kind == b"trak") {
+        let tk = boxes(d, trak.body..trak.end, false)?;
+        let Some(tkhd) = find(&tk, b"tkhd") else { continue };
+        let version = *d.get(tkhd.body).ok_or("empty tkhd")?;
+        let id = be32(d, tkhd.body + if version == 1 { 20 } else { 12 })?;
+        let meta = match find(&tk, b"mdia") {
+            Some(mdia) => {
+                let mk = boxes(d, mdia.body..mdia.end, false)?;
+                gps_track(find(&mk, b"hdlr").and_then(|h| d.get(h.body + 8..h.body + 12)))
+            }
+            None => false,
+        };
+        out.tracks.push((id, None, meta));
+    }
+    if let Some(mvex) = find(&kids, b"mvex") {
+        for trex in boxes(d, mvex.body..mvex.end, false)?.iter().filter(|b| &b.kind == b"trex") {
+            if trex.body + 24 > trex.end {
+                return Err("trex too short".into());
+            }
+            let id = be32(d, trex.body + 4)?;
+            let size = be32(d, trex.body + 16)?;
+            for t in out.tracks.iter_mut().filter(|t| t.0 == id) {
+                t.1 = Some(size);
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Zeroes the data every `moof` gives a timed-metadata track (HOL-SEC-305).
+/// Each `moof` is read from a copy, so zeroing cannot change what a later
+/// fragment of it says.
+fn strip_fragments(d: &mut [u8], top: &Boxes, tracks: &FragmentTracks, budget: &mut Budget) -> Result<(), String> {
+    if !tracks.any_meta() {
+        return Ok(());
+    }
+    for moof in top.iter().filter(|b| &b.kind == b"moof") {
+        let m = d.get(moof.start..moof.end).ok_or("moof past the file")?.to_vec();
+        for r in fragment_runs(&m, moof.start, moof.body - moof.start, tracks)? {
+            budget.charge(&r)?;
+            zero(d, r)?;
+        }
+    }
+    Ok(())
+}
+
+/// The file range of every run a timed-metadata track has in one `moof`,
+/// given as `m` (its bytes, starting at `at` in the file, its children from
+/// `head`). A run's samples lie end to end, so a run is one range.
+fn fragment_runs(m: &[u8], at: usize, head: usize, tracks: &FragmentTracks) -> Result<Vec<Range<usize>>, String> {
+    let mut out = Vec::new();
+    // Where the previous track fragment's data ended, if it can be known.
+    let mut prev_end = Some(at as u64);
+    for traf in boxes(m, head..m.len(), false)?.iter().filter(|b| &b.kind == b"traf") {
+        let kids = boxes(m, traf.body..traf.end, false)?;
+        let tfhd = find(&kids, b"tfhd").ok_or("track fragment without tfhd")?;
+        if tfhd.body + 8 > tfhd.end {
+            return Err("tfhd too short".into());
+        }
+        let flags = be32(m, tfhd.body)? & 0x00FF_FFFF;
+        let id = be32(m, tfhd.body + 4)?;
+        let mut p = tfhd.body + 8;
+        let mut field = |n: usize| -> Result<u64, String> {
+            if p + n > tfhd.end {
+                return Err("tfhd too short".into());
+            }
+            p += n;
+            be_sized(m, p - n, n)
+        };
+        let base_offset = if flags & 0x01 != 0 { Some(field(8)?) } else { None };
+        if flags & 0x02 != 0 {
+            field(4)?;
+        }
+        if flags & 0x08 != 0 {
+            field(4)?;
+        }
+        let tfhd_size = if flags & 0x10 != 0 { Some(field(4)?) } else { None };
+        let (trex_size, meta) = tracks.get(id).unwrap_or((None, false));
+        let base = match base_offset {
+            Some(b) => Some(b),
+            None if flags & 0x02_0000 != 0 => Some(at as u64),
+            None => prev_end,
+        };
+        let mut next = base;
+        for trun in kids.iter().filter(|b| &b.kind == b"trun") {
+            if trun.body + 8 > trun.end {
+                return Err("trun too short".into());
+            }
+            let tflags = be32(m, trun.body)? & 0x00FF_FFFF;
+            let count = be32(m, trun.body + 4)? as usize;
+            let mut q = trun.body + 8;
+            let offset = if tflags & 0x001 != 0 { Some(i64::from(be32(m, q)? as i32)) } else { None };
+            q += 4 * (tflags & 0x001) as usize + if tflags & 0x004 != 0 { 4 } else { 0 };
+            let record = 4 * (tflags & 0xF00).count_ones() as usize;
+            if q > trun.end || (record > 0 && count > (trun.end - q) / record) {
+                return Err("trun longer than its box".into());
+            }
+            let start = match offset {
+                Some(off) => base.and_then(|b| b.checked_add_signed(off)),
+                None => next,
+            };
+            let total = if tflags & 0x200 != 0 {
+                // The size follows the duration when a record has both.
+                let size_at = q + if tflags & 0x100 != 0 { 4 } else { 0 };
+                let mut sum = 0u64;
+                for k in 0..count {
+                    sum += u64::from(be32(m, size_at + k * record)?);
+                }
+                Some(sum)
+            } else {
+                tfhd_size.or(trex_size.map(u64::from)).map(|s| (count as u64).saturating_mul(s))
+            };
+            next = start.zip(total).and_then(|(s, t)| s.checked_add(t));
+            if meta {
+                let (s, e) = start.zip(next).ok_or("timed metadata run whose place is unknown")?;
+                out.push(s as usize..e as usize);
+            }
+        }
+        prev_end = next;
+    }
+    Ok(out)
 }
 
 fn strip_moov(d: &mut [u8], moov: &Bx, fragmented: bool, budget: &mut Budget) -> Result<(), String> {
@@ -261,7 +411,9 @@ fn strip_moov(d: &mut [u8], moov: &Bx, fragmented: bool, budget: &mut Budget) ->
         match &b.kind {
             b"mvhd" => zero_times(d, &b)?,
             b"trak" => strip_trak(d, &b, fragmented, budget)?,
-            b"udta" | b"meta" | b"uuid" => to_free(d, &b),
+            // A dashcam's `gps ` box holds its GPS log or an index to it
+            // (HOL-SEC-306).
+            b"udta" | b"meta" | b"uuid" | b"gps " => to_free(d, &b),
             _ => {}
         }
     }
@@ -275,7 +427,7 @@ fn strip_trak(d: &mut [u8], trak: &Bx, fragmented: bool, budget: &mut Budget) ->
         let handler = find(&mkids, b"hdlr").and_then(|h| d.get(h.body + 8..h.body + 12));
         // A timed-metadata track is where action cameras and phones keep a GPS
         // trace: the whole track goes, samples included.
-        if handler == Some(b"meta".as_slice()) && !fragmented {
+        if gps_track(handler) && !fragmented {
             sample_tables(d, &mkids)?.walk(d.len(), |r| {
                 budget.charge(&r)?;
                 zero(d, r)
@@ -300,6 +452,12 @@ fn strip_trak(d: &mut [u8], trak: &Bx, fragmented: bool, budget: &mut Budget) ->
         }
     }
     Ok(())
+}
+
+/// Whether a track's handler marks timed metadata, where cameras keep a GPS
+/// trace: `meta`, or Google's camera motion `camm` (HOL-SEC-306).
+fn gps_track(handler: Option<&[u8]>) -> bool {
+    matches!(handler, Some(b"meta") | Some(b"camm"))
 }
 
 /// A track's chunk offsets, as wide as the file wrote them.
@@ -459,9 +617,18 @@ fn is_heif(d: &[u8]) -> bool {
 fn strip_heif(d: &mut [u8]) -> Result<(), String> {
     let top = boxes(d, 0..d.len(), true)?;
     for b in top.iter() {
-        if &b.kind == b"uuid" || &b.kind == b"udta" {
+        if matches!(&b.kind, b"uuid" | b"udta" | b"gps ") {
             to_free(d, &b);
         }
+    }
+    // An image sequence keeps a movie beside its items, with tracks and user
+    // data of its own, which 0.14 never walked (HOL-SEC-307).
+    let mut budget = Budget::for_file(d.len());
+    if let Some(moov) = find(&top, b"moov") {
+        let fragmented = find(&top, b"moof").is_some();
+        let tracks = fragment_tracks(d, &top)?;
+        strip_moov(d, &moov, fragmented, &mut budget)?;
+        strip_fragments(d, &top, &tracks, &mut budget)?;
     }
     let meta = find(&top, b"meta").ok_or("no meta box")?;
     let kids = boxes(d, meta.body + 4..meta.end, false)?;
@@ -475,7 +642,6 @@ fn strip_heif(d: &mut [u8]) -> Result<(), String> {
     // The extents are counted against the budget first, then zeroed from a
     // copy of the table as it was read: the zeroing may reach the table itself
     // (HOL-SEC-269), and a range per extent held four times the file.
-    let mut budget = Budget::for_file(d.len());
     let read_to = item_extents(d, iloc.body, d.len(), idat, &targets, |r| budget.charge(&r))?;
     let table = d.get(iloc.body..read_to).ok_or("iloc read past the file")?.to_vec();
     let len = d.len();
@@ -601,12 +767,14 @@ const SEGMENT: u32 = 0x1853_8067;
 const CLUSTER: u32 = 0x1F43_B675;
 const INFO: u32 = 0x1549_A966;
 const TAGS: u32 = 0x1254_C367;
+const ATTACHMENTS: u32 = 0x1941_A469;
+const CHAPTERS: u32 = 0x1043_A770;
 const DATE_UTC: u32 = 0x4461;
 const TITLE: u32 = 0x7BA9;
 /// Elements that sit directly in a Segment, so one of them ends an
 /// unknown-size Cluster.
 const SEGMENT_LEVEL: &[u32] =
-    &[0x114D_9B74, INFO, 0x1654_AE6B, CLUSTER, 0x1C53_BB6B, 0x1941_A469, 0x1043_A770, TAGS];
+    &[0x114D_9B74, INFO, 0x1654_AE6B, CLUSTER, 0x1C53_BB6B, ATTACHMENTS, CHAPTERS, TAGS];
 
 fn element_id(d: &[u8], i: usize) -> Result<(u32, usize), String> {
     let b = *d.get(i).ok_or("truncated element")?;
@@ -685,7 +853,9 @@ fn strip_segment(d: &mut [u8], from: usize, to: usize) -> Result<(), String> {
             None => return Err("element of unknown size".into()),
         };
         match id {
-            TAGS => void(d, i, end),
+            // Attached files keep their own Exif, and chapters may name a
+            // place (HOL-SEC-306).
+            TAGS | ATTACHMENTS | CHAPTERS => void(d, i, end),
             INFO => {
                 let mut k = body;
                 while k < end {
@@ -1034,7 +1204,7 @@ pub(crate) mod fixtures {
         [ftyp, moov(head as u32, (head + video.len()) as u32), mdat].concat()
     }
 
-    fn ebml(id: &[u8], body: &[u8]) -> Vec<u8> {
+    pub(crate) fn ebml(id: &[u8], body: &[u8]) -> Vec<u8> {
         assert!(body.len() < 0x3FFF);
         [id, &[0x40 | (body.len() >> 8) as u8, body.len() as u8], body].concat()
     }
@@ -1801,6 +1971,147 @@ mod tests {
         let len = heic.len() as i64;
         let (_, peak) = peak_of(move || strip_for_send("heic", heic).is_ok());
         assert!(peak < 2 * len, "held {peak} bytes ({}x) stripping a {len} byte file", peak as f64 / len as f64);
+    }
+
+    /// A fragmented mp4: a video track and a GPS track, one sample each in the
+    /// `mdat` after one `moof`. `mode` picks how the GPS fragment names its
+    /// data: 0 its `moof` as base plus a data offset, 1 an explicit base offset
+    /// (the `moof` start, written out) plus a data offset,
+    /// 2 no base at all (after the video fragment's data), 3 a sample size from
+    /// `trex`, 4 no sample size anywhere. Returns the file and the GPS sample.
+    fn fragmented_mp4_with_gps(mode: u8) -> (Vec<u8>, Range<usize>) {
+        let video = b"VIDEO-FRAGMENT".to_vec();
+        let gps = [b"GPS ".as_slice(), LOCATION].concat();
+        let (vlen, glen) = (video.len() as u32, gps.len() as u32);
+        let flagged = |kind: &[u8; 4], flags: u32, body: &[u8]| bx(kind, &[&flags.to_be_bytes()[..], body].concat());
+        let tkhd = |id: u8| full(b"tkhd", 0, &[&[0u8; 8][..], &[0, 0, 0, id], &[0; 68]].concat());
+        let hdlr = |h: &[u8; 4]| full(b"hdlr", 0, &[&[0u8; 4][..], h, &[0; 12]].concat());
+        let trak = |id: u8, h: &[u8; 4]| bx(b"trak", &[tkhd(id), bx(b"mdia", &hdlr(h))].concat());
+        let trex = |id: u8, size: u32| full(b"trex", 0, &[&[0, 0, 0, id][..], &[0, 0, 0, 1], &[0; 4], &size.to_be_bytes(), &[0; 4]].concat());
+        let mut mvex = trex(1, 0);
+        if mode != 4 {
+            mvex.extend(trex(2, if mode == 3 { glen } else { 0 }));
+        }
+        let ftyp = bx(b"ftyp", b"iso5\0\0\0\0iso5");
+        let moov = bx(b"moov", &[full(b"mvhd", 0, &[0; 96]), trak(1, b"vide"), trak(2, b"meta"), bx(b"mvex", &mvex)].concat());
+        let at = (ftyp.len() + moov.len()) as u32;
+        let moof = |data: u32| {
+            // The video run's records hold a duration and a size.
+            let vbase = if mode == 2 { 0 } else { 0x02_0000 };
+            let vtraf = [flagged(b"tfhd", vbase, &[0, 0, 0, 1]), flagged(b"trun", 0x301, &[&1u32.to_be_bytes()[..], &data.to_be_bytes(), &[0, 0, 0, 1], &vlen.to_be_bytes()].concat())].concat();
+            let gtraf = match mode {
+                0 => [flagged(b"tfhd", 0x02_0010, &[&[0, 0, 0, 2][..], &glen.to_be_bytes()].concat()), flagged(b"trun", 0x001, &[&1u32.to_be_bytes()[..], &(data + vlen).to_be_bytes()].concat())].concat(),
+                1 => [flagged(b"tfhd", 0x11, &[&[0, 0, 0, 2][..], &u64::from(at).to_be_bytes(), &glen.to_be_bytes()].concat()), flagged(b"trun", 0x001, &[&1u32.to_be_bytes()[..], &(data + vlen).to_be_bytes()].concat())].concat(),
+                2 => [flagged(b"tfhd", 0x10, &[&[0, 0, 0, 2][..], &glen.to_be_bytes()].concat()), flagged(b"trun", 0, &1u32.to_be_bytes())].concat(),
+                _ => [flagged(b"tfhd", 0x02_0000, &[0, 0, 0, 2]), flagged(b"trun", 0x001, &[&1u32.to_be_bytes()[..], &(data + vlen).to_be_bytes()].concat())].concat(),
+            };
+            bx(b"moof", &[full(b"mfhd", 0, &[0, 0, 0, 1]), bx(b"traf", &vtraf), bx(b"traf", &gtraf)].concat())
+        };
+        let data = moof(0).len() as u32 + 8;
+        let file = [ftyp, moov, moof(data), bx(b"mdat", &[video, gps.clone()].concat())].concat();
+        let (n, g) = (file.len(), file.len() - gps.len());
+        (file, g..n)
+    }
+
+    /// HOL-SEC-305: a fragmented movie's GPS samples are zeroed in its `moof`
+    /// runs however the fragment names their place, and nothing else changes.
+    #[test]
+    fn a_fragmented_movie_loses_its_gps_samples() {
+        for mode in 0..4 {
+            let (mp4, gps) = fragmented_mp4_with_gps(mode);
+            let mut want = mp4.clone();
+            want[gps].fill(0);
+            assert_eq!(strip_for_send("mp4", mp4).unwrap(), want, "mode {mode}");
+        }
+        // A GPS run whose size nothing gives is refused.
+        assert!(strip_for_send("mp4", fragmented_mp4_with_gps(4).0).is_err());
+        // So is a run longer than its box, in any track of such a movie.
+        let (mut mp4, _) = fragmented_mp4_with_gps(0);
+        let t = mp4.windows(4).position(|w| w == b"trun").unwrap() + 4;
+        mp4[t + 4..t + 8].copy_from_slice(&2u32.to_be_bytes());
+        assert!(strip_for_send("mp4", mp4).is_err());
+        // Without a timed-metadata track every byte stays, as in 0.14.
+        let (mut plain, _) = fragmented_mp4_with_gps(0);
+        let h = plain.windows(4).position(|w| w == b"meta").unwrap();
+        plain[h..h + 4].copy_from_slice(b"vide");
+        assert_eq!(strip_for_send("mp4", plain.clone()).unwrap(), plain);
+    }
+
+    /// A HEIC that also holds a movie whose user data names a place.
+    fn heic_with_a_movie() -> (Vec<u8>, Vec<u8>) {
+        let xyz = bx(b"\xA9xyz", &[&[0, LOCATION.len() as u8 + 1, 0x15, 0xC7][..], LOCATION, b"/"].concat());
+        let moov = bx(b"moov", &[full(b"mvhd", 0, &[0; 96]), bx(b"udta", &xyz)].concat());
+        ([heic_with_gps(), moov.clone()].concat(), moov)
+    }
+
+    /// HOL-SEC-307: a HEIF that also holds a movie has the movie walked as a
+    /// video's is; its items are stripped as before.
+    #[test]
+    fn a_heif_with_a_movie_loses_the_movies_location() {
+        let (heic, moov) = heic_with_a_movie();
+        let mut freed = moov;
+        let u = freed.windows(4).position(|w| w == b"udta").unwrap();
+        freed[u..u + 4].copy_from_slice(b"free");
+        freed[u + 4..].fill(0);
+        let want = [strip_for_send("heic", heic_with_gps()).unwrap(), freed].concat();
+        assert_eq!(strip_for_send("heic", heic).unwrap(), want);
+    }
+
+    /// A fragmented movie or a HEIF with a movie, received and sent on, leaves
+    /// without its location.
+    #[test]
+    fn a_forwarded_fragment_or_sequence_loses_its_location() {
+        let dir = crate::test_tmp::tempdir().expect("tmp");
+        let mut camm = mp4_with_location();
+        let h = nth(&camm, b"hdlr", 1) + 12;
+        camm[h..h + 4].copy_from_slice(b"camm");
+        for (name, bytes) in [("frag.mp4", fragmented_mp4_with_gps(2).0), ("seq.heic", heic_with_a_movie().0), ("camm.mp4", camm)] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, bytes).expect("write");
+            assert!(!holds(&read_for_send(&path).expect(name), LOCATION), "{name}");
+        }
+    }
+
+    /// Where `kind` occurs the `n`th time (from 0).
+    fn nth(d: &[u8], kind: &[u8], n: usize) -> usize {
+        d.windows(kind.len()).enumerate().filter(|(_, w)| *w == kind).nth(n).expect("present").0
+    }
+
+    /// HOL-SEC-306: the other places a location is kept lose it, and only
+    /// those bytes change: a `camm` track goes like a `meta` one, a `gps ` box
+    /// in `moov` or at the top becomes padding, and Matroska Attachments and
+    /// Chapters become Void (ported from the 0.16 walker's test).
+    #[test]
+    fn other_location_carriers_lose_the_location() {
+        let freed = |b: &[u8]| [&b[..4], b"free", &vec![0; b.len() - 8]].concat();
+        // Google's camera motion track (`camm` handler) carries GPS packets.
+        let mut camm = mp4_with_location();
+        let h = nth(&camm, b"hdlr", 1) + 12;
+        assert_eq!(&camm[h..h + 4], b"meta");
+        camm[h..h + 4].copy_from_slice(b"camm");
+        assert_eq!(strip_for_send("mp4", camm).unwrap(), strip_for_send("mp4", mp4_with_location()).unwrap(), "camm track");
+        // A Novatek dashcam's `gps ` box in `moov`, and one at the top level.
+        let gps = bx(b"gps ", LOCATION);
+        let mvhd = full(b"mvhd", 0, &[0u8; 96]);
+        let in_moov = |g: &[u8]| [bx(b"ftyp", b"isom\0\0\0\0"), bx(b"moov", &[&mvhd[..], g].concat())].concat();
+        assert_eq!(strip_for_send("mp4", in_moov(&gps)).unwrap(), in_moov(&freed(&gps)), "gps box in moov");
+        let top = [mp4_with_location(), gps.clone()].concat();
+        let want = [strip_for_send("mp4", mp4_with_location()).unwrap(), freed(&gps)].concat();
+        assert_eq!(strip_for_send("mp4", top).unwrap(), want, "top-level gps box");
+        let heic = [heic_with_gps(), gps.clone()].concat();
+        let want = [strip_for_send("heic", heic_with_gps()).unwrap(), freed(&gps)].concat();
+        assert_eq!(strip_for_send("heic", heic).unwrap(), want, "gps box beside a HEIF's items");
+        // Matroska Attachments (a photo with its Exif) and Chapters (a named place).
+        for id in [[0x19, 0x41, 0xA4, 0x69], [0x10, 0x43, 0xA7, 0x70]] {
+            let mut webm = webm_with_location();
+            webm.truncate(nth(&webm, &[0x12, 0x54, 0xC3, 0x67], 0));
+            let el = ebml(&id, &ebml(&[0x61, 0xA7], &ebml(&[0x46, 0x5C], LOCATION)));
+            let mut voided = el.clone();
+            let n = voided.len();
+            void(&mut voided, 0, n);
+            let want = [strip_for_send("mkv", webm.clone()).unwrap(), voided].concat();
+            assert_eq!(strip_for_send("mkv", [webm, el].concat()).unwrap(), want, "{id:02X?}");
+        }
     }
 
     /// A file received from someone and sent on is read through the same

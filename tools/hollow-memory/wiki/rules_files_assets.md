@@ -74,7 +74,10 @@ stay in CLAUDE.md. Wiki `rust_file_handler`, `emotes`, `hollowpack`.
   `vault_upload_file`, `share_create_for_send`, which shares a cleaned copy from
   `shares/send_*/`); the image conversion's fallback arms strip the container too. A video
   keeps every byte position (metadata becomes `free`/Void/JUNK padding), so the file id,
-  `vthumb.size` and the share manifest still match. Media that does not parse is REFUSED
+  `vthumb.size` and the share manifest still match. A timed GPS track goes with its
+  samples, in a fragmented file the data of its `moof` runs (HOL-SEC-305); a HEIF holding a
+  movie has the movie walked too (HOL-SEC-307); `camm` tracks, `gps ` boxes and Matroska
+  Attachments and Chapters go too (HOL-SEC-306). Media that does not parse is REFUSED
   (`media_strip::REFUSED`), never sent raw; other files keep their bytes. Harness
   `dm_video_send_strips_location_before_it_leaves`. The strip parses a stranger's
   bytes (a received file sent on): it never panics, never recurses or walks a table

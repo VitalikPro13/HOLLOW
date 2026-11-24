@@ -24,8 +24,9 @@ cannot be parsed is refused with a message.
 
 ## Residual risk
 
-Timed GPS tracks in fragmented MP4, subtitle tracks, and TIFF/RAW sent as files keep their
-metadata.
+Subtitle tracks and TIFF/RAW sent as files keep their metadata. Timed GPS tracks in
+fragmented MP4 kept theirs until HOL-SEC-305; `camm` tracks, `gps ` boxes and Matroska
+Attachments and Chapters until HOL-SEC-306.
 
 ## Test
 
