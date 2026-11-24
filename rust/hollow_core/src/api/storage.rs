@@ -494,6 +494,20 @@ pub fn get_avatar(peer_id: String) -> Result<Option<Vec<u8>>, String> {
     Ok(shown(bytes))
 }
 
+/// A peer's avatar as an OS notification may carry it (the iOS push hints the
+/// Notification Service Extension attaches): our PNG of the checked still, never the
+/// stored bytes. `None` when there is none, it is refused, or not judged yet.
+#[frb]
+pub fn get_notification_avatar(peer_id: String) -> Result<Option<Vec<u8>>, String> {
+    let bytes = {
+        let store = get_store();
+        let guard = store.lock().map_err(|e| format!("Lock poisoned: {e}"))?;
+        let ms = guard.as_ref().ok_or("Message store is not open")?;
+        ms.load_avatar_for_display(&peer_id)?
+    };
+    Ok(bytes.and_then(|b| crate::node::image_gate::notification_icon_shared(&b)))
+}
+
 /// Get only the banner bytes for a peer (lazy load for profile card/DM header).
 #[frb]
 pub fn get_banner(peer_id: String) -> Result<Option<Vec<u8>>, String> {

@@ -84,23 +84,45 @@ fn run_on_thread(
     slack: Duration,
     check: fn(&[u8], &Budget) -> Result<Facts, Refusal>,
 ) -> Outcome {
+    match run_job(bytes, budget, slot_wait, slack, check) {
+        Ran::Done(Ok(facts)) => Outcome::Pass(facts),
+        Ran::Done(Err(refusal)) => Outcome::Refused(refusal),
+        Ran::Busy => Outcome::Busy,
+    }
+}
+
+/// How a bounded job on peer bytes ended.
+enum Ran<T> {
+    Done(Result<T, Refusal>),
+    /// No slot or no thread.
+    Busy,
+}
+
+/// Any work on peer bytes under the check's own bounds: one of the [`MAX_RUNNING`]
+/// slots, a thread of its own, and a caller that stops waiting at `budget.max_time`.
+fn run_job<T: Send + 'static>(
+    bytes: &[u8],
+    budget: Budget,
+    slot_wait: Duration,
+    slack: Duration,
+    job: fn(&[u8], &Budget) -> Result<T, Refusal>,
+) -> Ran<T> {
     let Some(slot) = Slot::take(slot_wait) else {
-        return Outcome::Busy;
+        return Ran::Busy;
     };
     let owned = bytes.to_vec();
     let (tx, rx) = mpsc::channel();
     let spawned = std::thread::Builder::new().name("image-check".into()).spawn(move || {
         let _slot = slot;
-        let _ = tx.send(check(&owned, &budget));
+        let _ = tx.send(job(&owned, &budget));
     });
     if spawned.is_err() {
-        return Outcome::Busy;
+        return Ran::Busy;
     }
     match rx.recv_timeout(budget.max_time + slack) {
-        Ok(Ok(facts)) => Outcome::Pass(facts),
-        Ok(Err(refusal)) => Outcome::Refused(refusal),
-        Err(mpsc::RecvTimeoutError::Timeout) => Outcome::Refused(Refusal::OverTime),
-        Err(mpsc::RecvTimeoutError::Disconnected) => Outcome::Refused(Refusal::Panicked),
+        Ok(done) => Ran::Done(done),
+        Err(mpsc::RecvTimeoutError::Timeout) => Ran::Done(Err(Refusal::OverTime)),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Ran::Done(Err(Refusal::Panicked)),
     }
 }
 
@@ -268,6 +290,135 @@ fn recheck_later(bytes: Vec<u8>) {
     {
         r.remove(&hash);
     }
+}
+
+/// `image_verdicts` version of a notification icon render. Its row is keyed by
+/// [`icon_key`], so it never replaces the check's own row for the same bytes.
+pub(crate) const ICON_RULE: i64 = 1;
+/// How long a caller waits on one icon render.
+const ICON_MAX_TIME: Duration = Duration::from_secs(10);
+/// Icons kept in memory by the avatar's digest: every banner reads its profile again.
+const ICON_CACHE_MAX: usize = 32;
+
+/// The `image_verdicts` key of the icon render of the bytes hashing to `hash`.
+pub(crate) fn icon_key(hash: &str) -> String {
+    format!("icon1:{hash}")
+}
+
+/// `(digest, icon)`, least recently used first.
+type IconCache = Mutex<std::collections::VecDeque<(String, Vec<u8>)>>;
+
+fn icon_cache() -> &'static IconCache {
+    static CACHE: OnceLock<IconCache> = OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
+fn cached_icon(hash: &str) -> Option<Vec<u8>> {
+    let mut cache = icon_cache().lock().ok()?;
+    let at = cache.iter().position(|(h, _)| h == hash)?;
+    let hit = cache.remove(at)?;
+    let icon = hit.1.clone();
+    cache.push_back(hit);
+    Some(icon)
+}
+
+fn keep_icon(hash: &str, icon: &[u8]) {
+    if let Ok(mut cache) = icon_cache().lock() {
+        cache.retain(|(h, _)| h != hash);
+        cache.push_back((hash.to_string(), icon.to_vec()));
+        while cache.len() > ICON_CACHE_MAX {
+            cache.pop_front();
+        }
+    }
+}
+
+fn render_icon(bytes: &[u8], _: &Budget) -> Result<Vec<u8>, Refusal> {
+    super::image_convert::notification_icon(bytes).ok_or_else(|| Refusal::Undecodable("no notification icon".into()))
+}
+
+/// Our notification icon of `bytes`, which the check already passed: from memory, else
+/// rendered in the check's slots and deadline. A render the process died in (its
+/// `CODE_CHECKING` mark left behind) or that failed is never tried again for these bytes;
+/// no slot = no icon this time, nothing kept.
+fn icon_with(
+    bytes: &[u8],
+    slot_wait: Duration,
+    lookup: impl FnOnce(&str) -> Option<(i64, i64)>,
+    mut record: impl FnMut(&str, Option<i64>),
+) -> Option<Vec<u8>> {
+    let hash = digest(bytes);
+    if let Some(icon) = cached_icon(&hash) {
+        return Some(icon);
+    }
+    let key = icon_key(&hash);
+    if let Some(Verdict::Refused | Verdict::NotYet) = lookup(&key).and_then(|(code, at)| read_row(&key, code, at)) {
+        return None;
+    }
+    if !in_flight().lock().is_ok_and(|mut f| f.insert(key.clone())) {
+        return None;
+    }
+    record(&key, Some(CODE_CHECKING));
+    let budget = Budget { max_time: ICON_MAX_TIME, ..Budget::PEER };
+    let icon = match run_job(bytes, budget, slot_wait, JOIN_SLACK, render_icon) {
+        Ran::Done(Ok(icon)) => {
+            record(&key, Some(CODE_PASS));
+            keep_icon(&hash, &icon);
+            Some(icon)
+        }
+        Ran::Done(Err(why)) => {
+            hollow_log!("[HOLLOW-SECURITY] No notification icon for {}: it {why}", &hash[..12]);
+            record(&key, Some(if why == Refusal::OverTime { CODE_TIMED_OUT } else { CODE_REFUSED }));
+            None
+        }
+        Ran::Busy => {
+            record(&key, None);
+            None
+        }
+    };
+    if let Ok(mut f) = in_flight().lock() {
+        f.remove(&key);
+    }
+    icon
+}
+
+/// The avatar `bytes` as an OS notification may carry them, against a store this
+/// caller holds: the check first, then our PNG ([`super::image_convert::notification_icon`]).
+pub(crate) fn notification_icon_in(store: &MessageStore, bytes: &[u8], slot_wait: Duration) -> Option<Vec<u8>> {
+    if judge_in(store, bytes, slot_wait) != Verdict::Pass {
+        return None;
+    }
+    icon_with(bytes, slot_wait, |k| store.image_verdict(k, ICON_RULE), |k, code| match code {
+        Some(code) => {
+            let _ = store.record_image_verdict(k, code, ICON_RULE);
+        }
+        None => store.forget_image_verdict(k),
+    })
+}
+
+/// [`notification_icon_in`] against the app's shared store, from Flutter's FFI pool:
+/// locked only around each lookup and record, never across a decode.
+pub(crate) fn notification_icon_shared(bytes: &[u8]) -> Option<Vec<u8>> {
+    if judge_for_ffi(bytes) != Verdict::Pass {
+        return None;
+    }
+    let store = crate::api::storage::get_store();
+    icon_with(
+        bytes,
+        FFI_SLOT_WAIT,
+        |k| store.lock().ok()?.as_ref()?.image_verdict(k, ICON_RULE),
+        |k, code| {
+            if let Ok(guard) = store.lock()
+                && let Some(ms) = guard.as_ref()
+            {
+                match code {
+                    Some(code) => {
+                        let _ = ms.record_image_verdict(k, code, ICON_RULE);
+                    }
+                    None => ms.forget_image_verdict(k),
+                }
+            }
+        },
+    )
 }
 
 /// `bytes` when they pass, else `None` (refused or not judged yet): the shape of
@@ -685,6 +836,100 @@ mod crossing_tests {
         profile_with(&store, "good-peer", &good(), &good());
         assert_eq!(crate::api::network::push_profile_in_for_test(&store, "bad-peer"), None);
         assert!(crate::api::network::push_profile_in_for_test(&store, "good-peer").is_some());
+    }
+
+    /// A PNG of `w` x `h` whose bytes no other test uses (`seed`), in big flat blocks.
+    fn own_png(seed: u8, w: u32, h: u32) -> Vec<u8> {
+        let img = image::RgbaImage::from_fn(w, h, |x, y| image::Rgba([seed, (x / 512) as u8 * 30, (y / 512) as u8 * 30, 255]));
+        let mut out = Vec::new();
+        img.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png).unwrap();
+        out
+    }
+
+    /// Every banner reads its push profile again: a big avatar is decoded once, then the
+    /// icon comes from memory.
+    #[test]
+    fn a_push_profile_does_not_decode_the_avatar_again_each_call() {
+        let store = fresh_store();
+        let avatar = own_png(201, 4096, 4096);
+        profile_with(&store, "big", &avatar, &good());
+        let first = crate::api::network::push_profile_in_for_test(&store, "big").expect("an icon");
+        for _ in 0..5 {
+            let t = std::time::Instant::now();
+            let again = crate::api::network::push_profile_in_for_test(&store, "big");
+            let took = t.elapsed();
+            assert_eq!(again.as_ref(), Some(&first));
+            assert!(took < Duration::from_millis(20), "a cached icon took {took:?}");
+        }
+    }
+
+    /// A name-only read (a channel wake's sender, a hidden banner) touches no image.
+    #[test]
+    fn a_name_only_push_profile_decodes_nothing() {
+        let store = fresh_store();
+        let avatar = own_png(202, 40, 40);
+        profile_with(&store, "named", &avatar, &good());
+        let p = crate::api::network::push_name_in_for_test(&store, "named").expect("a profile");
+        assert_eq!(p.display_name, "P");
+        assert!(p.avatar_bytes.is_none());
+        let hash = digest(&avatar);
+        assert_eq!(store.image_verdict(&hash, RULE), None, "the check never ran");
+        assert_eq!(store.image_verdict(&icon_key(&hash), ICON_RULE), None, "nor a render");
+    }
+
+    /// A render the process died in leaves its mark: those bytes are never rendered again.
+    #[test]
+    fn a_render_that_never_finished_is_not_tried_again() {
+        let store = fresh_store();
+        let avatar = own_png(203, 40, 40);
+        profile_with(&store, "p", &avatar, &good());
+        assert_eq!(judge_in(&store, &avatar, SLOT_WAIT), Verdict::Pass);
+        store.record_image_verdict(&icon_key(&digest(&avatar)), CODE_CHECKING, ICON_RULE).unwrap();
+        assert_eq!(crate::api::network::push_profile_in_for_test(&store, "p"), None);
+        assert_eq!(
+            store.image_verdict(&icon_key(&digest(&avatar)), ICON_RULE).map(|r| r.0),
+            Some(CODE_CHECKING),
+            "nothing rendered over the mark"
+        );
+    }
+
+    /// An icon render takes one of the check's slots: with none free there is no icon
+    /// now and nothing is kept, and the next read renders it.
+    #[test]
+    fn a_notification_icon_waits_for_a_free_image_slot() {
+        let store = fresh_store();
+        let avatar = own_png(204, 40, 40);
+        profile_with(&store, "p", &avatar, &good());
+        assert_eq!(judge_in(&store, &avatar, SLOT_WAIT), Verdict::Pass);
+        let held = (Slot::take(SLOT_WAIT).expect("a slot"), Slot::take(SLOT_WAIT).expect("a slot"));
+        assert_eq!(crate::api::network::push_profile_in_for_test(&store, "p"), None);
+        assert_eq!(store.image_verdict(&icon_key(&digest(&avatar)), ICON_RULE), None);
+        drop(held);
+        assert!(crate::api::network::push_profile_in_for_test(&store, "p").is_some());
+        assert_eq!(store.image_verdict(&icon_key(&digest(&avatar)), ICON_RULE).map(|r| r.0), Some(CODE_PASS));
+    }
+
+    /// The iOS push hints file: our PNG of a checked avatar, nothing for a refused one.
+    #[test]
+    fn a_hints_avatar_is_our_png_never_the_peers_bytes() {
+        let _l = store_test_lock();
+        let store = fresh_store();
+        let avatar = own_png(205, 60, 40);
+        profile_with(&store, "bad-peer", &bad(), &good());
+        profile_with(&store, "good-peer", &avatar, &good());
+        // Decodable, but the check refused it: the gate alone keeps it off.
+        let refused = own_png(206, 40, 40);
+        profile_with(&store, "refused-peer", &refused, &good());
+        store.record_image_verdict(&digest(&refused), CODE_REFUSED, RULE).unwrap();
+        set_test_store(store);
+        use crate::api::storage::get_notification_avatar;
+        assert_eq!(get_notification_avatar("bad-peer".into()).unwrap(), None);
+        assert_eq!(get_notification_avatar("refused-peer".into()).unwrap(), None);
+        let icon = get_notification_avatar("good-peer".into()).unwrap().expect("an icon");
+        assert_ne!(icon, avatar);
+        assert!(icon.starts_with(b"\x89PNG\r\n\x1a\n"));
+        let drawn = image::load_from_memory_with_format(&icon, image::ImageFormat::Png).unwrap();
+        assert_eq!((drawn.width(), drawn.height()), (40, 40));
     }
 
     /// The gate on its own: bytes our decoder reads but the check refused give no icon.

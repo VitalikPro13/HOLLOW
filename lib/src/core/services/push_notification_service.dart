@@ -551,14 +551,15 @@ Future<bool> _dmPushMuted(String personKey) async {
 
 /// Resolves the cached display name, avatar and per-PERSON notification key
 /// for [sender]. Defaults to the truncated peer id, null and sender itself on
-/// any failure.
+/// any failure. While banners are hidden no avatar is read or decoded.
 Future<(String, Uint8List?, String)> _resolveDmPushProfile(
     String sender) async {
   String? chosenName;
   Uint8List? avatarBytes;
   String personKey = sender;
   try {
-    final profile = await network_api.getPushProfile(peerId: sender);
+    final profile = await network_api.getPushProfile(
+        peerId: sender, withAvatar: !await _bannersHidden());
     await _pushLog('getPushProfile: found=${profile != null}, '
         'hasAvatar=${profile?.avatarBytes != null}');
     if (profile != null && profile.displayName.isNotEmpty) {
@@ -1059,7 +1060,8 @@ Future<String> _channelWakeNameOf(
   if (cached != null) return cached;
   var name = shortPeerLabel(peerId);
   try {
-    final profile = await network_api.getPushProfile(peerId: peerId);
+    final profile =
+        await network_api.getPushProfile(peerId: peerId, withAvatar: false);
     if (profile != null && profile.displayName.isNotEmpty) {
       name = profile.displayName;
     }
@@ -1067,6 +1069,15 @@ Future<String> _channelWakeNameOf(
   cache[peerId] = name;
   return name;
 }
+
+@visibleForTesting
+Future<(String, Uint8List?, String)> resolveDmPushProfileForTest(
+        String sender) =>
+    _resolveDmPushProfile(sender);
+
+@visibleForTesting
+Future<String> channelWakeNameForTest(String peerId) =>
+    _channelWakeNameOf(peerId, <String, String>{});
 
 /// Per-channel local level check: the replay burst may span channels the user
 /// muted individually. The triggering channel reuses the already-loaded

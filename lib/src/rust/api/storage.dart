@@ -113,6 +113,12 @@ Future<UserProfile?> getProfileLight({required String peerId}) =>
 Future<Uint8List?> getAvatar({required String peerId}) =>
     RustLib.instance.api.crateApiStorageGetAvatar(peerId: peerId);
 
+/// A peer's avatar as an OS notification may carry it (the iOS push hints the
+/// Notification Service Extension attaches): our PNG of the checked still, never the
+/// stored bytes. `None` when there is none, it is refused, or not judged yet.
+Future<Uint8List?> getNotificationAvatar({required String peerId}) =>
+    RustLib.instance.api.crateApiStorageGetNotificationAvatar(peerId: peerId);
+
 /// Get only the banner bytes for a peer (lazy load for profile card/DM header).
 Future<Uint8List?> getBanner({required String peerId}) =>
     RustLib.instance.api.crateApiStorageGetBanner(peerId: peerId);

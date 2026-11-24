@@ -140,8 +140,9 @@ device, device targeting, channel push fan-out, the NSE) stay in CLAUDE.md; wiki
   refused while locked, earlier toasts withdrawn when the lock rises; the iOS hints hold
   only the `~locked` marker. Protection state unknown counts as on. HOL-SEC-155.
 - A `hollow://` link arriving while locked is buffered and replayed after unlock.
-- A banner's avatar (large icon, push or live) is ONLY `getPushProfile`'s: a PNG Rust drew
-  from the checked still. Never hand `getAvatar` or any peer bytes to
+- A banner's avatar (large icon, push or live) is ONLY `getPushProfile`'s (the iOS push
+  hints: `getNotificationAvatar`): a PNG Rust drew from the checked still. A name-only read
+  or a hidden banner passes `withAvatar: false` (no decode). Never hand `getAvatar` or any peer bytes to
   `ByteArrayAndroidBitmap`/a Person icon/BigPicture (BitmapFactory would parse them);
   guard `test/image_file_decode_guard_test.dart`, wiki `push_notifications`.
 - A wipe deletes the push token LOCALLY (FCM `deleteToken`, APNs unregister, UnifiedPush

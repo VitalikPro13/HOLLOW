@@ -489,8 +489,14 @@ Future<void> declineLinkPush({required String targetPeer}) =>
 
 /// Load a peer's cached profile straight from SQLCipher for push display. Works
 /// without a running node; `None` when there is no profile or identity is locked.
-Future<PushProfile?> getPushProfile({required String peerId}) =>
-    RustLib.instance.api.crateApiNetworkGetPushProfile(peerId: peerId);
+/// `with_avatar` false (a name only, or banners hidden) reads and decodes no image.
+Future<PushProfile?> getPushProfile({
+  required String peerId,
+  required bool withAvatar,
+}) => RustLib.instance.api.crateApiNetworkGetPushProfile(
+  peerId: peerId,
+  withAvatar: withAvatar,
+);
 
 /// Whether a push wake from `peer_id` may name its sender in a content-free
 /// fallback banner: false for a stranger, a blocked or revoked device, and for a

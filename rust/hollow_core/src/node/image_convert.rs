@@ -2321,18 +2321,37 @@ pub(crate) fn notification_icon(avatar: &[u8]) -> Option<Vec<u8>> {
     if side == 0 {
         return None;
     }
-    let cropped = img.crop_imm((w - side) / 2, (h - side) / 2, side, side);
     let dim = side.min(NOTIFICATION_ICON_SIDE);
-    let rgba = if dim == side {
-        cropped.to_rgba8()
-    } else {
-        cropped.resize_exact(dim, dim, FilterType::Lanczos3).to_rgba8()
-    };
+    let rgba = square_thumbnail(&img, (w - side) / 2, (h - side) / 2, side, dim);
     let mut out = Vec::new();
     image::codecs::png::PngEncoder::new(&mut out)
         .write_image(rgba.as_raw(), dim, dim, image::ExtendedColorType::Rgba8)
         .ok()?;
     Some(out)
+}
+
+/// The `side` square of `img` at (`x`, `y`), shrunk to `dim` through a view in the
+/// decoded pixel type and only then converted to RGBA8: the decode is the only
+/// full-size buffer (a 16-bit 4096 px canvas alone is 128 MiB).
+fn square_thumbnail(img: &image::DynamicImage, x: u32, y: u32, side: u32, dim: u32) -> image::RgbaImage {
+    use image::DynamicImage as D;
+    use image::imageops::{crop_imm, thumbnail};
+    macro_rules! shrink {
+        ($buf:expr) => {
+            D::from(thumbnail(&*crop_imm($buf, x, y, side, side), dim, dim)).into_rgba8()
+        };
+    }
+    match img {
+        D::ImageRgba8(b) => thumbnail(&*crop_imm(b, x, y, side, side), dim, dim),
+        D::ImageRgb8(b) => shrink!(b),
+        D::ImageLuma8(b) => shrink!(b),
+        D::ImageLumaA8(b) => shrink!(b),
+        D::ImageRgb16(b) => shrink!(b),
+        D::ImageRgba16(b) => shrink!(b),
+        D::ImageLuma16(b) => shrink!(b),
+        D::ImageLumaA16(b) => shrink!(b),
+        other => thumbnail(&*crop_imm(other, x, y, side, side), dim, dim),
+    }
 }
 
 /// Side of the avatar thumbnail a friend-request card carries, a ceiling on receive.

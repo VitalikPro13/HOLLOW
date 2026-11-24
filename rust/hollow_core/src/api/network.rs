@@ -2712,8 +2712,9 @@ pub struct PushProfile {
 
 /// Load a peer's cached profile straight from SQLCipher for push display. Works
 /// without a running node; `None` when there is no profile or identity is locked.
+/// `with_avatar` false (a name only, or banners hidden) reads and decodes no image.
 #[frb]
-pub fn get_push_profile(peer_id: String) -> Result<Option<PushProfile>, String> {
+pub fn get_push_profile(peer_id: String, with_avatar: bool) -> Result<Option<PushProfile>, String> {
     crate::log::init();
     // Use the existing identity ONLY: generating one in a background isolate would
     // derive a different DB passphrase and silently open an empty database, breaking
@@ -2753,31 +2754,36 @@ pub fn get_push_profile(peer_id: String) -> Result<Option<PushProfile>, String> 
     // The push `sender` is a relay-attested DEVICE id while profiles are keyed by
     // MASTER, so warm the resolver from DB links and resolve device to master.
     node::resolver::warm_from_store(&store);
-    push_profile_in(&store, &peer_id)
+    push_profile_in(&store, &peer_id, with_avatar)
 }
 
 #[cfg(test)]
 pub(crate) fn push_profile_in_for_test(store: &MessageStore, peer_id: &str) -> Option<Vec<u8>> {
-    push_profile_in(store, peer_id).ok().flatten().and_then(|p| p.avatar_bytes)
+    push_profile_in(store, peer_id, true).ok().flatten().and_then(|p| p.avatar_bytes)
+}
+
+#[cfg(test)]
+pub(crate) fn push_name_in_for_test(store: &MessageStore, peer_id: &str) -> Option<PushProfile> {
+    push_profile_in(store, peer_id, false).ok().flatten()
 }
 
 /// The push profile of `peer_id` from an open store, its avatar through the image check
 /// and our own re-encode.
-fn push_profile_in(store: &MessageStore, peer_id: &str) -> Result<Option<PushProfile>, String> {
+fn push_profile_in(store: &MessageStore, peer_id: &str, with_avatar: bool) -> Result<Option<PushProfile>, String> {
     let master = node::resolver::resolve(peer_id);
     let profile = store.load_profile_light(&master)?;
     match profile {
         Some(p) => {
             // The OS's own native codec draws the icon with no tap: it gets only our
             // re-encode of a checked avatar, never the peer's bytes.
-            let avatar = store
-                .load_avatar(&master)
-                .unwrap_or(None)
-                .filter(|b| {
-                    let wait = node::image_gate::FFI_SLOT_WAIT;
-                    node::image_gate::judge_in(store, b, wait) == node::image_gate::Verdict::Pass
-                })
-                .and_then(|b| node::image_convert::notification_icon(&b));
+            let avatar = if with_avatar {
+                store
+                    .load_avatar(&master)
+                    .unwrap_or(None)
+                    .and_then(|b| node::image_gate::notification_icon_in(store, &b, node::image_gate::FFI_SLOT_WAIT))
+            } else {
+                None
+            };
             let named = !p.display_name.is_empty();
             hollow_log!("[HOLLOW-PUSH] get_push_profile: loaded (name={named}, avatar={})", avatar.is_some());
             Ok(Some(PushProfile {

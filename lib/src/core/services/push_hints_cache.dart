@@ -15,7 +15,8 @@ import 'package:hollow/src/rust/api/storage.dart' as storage_api;
 /// the app's private encrypted DB.
 ///
 /// `{ peerId: {name, avatar} }` in `push_hints/hints.json`, plus one
-/// `push_hints/<peerId>.img` per friend with an avatar. Plaintext the user
+/// `push_hints/<peerId>.img` per friend with an avatar (our PNG of it, from
+/// `getNotificationAvatar`). Plaintext the user
 /// already displays, contained to the app-private group container and kept out
 /// of device backups (AppDelegate.swift). With App Lock on it holds only the
 /// locked marker. iOS-only, a no-op everywhere else. Tier B, decrypted message
@@ -134,7 +135,9 @@ class PushHintsCache {
         final profile = await storage_api.getProfileLight(peerId: peerId);
 
         String? avatarPath;
-        final bytes = await storage_api.getAvatar(peerId: peerId);
+        // The NSE hands this file to ImageIO: our PNG, never the peer's bytes.
+        final bytes =
+            await storage_api.getNotificationAvatar(peerId: peerId);
         if (bytes != null && bytes.isNotEmpty) {
           // The avatar file is keyed by the MASTER id, one per person, and
           // every alias entry below points at this same file.

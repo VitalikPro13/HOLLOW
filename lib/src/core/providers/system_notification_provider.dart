@@ -208,7 +208,8 @@ class SystemNotificationNotifier
     if (_avatarCache.containsKey(id)) return _avatarCache[id];
     Uint8List? bytes;
     try {
-      final profile = await network_api.getPushProfile(peerId: id);
+      final profile =
+          await network_api.getPushProfile(peerId: id, withAvatar: true);
       bytes = profile?.avatarBytes;
     } catch (_) {}
     _avatarCache[id] = bytes;

@@ -283,18 +283,25 @@ db_passphrase) -> Vec<FetchedDm>`.
   counting and with an evicted roster record.
 - `get_push_profile(peer_id) -> PushProfile` — opens its OWN SQLCipher connection,
   reads `load_profile_light` + `load_avatar`. Tier 1 (name + avatar, no node).
-  The avatar it returns is never the stored bytes: after `image_gate` passes them,
-  `image_convert::notification_icon` draws the first frame, centre-cropped, at most
-  192 px square, and encodes it as PNG (#154). Every OS notification avatar comes
-  from here (Android `ByteArrayAndroidBitmap`, push AND the live node's banner via
-  `systemNotificationProvider._avatarFor`; macOS and Windows toasts), so
-  BitmapFactory, ImageIO and the Windows shell only ever parse a PNG we wrote.
-  Done in Rust, not Flutter, so it works in the push isolate and the UnifiedPush
-  background engine without asking them to rasterize. A new OS image site is
-  listed in `test/image_file_decode_guard_test.dart`, which also keeps the
-  notification files off the raw getters (`getAvatar` and friends). The iOS NSE
-  is the exception: it attaches `push_hints/<master>.img`, which `PushHintsCache`
-  writes from `getAvatar` (gated, but the peer's own bytes).
+  `with_avatar` false (a channel wake's sender name; any DM banner while App Lock
+  hides banners) reads and decodes no image. With it, the avatar is never the
+  stored bytes: `image_gate::notification_icon_in` runs the check, then renders
+  `image_convert::notification_icon` (first frame, centre-cropped through a view,
+  shrunk before any RGBA8 copy, at most 192 px square, our PNG) in the check's own
+  slots and deadline (10 s). The PNG is kept in memory by the avatar's digest (32
+  entries), and the render's mark sits in `image_verdicts` under `icon1:<digest>`
+  (rule `ICON_RULE`): a render a wake died in (OOM) leaves `CODE_CHECKING` and is
+  never tried again for those bytes; no free slot = no icon this time. Every OS
+  notification avatar is ours: Android `ByteArrayAndroidBitmap` (push AND the live
+  node's banner via `systemNotificationProvider._avatarFor`), macOS and Windows
+  toasts, and the iOS NSE attachment (`PushHintsCache` writes `<master>.img` from
+  `get_notification_avatar`, the same render against the shared store). The
+  Android call face is raw RGBA Dart drew (`renderOsCallAvatar`, wiki
+  `rules_media_calls`). Done in Rust, not Flutter, so it works in the push isolate
+  and the UnifiedPush background engine without asking them to rasterize. A new OS
+  image site is listed in `test/image_file_decode_guard_test.dart`, whose
+  allow-list keeps the notification files to `getPushProfile` results and
+  `getNotificationAvatar`.
 - `get_push_channel_meta(server_id, channel_id) -> PushChannelMeta` — server +
   channel names and the effective LOCAL notification level, straight from
   SQLCipher (no node). Used by the Android channel-wake handler.

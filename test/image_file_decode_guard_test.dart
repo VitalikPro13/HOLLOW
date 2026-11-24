@@ -154,14 +154,66 @@ const _osNotificationImageSites = <String, (int, String)>{
       (2, 'ours: the macOS attachment and Windows logo are get_push_profile\'s PNG'),
 };
 
-/// The files that build OS notifications: none reads a raw image getter, so
-/// their avatar can only be the push profile's re-encode.
+/// The files that build OS notifications (the iOS push hints feed the
+/// Notification Service Extension's attachment).
 const _osNotificationFiles = [
   'lib/src/core/services/push_notification_service.dart',
   'lib/src/core/services/desktop_notification_service.dart',
   'lib/src/core/services/linux_notifier.dart',
   'lib/src/core/providers/system_notification_provider.dart',
+  'lib/src/core/services/push_hints_cache.dart',
 ];
+
+/// The only image-carrying calls a notification file may make: our PNG of a
+/// checked avatar (`getPushProfile`, `getNotificationAvatar`), and in the push
+/// hints a name read whose profile Rust sends with no image bytes.
+const _notificationImageCalls = {'getPushProfile', 'getNotificationAvatar'};
+const _notificationImageCallsIn = {
+  'lib/src/core/services/push_hints_cache.dart': {'getProfileLight'},
+};
+
+/// A bare call or one on a generated FFI module (`storage_api.`), never a method
+/// on some other object (`file.readAsBytes`).
+final _imageCall = RegExp(
+    r'(?:(?<=\b\w+_api\s*\.\s*)|(?<![\w.$]))((?:get|read|load|fetch)\w*(?:Avatar|Banner|Image|Images|Icon|Picture'
+    r'|Bytes|Profile|Profiles|Blob|Emote|Showcase|Thumb)\w*|readAtRest\w*'
+    r'|overlayImageBytes)\s*\(');
+final _imageProvider =
+    RegExp(r'\b\w*(?:[aA]vatar|[bB]anner|[iI]mage|[eE]mote)\w*Provider\b');
+final _imageField =
+    RegExp(r'([A-Za-z_]\w*|[\)\]])\s*\??\.\s*(?:avatarBytes|bannerBytes)\b');
+
+/// Ways [source] could hand an OS notification an image that is not our PNG: an
+/// image call off the allow-list, an image provider, or an `avatarBytes` /
+/// `bannerBytes` read from anything but a `getPushProfile` result. Comment lines
+/// are left out.
+List<String> notificationImageLeaks(String source,
+    {Set<String> alsoAllowed = const {}}) {
+  final code = source
+      .replaceAll('\r\n', '\n')
+      .split('\n')
+      .where((l) => !l.trimLeft().startsWith('//'))
+      .join('\n');
+  final leaks = <String>[];
+  for (final m in _imageCall.allMatches(code)) {
+    final name = m.group(1)!;
+    if (!_notificationImageCalls.contains(name) &&
+        !alsoAllowed.contains(name)) {
+      leaks.add('$name(');
+    }
+  }
+  for (final m in _imageProvider.allMatches(code)) {
+    leaks.add(m.group(0)!);
+  }
+  for (final m in _imageField.allMatches(code)) {
+    final on = m.group(1)!;
+    final bound = RegExp('\\b${RegExp.escape(on)}\\s*=\\s*await\\s+\\w+_api\\s*\\.'
+            '\\s*getPushProfile\\s*\\(')
+        .hasMatch(code);
+    if (!bound) leaks.add(m.group(0)!);
+  }
+  return leaks;
+}
 
 void main() {
   test('no widget decodes a file straight from disk', () {
@@ -263,17 +315,52 @@ void main() {
             'getPushProfile\'s avatar (Rust notification_icon), then list the '
             'site here.');
 
-    final raw = RegExp(r'\b(?:getAvatar|getBanner|getServerAvatar|'
-        r'getEmoteBytes|readAtRestImage)\s*\(|\bavatarProvider\b');
     for (final path in _osNotificationFiles) {
-      expect(_sites(raw, File(path).readAsStringSync()), 0,
-          reason: '$path reads a raw image getter; its avatar must come '
-              'from getPushProfile');
+      expect(
+          notificationImageLeaks(File(path).readAsStringSync(),
+              alsoAllowed: _notificationImageCallsIn[path] ?? const {}),
+          isEmpty,
+          reason: '$path may hand an OS notification only our PNG: '
+              'getPushProfile\'s avatarBytes or getNotificationAvatar');
     }
     expect(
         File('lib/src/core/providers/system_notification_provider.dart')
             .readAsStringSync(),
         contains('getPushProfile('));
+    expect(
+        File('lib/src/core/services/push_hints_cache.dart').readAsStringSync(),
+        contains('getNotificationAvatar('));
+  });
+
+  test('the notification allow-list sees every way around it', () {
+    for (final leak in [
+      'final b = (await storage_api.getProfile(peerId: id))?.avatarBytes;',
+      'final p = await storage_api.getProfileLight(peerId: id);\nuse(p?.avatarBytes);',
+      'use(ref.read(profileProvider)[id]?.avatarBytes);',
+      'final all = await storage_api.getAllProfiles();',
+      'await storage_api.getAvatar(peerId: id)',
+      'await at_rest_api.readAtRestImage(path: p)',
+      'await overlay_api.overlayImageBytes(hash: h)',
+      'ref.watch(avatarProvider)',
+      'final b = await storage_api.getBanner(peerId: id);',
+    ]) {
+      expect(notificationImageLeaks(leak), isNotEmpty, reason: leak);
+    }
+    for (final ok in [
+      'final profile = await network_api.getPushProfile(peerId: s, withAvatar: true);\n'
+          'use(profile?.avatarBytes);',
+      'final profile =\n    await network_api.getPushProfile(peerId: s, withAvatar: true);\n'
+          'use(profile?.avatarBytes != null);',
+      'final b = await storage_api.getNotificationAvatar(peerId: p);',
+      '// final b = await storage_api.getAvatar(peerId: p);',
+      'push.showLocalDmNotification(avatarBytes: avatarBytes);',
+    ]) {
+      expect(notificationImageLeaks(ok), isEmpty, reason: ok);
+    }
+    expect(
+        notificationImageLeaks('await storage_api.getProfileLight(peerId: p)',
+            alsoAllowed: {'getProfileLight'}),
+        isEmpty);
   });
 
   test('the notification scan sees each form and skips comments', () {
