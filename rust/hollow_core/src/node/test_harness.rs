@@ -75350,29 +75350,39 @@ async fn rev_leaf_a_member_admitted_before_the_settling_never_makes_the_owner_fo
     drop((n, f, w));
 }
 
-/// A member a settling dropped (K, the fleet's ghost server) can write no leave there:
-/// its fold no longer counts it, and only a member authors (its own recovery hold never
-/// ends, since the settling goes only to the settled state's members). Its leave drops the
-/// server here with no op: gone from the node and the store, after a restart too. A
-/// member's leave still writes its op: J's reaches the owner.
+/// A member a recovery drops (K, the fleet's ghost server) can write no leave there: its
+/// fold no longer counts it, and only a member authors (its own recovery hold never ends,
+/// since the settling goes only to the settled state's members). Its leave, here during
+/// the hold while the members still keep its seat, drops the server with no op: no state,
+/// no MLS group, no stored rows, nothing posted afterwards reaches it, before the settling
+/// or after, nor after a restart. A member's leave still writes its op: J's reaches F.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[allow(clippy::await_holding_lock)]
 async fn f5lr_a_member_a_settling_dropped_leaves_the_server_without_an_op() {
     let _g = test_guard();
     let k_tag = 186u8;
     let w = f5sl_world([181, 182, 183, 184, 185, k_tag], false).await;
-    let f = f5sl_restore(&w, (184, 187)).await;
+    let f = f5sl_offered(&w, (184, 187)).await;
     let (j, k, sid) = (&w.j, &w.k, w.sid.clone());
+    let general = general_channel_of(&sid);
     let k_master = k.master_id.clone();
     let stored = |n: &TestNode| n.store().load_all_servers().unwrap_or_default().into_iter().any(|(s, _)| s == sid);
     assert!(
-        wait_until(30, async || k.live_server_state(&sid).await.is_some_and(|s| !s.is_member(&k_master))).await,
-        "precondition: K's fold no longer counts K: {:?}",
+        wait_until(30, async || k.live_server_state(&sid).await.is_some_and(|s| !s.is_member(&k_master) && s.keeps_peer(&k_master))).await,
+        "precondition: K's fold drops K and the recovery hold keeps it: {:?}",
         f5lr_view(k, &sid).await,
     );
+    assert!(j.live_server_state(&sid).await.is_some_and(|s| s.keeps_peer(&k_master)), "precondition: J still keeps K's seat");
     k.cmd_tx.send(NodeCommand::LeaveServer { server_id: sid.clone() }).await.unwrap();
-    assert!(wait_until(20, async || k.live_server_state(&sid).await.is_none()).await, "K keeps a server the settling dropped it from");
+    assert!(wait_until(20, async || k.live_server_state(&sid).await.is_none()).await, "K keeps a server it cannot write a leave in");
     assert!(wait_until(10, async || !stored(k)).await, "K's stored server outlived its leave");
+    assert!(k.mls_epoch(&sid).await.is_none(), "K kept the server's MLS group");
+    // J still seats K until the settling: nothing J posts reaches K's device.
+    w3c1h_post(j, &[], &sid, &general, "f5lr-in-hold", &j.device_id).await;
+    f5sl_choose(&w, &f).await;
+    w3c1h_post(j, &[&f], &sid, &general, "f5lr-settled", &j.device_id).await;
+    let reached = wait_until(5, async || !k.store().channel_post_proofs(&["f5lr-in-hold", "f5lr-settled"]).is_empty()).await;
+    assert!(!reached && k.live_server_state(&sid).await.is_none(), "K, gone from the server, still reads it");
     // A member's leave is the signed op, never the silent drop.
     j.cmd_tx.send(NodeCommand::LeaveServer { server_id: sid.clone() }).await.unwrap();
     assert!(
@@ -75434,4 +75444,37 @@ async fn f5lr_view(n: &TestNode, sid: &str) -> Option<(bool, bool, bool, bool, b
     n.live_server_state(sid).await.map(|s| {
         (s.is_member(&me), s.keeps_peer(&me), s.seats_peer(&me), s.in_recovery(), s.base.as_ref().is_some_and(|b| b.state.cp_settles.is_some()))
     })
+}
+
+/// A pending joiner that leaves before its admission (the owner away, its ask parked)
+/// keeps nothing of the server once the owner comes back and admits it: no state, no row,
+/// no listed server. Its fold lacks it until the admission folds, so a silent drop must
+/// never stand in for ending the join.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)]
+async fn f5lr_a_pending_joiner_that_leaves_never_gets_the_server_back() {
+    let _g = test_guard();
+    let relay = MockRelay::new();
+    let (o_tag, n_tag) = (151u8, 152u8);
+    let (o_master, n_master) = (tag_kp(o_tag).peer_id(), tag_kp(n_tag).peer_id());
+    let mut o = spawn_node_with_friends(&relay, o_tag, o_tag, &[&n_master]).await;
+    let n = spawn_node_with_friends(&relay, n_tag, n_tag, &[&o_master]).await;
+    expect_dm_pair_ready(&relay, &o, &n, 15).await;
+    let sid = create_server_and_wait(&mut o, "Pending").await;
+    relay.set_online(&o.device_id, false);
+    n.cmd_tx
+        .send(NodeCommand::JoinServer { server_id: sid.clone(), twitch_proof_json: None, nsfw_confirmed: false, owner_pin: None, join_key: invite_key(&sid) })
+        .await
+        .unwrap();
+    assert!(
+        wait_until(60, async || n.pending_joins().iter().any(|(s, state, _)| *s == sid && state == "pending")).await,
+        "precondition: N's join waits for the owner: {:?}",
+        n.pending_joins(),
+    );
+    n.cmd_tx.send(NodeCommand::LeaveServer { server_id: sid.clone() }).await.unwrap();
+    relay.set_online(&o.device_id, true);
+    let stored = |t: &TestNode| t.store().load_all_servers().unwrap_or_default().into_iter().any(|(s, _)| s == sid);
+    let back = wait_until(40, async || n.live_server_state(&sid).await.is_some() || stored(&n)).await;
+    assert!(!back, "N left its pending join, yet holds the server after the owner came back: listed {:?}, pending {:?}", n.servers(), n.pending_joins());
+    drop((n, o, relay));
 }

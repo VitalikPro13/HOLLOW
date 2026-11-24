@@ -3375,6 +3375,15 @@ pub(crate) async fn handle_approve_device(
 
 // ── 10b. LeaveServer ─────────────────────────────────────────────────
 
+/// Whether our leave of a server we hold drops it here with no op: a recovery's settling
+/// dropped us, so our fold no longer counts us and our own rules refuse any leave op
+/// (only a member authors), and nobody can be told. Never while a join of ours is
+/// pending (`joining`): a joiner's fold lacks us until its admission folds, and its join
+/// would bring the server back. A member always writes its signed leave.
+pub(crate) fn leaves_without_op(state: &ServerState, local_master: &str, joining: bool) -> bool {
+    !joining && !state.is_member(local_master)
+}
+
 pub(crate) async fn handle_leave_server(
     server_states: &mut HashMap<String, ServerState>,
     mls: &mut Option<MlsManager>,
@@ -3389,6 +3398,7 @@ pub(crate) async fn handle_leave_server(
     crdt_store: &CrdtStore,
     leave_book: &mut super::leave_book::LeaveBook,
     door: Option<(u64, zeroize::Zeroizing<[u8; 32]>)>,
+    joining: bool,
 ) -> bool {
     if let Some(state) = server_states.get_mut(&server_id) {
         // The owner is fixed for the server's life, so the only way out is a delete.
@@ -3397,10 +3407,7 @@ pub(crate) async fn handle_leave_server(
             return deny(event_tx, "You own this server, so you can't leave it, only delete it.").await;
         }
 
-        // A settling that dropped us leaves a fold that no longer counts us, where our own
-        // rules refuse any leave op (only a member authors), so we drop the server here
-        // alone: nobody can be told. A member always writes its leave.
-        if !state.is_member(local_peer_str) {
+        if leaves_without_op(state, local_peer_str, joining) {
             hollow_log!("[HOLLOW-CRDT] Our fold of {server_id} no longer counts us: dropping it here without a leave op");
             if let Some(mls_mgr) = mls {
                 mls_mgr.remove_group(&server_id);
@@ -5285,6 +5292,25 @@ fn apply_sync_item_extras(
 
 #[cfg(test)]
 mod tests {
+    /// R-CR-19: a leave drops a held server with no op only where our fold no longer
+    /// counts us and no join of ours is pending; a joiner (its fold lacks it until its
+    /// admission folds) and a member are never dropped silently.
+    #[test]
+    fn a_leave_drops_without_an_op_only_a_member_the_fold_dropped_with_no_join_pending() {
+        use crate::crdt::hold::tests::{hears_of_recovery, member_of, world, MEMBER, MEMBER_PHONE, MEMBER_RECOVERY, OWNER};
+        use crate::crdt::testkeys::keys;
+        let held = member_of(&world(), MEMBER, MEMBER_PHONE, false);
+        let mut dropped = held.clone();
+        hears_of_recovery(&mut dropped);
+        let (member, owner, stranger) = (keys(MEMBER).1, keys(OWNER).1, keys(MEMBER_RECOVERY).1);
+        assert!(held.is_member(&member) && !dropped.is_member(&member) && dropped.keeps_peer(&member), "precondition: the recovery's fold drops the member, its hold keeps it");
+        assert!(leaves_without_op(&dropped, &member, false), "the dropped member's leave cannot be an op");
+        assert!(!leaves_without_op(&dropped, &member, true), "a pending join of ours is never dropped silently");
+        assert!(!leaves_without_op(&held, &member, false), "a member writes its signed leave");
+        assert!(!leaves_without_op(&dropped, &owner, false), "the owner is always a member");
+        assert!(!leaves_without_op(&held, &stranger, true), "a joiner whose admission has not folded yet keeps its join");
+    }
+
     use super::*;
 
     fn store() -> crate::storage::MessageStore {

@@ -718,7 +718,7 @@ pub(crate) mod tests {
         s.author_checkpoint(P::ServerCheckpoint { state: json, covers }).expect("the checkpoint becomes the base").0
     }
 
-    struct World {
+    pub(crate) struct World {
         owner: ServerState,
         log: Vec<CrdtOp>,
         cp0: CrdtOp,
@@ -730,7 +730,7 @@ pub(crate) mod tests {
     /// The owner's phone founds (committing to its recovery key), admits MEMBER and MOD
     /// (a moderator), writes cp0, admits LATE, and writes cp1: every checkpoint is the
     /// phone's.
-    fn world() -> World {
+    pub(crate) fn world() -> World {
         let (before, _) = owner_rosters();
         let (master, m_id, pk) = keys(OWNER);
         let (phone, phone_id, _) = keys(PHONE);
@@ -751,7 +751,7 @@ pub(crate) mod tests {
     }
 
     /// `tag`'s replica holding the world, judged by the owner roster from before.
-    fn member_of(w: &World, tag: u8, device: u8, signs: bool) -> ServerState {
+    pub(crate) fn member_of(w: &World, tag: u8, device: u8, signs: bool) -> ServerState {
         let (before, _) = owner_rosters();
         let mut s = replica(&w.owner.server_id, tag, device, signs);
         s.authority = view(&before);
@@ -762,7 +762,7 @@ pub(crate) mod tests {
 
     /// The recovery reaches the replica: the owner's view drops the phone, and the floor
     /// round ends with no answer.
-    fn hears_of_recovery(s: &mut ServerState) {
+    pub(crate) fn hears_of_recovery(s: &mut ServerState) {
         hears_of_recovery_in_round(s);
         let _ = s.end_floor_round(&[]);
     }

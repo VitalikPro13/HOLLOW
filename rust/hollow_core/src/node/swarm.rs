@@ -2198,6 +2198,7 @@ async fn run_event_loop(
                             &ws_room_peers, &bundle_keypair, &local_peer_str, &device_peer_id,
                             server_id.clone(),
                             &crypto_store, &crdt_store, &mut leave_book, door,
+                            pending_server_joins.contains_key(&server_id),
                         ).await { continue; }
                         if let Some((n, secret)) = kept.filter(|_| leave_book.holds_room(&server_id)) {
                             door_rooms.keep_for_leave(&server_id, n, secret);
