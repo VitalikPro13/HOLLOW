@@ -75,13 +75,14 @@ pub fn strip_webp_metadata(data: &[u8]) -> Result<Vec<u8>, String> {
 
 /// Strip EXIF and other metadata from a GIF without re-encoding, so animation
 /// survives. Rebuilt from the essential blocks only, which is safer than
-/// surgically removing individual chunks.
-pub fn strip_gif_metadata(data: &[u8]) -> Vec<u8> {
+/// surgically removing individual chunks. A block it keeps that runs past the
+/// end of the file refuses the file (HOL-SEC-267).
+pub fn strip_gif_metadata(data: &[u8]) -> Result<Vec<u8>, String> {
     // Everything is copied except Comment and Application Extension blocks;
     // NETSCAPE2.0 is the exception, it carries the animation loop count.
 
     if data.len() < 13 || &data[0..3] != b"GIF" {
-        return data.to_vec(); // Not a GIF, return as-is.
+        return Ok(data.to_vec()); // Not a GIF, return as-is.
     }
 
     let mut out = Vec::with_capacity(data.len());
@@ -89,7 +90,7 @@ pub fn strip_gif_metadata(data: &[u8]) -> Vec<u8> {
 
     let lsd_end = 13;
     if data.len() < lsd_end {
-        return data.to_vec();
+        return Ok(data.to_vec());
     }
     out.extend_from_slice(&data[..lsd_end]);
     i = lsd_end;
@@ -100,7 +101,7 @@ pub fn strip_gif_metadata(data: &[u8]) -> Vec<u8> {
         let gct_size = 3 * (1 << ((packed & 0x07) + 1));
         let gct_end = i + gct_size as usize;
         if gct_end > data.len() {
-            return data.to_vec();
+            return Ok(data.to_vec());
         }
         out.extend_from_slice(&data[i..gct_end]);
         i = gct_end;
@@ -118,7 +119,7 @@ pub fn strip_gif_metadata(data: &[u8]) -> Vec<u8> {
                 i = next;
             }
             0x21 => {
-                let Some(next) = copy_gif_extension(data, i, &mut out) else { break; };
+                let Some(next) = copy_gif_extension(data, i, &mut out)? else { break; };
                 i = next;
             }
             _ => {
@@ -128,7 +129,7 @@ pub fn strip_gif_metadata(data: &[u8]) -> Vec<u8> {
         }
     }
 
-    out
+    Ok(out)
 }
 
 /// Copy a GIF Image Descriptor block (0x2C) into `out`. Returns the new cursor,
@@ -164,51 +165,56 @@ fn copy_gif_image_descriptor(data: &[u8], mut i: usize, out: &mut Vec<u8>) -> Op
 
 /// Copy or strip a GIF extension block (0x21) depending on its label. Returns
 /// the new cursor, or `None` when the data is truncated.
-fn copy_gif_extension(data: &[u8], i: usize, out: &mut Vec<u8>) -> Option<usize> {
-    if i + 2 > data.len() { return None; }
+fn copy_gif_extension(data: &[u8], i: usize, out: &mut Vec<u8>) -> Result<Option<usize>, String> {
+    if i + 2 > data.len() { return Ok(None); }
     let label = data[i + 1];
     match label {
         0xF9 => {
             // Graphic Control Extension — always keep (animation timing).
             // Fixed size: 2 (introducer+label) + 1 (block size=4) + 4 + 1 (terminator) = 8
             let block_end = i + 8;
-            if block_end > data.len() { return None; }
+            if block_end > data.len() { return Ok(None); }
             out.extend_from_slice(&data[i..block_end]);
-            Some(block_end)
+            Ok(Some(block_end))
         }
         0xFF => copy_gif_application_extension(data, i, out),
         0xFE => {
             // Comment Extension — skip entirely.
-            Some(skip_gif_sub_blocks(data, i + 2))
+            Ok(Some(skip_gif_sub_blocks(data, i + 2)))
         }
         _ => {
             // Unknown extension — keep it (could be essential).
-            let ext_start = i;
             let end = skip_gif_sub_blocks(data, i + 2);
-            out.extend_from_slice(&data[ext_start..end]);
-            Some(end)
+            out.extend_from_slice(kept_gif_block(data, i, end)?);
+            Ok(Some(end))
         }
     }
 }
 
 /// Application Extension (0xFF) — keep only NETSCAPE2.0 (animation loop).
-fn copy_gif_application_extension(data: &[u8], i: usize, out: &mut Vec<u8>) -> Option<usize> {
-    if i + 3 > data.len() { return None; }
+fn copy_gif_application_extension(data: &[u8], i: usize, out: &mut Vec<u8>) -> Result<Option<usize>, String> {
+    if i + 3 > data.len() { return Ok(None); }
     let app_block_size = data[i + 2] as usize;
     let app_id_end = i + 3 + app_block_size;
-    if app_id_end > data.len() { return None; }
+    if app_id_end > data.len() { return Ok(None); }
 
     let is_netscape = app_block_size >= 11
         && &data[i + 3..i + 3 + 8] == b"NETSCAPE";
 
-    let ext_start = i;
     let end = skip_gif_sub_blocks(data, app_id_end);
 
     if is_netscape {
-        out.extend_from_slice(&data[ext_start..end]);
+        out.extend_from_slice(kept_gif_block(data, i, end)?);
     }
     // Otherwise: skip (strips EXIF, XMP, ICC, etc.)
-    Some(end)
+    Ok(Some(end))
+}
+
+/// A block the strip keeps, from its introducer to past its sub-blocks. One
+/// whose sub-blocks claim more bytes than the file has is refused: copying
+/// what is there would send a block cut short (HOL-SEC-267).
+fn kept_gif_block(data: &[u8], start: usize, end: usize) -> Result<&[u8], String> {
+    data.get(start..end).ok_or_else(|| "a GIF block runs past the end of the file".to_string())
 }
 
 /// Advance past GIF data sub-blocks until the 0x00 terminator (or end of data).

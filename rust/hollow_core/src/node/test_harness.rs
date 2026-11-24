@@ -72036,3 +72036,73 @@ async fn mock_relay_drops_the_directs_the_relay_drops() {
     assert_eq!(send(&shared, &away), 0);
     assert_eq!(held(&away), 2, "control: a sender in the room has a frame kept for a target not in it");
 }
+
+// fix-media-strip
+/// HOL-SEC-267..269: a crafted file someone sent, kept at rest like any received
+/// file, is refused or cleaned in time when the user sends it on, and the node
+/// lives on to send the next file.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::await_holding_lock)] // serializes harness tests; see other test
+async fn fms_a_crafted_file_sent_on_is_refused_or_cleaned_in_time() {
+    use super::media_strip::fixtures::{avi_nested, gifs_with_a_kept_block_past_the_end, mp4_with_empty_chunk_runs, mp4_with_location};
+    let _g = test_guard();
+    let global_tmp = crate::test_tmp::tempdir().expect("global tmp");
+    unsafe { std::env::set_var("HOLLOW_DATA_DIR", global_tmp.path()); }
+
+    let relay = MockRelay::new();
+    const A_MASTER: u8 = 189;
+    const B_MASTER: u8 = 194;
+    let a_master = NativeKeypair::from_secret_bytes(&seed_bytes(A_MASTER)).peer_id();
+    let b_master = NativeKeypair::from_secret_bytes(&seed_bytes(B_MASTER)).peer_id();
+    let mut a = spawn_node_with_friends(&relay, A_MASTER, A_MASTER, &[&b_master]).await;
+    let mut b = spawn_node_with_friends(&relay, B_MASTER, B_MASTER, &[&a_master]).await;
+    expect_dm_pair_ready(&relay, &a, &b, 15).await;
+    drain_events(&mut a);
+    drain_events(&mut b);
+
+    let to = a.master_id.clone();
+    let send = |path: &std::path::Path, mid: &str| {
+        NodeCommand::SendFile(Box::new(super::types::SendFilePayload {
+            peer_id: Some(to.clone()),
+            server_id: None,
+            channel_id: None,
+            file_path: path.to_str().unwrap().to_string(),
+            message_id: mid.to_string(),
+            message_text: String::new(),
+            vthumb: None,
+            override_width: None,
+            override_height: None,
+            share_ref: None,
+            voice: false,
+            poster: None,
+            album: None,
+        }))
+    };
+    let [gif, _] = gifs_with_a_kept_block_past_the_end();
+    let received = b.data_root.join("files");
+    for (name, bytes) in [("got.gif", gif), ("got.avi", avi_nested(200_000))] {
+        let path = received.join(name);
+        super::at_rest::write_all(&path, &bytes).expect("kept at rest");
+        assert!(super::at_rest::is_encrypted(&path), "precondition: the copy is sealed like a received file");
+        b.cmd_tx.send(send(&path, name)).await.unwrap();
+        let refused = wait_event(&mut b, std::time::Duration::from_secs(20), |ev| {
+            matches!(ev, NetworkEvent::FileFailed { file_id, error }
+                if file_id == name && error == super::media_strip::REFUSED)
+        })
+        .await;
+        assert!(refused, "{name} is refused with a reason");
+    }
+
+    let header = |prefix: &'static str| {
+        move |ev: &NetworkEvent| matches!(ev, NetworkEvent::FileHeaderReceived { file_name, .. } if file_name.starts_with(prefix))
+    };
+    let wait = std::time::Duration::from_secs(20);
+    let tracks = received.join("tracks.mp4");
+    super::at_rest::write_all(&tracks, &mp4_with_empty_chunk_runs(60_000, 60_000)).expect("kept at rest");
+    b.cmd_tx.send(send(&tracks, "tracks-1")).await.unwrap();
+    assert!(wait_event(&mut a, wait, header("tracks")).await, "runs of empty chunks are cleaned in time and sent");
+    let clean = received.join("holiday.mp4");
+    super::at_rest::write_all(&clean, &mp4_with_location()).expect("kept at rest");
+    b.cmd_tx.send(send(&clean, "holiday-1")).await.unwrap();
+    assert!(wait_event(&mut a, wait, header("holiday")).await, "the node lives on and sends the next file");
+}

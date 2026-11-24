@@ -76,7 +76,11 @@ stay in CLAUDE.md. Wiki `rust_file_handler`, `emotes`, `hollowpack`.
   keeps every byte position (metadata becomes `free`/Void/JUNK padding), so the file id,
   `vthumb.size` and the share manifest still match. Media that does not parse is REFUSED
   (`media_strip::REFUSED`), never sent raw; other files keep their bytes. Harness
-  `dm_video_send_strips_location_before_it_leaves`.
+  `dm_video_send_strips_location_before_it_leaves`. The strip parses a stranger's
+  bytes (a received file sent on): it never panics, never recurses or walks a table
+  without a bound (HOL-SEC-267..269), and an honest file's output stays byte for byte
+  what it was (`strip_answers_as_0_14_did` digests every answer; change it only with
+  a reason).
 - A received file reaches NO decoder before a tap (C-FILES-02): `VideoMessageBubble` cuts
   its own poster only for `isMine` or after the user opens it (the sender's header poster
   stands in); a voice note's duration comes from its Ogg pages in Dart

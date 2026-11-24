@@ -70,7 +70,7 @@ pub(crate) fn strip_image(data: Vec<u8>) -> Result<Vec<u8>, String> {
     } else if data.len() >= 12 && &data[0..4] == b"RIFF" && &data[8..12] == b"WEBP" {
         strip_webp(&data)
     } else if data.starts_with(b"GIF8") {
-        Ok(super::image_convert::strip_gif_metadata(&data))
+        super::image_convert::strip_gif_metadata(&data)
     } else if data.starts_with(b"BM") {
         // A bitmap has nowhere to keep a location.
         Ok(data)
@@ -286,6 +286,15 @@ fn sample_ranges(d: &[u8], mdia_kids: &[Bx]) -> Result<Vec<Range<usize>>, String
             return Err("chunk numbers start at one".into());
         }
         let last = runs.get(k + 1).map(|n| n.0.saturating_sub(1)).unwrap_or(offsets.len() as u32);
+        if per_chunk == 0 {
+            // Runs may name the same chunks again, so walking an empty one
+            // would cost runs times chunks; it only has to name chunks the
+            // offset table holds (HOL-SEC-269).
+            if first <= last && last as usize > offsets.len() {
+                return Err("chunk past the offset table".into());
+            }
+            continue;
+        }
         for chunk in first..=last {
             let mut at = *offsets.get(chunk as usize - 1).ok_or("chunk past the offset table")?;
             for _ in 0..per_chunk {
@@ -380,6 +389,7 @@ fn item_extents(d: &[u8], iloc: &Bx, idat: Option<&Bx>, ids: &[u32]) -> Result<V
         i += 4;
         be32(d, i - 4)? as usize
     };
+    let ids: std::collections::HashSet<u32> = ids.iter().copied().collect();
     let mut out = Vec::new();
     for _ in 0..count {
         let id = if version < 2 {
@@ -400,13 +410,22 @@ fn item_extents(d: &[u8], iloc: &Bx, idat: Option<&Bx>, ids: &[u32]) -> Result<V
         i += base_size;
         let extents = be16(d, i)? as usize;
         i += 2;
+        let wanted = ids.contains(&id);
+        // An extent with no fields takes no bytes, so an item may list 65535 of
+        // them for free; each reads as offset 0, length 0 (HOL-SEC-269).
+        if index_size + offset_size + length_size == 0 {
+            if wanted && extents > 0 {
+                return Err("metadata item runs to the end of the file".into());
+            }
+            continue;
+        }
         for _ in 0..extents {
             i += index_size;
             let off = be_sized(d, i, offset_size)?;
             i += offset_size;
             let len = be_sized(d, i, length_size)?;
             i += length_size;
-            if !ids.contains(&id) {
+            if !wanted {
                 continue;
             }
             if len == 0 {
@@ -554,11 +573,15 @@ fn cluster_end(d: &[u8], from: usize, to: usize) -> Result<usize, String> {
 
 fn strip_avi(d: &mut [u8]) -> Result<(), String> {
     let end = 8usize.checked_add(le32(d, 4)? as usize).filter(|e| *e <= d.len()).ok_or("truncated RIFF")?;
-    strip_riff_chunks(d, 12, end)
+    strip_riff_chunks(d, 12, end, 0)
 }
 
+/// How deep header lists may nest. A real AVI nests them once, and each level
+/// is a call, so a crafted file must not choose the depth (HOL-SEC-268).
+const MAX_LIST_DEPTH: usize = 16;
+
 /// Turns the INFO list and the capture date into JUNK chunks of the same size.
-fn strip_riff_chunks(d: &mut [u8], from: usize, to: usize) -> Result<(), String> {
+fn strip_riff_chunks(d: &mut [u8], from: usize, to: usize, depth: usize) -> Result<(), String> {
     let mut i = from;
     while i + 8 <= to {
         let len = le32(d, i + 4)? as usize;
@@ -568,7 +591,10 @@ fn strip_riff_chunks(d: &mut [u8], from: usize, to: usize) -> Result<(), String>
             d[i..i + 4].copy_from_slice(b"JUNK");
             d[i + 8..end].fill(0);
         } else if &d[i..i + 4] == b"LIST" && d.get(i + 8..i + 12) == Some(b"hdrl".as_slice()) {
-            strip_riff_chunks(d, i + 12, end)?;
+            if depth >= MAX_LIST_DEPTH {
+                return Err("header lists nest too deep".into());
+            }
+            strip_riff_chunks(d, i + 12, end, depth + 1)?;
         }
         i = (end + (len & 1)).min(to);
     }
@@ -988,6 +1014,100 @@ pub(crate) mod fixtures {
         let mdat = bx(b"mdat", &[picture.as_slice(), &exif].concat());
         [ftyp, meta(head as u32, (head + picture.len()) as u32), mdat].concat()
     }
+
+    /// A two-frame GIF with a loop count, an XMP packet and a comment holding
+    /// the location, and a plain text extension the strip keeps.
+    pub(crate) fn gif_with_location() -> Vec<u8> {
+        let mut g = b"GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xFF\xFF\xFF".to_vec();
+        g.extend_from_slice(&[&[0x21, 0xFF, 11][..], b"NETSCAPE2.0", &[3, 1, 0, 0, 0]].concat());
+        g.extend_from_slice(&[&[0x21, 0xFF, 11][..], b"XMP DataXMP", &[LOCATION.len() as u8], LOCATION, &[0]].concat());
+        g.extend_from_slice(&[&[0x21, 0xFE, LOCATION.len() as u8][..], LOCATION, &[0]].concat());
+        let frame = [0x21, 0xF9, 4, 0, 10, 0, 0, 0, 0x2C, 0, 0, 0, 0, 1, 0, 1, 0, 0, 2, 2, 0x44, 0x01, 0];
+        g.extend_from_slice(&frame);
+        g.extend_from_slice(&[0x21, 0x01, 12, 0, 0, 0, 0, 1, 0, 1, 0, 1, 1, 0, 1, 3, b'h', b'i', b'!', 0]);
+        g.extend_from_slice(&frame);
+        g.push(0x3B);
+        g
+    }
+
+    /// GIFs cut inside a last block the strip keeps: an unknown extension and
+    /// the loop count, each claiming more bytes than are left (HOL-SEC-267).
+    pub(crate) fn gifs_with_a_kept_block_past_the_end() -> [Vec<u8>; 2] {
+        let gif = gif_with_location();
+        let body = &gif[..gif.len() - 1];
+        [
+            [body, &[0x21, 0x01, 200, 1, 2, 3]].concat(),
+            [body, &[0x21, 0xFF, 11], b"NETSCAPE2.0", &[200, 1, 0]].concat(),
+        ]
+    }
+
+    /// An AVI whose header list holds another header list `depth` times over
+    /// (HOL-SEC-268).
+    pub(crate) fn avi_nested(depth: usize) -> Vec<u8> {
+        let inner = riff(b"avih", &[0; 56]);
+        let total = 12 + 12 * depth + inner.len();
+        let mut v = Vec::with_capacity(total);
+        v.extend_from_slice(b"RIFF");
+        v.extend_from_slice(&((total - 8) as u32).to_le_bytes());
+        v.extend_from_slice(b"AVI ");
+        for k in 0..depth {
+            v.extend_from_slice(b"LIST");
+            v.extend_from_slice(&((total - 12 * (k + 1) - 8) as u32).to_le_bytes());
+            v.extend_from_slice(b"hdrl");
+        }
+        v.extend_from_slice(&inner);
+        v
+    }
+
+    /// An mp4 whose timed GPS track has `runs` runs of empty chunks, every
+    /// other one starting at the first of `chunks` chunks (HOL-SEC-269).
+    pub(crate) fn mp4_with_empty_chunk_runs(runs: u32, chunks: u32) -> Vec<u8> {
+        let mut stsc = runs.to_be_bytes().to_vec();
+        for k in 0..runs {
+            let first = if k % 2 == 0 { 1 } else { chunks + 1 };
+            stsc.extend_from_slice(&first.to_be_bytes());
+            stsc.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 1]);
+        }
+        let stco = full(b"stco", 0, &[&chunks.to_be_bytes()[..], &vec![0u8; 4 * chunks as usize]].concat());
+        let stbl = bx(b"stbl", &[full(b"stsz", 0, &[0u8; 8]), full(b"stsc", 0, &stsc), stco].concat());
+        let hdlr = full(b"hdlr", 0, &[&[0u8; 4][..], b"meta", &[0; 12]].concat());
+        let trak = bx(b"trak", &bx(b"mdia", &[hdlr, bx(b"minf", &stbl)].concat()));
+        [bx(b"ftyp", b"isom\0\0\0\0"), bx(b"moov", &trak)].concat()
+    }
+
+    /// A HEIC whose `items` items (none of them the Exif item) each list
+    /// 65535 extents written with no fields (HOL-SEC-269).
+    pub(crate) fn heic_with_empty_extents(items: u16) -> Vec<u8> {
+        let mut iloc = vec![0x00, 0x00];
+        iloc.extend_from_slice(&items.to_be_bytes());
+        for id in 0..items {
+            iloc.extend_from_slice(&(id % 60_000 + 3).to_be_bytes());
+            iloc.extend_from_slice(&[0, 0, 0xFF, 0xFF]);
+        }
+        let infe = full(b"infe", 2, &[&[0, 2, 0, 0][..], b"Exif", b"\0"].concat());
+        let iinf = full(b"iinf", 0, &[&[0, 1][..], &infe].concat());
+        let meta = full(b"meta", 0, &[iinf, full(b"iloc", 0, &iloc)].concat());
+        [bx(b"ftyp", b"heic\0\0\0\0mif1heic"), meta].concat()
+    }
+
+    /// A HEIC with `ids` Exif items and `items` other items of `extents`
+    /// extents each, located by a version 2 `iloc` (HOL-SEC-269).
+    pub(crate) fn heic_with_many_exif_items(ids: u16, items: u32, extents: u16) -> Vec<u8> {
+        let mut infes = ids.to_be_bytes().to_vec();
+        for id in 1..=ids {
+            infes.extend_from_slice(&full(b"infe", 2, &[&id.to_be_bytes()[..], &[0, 0], b"Exif", b"\0"].concat()));
+        }
+        let mut iloc = vec![0x04, 0x00];
+        iloc.extend_from_slice(&items.to_be_bytes());
+        for k in 0..items {
+            iloc.extend_from_slice(&(100_000 + k).to_be_bytes());
+            iloc.extend_from_slice(&[0, 0, 0, 0]);
+            iloc.extend_from_slice(&extents.to_be_bytes());
+            iloc.extend_from_slice(&[0, 0, 0, 1].repeat(extents as usize));
+        }
+        let meta = full(b"meta", 0, &[full(b"iinf", 0, &infes), full(b"iloc", 2, &iloc)].concat());
+        [bx(b"ftyp", b"heic\0\0\0\0mif1heic"), meta].concat()
+    }
 }
 
 #[cfg(test)]
@@ -1111,5 +1231,209 @@ mod tests {
         let doc = b"%PDF-1.7 with a location +37.7749-122.4194".to_vec();
         assert_eq!(strip_for_send("pdf", doc.clone()).unwrap(), doc, "a file keeps its bytes");
         assert!(strips_on_send("MOV") && strips_on_send("heic") && !strips_on_send("pdf") && !strips_on_send("ogg"));
+    }
+
+    /// `f`'s answer, if it comes within `secs` on a thread of its own.
+    fn within<T: Send + 'static>(secs: u64, f: impl FnOnce() -> T + Send + 'static) -> Option<T> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .stack_size(1 << 20)
+            .spawn(move || {
+                let _ = tx.send(f());
+            })
+            .expect("spawn");
+        rx.recv_timeout(std::time::Duration::from_secs(secs)).ok()
+    }
+
+    /// HOL-SEC-267: a GIF block the strip keeps that runs past the end of the
+    /// file is refused; 0.14 panicked slicing it.
+    #[test]
+    fn a_kept_gif_block_past_the_end_is_refused() {
+        for gif in gifs_with_a_kept_block_past_the_end() {
+            assert!(strip_for_send("gif", gif).is_err());
+        }
+        let gif = gif_with_location();
+        let out = strip_for_send("gif", gif.clone()).expect("a whole GIF strips");
+        assert!(!holds(&out, LOCATION), "the comment and the XMP packet went");
+        assert!(holds(&out, b"NETSCAPE2.0") && holds(&out, b"hi!"), "the loop count and the text stay");
+        // A dropped block cut short still ends the copy where 0.14 ended it.
+        let cut = [&gif[..gif.len() - 1], &[0x21, 0xFE, 200, 1, 2]].concat();
+        assert_eq!(strip_for_send("gif", cut).unwrap(), out[..out.len() - 1]);
+    }
+
+    /// HOL-SEC-268: AVI header lists nest at most 16 deep; 0.14 recursed into
+    /// each one and a crafted file overflowed the stack.
+    #[test]
+    fn a_deeply_nested_avi_is_refused() {
+        assert!(strip_for_send("avi", avi_nested(16)).is_ok(), "within the bound it strips");
+        assert!(strip_for_send("avi", avi_nested(17)).is_err());
+        let deep = avi_nested(200_000);
+        let answer = within(20, move || strip_for_send("avi", deep).is_err());
+        assert_eq!(answer, Some(true), "refused on a 1 MiB stack");
+    }
+
+    /// HOL-SEC-269: sample tables and item locations that cost 0.14 billions
+    /// of steps take one pass, with 0.14's answer.
+    #[test]
+    fn crafted_tables_take_one_pass() {
+        let mp4 = mp4_with_empty_chunk_runs(150_000, 150_000);
+        let out = within(20, move || strip_for_send("mp4", mp4)).expect("runs of empty chunks take one pass");
+        assert!(!holds(&out.expect("an empty GPS track strips"), b"trak"), "the track went");
+
+        let heic = heic_with_empty_extents(50_000);
+        let out = within(20, move || strip_for_send("heic", heic).is_ok());
+        assert_eq!(out, Some(true), "extents with no fields take one pass");
+
+        let heic = heic_with_many_exif_items(60_000, 4, 0xFFFF);
+        let out = within(20, move || strip_for_send("heic", heic).is_ok());
+        assert_eq!(out, Some(true), "each item is looked up once, not per extent");
+        let heic = heic_with_many_exif_items(60_000, 300_000, 1);
+        let out = within(20, move || strip_for_send("heic", heic).is_ok());
+        assert_eq!(out, Some(true), "each item is looked up in a set");
+
+        // An empty run naming a chunk past the offset table is refused, and so
+        // is the Exif item written with no fields, as in 0.14.
+        let mut bad = mp4_with_empty_chunk_runs(2, 4);
+        let at = bad.windows(4).position(|w| w == b"stsc").unwrap() + 24;
+        bad[at..at + 4].copy_from_slice(&6u32.to_be_bytes());
+        assert!(strip_for_send("mp4", bad).is_err());
+        let mut exif = heic_with_empty_extents(1);
+        let at = exif.windows(4).position(|w| w == b"iloc").unwrap() + 12;
+        exif[at..at + 2].copy_from_slice(&[0, 2]);
+        assert!(strip_for_send("heic", exif).is_err());
+
+        // Empty runs that name no chunk, an Exif item listing no extent, and
+        // extents of index fields alone pass, as in 0.14.
+        let mut fine = mp4_with_empty_chunk_runs(2, 4);
+        let at = fine.windows(4).position(|w| w == b"stsc").unwrap() + 12;
+        fine[at..at + 4].copy_from_slice(&9u32.to_be_bytes());
+        fine[at + 12..at + 16].copy_from_slice(&7u32.to_be_bytes());
+        assert!(strip_for_send("mp4", fine).is_ok());
+        let mut none = heic_with_empty_extents(1);
+        let at = none.windows(4).position(|w| w == b"iloc").unwrap() + 12;
+        none[at..at + 6].copy_from_slice(&[0, 2, 0, 0, 0, 0]);
+        assert!(strip_for_send("heic", none).is_ok());
+        let infe = full(b"infe", 2, &[&[0, 2, 0, 0][..], b"Exif", b"\0"].concat());
+        let items = [&[0, 5, 0, 0, 0, 0, 0, 2][..], &[0, 2, 0, 0, 0, 0, 0, 1], &[0, 2, 0, 0, 0, 0, 0, 0]].concat();
+        let iloc = full(b"iloc", 1, &[&[0x00, 0x04, 0, 2][..], &items].concat());
+        let meta = full(b"meta", 0, &[full(b"iinf", 0, &[&[0, 1][..], &infe].concat()), iloc].concat());
+        assert!(strip_for_send("heic", [bx(b"ftyp", b"heic\0\0\0\0mif1heic"), meta].concat()).is_ok());
+    }
+
+    /// A file received from someone and sent on is read through the same
+    /// strip, so each crafted file above is refused or cleaned in time.
+    #[test]
+    fn a_forwarded_crafted_file_is_refused_or_cleaned_in_time() {
+        let dir = crate::test_tmp::tempdir().expect("tmp");
+        let [gif, _] = gifs_with_a_kept_block_past_the_end();
+        let cases = [
+            ("got.gif", gif, false),
+            ("got.avi", avi_nested(200_000), false),
+            ("got.mp4", mp4_with_empty_chunk_runs(150_000, 150_000), true),
+            ("got.heic", heic_with_empty_extents(50_000), true),
+        ];
+        for (name, bytes, sends) in cases {
+            let path = dir.path().join(name);
+            std::fs::write(&path, bytes).expect("write");
+            let answer = within(20, move || read_for_send(&path).map(|_| ()));
+            assert_eq!(answer, Some(if sends { Ok(()) } else { Err(REFUSED.to_string()) }), "{name}");
+        }
+    }
+
+    /// Every honest file strips to the bytes 0.14 gave, and every damaged copy
+    /// gets 0.14's answer, a 0.14 panic counting as a refusal. The digest was
+    /// taken on 0.14.3's base 4232da60, before HOL-SEC-267..269.
+    #[test]
+    fn strip_answers_as_0_14_did() {
+        let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/node/image_check_fixtures");
+        let honest: Vec<(&str, Vec<u8>)> = vec![
+            ("mp4", mp4_with_location()),
+            ("mov", mp4_with_chunk_runs()),
+            ("webm", webm_with_location()),
+            ("avi", avi_with_location()),
+            ("avi", avi_nested(3)),
+            ("jpg", jpeg_with_gps(1)),
+            ("jpg", jpeg_with_gps(6)),
+            ("png", png_with_gps()),
+            ("webp", webp_with_gps(1)),
+            ("webp", webp_with_gps(8)),
+            ("heic", heic_with_gps()),
+            ("heic", heic_with_split_exif()),
+            ("gif", gif_with_location()),
+        ];
+        let crafted: Vec<Vec<u8>> = (1..=8)
+            .map(|k| std::fs::read(fixtures.join(format!("webp_panic_{k}.webp"))).expect("fixture"))
+            .collect();
+        let mut h = <sha2::Sha256 as sha2::Digest>::new();
+        let mut answer = |ext: &str, data: &[u8]| {
+            let out = std::panic::catch_unwind(|| strip_for_send(ext, data.to_vec()));
+            let ok = matches!(out, Ok(Ok(_)));
+            match out {
+                Ok(Ok(b)) => {
+                    sha2::Digest::update(&mut h, (b.len() as u64).to_le_bytes());
+                    sha2::Digest::update(&mut h, &b);
+                }
+                _ => sha2::Digest::update(&mut h, b"refused"),
+            }
+            ok
+        };
+        for (ext, data) in &honest {
+            assert!(answer(ext, data), "an honest {ext} strips");
+        }
+        for data in &crafted {
+            answer("webp", data);
+        }
+        for (ext, data) in honest.iter().filter(|(ext, _)| ["mov", "mp4", "avi", "heic", "gif", "webm"].contains(ext)) {
+            for k in 0..data.len() {
+                answer(ext, &data[..k]);
+                for v in [0x00, 0x01, 0x7F, 0xFF, data[k] ^ 0x80] {
+                    if v != data[k] {
+                        let mut d = data.clone();
+                        d[k] = v;
+                        answer(ext, &d);
+                    }
+                }
+            }
+        }
+        assert_eq!(hex::encode(sha2::Digest::finalize(h)), "cc4bd9315949fc8812b75fd12ed25047d02e7275b16666664c882e7c740af42d");
+    }
+
+    /// A GPS track whose chunks hold two, none, one and no samples.
+    fn mp4_with_chunk_runs() -> Vec<u8> {
+        let ftyp = bx(b"ftyp", b"qt  \0\0\x02\0qt  ");
+        let samples: [&[u8]; 3] = [b"GPS1+37", b"GPS2.7749", b"GPS3-122.4194"];
+        let at = ftyp.len() as u32 + 8;
+        let mdat = bx(b"mdat", &samples.concat());
+        let len = |k: usize| samples[k].len() as u32;
+        let run = |first: u32, n: u32| [first.to_be_bytes(), n.to_be_bytes(), 1u32.to_be_bytes()].concat();
+        let stsc = full(b"stsc", 0, &[&4u32.to_be_bytes()[..], &run(1, 2), &run(2, 0), &run(3, 1), &run(4, 0)].concat());
+        let sizes = [3u32, len(0), len(1), len(2)].iter().flat_map(|v| v.to_be_bytes()).collect::<Vec<_>>();
+        let stsz = full(b"stsz", 0, &[&[0u8; 4][..], &sizes].concat());
+        let offsets = [4, at, at, at + len(0) + len(1), at].iter().flat_map(|v| v.to_be_bytes()).collect::<Vec<_>>();
+        let stco = full(b"stco", 0, &offsets);
+        let stbl = bx(b"stbl", &[full(b"stsd", 0, &[0, 0, 0, 0]), stsc, stsz, stco].concat());
+        let hdlr = full(b"hdlr", 0, &[&[0u8; 4][..], b"meta", &[0; 12]].concat());
+        let trak = bx(b"trak", &bx(b"mdia", &[hdlr, bx(b"minf", &stbl)].concat()));
+        let moov = bx(b"moov", &[full(b"mvhd", 0, &[0x11; 96]), trak].concat());
+        [ftyp, mdat, moov].concat()
+    }
+
+    /// A HEIC whose Exif item sits in two extents past a base offset, located
+    /// by a version 1 `iloc`.
+    fn heic_with_split_exif() -> Vec<u8> {
+        let ftyp = bx(b"ftyp", b"heic\0\0\0\0mif1heic");
+        let exif = [&[0u8, 0, 0, 6][..], b"Exif\0\0", &exif_with_gps(6)].concat();
+        let half = exif.len() / 2;
+        let meta = |base: u32| {
+            let infe = |id: u8, t: &[u8; 4]| full(b"infe", 2, &[&[0, id, 0, 0][..], t, b"\0"].concat());
+            let iinf = full(b"iinf", 0, &[&[0, 2][..], &infe(1, b"hvc1"), &infe(2, b"Exif")].concat());
+            let ext = |off: usize, len: usize| [(off as u32).to_be_bytes(), (len as u32).to_be_bytes()].concat();
+            let item1 = [&[0, 1, 0, 0, 0, 0][..], &base.to_be_bytes(), &[0, 1], &ext(0, 4)].concat();
+            let item2 = [&[0, 2, 0, 0, 0, 0][..], &base.to_be_bytes(), &[0, 2], &ext(4, half), &ext(4 + half, exif.len() - half)].concat();
+            full(b"meta", 0, &[iinf, full(b"iloc", 1, &[&[0x44, 0x40, 0, 2][..], &item1, &item2].concat())].concat())
+        };
+        let head = ftyp.len() + meta(0).len() + 8;
+        let mdat = bx(b"mdat", &[b"HEVC".as_slice(), &exif].concat());
+        [ftyp, meta(head as u32), mdat].concat()
     }
 }
