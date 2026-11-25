@@ -79,7 +79,7 @@ dependencies:
   path: ^1.9.0
   # Pure-Dart WebP decode of ffmpeg's tiny sample frames, to pick a video
   # poster that is not black (the bundled minimal ffmpeg has no stats filter).
-  image: ^4.8.0
+  image: ^4.13.1
   # Deep links: receives hollow:// (and later https universal-link) URLs on all
   # platforms — cold-start initial link + live stream. Windows single-instance
   # forwarding rides SendAppLinkToInstance in windows/runner/main.cpp.
