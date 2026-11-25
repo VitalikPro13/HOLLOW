@@ -1,8 +1,7 @@
 # HOL-SEC-207: A member could re-admit someone who left, on a spare ask from before their second leave
 
 ```
-ID:          HOL-SEC-207                 Status: Fixed after 0.14.0
-                                          (track t15-verify-probe, local, not released)
+ID:          HOL-SEC-207                 Status: Fixed in 0.14.1
 Severity:    Low                         (Impact L: a former member is listed as a member
                                           again against their will, so members' fan-out
                                           reaches their devices until someone removes them;
@@ -19,8 +18,8 @@ Attacker:    a member of the server with a modified client
 Found:       2026-11-16 (track t15-verify-probe, the w2-d follow-up "sign follows_leave
              into JoinAsk")
 Affected:    0.14.0
-Fix commit:  not committed (t15-verify-probe worktree)
-Disclosure:  with the next release's notes
+Fix commit:  82090231a
+Disclosure:  published with 0.14.1
 ```
 
 ## Description

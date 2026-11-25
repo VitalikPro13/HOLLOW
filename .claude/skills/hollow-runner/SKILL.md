@@ -63,8 +63,9 @@ section after the Windows fleet); these rules hold for every command that runs O
 Every job on a shared machine runs inside a lease, taken on the Mac:
 `bash scripts/lease.sh run <resource> --who <your session/track> -- <command>`. Resources:
 `mac-build` (2 slots: cargo builds, nextest, flutter test, Xcode on the mini), `mac-ios-sims`,
-`mac-android`, `mac-desktop-app`, `pc-fleet`, `pc-build` (2 slots: every Rust job on the PC), `linux-vm`,
-`hollowsrv`, `vps-relay-tests`. It waits its turn first-come-first-served; waiting is normal, never
+`mac-android`, `mac-desktop-app`, `pc-fleet`, `pc-build` (2 slots: every Rust job on the PC),
+`cloud-build` (the rented OVH VM: 2 slots at c3-32-flex, 4 at c3-64-flex; see "Rust on the OVH VM"),
+`linux-vm`, `hollowsrv`, `vps-relay-tests`. It waits its turn first-come-first-served; waiting is normal, never
 a reason to skip the lease or go around it. A job that must outlive one shell (a background fleet):
 `acquire` (prints an id, `--ttl` minutes, default 60), `renew` while it runs, `release` after.
 `bash scripts/lease.sh status` shows who holds what. Report time spent waiting under NOTES.
@@ -222,14 +223,24 @@ a reason to skip the lease or go around it. A job that must outlive one shell (a
   log is `D:\dev\wt\<name>\.team\agent-pc-win.log`.
 - C: on the PC is nearly full (about 13 GB free): builds and worktrees go on D:.
 
-### Rust on the PC (full suites always; other Rust jobs when `lease.sh pick rust` says `pc-build`)
-Before a targeted, harness, mutation or clippy job run `bash scripts/lease.sh pick rust`: it prints
-the less loaded of `pc-build` and `mac-build` (PC on a tie); on `mac-build` run it in the Mac
-worktree under that lease as usual. Run a PC job inside `bash scripts/lease.sh run pc-build --who <track> -- ssh ... pc "..."` so the lease
+### Rust on the PC (when `lease.sh pick rust` says `pc-build`)
+Before EACH Rust job run `bash scripts/lease.sh pick rust --tree <worktree>` (add `--suite` for a
+full suite, `--heavy` for a mutation pass, `--unix` for a unix-only crate such as hollow_blobd): it
+prints `cloud-build`, `pc-build` or `mac-build`, the one with the most free capacity per slot (ties:
+the VM, then the PC, then the Mac), and says on stderr why it skipped a machine (a hold, the Mac's
+disk under 40 GB free, the VM draining for a heavy job). A suite never goes to the Mac. On
+`mac-build` run it in the Mac worktree under that lease as usual. While `pc-build` is on hold, pass
+the same `--tree <worktree>` to `lease.sh run|acquire pc-build`: a tree containing the commit the
+hold names may run, any other is refused (exit 5); never `--force` past a hold. Run a PC job inside `bash scripts/lease.sh run pc-build --who <track> -- ssh ... pc "..."` so the lease
 lives exactly as long as the job (2 slots; a slot held by `Vitalik` means wait). A targeted run is
 step 1, then step 3 with `-E "test(/<filter>/)"`. A mutation pass runs ON the PC copy (Python is
 there; the script edits `D:\dev\wt\<name>` files, never the Mac worktree) and restores them; rerun
 `pc_sync.sh` afterwards only if the Mac tree changed meanwhile.
+
+PC disk (D:, about 5 warm targets fit): each SESSION keeps at most TWO warm PC targets
+(`D:\dev\wt\<name>\rust\hollow_core\target`) at a time, and a track deletes its PC target right
+after its PC job unless another PC job of that track follows within the hour. Check D: has room
+for a cold build (about 25 GB) before starting one.
 
 #### Full Rust suite on the PC
 1. `bash scripts/pc_sync.sh <name> <worktree>` (first run creates `D:\dev\wt\<name>`, later runs
@@ -254,6 +265,25 @@ there; the script edits `D:\dev\wt\<name>` files, never the Mac worktree) and re
   run (a background Bash on the Mac); never a scheduled task or other persistence on the PC.
 - If `pc` (LAN) times out, use `pc-ts` (Tailscale) for every step, and `PC_HOST=pc-ts` for
   pc_sync.sh.
+
+### Rust on the OVH VM (when `lease.sh pick rust` says `cloud-build`)
+- It starts, stops and resizes itself: NEVER `scripts/cloud_vm.sh up/down/resize` by hand. A
+  cloud-build lease while it is down starts it (about 70 s); it is deleted after 5 idle minutes.
+- Two sizes: c3-32-flex (16 vCPU, 2 slots) for everyday work, c3-64-flex (32 vCPU, 4 slots) only
+  for a `--heavy` lease. `scripts/cloud_mutate.sh` is always heavy; `scripts/cloud_suite.sh` only
+  with `HOLLOW_HEAVY=1` when the brief says so. A heavy lease waits while the VM drains and
+  reboots into the big size; its lease lines and `lease.sh status` say how long, so report that
+  wait under NOTES and never cancel it for being slow.
+- Full suite: `HOLLOW_LEASE_WHO=<who> bash scripts/cloud_suite.sh <name> <worktree> [filter]`
+  (syncs, runs detached on the VM, log back in `<worktree>/.team/cloud_suite_<time>.log`, exit code
+  = nextest's; FLAKY = load noise, FAIL on every try = real). Mutation pass:
+  `HOLLOW_LEASE_WHO=<who> bash scripts/cloud_mutate.sh <name> <worktree> <mutants.json> [K]`
+  (results in `<worktree>/.team/cloud_mut_<time>/results.txt`). Anything else:
+  `bash scripts/lease.sh run cloud-build --who <who> -- bash -c 'bash scripts/cloud_sync.sh <name>
+  <worktree> && ssh -o ServerAliveInterval=15 ovh ". ~/.hollow_env; cd ~/wt/<name>/... && ..."'`.
+- Before a new tree, a seed copy or a mutation pass: `ssh ovh df -h /` must leave 15 GB free.
+  Status and spend: `bash scripts/cloud_vm.sh status`. Details: memory
+  `reference_ovh_cloud_build_vm.md`.
 
 ## Mac mini (iOS Simulators, macOS app, Android emulators)
 

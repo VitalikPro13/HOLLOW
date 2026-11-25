@@ -142,10 +142,14 @@ in YOUR context costs far more than in a runner's.
   and signing steps are proven on a GitHub runner, never on his desktop.
 - Never sleep, hibernate or cut the network of the Windows host, the Mac mini or the VM. Network
   tests act on an emulator, one app's process or a proxy.
-- Rust runs on whichever machine is less loaded (Vitalik, Nov 20: use both fully):
-  `bash scripts/lease.sh pick rust` prints `pc-build` or `mac-build` (PC on a tie); ask it before
-  EACH Rust job. Both have 2 slots; on the PC cargo and nextest `-j 7`. One heavy job at a time per
-  builder. A `pc-build` lease held by `Vitalik` means he needs the PC: wait.
+- Rust runs on whichever machine is least loaded (Vitalik, Nov 22: all three filled, no queue on one
+  while another has room, no OVH money on idle cores): `bash scripts/lease.sh pick rust --tree <wt>`
+  (`--suite` for a full suite, `--heavy` for a mutation pass, `--unix` for unix-only crates) prints
+  `cloud-build`, `pc-build` or `mac-build`; ask it before EACH Rust job and use what it prints, even
+  for `cloud_suite.sh` jobs. The lease dir `~/.hollow-leases` (`lease.sh status`) is the ONE shared
+  state both sessions read: never bypass it. It skips the Mac under 40 GB free, the PC under 25 GB on
+  D:, and the VM while it sits at the big size with no heavy job (so it shrinks). On the PC cargo and
+  nextest `-j 7`. One heavy job at a time per builder. A `pc-build` lease held by `Vitalik` = wait.
 - Fleet peers use THROWAWAY identities only, and only your own letters. The machine details and
   commands are in the `hollow-runner` skill and the memory files it names.
 

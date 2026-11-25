@@ -1,8 +1,7 @@
 # HOL-SEC-214: A self-hosted relay kept its old public address in TURN after the address changed
 
 ```
-ID:          HOL-SEC-214                 Status: Fixed in the relay setup (track fix-214,
-                                          2026-11-20), live to self-hosters on push
+ID:          HOL-SEC-214                 Status: Fixed in the relay setup of 0.14.2 (2026-11-21)
 Severity:    Low                         (Impact L: UDP from the relay's coturn to
                                           49152-65535 on one address that is no longer
                                           the operator's, plus TURN and forwarder calls
@@ -19,8 +18,8 @@ Attacker:    whoever is next given the relay's old address, with any user of the
 Found:       2026-11-20 (fix-153 investigation of a home relay on a dynamic address)
 Affected:    every relay set up by install.sh with a DuckDNS name or its own domain,
              from the setup's first release through 0.14.1
-Fix commit:  pending (track fix-214)
-Disclosure:  private until the setup change is pushed
+Fix commit:  d48ec8706, f924f4a50, 5765b5841
+Disclosure:  published with 0.14.2
 ```
 
 ## Description

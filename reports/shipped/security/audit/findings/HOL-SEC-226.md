@@ -1,8 +1,7 @@
 # HOL-SEC-226: the relay setup read OpenSSH 10.5's password logins as off
 
 ```
-ID:          HOL-SEC-226                 Status: Fixed in the relay setup (track fix-153d,
-                                          2026-11-22), live to self-hosters on push
+ID:          HOL-SEC-226                 Status: Fixed in the relay setup of 0.14.3 (2026-11-22)
 Severity:    Low                         (Impact L: on Ubuntu 26.10 the setup and check-host
                                           reported SSH password logins as off while sshd took
                                           them, so the setup's advice to turn them off never
@@ -17,7 +16,7 @@ Boundary:    TB-4 (relay host and its operator)
 Traces to:   R-RS-08
 Found:       2026-11-21 (builder of track fix-153d, box tests on Ubuntu 26.10)
 Affected:    every relay setup on OpenSSH 10.5 or newer (Ubuntu 26.10), through 0.14.2
-Fix commit:  pending (fix/153-ubuntu-2604)
+Fix commit:  6694bc357
 ```
 
 ## Description

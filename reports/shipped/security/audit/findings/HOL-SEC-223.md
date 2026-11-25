@@ -1,8 +1,7 @@
 # HOL-SEC-223: a "not sure" settling undid the owner's home relay
 
 ```
-ID:          HOL-SEC-223                 Status: Open, fix planned for 0.14.3
-                                          (track phrase-restore)
+ID:          HOL-SEC-223                 Status: Fixed in 0.14.3
 Severity:    Low                         (Impact L: for a short time the server names no
                                           home relay, so HOL-SEC-211's rule is off there;
                                           Exploitability L: needs the owner's own removal
@@ -13,8 +12,8 @@ Boundary:    TB-3 (server members and their replicated state)
 Traces to:   DEVICE_PROOF_DESIGN 8.3; R-CR-13, R-CR-18
 Found:       2026-11-22 (phrase-restore, while fixing HOL-SEC-222)
 Affected:    0.14.2 (the home relay setting came with it)
-Fix commit:  pending (feat/phrase-restore)
-Disclosure:  private until 0.14.3 ships
+Fix commit:  db4a011de
+Disclosure:  published with 0.14.3
 ```
 
 ## Description

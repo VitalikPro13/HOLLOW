@@ -1,8 +1,7 @@
 # HOL-SEC-220: a members-only relay whose keys.json did not read at boot ran open
 
 ```
-ID:          HOL-SEC-220                 Status: Fixed (relay, track fix-153c, 2026-11-21),
-                                          embargoed, rides the release
+ID:          HOL-SEC-220                 Status: Fixed in relay 0.14.3
 Severity:    Medium                      (Impact M: anyone reaches a relay its operator
                                           limited to key holders, and stays connected after
                                           the file is fixed; Exploitability L: needs the
@@ -16,8 +15,8 @@ Traces to:   R-RS-25
 Attacker:    anyone who can reach the relay
 Found:       2026-11-21 (hostile review 1 of fix/153-license-seats, item 1)
 Affected:    every relay with access keys, through 0.14.2
-Fix commit:  pending (fix/153-license-seats)
-Disclosure:  private until the release
+Fix commit:  5e153b1f0
+Disclosure:  published with 0.14.3
 ```
 
 ## Description

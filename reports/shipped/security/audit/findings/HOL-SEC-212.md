@@ -1,8 +1,7 @@
 # HOL-SEC-212: the relay host check passed every sudo rule on a host set to another language
 
 ```
-ID:          HOL-SEC-212                 Status: Fixed (relay setup, pushed with #153)
-                                          (track fix-153, 2026-11-20)
+ID:          HOL-SEC-212                 Status: Fixed in the relay setup of 0.14.2 (2026-11-20)
 Severity:    Low                         (Impact M: a service account that may become root
                                           is reported as "cannot become root"; Exploitability
                                           L: needs a host with a non-English locale and a
@@ -13,7 +12,7 @@ Component:   relay-uws/deploy/check-host.sh (service accounts)
 Boundary:    the relay host's own hardening report
 Found:       2026-11-20 (builder of track fix-153, while fixing #153)
 Affected:    every relay setup since the service-account check
-Fix commit:  pending (fix/153-mint-host-checks)
+Fix commit:  5ebafeac6
 ```
 
 ## Description

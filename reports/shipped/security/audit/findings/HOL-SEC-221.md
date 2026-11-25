@@ -1,8 +1,7 @@
 # HOL-SEC-221: a settling dropped the founding op of a server the lost device founded
 
 ```
-ID:          HOL-SEC-221                 Status: Open, fix planned for 0.14.3
-                                          (track phrase-restore)
+ID:          HOL-SEC-221                 Status: Fixed in 0.14.3
 Severity:    Low                         (Impact M: a lost-or-stolen removal or a phrase
                                           recovery leaves the server unsettled, so what only
                                           a settling undoes stays; Exploitability L:
@@ -14,8 +13,8 @@ Boundary:    TB-3 (server members and their replicated state)
 Traces to:   DEVICE_PROOF_DESIGN 8.1, 8.3, 8.4; R-CR-13
 Found:       2026-11-21 (phrase-restore fix round, while writing the HOL-SEC-216 tests)
 Affected:    0.14.0 through 0.14.2
-Fix commit:  pending (feat/phrase-restore)
-Disclosure:  private until 0.14.3 ships
+Fix commit:  84a80693a
+Disclosure:  published with 0.14.3
 ```
 
 ## Description

@@ -1,8 +1,7 @@
 # HOL-SEC-302: the metadata strip held about 24 bytes for every sample of a GPS track
 
 ```
-ID:          HOL-SEC-302                 Status: Fixed (track fix-media-strip, 2026-11-24),
-                                          embargoed, 0.14.3 at session A's choice
+ID:          HOL-SEC-302                 Status: Fixed in 0.14.3
 Severity:    Low                         (Impact L: sending one crafted video takes about 24
                                           times its size in memory, enough to end the app on
                                           a phone; Exploitability L: the user has to send or
@@ -15,8 +14,8 @@ Traces to:   R-RB-04, C-FILES-03
 Attacker:    anyone who can send the user a file
 Found:       2026-11-24 (builder of track fix-media-strip, while fixing HOL-SEC-267..269)
 Affected:    every client since the strip shipped (HOL-SEC-150), through 0.14.2
-Fix commit:  pending (fix/media-strip-267-269, second commit)
-Disclosure:  private until the release
+Fix commit:  d2cd7ae47, 73f9d9e06
+Disclosure:  published with 0.14.3
 ```
 
 ## Description

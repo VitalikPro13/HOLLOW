@@ -206,3 +206,8 @@ ios/GoogleService-Info-dev.plist
 
 # Internal business planning
 reports/planned/business/
+
+# personal and some other stuff
+tmp*
+scripts/cloud*
+scripts/hol_sec.sh

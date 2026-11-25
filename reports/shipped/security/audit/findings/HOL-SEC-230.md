@@ -1,8 +1,7 @@
-# HOL-SEC-230: a recovery on a server with no checkpoint drops every member its lost device admitted
+# HOL-SEC-230: a recovery on a server with no checkpoint dropped every member its lost device admitted
 
 ```
-ID:          HOL-SEC-230                 Status: Open, fix designed for 0.14.3
-                                          (track phrase-restore-f5)
+ID:          HOL-SEC-230                 Status: Fixed in 0.14.3
 Severity:    Medium (shipped) / High (the 0.14.3 Welcome restore as built)
                                           (Impact: every member, channel, role and
                                           setting the dropped device wrote leaves the
@@ -23,8 +22,8 @@ Traces to:   DEVICE_PROOF_DESIGN 7, 8.4, 8.7 ("no member or MLS leaf is evicted
 Found:       2026-11-23 (hostile design review of F5; proven on v0.14.2-beta)
 Affected:    0.14.0 to 0.14.2 (the in-app "Remove devices with your recovery
              phrase"); the Welcome restore (unreleased, 0.14.3)
-Fix commit:  pending (feat/phrase-restore-f5)
-Disclosure:  private until 0.14.3 ships
+Fix commit:  854a1d6c8, 5c1667636, 7be90a607
+Disclosure:  published with 0.14.3
 ```
 
 ## Description

@@ -2,7 +2,6 @@
 
 ```
 ID:          HOL-SEC-211                 Status: Fixed in 0.14.2
-                                          (track sec-0142, issue #151, 2026-11-20)
 Severity:    Medium                      (Impact M: people the owner never admitted and
                                           cannot see or remove read and post in a copy of
                                           the server with real members, and their admission
@@ -23,8 +22,8 @@ Traces to:   GitHub issue #151; MULTI_RELAY_CLIENT_PLAN.md section 2 ("a server 
 Attacker:    a member of the server, with a stock client, on a relay of their choosing
 Found:       2026-11-20 (issue #151, proven in the harness before the fix)
 Affected:    every release with the join lock (0.12 to 0.14.1)
-Fix commit:  pending (security/0.14.2, embargoed)
-Disclosure:  private until 0.14.2 ships
+Fix commit:  f0b54bf3a
+Disclosure:  published with 0.14.2
 ```
 
 ## Description

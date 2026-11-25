@@ -1,8 +1,7 @@
 # HOL-SEC-267: the GIF metadata strip panicked on a kept block cut short
 
 ```
-ID:          HOL-SEC-267                 Status: Fixed (track fix-media-strip, 2026-11-24),
-                                          embargoed, rides 0.14.3
+ID:          HOL-SEC-267                 Status: Fixed in 0.14.3
 Severity:    Low                         (Impact L: the send, vault upload or large-file
                                           share of that one file fails with a panic instead
                                           of a refusal; Exploitability L: the user has to
@@ -16,8 +15,8 @@ Traces to:   R-RB-03, C-FILES-03
 Attacker:    anyone who can send the user a file
 Found:       2026-11-23 (builder of track S7b, session B)
 Affected:    every client since the strip shipped (HOL-SEC-150), through 0.14.2
-Fix commit:  pending (fix/media-strip-267-269)
-Disclosure:  private until the release
+Fix commit:  ef8fd4e64
+Disclosure:  published with 0.14.3
 ```
 
 ## Description

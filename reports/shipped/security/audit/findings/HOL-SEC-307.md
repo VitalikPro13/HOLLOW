@@ -1,8 +1,7 @@
 # HOL-SEC-307: a HEIF-branded file never had its movie walked
 
 ```
-ID:          HOL-SEC-307                 Status: Fixed (track fix-media-strip, 2026-11-24),
-                                          embargoed, 0.14.3 at Vitalik's choice
+ID:          HOL-SEC-307                 Status: Fixed in 0.14.3
 Severity:    Low                         (Impact M: a HEIF image sequence's movie user data
                                           and timed GPS track reach every recipient;
                                           Exploitability L: few files carry both)
@@ -13,8 +12,8 @@ Traces to:   R-AR-11, C-FILES-03
 Attacker:    any recipient
 Found:       2026-11-24 (hostile review of track S7b, pre-existing list)
 Affected:    every client since the strip shipped (HOL-SEC-150), through 0.14.2
-Fix commit:  pending (fix/media-strip-267-269, fourth commit)
-Disclosure:  private until the release
+Fix commit:  683557472
+Disclosure:  published with 0.14.3
 ```
 
 ## Description

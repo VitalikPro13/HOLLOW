@@ -1,8 +1,7 @@
 # HOL-SEC-224: a variant at an endorsed op's key read as endorsed
 
 ```
-ID:          HOL-SEC-224                 Status: Open, fix planned for 0.14.3
-                                          (track phrase-restore)
+ID:          HOL-SEC-224                 Status: Fixed in 0.14.3
 Severity:    Low                         (Impact L: one op a retire kept for a removed
                                           device drops out of the server's history;
                                           Exploitability L: needs the removed device's
@@ -13,8 +12,8 @@ Boundary:    TB-3 (server members and their replicated state)
 Traces to:   DEVICE_PROOF_DESIGN 8.2, 8.3; R-CR-07
 Found:       2026-11-22 (phrase-restore, while fixing HOL-SEC-222)
 Affected:    0.14.0 to 0.14.2 (the device proof track)
-Fix commit:  pending (feat/phrase-restore)
-Disclosure:  private until 0.14.3 ships
+Fix commit:  3ec9eb239
+Disclosure:  published with 0.14.3
 ```
 
 ## Description

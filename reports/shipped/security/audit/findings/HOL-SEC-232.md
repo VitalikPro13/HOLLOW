@@ -1,8 +1,7 @@
-# HOL-SEC-232: a recovery stored while the node is down opens no hold at the next start
+# HOL-SEC-232: a recovery stored while the node was down opened no hold at the next start
 
 ```
-ID:          HOL-SEC-232                 Status: Fixed on feat/phrase-restore-f5
-                                          (0.14.3, not released)
+ID:          HOL-SEC-232                 Status: Fixed in 0.14.3
 Severity:    Medium (Impact: a member that takes the owner's recovery roster while its
                                           app is stopped restarts straight into the
                                           step-back: members, seats and MLS leaves of
@@ -18,8 +17,8 @@ Boundary:    TB-2 (co-members of a server)
 Traces to:   DEVICE_PROOF_DESIGN 8.8 item 1; R-CR-07, R-CR-14
 Found:       2026-11-23 (second hostile design review of F5; proven on this branch)
 Affected:    0.14.0 to 0.14.2
-Fix commit:  feat/phrase-restore-f5
-Disclosure:  private until 0.14.3 ships
+Fix commit:  5c1667636
+Disclosure:  published with 0.14.3
 ```
 
 ## Description

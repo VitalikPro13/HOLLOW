@@ -1,8 +1,7 @@
 # HOL-SEC-309: Samsung's `sefd` box kept the capture time and country code
 
 ```
-ID:          HOL-SEC-309                 Status: Fixed (track fix-media-strip-309, 2026-11-24),
-                                          embargoed, 0.14.3
+ID:          HOL-SEC-309                 Status: Fixed in 0.14.3
 Severity:    Low                         (Impact L: the capture time, the country of the
                                           phone's network and a hash of the original path
                                           reach every recipient; Exploitability L: needs a
@@ -14,8 +13,8 @@ Traces to:   R-AR-11, C-FILES-03
 Attacker:    any recipient
 Found:       2026-11-24 (track fix-media-strip-308, real Samsung Galaxy S22 Ultra sample)
 Affected:    every client since the strip shipped (HOL-SEC-150), through 0.14.2
-Fix commit:  pending (7th commit on fix/media-strip-267-269)
-Disclosure:  private until the release
+Fix commit:  5126de3e2
+Disclosure:  published with 0.14.3
 ```
 
 ## Description

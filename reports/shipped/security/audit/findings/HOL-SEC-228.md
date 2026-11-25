@@ -1,8 +1,7 @@
 # HOL-SEC-228: a carry to our own devices could miss one that left before delivery
 
 ```
-ID:          HOL-SEC-228                 Status: Fixed (track fix-flakes-own-carry,
-                                          2026-11-23), embargoed, rides 0.14.3
+ID:          HOL-SEC-228                 Status: Fixed in 0.14.3
 Severity:    Low                         (Impact L: a phone keeps showing age-restricted
                                           servers after a computer of the identity turned
                                           them off (the Apple 1.2 gate), or keeps a server
@@ -22,8 +21,8 @@ Found:       2026-11-22 (the age gate harness test failing under load in the
              nightly suites)
 Affected:    0.14.0 to 0.14.2 for the age gate; removal and leave ops since
              0.12.1, when they began to ride this fan-out
-Fix commit:  81e9e3bf0, b8b2595af (release/0.14.3)
-Disclosure:  private until 0.14.3 ships
+Fix commit:  81e9e3bf0, b8b2595af
+Disclosure:  published with 0.14.3
 ```
 
 ## Description

@@ -1,8 +1,7 @@
 # HOL-SEC-304: a GIF cut inside its header was sent without its metadata removed
 
 ```
-ID:          HOL-SEC-304                 Status: Fixed (track fix-media-strip, 2026-11-24),
-                                          embargoed, rides 0.14.3
+ID:          HOL-SEC-304                 Status: Fixed in 0.14.3
 Severity:    Info                        (Impact L: a GIF of at most 780 bytes goes out
                                           exactly as it was, whatever its trailing bytes hold;
                                           Exploitability L: only the vault upload sends such
@@ -15,8 +14,8 @@ Traces to:   R-RB-05, C-FILES-03
 Attacker:    none needed (a cut file the user sends)
 Found:       2026-11-24 (hostile review of fix/media-strip-267-269, outside its lines)
 Affected:    every client since the strip shipped (HOL-SEC-150), through 0.14.2
-Fix commit:  pending (fix/media-strip-267-269, third commit)
-Disclosure:  private until the release
+Fix commit:  73f9d9e06
+Disclosure:  published with 0.14.3
 ```
 
 ## Description

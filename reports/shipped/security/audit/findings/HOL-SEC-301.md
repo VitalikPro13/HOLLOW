@@ -1,8 +1,7 @@
 # HOL-SEC-301: a WebP of many EXIF chunks made the metadata strip run for hours
 
 ```
-ID:          HOL-SEC-301                 Status: Fixed (track fix-media-strip, 2026-11-24),
-                                          embargoed, 0.14.3 at session A's choice
+ID:          HOL-SEC-301                 Status: Fixed in 0.14.3
 Severity:    Low                         (Impact L: the send of that file never finishes and
                                           holds a blocking thread and a core for hours;
                                           Exploitability L: the user has to send or pass on
@@ -14,8 +13,8 @@ Traces to:   R-RB-04, C-FILES-03
 Attacker:    anyone who can send the user a file
 Found:       2026-11-24 (builder of track fix-media-strip, while fixing HOL-SEC-267..269)
 Affected:    every client since the strip shipped (HOL-SEC-150), through 0.14.2
-Fix commit:  pending (fix/media-strip-267-269, second commit)
-Disclosure:  private until the release
+Fix commit:  d2cd7ae47
+Disclosure:  published with 0.14.3
 ```
 
 ## Description

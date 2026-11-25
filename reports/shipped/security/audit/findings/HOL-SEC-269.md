@@ -1,8 +1,7 @@
 # HOL-SEC-269: crafted MP4 and HEIF tables made the metadata strip run for hours
 
 ```
-ID:          HOL-SEC-269                 Status: Fixed (track fix-media-strip, 2026-11-24),
-                                          embargoed, rides 0.14.3
+ID:          HOL-SEC-269                 Status: Fixed in 0.14.3
 Severity:    Low                         (Impact L: the send of that file never finishes and
                                           holds a blocking thread and a core for hours;
                                           Exploitability L: the user has to send or pass on
@@ -15,8 +14,8 @@ Traces to:   R-RB-03, C-FILES-03
 Attacker:    anyone who can send the user a file
 Found:       2026-11-23 (builder of track S7b, session B)
 Affected:    every client since the strip shipped (HOL-SEC-150), through 0.14.2
-Fix commit:  pending (fix/media-strip-267-269)
-Disclosure:  private until the release
+Fix commit:  ef8fd4e64, 73f9d9e06
+Disclosure:  published with 0.14.3
 ```
 
 ## Description

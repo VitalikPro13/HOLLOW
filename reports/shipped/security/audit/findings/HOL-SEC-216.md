@@ -1,8 +1,7 @@
-# HOL-SEC-216: a device that first held a server after T settled it from its own records
+# HOL-SEC-216: a device that first held a server after the moment of loss settled it from its own records
 
 ```
-ID:          HOL-SEC-216                 Status: Open, fix planned for 0.14.3
-                                          (track phrase-restore, S216)
+ID:          HOL-SEC-216                 Status: Fixed in 0.14.3
 Severity:    Medium                      (Impact H: what a lost device did in a server
                                           before the person lost it stops counting:
                                           owner renames, channels, roles, admissions;
@@ -16,8 +15,8 @@ Boundary:    TB-3 (server members and their replicated state)
 Traces to:   DEVICE_PROOF_DESIGN 8.3, 8.4; R-CR-12, R-ID-11
 Found:       2026-11-21 (hostile review of the phrase restore design)
 Affected:    0.14.0 through 0.14.2
-Fix commit:  pending (feat/phrase-restore)
-Disclosure:  private until 0.14.3 ships
+Fix commit:  edfce376d
+Disclosure:  published with 0.14.3
 ```
 
 ## Description

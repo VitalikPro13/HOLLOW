@@ -1,8 +1,7 @@
-# HOL-SEC-306: places a location is kept that the metadata strip never visited
+# HOL-SEC-306: some places a file keeps a location were never visited by the metadata strip
 
 ```
-ID:          HOL-SEC-306                 Status: Fixed (track fix-media-strip, 2026-11-24),
-                                          embargoed, 0.14.3 at Vitalik's choice
+ID:          HOL-SEC-306                 Status: Fixed in 0.14.3
 Severity:    Low                         (Impact M: a location reaches recipients from the
                                           files that keep one there; Exploitability: none
                                           needed, it happens on send, for a few camera and
@@ -16,8 +15,8 @@ Attacker:    any recipient
 Found:       2026-11-24 (hostile review of track S7b, pre-existing list; confirmed by the
              S7b builder's test and this track's)
 Affected:    every client since the strip shipped (HOL-SEC-150), through 0.14.2
-Fix commit:  pending (fix/media-strip-267-269, fourth and fifth commits)
-Disclosure:  private until the release
+Fix commit:  683557472, 539f05d55
+Disclosure:  published with 0.14.3
 ```
 
 ## Description

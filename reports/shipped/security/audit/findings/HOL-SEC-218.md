@@ -1,8 +1,7 @@
 # HOL-SEC-218: a phrase admission dated before the identity's current base counted nowhere
 
 ```
-ID:          HOL-SEC-218                 Status: Open, fix planned for 0.14.3
-                                          (track phrase-restore, S218)
+ID:          HOL-SEC-218                 Status: Fixed in 0.14.3
 Severity:    Low                         (Impact L: the restored device is cut off from
                                           contacts and the relay while it believes it
                                           belongs, and the lock then names the wrong cause;
@@ -15,8 +14,8 @@ Boundary:    TB-2 (the identity's own devices)
 Traces to:   HOL-SEC-152, R-ID-16 (new)
 Found:       2026-11-21 (hostile review of the phrase restore design)
 Affected:    0.12.0 through 0.14.2
-Fix commit:  pending (feat/phrase-restore)
-Disclosure:  private until 0.14.3 ships
+Fix commit:  7fa286cc2
+Disclosure:  published with 0.14.3
 ```
 
 ## Description

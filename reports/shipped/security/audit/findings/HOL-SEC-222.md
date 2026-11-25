@@ -1,8 +1,7 @@
 # HOL-SEC-222: a removed device could found a held server a second time
 
 ```
-ID:          HOL-SEC-222                 Status: Open, fix planned for 0.14.3
-                                          (track phrase-restore)
+ID:          HOL-SEC-222                 Status: Fixed in 0.14.3
 Severity:    Low                         (Impact M: a device the roster removed rewrites a
                                           server's founding op on every replica that folds
                                           it from genesis, its name and founding clock
@@ -15,8 +14,8 @@ Boundary:    TB-3 (server members and their replicated state)
 Traces to:   DEVICE_PROOF_DESIGN 7, 8.3; R-CR-07
 Found:       2026-11-22 (phrase-restore, while fixing HOL-SEC-221)
 Affected:    0.14.0 through 0.14.2
-Fix commit:  pending (feat/phrase-restore)
-Disclosure:  private until 0.14.3 ships
+Fix commit:  12fbcc068, 3e10e7245
+Disclosure:  published with 0.14.3
 ```
 
 ## Description

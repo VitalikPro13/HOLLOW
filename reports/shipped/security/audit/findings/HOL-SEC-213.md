@@ -1,8 +1,7 @@
 # HOL-SEC-213: the TURN port check could take a local program for coturn by its name
 
 ```
-ID:          HOL-SEC-213                 Status: Fixed (relay setup, pushed with #153)
-                                          (track fix-153, 2026-11-20)
+ID:          HOL-SEC-213                 Status: Fixed in the relay setup of 0.14.2 (2026-11-20)
 Severity:    Low                         (Impact L: a UDP listener inside the TURN band is
                                           reported as coturn's, so the check says ok while TURN
                                           can reach it; the firewall rule itself is unchanged;
@@ -12,7 +11,7 @@ Component:   relay-uws/deploy/turn-port-lock.sh (check: stray listeners)
 Boundary:    local accounts on the relay host
 Found:       2026-11-20 (builder of track fix-153, while fixing #153)
 Affected:    every relay setup since the stray-listener check
-Fix commit:  pending (fix/153-mint-host-checks)
+Fix commit:  5ebafeac6
 ```
 
 ## Description

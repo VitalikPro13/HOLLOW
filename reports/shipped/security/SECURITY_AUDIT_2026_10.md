@@ -1,14 +1,14 @@
 # Hollow Internal Security Review 2026-10
 
 **Internal security review**\
-**Hollow version: 0.14.0**\
-**Date: October 30, 2026; revised for 0.14 on November 15, 2026**\
-**Scope: the 0.14.0 release, tag `v0.14.0-beta`**\
-**Review period: 2026-09-26 to 2026-11-15**\
+**Hollow version: 0.14.3**\
+**Date: October 30, 2026; revised November 15 (0.14) and November 25, 2026 (0.14.3)**\
+**Scope: the 0.14.3 release, tag `v0.14.3-beta`**\
+**Review period: 2026-09-26 to 2026-11-24**\
 **Author: Vitalii Rovinskyi**\
 *This report was generated with the assistance of Claude (AI), and the review it describes was carried out with Claude agents directed by the author. Every decision on what Hollow must allow, every severity and every conclusion is the author's. This is not an audit by an independent firm.*
 
-*Revision note: this edition was revised for 0.14 on November 15, 2026. It describes Hollow at the 0.14 release. The twenty findings filed since 0.13.0 sit in their sections, and every total counts them. The 0.13 edition of October 30, 2026 stays available with the 0.13.0 release.*
+*Revision note: this edition was revised for 0.14.3 on November 25, 2026. It describes Hollow at the 0.14.3 release. The 39 findings fixed in 0.14.1, 0.14.2 and 0.14.3 sit in their sections, and every total counts them. The findings table lists every number from 001 to 309, so a number whose fix has not shipped yet is marked reserved until the release that carries it. The 0.14 edition of November 15, 2026 stays available with the 0.14.0 release, and the 0.13 edition of October 30, 2026 with 0.13.0.*
 
 ---
 
@@ -21,15 +21,18 @@ Hollow is a distributed, end-to-end encrypted chat and voice application: Rust c
 (`relay-uws`) that members or Hollow run. This review covered the Rust core, the relay and
 its host, the parts of the Flutter app that make security decisions or handle untrusted
 input, the push path, the release and update signing, the macOS app bundle and the
-self-hosted relay's setup wizard. It ran from 2026-09-26 to 2026-11-15, across the
+self-hosted relay's setup wizard. It ran from 2026-09-26 to 2026-11-24, across the
 releases 0.12.0 (2026-10-05), 0.12.1 (2026-10-16), 0.12.2 (2026-10-20), the 0.13 wave
-(2026-10-22 to 2026-10-24, released as 0.13.0 on 2026-10-30) and the 0.14 work
-(2026-10-31 to 2026-11-15).
+(2026-10-22 to 2026-10-24, released as 0.13.0 on 2026-10-30), the 0.14 work
+(2026-10-31 to 2026-11-15) and the patch releases 0.14.1 (2026-11-19), 0.14.2
+(2026-11-21) and 0.14.3 (2026-11-24).
 
 ### Headline numbers
 
-The review filed 202 findings, numbered HOL-SEC-001 to HOL-SEC-206. The numbers 166 to 169
-were never used (see section 3.10). Every finding is fixed. What a fix did not remove is
+This edition reports 241 findings, numbered HOL-SEC-001 to HOL-SEC-309. The numbers 166 to
+169 were never used, 233 to 239 and 270 to 299 are not used yet, and the rest of the
+numbers up to 309 are reserved for findings whose fix has not shipped yet (see section
+3.10). Every finding reported here is fixed. What a fix did not remove is
 recorded as a residual in the finding and, where it is a decision, in the accepted-risk
 register (section 6).
 
@@ -47,10 +50,10 @@ break of confidentiality:
 |---|---|---|---|---|---|
 | Critical | 7 | 1 | 0 | 0 | 8 |
 | High | 28 | 7 | 0 | 0 | 35 |
-| Medium | 50 | 21 | 12 | 1 | 84 |
-| Low | 43 | 21 | 8 | 1 | 73 |
-| Info | 2 | 0 | 0 | 0 | 2 |
-| Total | 130 | 50 | 20 | 2 | 202 |
+| Medium | 55 | 26 | 13 | 1 | 95 |
+| Low | 55 | 32 | 12 | 1 | 100 |
+| Info | 2 | 0 | 1 | 0 | 3 |
+| Total | 147 | 66 | 26 | 2 | 241 |
 
 Where the fixes shipped:
 
@@ -60,7 +63,10 @@ Where the fixes shipped:
 | 0.12.1 | 6 | 0 | 1 | 3 | 2 | 0 |
 | 0.13 (relay deployed 2026-10-23) | 14 | 0 | 2 | 5 | 7 | 0 |
 | 0.14 (relay fixes deployed ahead of it) | 20 | 0 | 3 | 8 | 9 | 0 |
-| Total | 202 | 8 | 35 | 84 | 73 | 2 |
+| 0.14.1 | 2 | 0 | 0 | 0 | 2 | 0 |
+| 0.14.2 (relay setup fixes on `main` ahead of it) | 7 | 0 | 0 | 2 | 5 | 0 |
+| 0.14.3 (with relay 0.14.3; one relay setup fix on `main` ahead of it) | 30 | 0 | 0 | 9 | 20 | 1 |
+| Total | 241 | 8 | 35 | 95 | 100 | 3 |
 
 ### Verdict
 
@@ -91,7 +97,24 @@ bundle, and every signed build could open the identity key without a prompt
 history with the master key (HOL-SEC-188). A received sticker pack was unpacked with no
 size limit as soon as its card showed (HOL-SEC-205). All three are fixed in 0.14.
 
-We believe Hollow 0.14 keeps the promises in `audit/claims.md` as far as
+The three 0.14 patch releases fixed 39 more findings, none Critical or High. Eleven are
+Medium, 27 Low and one Info; 17 are class C, 16 class A and 6 class P. The largest group,
+14, came from building the phrase restore on the Welcome screen and reviewing the recovery
+code it reuses. A
+recovery could ask the person to approve the very device it had just cut off
+(HOL-SEC-229), could leave that device unaware of the cut when it was away (HOL-SEC-227),
+and on a server with no checkpoint could drop the members, bans and admissions the lost
+device had written (HOL-SEC-216, 221, 230 to 232). In the unreleased Welcome restore as
+first built, HOL-SEC-230 was High; it was fixed before that release. A member on another
+relay could grow a copy of a server the owner never saw (HOL-SEC-211), and a members-only
+relay whose key file did not read at start let everyone in (HOL-SEC-220). The metadata
+strip that cleans photos and videos before they are sent could be stalled, crashed or
+made to hold several times a file's size by a crafted file (HOL-SEC-267 to 269, 301 to
+303), and it left metadata, a GPS trace or a location among it, in a few kinds of file
+(HOL-SEC-304 to 309). The
+background push fetch lost frames it read but did not show (HOL-SEC-244, 249).
+
+We believe Hollow 0.14.3 keeps the promises in `audit/claims.md` as far as
 tests can show, with the residuals listed per finding and in section 6. This belief rests
 on an internal review, and the limits below are real.
 
@@ -114,6 +137,25 @@ on an internal review, and the limits below are real.
 - **The authorisation matrix is agent-built.** Its citations were checked mechanically
   (1,737 citations, none wrong) and the open rows and a sample of fixed rows were re-read
   by hand; the other rows are agent-verified, and the matrix says so.
+
+### What changed since the 0.14 edition
+
+- **39 new findings**, fixed in 0.14.1 (HOL-SEC-207, 208), 0.14.2 (211 to 214, 244, 248,
+  249) and 0.14.3 (215 to 232, 267 to 269, 301 to 309). They came from hostile reviews of
+  the patch tracks, the design and code reviews of the phrase restore and of the owner's
+  way back into owned servers after a recovery, fleet runs of the real apps, a test that
+  failed under load in the nightly suites, and reviews for the next release that reached
+  released code. They sit in sections 4 and 5, and the
+  totals above count them.
+- **The findings table lists every number.** A number whose fix has not shipped is listed
+  as reserved, with no detail, until the release that fixes it; numbers not handed out yet
+  are marked as not used yet (section 3.10).
+- **Hardening without a finding.** OS notifications on Android, macOS and Windows show only
+  an avatar Hollow decoded and encoded itself, so no system image decoder parses a peer's
+  file (240c634a, 560f04a3). The `url` crate moved to 2.5.9 for RUSTSEC-2026-0592
+  (e0715c15).
+- **Unchanged.** The accepted-risk register, the claims and the code-maturity ratings are as
+  at 0.14 (section 7).
 
 ### What changed since the 0.13 edition
 
@@ -243,6 +285,11 @@ group authentication is mistaken for authority over the object a message names.
   out (`audit/phase_ef/crdt.md`, `public_channels.md`, `backfill.md`), cargo-fuzz targets
   for the Rust wire parsers, a review of the dependency upgrades, and the requirements
   list (`audit/requirements.md`).
+- **The 0.14 patch releases** (2026-11-16 to 2026-11-24): a hostile review and one fix
+  round for every 0.14.1, 0.14.2 and 0.14.3 track, design and code reviews of the phrase
+  restore on the Welcome screen and of the owner's way back into owned servers after a
+  recovery, a review of the send-side metadata strip, and the reviews of the next
+  release's history sync work where they reached released code.
 
 ### 3.4 Severity
 
@@ -314,7 +361,10 @@ so a member back online refused it and never got the file. The third,
 cell it taps below the fold. Commit 45b462aa fixed the answer and added the scroll step to
 the scenario, and all three passed on the final tree. The macOS fix of HOL-SEC-187 was
 proven by hand on a notarized build, where the keychain move (check A), the password case
-and screen share all passed (section 5).
+and screen share all passed (section 5). Each 0.14 patch track ran the same way. On the
+final 0.14.3 release tree (commit 9911d87a) the full Rust suite passed 4,179 of 4,186 on
+the Windows PC (the other seven are the keystore tests), the Flutter suite passed 4,666,
+and the relay suites passed on the VPS, plain and sanitized.
 
 ### 3.9 Fuzzing
 
@@ -331,7 +381,8 @@ corpora into live nodes.
 
 ### 3.10 Finding numbers
 
-Findings are numbered in the order they were filed. HOL-SEC-166 to HOL-SEC-169 were never
+Findings are numbered as they are filed, and section 4 lists every number from 001 to the
+highest one released, 309, in order. HOL-SEC-166 to HOL-SEC-169 were never
 used. They fell in a range set aside during the review of the resumable relay sessions on
 2026-10-07, which filed HOL-SEC-164, 165 and 170 to 172. That review also drafted 173 and
 174 as duplicates of 164 and 165 and withdrew them before any finding file existed, so no
@@ -344,6 +395,13 @@ and was renumbered 202 before any file was written under either number. The host
 of the 0.14 relay code drafted numbers for findings in code that never shipped; those
 drafts were void and used no number.
 
+While work for 0.14.x and the next release ran side by side, numbers were handed out in
+blocks, so the numbers after 206 were not filed in order. From 2026-11-25 one shared
+counter hands out the lowest free number, so new findings fill the free numbers first:
+HOL-SEC-233 to 239 and 270 to 299, listed as not used yet. A number taken by a finding
+whose fix has not shipped is listed as reserved, with no detail. Its finding is added to
+this report, and its file published, with the release that fixes it.
+
 ### 3.11 Disclosure and the external audit
 
 Findings, fixes and the threat model stayed on local branches until the release that fixed
@@ -354,18 +412,23 @@ GHSA-rp8v-8rcw-gj6x, GHSA-3jhj-9w4q-rqjw) and two await CVE numbers. The eight C
 findings of this review are covered by seven draft advisories (HOL-SEC-001 and 006 share
 one). 0.13.0 shipped the fixes on 2026-10-30; the advisories publish once their CVE numbers
 are assigned. 0.14 ships the fixes for HOL-SEC-187 to 206, and their advisories publish
-with it. The `image-webp` panic behind HOL-SEC-173 was
+with it. For the findings fixed in 0.14.1 to 0.14.3, this report and their finding files
+serve as the advisories, and the same holds for later patch releases. The `image-webp` panic behind HOL-SEC-173 was
 reported upstream independently (image-rs/image-webp#182) and a fix waits in an open pull
 request; Hollow keeps decoding inside its panic guard until a fixed release ships. An external audit is planned, and
 this folder is written so that outside reviewers can start from it.
 
 ## 4. Findings table
 
-Status is Fixed for every finding. "Fixed in" names the first release that carries the
-fix, or the date a relay-only fix was deployed to the official relay; where the finding
-file names commits, they are given. The commits of 0.13 are on `main` since the 0.13.0
-release, and those of 0.14 since the 0.14 release. Where a 0.12.0 or 0.14 fix also changed
-the relay, the relay was deployed before the client release.
+The table lists every number from HOL-SEC-001 to HOL-SEC-309 in order. Status is Fixed for
+every finding reported here; a number whose fix has not shipped reads Reserved and carries
+no detail, and numbers never handed out read Not used, or Not used yet where a future
+finding may take them (section 3.10). "Fixed in" names the first release that carries the
+fix, or the date a relay-only fix was deployed to the official relay, or for the relay
+setup the date its fix reached `main`, from where self-hosters install; where the finding
+file names commits, they are given. Each release's commits are on `main` since that
+release. Where a 0.12.0 or 0.14 fix also changed the relay, the relay was deployed before
+the client release.
 
 | ID | Title | Severity | Class | Status | Fixed in |
 |---------|------------------------------|--------|----|------|--------|
@@ -534,6 +597,7 @@ the relay, the relay was deployed before the client release.
 | HOL-SEC-163 | Saving a received file on iOS let its sender's name replace any file in the app's sandbox | Medium | C | Fixed | 0.12.1 |
 | HOL-SEC-164 | One small frame made the relay walk every room a session holds | High | A | Fixed | 0.12.1 (relay) |
 | HOL-SEC-165 | A client could grow the relay's ack timer queue by one entry per heartbeat | Low | A | Fixed | 0.12.1 (relay) |
+| HOL-SEC-166 to 169 | Not used | | | | |
 | HOL-SEC-170 | Receivers that never ack could make the relay drop other people's waiting messages | Medium | A | Fixed | 0.12.1 (relay) |
 | HOL-SEC-171 | Session bounds walked whole tables on hot paths, so full rings or a full table could stall the relay | Medium | A | Fixed | 0.12.1 (relay) |
 | HOL-SEC-172 | A device coming back to a full address could lose its own session to its own login | Low | A | Fixed | 0.12.1 (relay) |
@@ -571,6 +635,74 @@ the relay, the relay was deployed before the client release.
 | HOL-SEC-204 | A self-hosted install's background push fetch dialled the official relay | Medium | P | Fixed | 0.14 (5965e6b9) |
 | HOL-SEC-205 | A received sticker pack was unpacked with no size limit as soon as its card showed | High | A | Fixed | 0.14 (89d3a85d) |
 | HOL-SEC-206 | Importing a shards bundle could replace a vault file's key or store shards no manifest names | Medium | C | Fixed | 0.14 (89d3a85d) |
+| HOL-SEC-207 | A member could re-admit someone who left, on a spare ask from before their second leave | Low | C | Fixed | 0.14.1 (82090231) |
+| HOL-SEC-208 | Linux desktop toasts handed a peer's words to the notification server as markup | Low | C | Fixed | 0.14.1 (250ae212) |
+| HOL-SEC-209 | Reserved: details are published with the release that fixes it | | | Reserved | |
+| HOL-SEC-210 | Reserved: details are published with the release that fixes it | | | Reserved | |
+| HOL-SEC-211 | A member on another relay could grow an island of the server the owner never sees | Medium | C | Fixed | 0.14.2 (f0b54bf3) |
+| HOL-SEC-212 | The relay host check passed every sudo rule on a host set to another language | Low | C | Fixed | Relay setup, 2026-11-20, in 0.14.2 (5ebafeac) |
+| HOL-SEC-213 | The TURN port check could take a local program for coturn by its name | Low | C | Fixed | Relay setup, 2026-11-20, in 0.14.2 (5ebafeac) |
+| HOL-SEC-214 | A self-hosted relay kept its old public address in TURN after the address changed | Low | C | Fixed | Relay setup, 2026-11-21, in 0.14.2 (d48ec870, f924f4a5, 5765b584) |
+| HOL-SEC-215 | A device the recovery phrase added raised no warning on the identity's other devices | Low | C | Fixed | 0.14.3 (7fa286cc) |
+| HOL-SEC-216 | A device that first held a server after the moment of loss settled it from its own records | Medium | A | Fixed | 0.14.3 (edfce376) |
+| HOL-SEC-217 | A phrase restore beside its own database kept the old device's Olm account | Low | C | Fixed | 0.14.3 (7fa286cc) |
+| HOL-SEC-218 | A phrase admission dated before the identity's current base counted nowhere | Low | A | Fixed | 0.14.3 (7fa286cc) |
+| HOL-SEC-219 | A removed access key left the fetch and guest connections it let in open | Low | C | Fixed | Relay 0.14.3 (774d75fc) |
+| HOL-SEC-220 | A members-only relay whose keys.json did not read at boot ran open | Medium | C | Fixed | Relay 0.14.3 (5e153b1f) |
+| HOL-SEC-221 | A settling dropped the founding op of a server the lost device founded | Low | A | Fixed | 0.14.3 (84a80693) |
+| HOL-SEC-222 | A removed device could found a held server a second time | Low | C | Fixed | 0.14.3 (12fbcc06, 3e10e724) |
+| HOL-SEC-223 | A "not sure" settling undid the owner's home relay | Low | A | Fixed | 0.14.3 (db4a011d) |
+| HOL-SEC-224 | A variant at an endorsed op's key read as endorsed | Low | C | Fixed | 0.14.3 (3ec9eb23) |
+| HOL-SEC-225 | A floor mark named the op held at its base's key | Low | A | Fixed | 0.14.3 (0a6e396a) |
+| HOL-SEC-226 | The relay setup read OpenSSH 10.5's password logins as off | Low | C | Fixed | Relay setup, 2026-11-22, in 0.14.3 (6694bc35) |
+| HOL-SEC-227 | A device away at an in-app phrase recovery never learned it | Medium | C | Fixed | 0.14.3 (556dbcc5, 0d028ac7) |
+| HOL-SEC-228 | A carry to our own devices could miss one that left before delivery | Low | A | Fixed | 0.14.3 (81e9e3bf, b8b2595a) |
+| HOL-SEC-229 | A recovery asked the person to approve the device it had just cut off | Medium | C | Fixed | 0.14.3 (447cfab4, f75f41bb, 611b3979) |
+| HOL-SEC-230 | A recovery on a server with no checkpoint dropped every member its lost device admitted | Medium | A | Fixed | 0.14.3 (854a1d6c, 5c166763, 7be90a60) |
+| HOL-SEC-231 | A recovery that dropped a moderator's device undid its moderation in the owner's fold | Medium | C | Fixed | 0.14.3 (5c166763) |
+| HOL-SEC-232 | A recovery stored while the node was down opened no hold at the next start | Medium | A | Fixed | 0.14.3 (5c166763) |
+| HOL-SEC-233 to 239 | Not used yet | | | | |
+| HOL-SEC-240 | Reserved: details are published with the release that fixes it | | | Reserved | |
+| HOL-SEC-241 | Reserved: details are published with the release that fixes it | | | Reserved | |
+| HOL-SEC-242 | Reserved: details are published with the release that fixes it | | | Reserved | |
+| HOL-SEC-243 | Reserved: details are published with the release that fixes it | | | Reserved | |
+| HOL-SEC-244 | A push fetch spent every frame it does not show | Medium | A | Fixed | 0.14.2 (fad4026e, ba51b966) |
+| HOL-SEC-245 | Reserved: details are published with the release that fixes it | | | Reserved | |
+| HOL-SEC-246 | Reserved: details are published with the release that fixes it | | | Reserved | |
+| HOL-SEC-247 | Reserved: details are published with the release that fixes it | | | Reserved | |
+| HOL-SEC-248 | A removed device could end a friendship | Low | C | Fixed | 0.14.2 (12cea33b) |
+| HOL-SEC-249 | A channel push wake spent the keys of group messages it did not show | Low | A | Fixed | 0.14.2 (b2225d7e) |
+| HOL-SEC-250 | Reserved: details are published with the release that fixes it | | | Reserved | |
+| HOL-SEC-251 | Reserved: details are published with the release that fixes it | | | Reserved | |
+| HOL-SEC-252 | Reserved: details are published with the release that fixes it | | | Reserved | |
+| HOL-SEC-253 | Reserved: details are published with the release that fixes it | | | Reserved | |
+| HOL-SEC-254 | Reserved: details are published with the release that fixes it | | | Reserved | |
+| HOL-SEC-255 | Reserved: details are published with the release that fixes it | | | Reserved | |
+| HOL-SEC-256 | Reserved: details are published with the release that fixes it | | | Reserved | |
+| HOL-SEC-257 | Reserved: details are published with the release that fixes it | | | Reserved | |
+| HOL-SEC-258 | Reserved: details are published with the release that fixes it | | | Reserved | |
+| HOL-SEC-259 | Reserved: details are published with the release that fixes it | | | Reserved | |
+| HOL-SEC-260 | Reserved: details are published with the release that fixes it | | | Reserved | |
+| HOL-SEC-261 | Reserved: details are published with the release that fixes it | | | Reserved | |
+| HOL-SEC-262 | Reserved: details are published with the release that fixes it | | | Reserved | |
+| HOL-SEC-263 | Reserved: details are published with the release that fixes it | | | Reserved | |
+| HOL-SEC-264 | Reserved: details are published with the release that fixes it | | | Reserved | |
+| HOL-SEC-265 | Reserved: details are published with the release that fixes it | | | Reserved | |
+| HOL-SEC-266 | Reserved: details are published with the release that fixes it | | | Reserved | |
+| HOL-SEC-267 | The GIF metadata strip panicked on a kept block cut short | Low | A | Fixed | 0.14.3 (ef8fd4e6) |
+| HOL-SEC-268 | The AVI metadata strip recursed without a bound | Medium | A | Fixed | 0.14.3 (ef8fd4e6) |
+| HOL-SEC-269 | Crafted MP4 and HEIF tables made the metadata strip run for hours | Low | A | Fixed | 0.14.3 (ef8fd4e6, 73f9d9e0) |
+| HOL-SEC-270 to 299 | Not used yet | | | | |
+| HOL-SEC-300 | Reserved: details are published with the release that fixes it | | | Reserved | |
+| HOL-SEC-301 | A WebP of many EXIF chunks made the metadata strip run for hours | Low | A | Fixed | 0.14.3 (d2cd7ae4) |
+| HOL-SEC-302 | The metadata strip held about 24 bytes for every sample of a GPS track | Low | A | Fixed | 0.14.3 (d2cd7ae4, 73f9d9e0) |
+| HOL-SEC-303 | The metadata strip's box lists held five times the file | Low | A | Fixed | 0.14.3 (73f9d9e0) |
+| HOL-SEC-304 | A GIF cut inside its header was sent without its metadata removed | Info | P | Fixed | 0.14.3 (73f9d9e0) |
+| HOL-SEC-305 | A fragmented video sent its GPS track's samples untouched | Medium | P | Fixed | 0.14.3 (68355747, 539f05d5) |
+| HOL-SEC-306 | Some places a file keeps a location were never visited by the metadata strip | Low | P | Fixed | 0.14.3 (68355747, 539f05d5) |
+| HOL-SEC-307 | A HEIF-branded file never had its movie walked | Low | P | Fixed | 0.14.3 (68355747) |
+| HOL-SEC-308 | A HEIC motion photo's clip kept its location | Low | P | Fixed | 0.14.3 (c8337ce1) |
+| HOL-SEC-309 | Samsung's `sefd` box kept the capture time and country code | Low | P | Fixed | 0.14.3 (5126de3e) |
 
 ## 5. Findings
 
@@ -3142,12 +3274,558 @@ One section per finding, condensed from its file in `reports/shipped/security/au
 
 **Test.** `a_bundle_for_a_server_we_do_not_hold_stores_nothing`, `a_bundle_never_replaces_a_held_vault_manifest`, `a_bundle_shard_that_does_not_hash_to_its_manifest_is_not_stored`, `a_bundle_manifest_is_judged_like_a_live_one`, `an_ex_members_bundle_restores_only_the_shards_of_manifests_it_holds`.
 
+### HOL-SEC-207: A member could re-admit someone who left, on a spare ask from before their second leave
+
+**Severity:** Low (Impact L, Exploitability L). **Class:** C. **Fixed in:** 0.14.1 (82090231). **Affected:** 0.14.0.
+
+**Impact.** A former member was listed as a member again against their will, so members' messages reached their devices until someone removed them. It needed a member with a modified client, a joiner whose clock ran ahead and a spare copy of an earlier rejoin ask.
+
+**Description.** A rejoin's ask is stamped just after the joiner's own last leave, which can sit ahead of the wall clock. The live gate counted that stamp only when the request named the leave it follows, but the fold had no such rule, and the leave was not signed into the ask. A spare ask from an earlier rejoin could so re-open a membership in the fold after a second leave, whenever a member wrote an admission with it.
+
+**Fix.** A rejoin ask whose stamp leads the joiner's wall clock signs the leave it follows and the time it was made (`hollow-join-ask3`), and the fold refuses an admission whose ask names a leave older than the one that closed the joiner's last membership. Every other ask signs the 0.14.0 bytes, so 0.14.0 members still read it.
+
+**Residual.** Asks signed without that field stay under the 0.14.0 rule. A spare of a first join's ask made before a kick can still open a membership when a member writes the admission; closing that needs a fold change 0.14.0 replicas would not share, planned for 0.15.
+
+**Test.** `a_spare_reask_folds_out_after_a_second_leave`, `a_rejoin_ask_binds_the_leave_it_follows`, `a_rejoin_without_a_clock_lead_signs_the_0140_ask`; harness `t15_a_member_readmits_no_leaver_on_a_spare_ask`.
+
+### HOL-SEC-208: Linux desktop toasts handed a peer's words to the notification server as markup
+
+**Severity:** Low (Impact L, Exploitability M). **Class:** C. **Fixed in:** 0.14.1 (250ae212). **Affected:** every Linux build with desktop toasts through 0.14.0.
+
+**Impact.** A friend's or co-member's message or display name showed as formatting inside a system notification headed by Hollow, and on servers that allow them as a link or a local image. A NUL in the text closed Hollow's connection to the bus, so that toast was lost and GNOME took back the earlier ones.
+
+**Description.** The toast body was a peer's message preview, passed to the notification server as it was. The notification spec lets a server read the body as markup when it says so, and GNOME and KDE Plasma do.
+
+**Fix.** Hollow asks the server what it supports once per connection and escapes the body for a server that reads markup. The summary is never read as markup, and no string with a NUL reaches the bus. A server's error reply or a slow answer no longer replaces the connection.
+
+**Residual.** None known.
+
+**Test.** `test/linux_notifier_test.dart` "a markup server gets peer markup as literal text", "a plain-text server gets the body as typed", "no string reaches the bus with a U+0000 in it"; a probe on a real bus.
+
+### HOL-SEC-211: A member on another relay could grow an island of the server the owner never sees
+
+**Severity:** Medium (Impact M, Exploitability M). **Class:** C. **Fixed in:** 0.14.2 (f0b54bf3). **Affected:** every release with the join lock, 0.12.0 through 0.14.1 (issue #151).
+
+**Impact.** People the owner never admitted, and could not see or remove, read and posted in a copy of the server with real members, and their admission reached the owner's own copy once the member came back.
+
+**Description.** Nothing bound a server to a relay. A member who switched relays kept the server and put its join lock on the new relay, which any socket that shows the owner's roster can arrange, and an attacker's own relay need not check at all. The member's invites then admitted people there, seated them in the encryption group and talked with them, while the owner on the server's real relay saw none of it.
+
+**Fix.** A server names its home relay in an owner-signed setting, read only when the anchor owner's own op wrote it. A new server names its owner's relay at creation; an older one gets it from its owner's device once. A device whose relay is not the server's home sends nothing for that server through that relay (no room join, lock, answer, Welcome, commit, ring write or file), and the app shows the server read-only with one notice and the relay switch dialog. Invites stamp the home relay.
+
+**Residual.** A member with a modified client, or one still on 0.14.1, can still admit people on another relay. Those admissions reach the owner's copy when that member returns and are judged like any member's admission; the owner's answer is to remove them.
+
+**Test.** Harness `i151_a_member_on_another_relay_serves_nothing_for_the_server`, `i151_a_joiner_answered_on_another_relay_stops_at_the_home_it_learns`, `i151_only_the_owner_names_the_home_relay`, `i151_the_owner_names_a_missing_home_and_servers_follow_the_owner`; unit `op_allowed_ingest_matrix` (home relay rows).
+
+### HOL-SEC-212: The relay host check passed every sudo rule on a host set to another language
+
+**Severity:** Low (Impact M, Exploitability L). **Class:** C. **Fixed in:** the relay setup, on 2026-11-20 and in 0.14.2 (5ebafeac). **Affected:** every relay setup since the service-account check.
+
+**Impact.** On a host whose locale is not English, a service account that may become root was reported as one that cannot. The check only reports; it never grants anything.
+
+**Description.** The check looked for the English words "may run" in `sudo -l`, which sudo translates, and an answer it could not read at all also passed.
+
+**Fix.** Both sudo calls run in the C locale, and any answer without one of the two known lines fails as unreadable.
+
+**Residual.** None known.
+
+**Test.** `host_check_tests.sh` "sudo is asked in the C locale"; the unreadable-output cases in `sudo_matrix_tests.sh`.
+
+### HOL-SEC-213: The TURN port check could take a local program for coturn by its name
+
+**Severity:** Low (Impact L, Exploitability L). **Class:** C. **Fixed in:** the relay setup, on 2026-11-20 and in 0.14.2 (5ebafeac). **Affected:** every relay setup since the stray-listener check.
+
+**Impact.** A local program listening inside the TURN port range passed as coturn, so the check said ok while TURN could reach it. The firewall rule itself did not change.
+
+**Description.** The check read each listener's owner from the first `pid=` on its `ss -p` line, after the program's own name, which a local program chooses.
+
+**Fix.** The pid is read from the end of the line, which the name cannot reach; a line in any other shape counts as a stray listener.
+
+**Residual.** None known.
+
+**Test.** `test_turn_port_lock.sh` `a_listeners_own_name_cannot_pass_for_coturn` and its box twin.
+
+### HOL-SEC-214: A self-hosted relay kept its old public address in TURN after the address changed
+
+**Severity:** Low (Impact L, Exploitability L). **Class:** C. **Fixed in:** the relay setup, on 2026-11-21 and in 0.14.2 (d48ec870, f924f4a5, 5765b584). **Affected:** every relay set up with a DuckDNS name or its own domain, through 0.14.1.
+
+**Impact.** A relay's TURN server could still send UDP to the high ports of an address that was no longer the operator's, and calls through TURN and the forwarder failed until someone ran the setup again.
+
+**Description.** The setup wrote the machine's public address once, at install, into coturn's settings, the TURN port lock and the media forwarder. A home relay on a dynamic address kept its name current through dynamic DNS, so chat followed a new address while TURN and the forwarder did not, and the old address stayed an allowed TURN peer.
+
+**Fix.** An address follower runs every five minutes for relays with a name, and asks only this machine's own DNS, never a third party. It takes a new address only once it is proven to be this machine, and never a private one. The proof is an address on one of its interfaces, or a TLS handshake there that completes with the relay's own key and, with TURN on, a TURN answer signed with the relay's TURN secret. It rewrites the three places together, keeps the old peer locked until coturn has restarted on the new one, and drops an old address only after half an hour of agreeing evidence. `check-host.sh` names any file whose address the name does not point at.
+
+**Residual.** Behind a router without NAT loopback, a changed address waits for the operator to confirm it; a name answered with a LAN address freezes the follower; a forwarder-only relay moves only to an address one of its interfaces holds. `SELF_HOSTING.md` lists these.
+
+**Test.** `address_follow_box_test.sh` in Ubuntu 24.04 and Debian 12 boxes, among them `a_proven_change_rewrites_all_three_and_drops_the_old_peer`, `an_impostor_address_rewrites_nothing`, `a_passthrough_proxy_for_443_alone_is_not_taken`, `a_private_address_is_never_taken` and `the_lock_holds_old_and_new_peers_while_coturn_restarts`.
+
+### HOL-SEC-215: A device the recovery phrase added raised no warning on the identity's other devices
+
+**Severity:** Low (Impact L, Exploitability L). **Class:** C. **Fixed in:** 0.14.3 (7fa286cc). **Affected:** 0.12.0 through 0.14.2.
+
+**Impact.** The person learned of a device added with the recovery phrase only from the device list or a contact's warning. Adding one needs the phrase, which already is the identity.
+
+**Description.** The identity's other devices recorded "a device was added" only for a device a sibling vouched for. A device the phrase admitted, or one a phrase recovery kept, became a member with no alert anywhere.
+
+**Fix.** A device newly counted whose root is a phrase admission or a recovery's keep set raises the alert on the other devices, saying it was added with the recovery phrase. The device itself and upgrade admissions raise nothing.
+
+**Residual.** None known.
+
+**Test.** `a_device_the_phrase_admits_alerts_our_other_devices`, `a_device_a_recovery_keeps_alerts_our_other_devices`, `the_device_the_phrase_admitted_alerts_nothing_about_itself`; harness `pr_the_phrase_alert_reaches_a_sibling_that_was_hidden`.
+
+### HOL-SEC-216: A device that first held a server after the moment of loss settled it from its own records
+
+**Severity:** Medium (Impact H, Exploitability M). **Class:** A. **Fixed in:** 0.14.3 (edfce376). **Affected:** 0.14.0 through 0.14.2.
+
+**Impact.** What a lost device did in a server before the person lost it stopped counting: renames, channels, roles and admissions. It followed an honest removal or recovery typed on a device newer than that moment, which a Welcome phrase restore makes common.
+
+**Description.** A lost-device removal, or a phrase recovery, settles each server from the remover's own records from before the moment the person names. The settling never checked that the remover held the server before that moment. A device that first held it later had no restore point from before it, so an owned server settled back to its founding state and a member server got a retire that kept none of the lost device's ops.
+
+**Fix.** A server is settled only where this device held it before the moment named. An owned server it did not hold then goes to the members, whose records restore it; a member server gets no retire from this device. "Longer ago, or not sure" takes each server's oldest restore point held here.
+
+**Residual.** An owned server the members restore keeps only what a checkpoint from before the moment holds, until the person picks a point.
+
+**Test.** `pr216_a_device_that_held_nothing_before_t_keeps_what_the_lost_device_did_before_t`, `pr216_a_recovery_typed_on_a_device_that_joined_after_t_settles_nothing_and_asks_the_witnesses`, `pr216_a_member_server_first_held_after_t_gets_no_retire_from_the_remover`, `held_before_judges_against_t_not_the_recovery`.
+
+### HOL-SEC-217: A phrase restore beside its own database kept the old device's Olm account
+
+**Severity:** Low (Impact M, Exploitability L). **Class:** C. **Fixed in:** 0.14.3 (7fa286cc). **Affected:** 0.12.0 through 0.14.2.
+
+**Impact.** Two devices encrypted from the same Olm chains, so they reused message keys where the relay sees the ciphertext, and shared one-time keys. It needed the original device still running beside a restored copy of its data.
+
+**Description.** A phrase restore that kept the identity's database minted a new device but took the old device's Olm account and sessions as its own. The same code overwrote the device key when only the master key file was lost, so the old device stayed counted with no key anywhere.
+
+**Fix.** The restore keeps the old device only when its key opens here, it is not the master, the roster counts it and the database's MLS credential names it; a recovery never keeps it. Every other restore drops the old device's Olm account, sessions, read marks, nonces and MLS rows first (history stays) and writes the new device key last.
+
+**Residual.** None known.
+
+**Test.** `a_restore_that_mints_a_device_beside_its_own_database_starts_a_fresh_olm_account`, `a_restore_over_a_lost_key_file_keeps_its_counted_device`, `a_restore_never_keeps_a_device_its_roster_does_not_count`, `a_recovery_restore_always_mints_a_device`.
+
+### HOL-SEC-218: A phrase admission dated before the identity's current base counted nowhere
+
+**Severity:** Low (Impact L, Exploitability L). **Class:** A. **Fixed in:** 0.14.3 (7fa286cc). **Affected:** 0.12.0 through 0.14.2.
+
+**Impact.** A restored device was cut off from contacts and the relay while it believed it belonged, and the lock then named the wrong cause.
+
+**Description.** A phrase admission counts only when it is dated after the identity's current base. The restore dated it by the machine's clock alone, so a clock behind, or a base signed by a device a few minutes ahead, left the new device uncounted.
+
+**Fix.** The restore dates its statement after the newest one the device holds, as the in-app phrase paths do. A device whose admission the base outdated is told to type its phrase again, which signs a statement dated after that base.
+
+**Residual.** None known.
+
+**Test.** `an_admission_dated_before_the_current_base_never_roots`, `a_restore_beside_a_held_roster_dates_its_admission_after_its_newest_statement`, `roster_status_says_too_early_for_an_admission_the_base_outdated`; harness `pr218_a_restore_on_a_clock_behind_asks_for_the_phrase_again_and_then_counts`.
+
+### HOL-SEC-219: A removed access key left the fetch and guest connections it let in open
+
+**Severity:** Low (Impact L, Exploitability L). **Class:** C. **Fixed in:** relay 0.14.3 (774d75fc). **Affected:** every relay with access keys, through 0.14.2.
+
+**Impact.** A person whose access key the operator removed kept a background fetch or a guest view on a members-only relay until that connection closed by itself.
+
+**Description.** A reload that removed a key closed the key's connections by looking them up among full connections only, so the fetch and guest connections the same key let in were never found.
+
+**Fix.** A seat belongs to the connection that took it, so a removed key closes every connection it let in, of any kind, and admits nobody afterwards. The close handler gives every seat back, whatever ended the connection.
+
+**Residual.** None known.
+
+**Test.** Relay live `license_revoked_key_closes_every_socket`, `license_every_path_back_to_zero`; relay unit `test_license_pool`.
+
+### HOL-SEC-220: A members-only relay whose keys.json did not read at boot ran open
+
+**Severity:** Medium (Impact M, Exploitability L). **Class:** C. **Fixed in:** relay 0.14.3 (5e153b1f). **Affected:** every relay with access keys, through 0.14.2.
+
+**Impact.** Anyone could use a relay its operator had limited to key holders, and stayed connected after the file was fixed. It needed the operator's `keys.json` to be unreadable at start, by a typo or the wrong permissions.
+
+**Description.** A `keys.json` that was there but did not read at start left the access-key gate off. Once the operator fixed it, the reload closed only connections holding a seat of a removed key; those let in while the gate was off held none, so they stayed, as did their sessions waiting to resume.
+
+**Fix.** A key file that does not read at start refuses every login with an answer clients retry, until a reload reads it. A reload that turns the gate on closes every connection the open gate let in and ends the waiting sessions it no longer admits; one that turns it off closes nobody. `check-host.sh` fails while the relay cannot read its key file.
+
+**Residual.** None known.
+
+**Test.** Relay unit `test_license_pool` ("an unread keys file refuses every login, with a key or without"); live `test_license_unread`, `license_gate_on_ends_the_keyless`, `license_gate_off_kicks_nobody`, `test_license_grace`; `run_live.sh` "--check-keys fails only a keys file that does not read".
+
+### HOL-SEC-221: A settling dropped the founding op of a server the lost device founded
+
+**Severity:** Low (Impact M, Exploitability L). **Class:** A. **Fixed in:** 0.14.3 (84a80693). **Affected:** 0.14.0 through 0.14.2.
+
+**Impact.** A lost-device removal or a phrase recovery left such a server unsettled, so what only a settling undoes, such as a checkpoint the lost device signed after it was lost, could stay in force. No attacker was needed.
+
+**Description.** A settling counts a dropped device's op only when this device stored it before the moment named. A server's founding op is one of its founder's ops, so on a server the lost device founded it dropped whenever it was stored at or after that moment, which "not sure" always gives. Without it the settling had nothing to fold from and was never written.
+
+**Fix.** The settling keeps the founding op the fold founds on, whoever wrote it and whenever it was stored here, and folds no other founding op. Every other op of the lost founder stored after the moment still drops, as the design intends for a vague answer.
+
+**Residual.** None known. By decision, a "not sure" settling of a server the lost device founded, with no restore point before the moment, undoes everything that device did there.
+
+**Test.** `a_not_sure_settling_stands_on_the_founding_op_the_lost_device_wrote`, `a_settling_stands_on_the_founding_op_the_fold_chose_whenever_stored`, `a_settling_folds_no_founding_op_but_the_stand`; harness `pr216_a_not_sure_recovery_dropping_the_founding_device_settles_its_server`.
+
+### HOL-SEC-222: A removed device could found a held server a second time
+
+**Severity:** Low (Impact M, Exploitability L). **Class:** C. **Fixed in:** 0.14.3 (12fbcc06, 3e10e724). **Affected:** 0.14.0 through 0.14.2.
+
+**Impact.** A device the roster removed could rewrite a server's founding op, its name and founding clock included, on every replica that folds the server from the start. It needed the master key a lost or stolen device holds.
+
+**Description.** Past a server's cut only ops from counted devices fold, but the founding op is exempt, since it anchors the server whichever device wrote it. The exemption covered every founding op, not only the one a replica held, so a removed device could sign another of the same id with any name and clock, and a replica folding from the start took the one with the lowest clock.
+
+**Fix.** A replica founds each server on one founding op, chosen only from the ops it holds and its view of the owner's roster, never by arrival order: a counted device's first, then a listed device's, then the earliest clock, then the content id. A later one is refuted by an earlier counted op of the owner. The same choice runs at ingest, in every rebuild and in the settling.
+
+**Residual.** While the founding device is uncounted and no retire endorses the real op, a second founding op it signs differs in nothing a replica can weigh, so the earlier clock founds and the founding name can change where nothing renamed the server since. For new servers, a founding nonce that also commits to the clock and the name is planned.
+
+**Test.** `a_second_founding_op_from_a_removed_device_founds_nothing`, `two_replicas_with_the_same_founding_ops_found_the_same_server`, `a_later_founding_op_is_refuted_by_an_earlier_counted_op_of_the_owner`, `only_a_counted_op_of_the_owner_refutes_a_founding_op`; harness `pr222_a_lost_founders_second_founding_op_changes_only_the_founding_name`.
+
+### HOL-SEC-223: A "not sure" settling undid the owner's home relay
+
+**Severity:** Low (Impact L, Exploitability L). **Class:** A. **Fixed in:** 0.14.3 (db4a011d). **Affected:** 0.14.2.
+
+**Impact.** For a short time the server named no home relay, so HOL-SEC-211's rule was off there and a member on another relay was not told the server lives elsewhere.
+
+**Description.** The owner's device that creates a server names its home relay at once, so on a server the lost device founded the home op was that device's too, and a "not sure" settling dropped it with the rest until an owner device named it again.
+
+**Fix.** The settling keeps the owner's op naming the relay this device dials as the home, whoever wrote it. A home op naming another relay keeps the ordinary rule.
+
+**Residual.** None known.
+
+**Test.** Unit `a_settling_keeps_only_the_home_op_naming_the_relay_this_device_dials`; harness `pr222_a_not_sure_settling_keeps_the_home_relay`.
+
+### HOL-SEC-224: A variant at an endorsed op's key read as endorsed
+
+**Severity:** Low (Impact L, Exploitability L). **Class:** C. **Fixed in:** 0.14.3 (3ec9eb23). **Affected:** 0.14.0 through 0.14.2.
+
+**Impact.** One op a retire kept for a removed device dropped out of the server's history. It needed the removed device's key and its identity's master key.
+
+**Description.** A retire names each op of a removed device it keeps by author, clock and content id. The check compared that id with the id of the op held at the same author and clock, not of the op being judged, so a variant at that key signed by the same removed device read as endorsed and could take the endorsed op's place.
+
+**Fix.** The check compares the retire's content id with the judged op's own content id.
+
+**Residual.** None known.
+
+**Test.** `crdt::verdict::tests::a_variant_at_an_endorsed_ops_key_is_not_endorsed`.
+
+### HOL-SEC-225: A floor mark named the op held at its base's key
+
+**Severity:** Low (Impact L, Exploitability L). **Class:** A. **Fixed in:** 0.14.3 (0a6e396a). **Affected:** 0.14.0 through 0.14.2.
+
+**Impact.** During an owner's recovery a member's floor mark could name the wrong checkpoint or fall back to its stale base, so the floor it held was older or missing. It needed the dropped owner device's key and the master key to sign a variant at a checkpoint's clock.
+
+**Description.** The same mix-up as HOL-SEC-224 sat in three paths of the floor round, which took the content id of the op held at a checkpoint's key instead of the checkpoint's own.
+
+**Fix.** The three paths use the op's own content id.
+
+**Residual.** None known.
+
+**Test.** `crdt::hold::tests::a_floor_pick_matches_an_answered_checkpoint_by_its_own_content`, `a_floor_mark_after_restart_names_the_recorded_base_by_its_own_content`.
+
+### HOL-SEC-226: The relay setup read OpenSSH 10.5's password logins as off
+
+**Severity:** Low (Impact L, Exploitability L). **Class:** C. **Fixed in:** the relay setup, on 2026-11-22 and in 0.14.3 (6694bc35). **Affected:** every relay setup on OpenSSH 10.5 or newer (Ubuntu 26.10), through 0.14.2.
+
+**Impact.** The setup and `check-host.sh` reported SSH password logins as off while sshd took them, so the advice to turn them off never showed. Nothing was opened.
+
+**Description.** OpenSSH 10.5 prints the keywords of `sshd -T` in mixed case, where every earlier release printed them in lower case. No line matched, and an answer that named nothing counted as "password logins off". The root login check also passed when sshd printed nothing.
+
+**Fix.** Every reader lowers the keywords and fails when sshd cannot answer, so the state is unknown, never off; root's login passes only for a value sshd printed and the check knows to be safe.
+
+**Residual.** None known.
+
+**Test.** `run_tests.sh` `t_ssh_ports` (`sshd_settings_read_in_any_case`, an OpenSSH 10.5 fixture), `host_check_tests.sh` `t_host_ssh` (`an_sshd_that_cannot_say_fails_closed`), `systemd_box_test.sh`.
+
+### HOL-SEC-227: A device away at an in-app phrase recovery never learned it
+
+**Severity:** Medium (Impact M, Exploitability L). **Class:** C. **Fixed in:** 0.14.3 (556dbcc5, 0d028ac7). **Affected:** 0.14.0 through 0.14.2.
+
+**Impact.** A lost or stolen device the person recovered the identity from kept running unlocked and never started its erase, although contacts and the relay that held the recovery already refused what it sent. It needed that device to be offline past its relay session's grace when the recovery ran.
+
+**Description.** A recovery typed into the app starts a new base that leaves out every device the person did not keep. A left-out device that was offline missed the live notice, and the hand-off on its return told only devices a removal named, which a recovery does not.
+
+**Fix.** In the identity's own room, a device the roster does not count is handed the roster when it appears, so it learns it was left out. The hand-off is bounded, since anyone with the master key can mint device ids: once per roster revision per device, and at most eight rosters a minute.
+
+**Residual.** None known.
+
+**Test.** Harness `hol_sec_227_an_inapp_recovery_reaches_a_device_away_past_its_grace_on_return`, `pr_b_old_devices_learn_a_welcome_recovery_online_and_on_their_return`, `pr_b_the_own_room_hand_off_skips_another_identitys_device`, `pr_b_the_own_room_hand_off_is_bounded_for_fresh_and_churning_ids`.
+
+### HOL-SEC-228: A carry to our own devices could miss one that left before delivery
+
+**Severity:** Low (Impact L, Exploitability L). **Class:** A. **Fixed in:** 0.14.3 (81e9e3bf, b8b2595a). **Affected:** 0.14.0 through 0.14.2 for the age gate; removal and leave ops since 0.12.1.
+
+**Impact.** A phone kept showing age-restricted servers after a computer of the identity turned them off, or kept a server we had left, until the two devices next met. No attacker was involved.
+
+**Description.** A change sent to every device of our own identity picked a present device's room only when it was delivered. If that device's last room leave landed in between, the change waited in the sender's memory and was lost when the sender went offline first.
+
+**Fix.** The route is fixed when the change is sent, pinned to a room the device rejoins on every connect (our own room, else our inbox), so the relay holds it for the device's return.
+
+**Residual.** None known.
+
+**Test.** Unit `olm_lane::tests::an_own_device_that_leaves_before_delivery_still_gets_the_carry`; harness `agegate_an_off_delivered_after_the_phone_left_still_reaches_it`, `md_a_hidden_sibling_drops_a_server_we_leave_at_once`, `mock_relay_drops_the_directs_the_relay_drops`.
+
+### HOL-SEC-229: A recovery asked the person to approve the device it had just cut off
+
+**Severity:** Medium (Impact M, Exploitability M). **Class:** C. **Fixed in:** 0.14.3 (447cfab4, f75f41bb, 611b3979). **Affected:** the in-app phrase recovery, 0.12.0 through 0.14.2.
+
+**Impact.** One tap re-admitted a device the person had just said someone else may hold, and the prompt called it a restored backup of theirs.
+
+**Description.** A device a phrase recovery cuts off learns it and, since anyone with the master key may ask to join, asks again at once. The recovered device then showed the pop-up a restored backup gets, on every start, and the device list offered Approve beside it.
+
+**Fix.** Each device records which devices a recovery cut off, inside the roster fold's own transaction, and marks the base, so a device that asks to join later is treated as possibly one of them. No such device is offered as a backup or in a pop-up; the device list names it for what it is. It can be let back in only by a deliberate act on its row, after a confirmation, or by typing the phrase on that device. Who counts does not change.
+
+**Residual.** The record is local. A device that joins the identity after the recovery has it only through its link snapshot, and a device that never held the earlier base treats askers as backups.
+
+**Test.** Harness `pr_c_a_recovered_device_is_not_prompted_to_approve_the_device_it_cut_off`, `pr_c_an_inapp_recovery_is_not_prompted_to_approve_the_device_it_cut_off`; unit `roster_book::tests::a_recovery_records_the_devices_it_cut_off`, `rev229_a_fresh_key_after_a_lost_recovery_is_not_offered_as_a_backup`; widget tests in `pending_device_dialog_test.dart`.
+
+### HOL-SEC-230: A recovery on a server with no checkpoint dropped every member its lost device admitted
+
+**Severity:** Medium (Impact M, Exploitability M). **Class:** A. **Fixed in:** 0.14.3 (854a1d6c, 5c166763, 7be90a60). **Affected:** the in-app phrase recovery, 0.14.0 through 0.14.2.
+
+**Impact.** Every member, channel, role and setting the owner's dropped founding device wrote left the fold at each member that heard of the recovery, with their encryption-group leaves, until the kept device's settling landed. No attacker was needed; it followed the owner's own recovery, on most servers. On the Welcome restore as first built for 0.14.3 the loss was permanent, which the fix closed before release.
+
+**Description.** On a phrase-rooted server an op counts only while its author's roster counts the device that proved it, and checkpoints are written only after 2,000 ops, so most servers have none. The hold that keeps members' seats while a recovery is in progress formed only when a held checkpoint stopped being eligible, so with no checkpoint it never formed.
+
+**Fix.** The owner checkpoints a cut server soon after its first change, then at most hourly while it changes. With no checkpoint held, the hold keeps the whole fold as it was. A member that holds no checkpoint from before the moment named sends a signed record of the dropped device's ops, from which the recovering install restores the server.
+
+**Residual.** None known.
+
+**Test.** Harness `w3c1_a_recovery_on_a_server_without_a_checkpoint_keeps_its_members`, `w3c1_an_owner_checkpoints_a_cut_server_soon_after_its_first_admission`, `pr_a_a_fresh_install_restores_members_from_the_owners_early_checkpoint`, `pr_a_a_fresh_install_restores_a_server_that_never_checkpointed_from_members_records`.
+
+### HOL-SEC-231: A recovery that dropped a moderator's device undid its moderation in the owner's fold
+
+**Severity:** Medium (Impact M, Exploitability M). **Class:** C. **Fixed in:** 0.14.3 (5c166763). **Affected:** 0.14.0 through 0.14.2.
+
+**Impact.** A ban, kick, admission or grant a moderator's device wrote stopped counting at the owner and at every member that heard of the moderator's recovery, so a banned member was a member again. It followed the moderator's own recovery on any server with no checkpoint.
+
+**Description.** The recovery hold looked only at the base the owner's devices write. When a moderator's recovery dropped the device that banned someone, the owner's fold dropped the ban, and a moderator recovering on a fresh install never wrote the retire that would have kept it.
+
+**Fix.** When a rebuild would drop folded ops of a device the view no longer counts, for another identity, the replica records those ops and keeps counting them until that identity's retire, the view or the owner's newer base decides them. Nothing the device writes later counts.
+
+**Residual.** None known.
+
+**Test.** Harness `rev_f5b_a_recovery_dropping_a_moderators_device_keeps_its_ban`; unit `crdt::hold::tests::a_moderators_dropped_device_keeps_its_ban_in_the_owners_fold`.
+
+### HOL-SEC-232: A recovery stored while the node was down opened no hold at the next start
+
+**Severity:** Medium (Impact M, Exploitability M). **Class:** A. **Fixed in:** 0.14.3 (5c166763). **Affected:** 0.14.0 through 0.14.2.
+
+**Impact.** A member that took the owner's recovery roster while its app was stopped restarted straight into the step-back: the members, seats and encryption-group leaves of the dropped device's admissions went, with no hold and no notice. The push fetch keeps roster removals while the app is closed, so no attacker was needed.
+
+**Description.** The recovery hold was opened only inside a live rebuild. A roster stored while the node was down met the saved rows only in the start-up restore, which refolded under the new view directly.
+
+**Fix.** A restart that refolds judges both recovery triggers against what the saved rows folded, and a hold it opens is saved with the start-up changes.
+
+**Residual.** None known.
+
+**Test.** Harness `rev_f5b_a_recovery_stored_while_the_node_is_down_still_opens_the_hold`; unit `crdt::hold::tests::a_recovery_stored_while_the_node_was_down_opens_the_hold_at_restart`.
+
+### HOL-SEC-244: A push fetch spent every frame it does not show
+
+**Severity:** Medium (Impact M, Exploitability none needed). **Class:** A. **Fixed in:** 0.14.2 (fad4026e, ba51b966). **Affected:** every release with the background push fetch, through 0.14.1.
+
+**Impact.** A deletion, a reaction, a sync page or another frame a friend sent the sleeping phone never reached the app, so a message the friend deleted stayed shown there.
+
+**Description.** The relay lets go of a room's buffered frames once it hands them to a woken phone's background fetch. The fetch read direct messages, edits, link cards and file headers and dropped everything else, its own sibling devices' frames and frames it could not decrypt included; a channel wake did the same with every direct that was not a post.
+
+**Fix.** The fetch keeps every durable frame it does not show in the encrypted message database, and the app replays each one through its usual receive path, with every live gate, when it next joins that room, forgetting it only after the replay. A frame the fetch decrypted keeps its plaintext, bound to that ciphertext, so it is never decrypted twice. Only sealed frames from devices counted for the room's people are kept, never from a removed device or a blocked identity, in a bounded store where direct-message rooms and server rooms have separate budgets and each room is one share.
+
+**Residual.** A decrypted frame too large to keep, or turned away by a full share, still has its key spent; sync brings it back.
+
+**Test.** Harness `fetch_keeps_a_durable_carried_frame_for_the_app`, `sec244_a_resumed_app_replays_what_its_push_fetch_kept`; unit `sec244_the_fetch_keeps_a_durable_envelope_it_does_not_show`, `rev244_a_removed_devices_frame_is_never_kept`, `rev244_one_frame_sybils_evict_a_friends_kept_frames`, `a_kept_frame_is_forgotten_only_after_its_replay`, `kept_plaintext_opens_only_its_own_frame_inside_its_replay`.
+
+### HOL-SEC-248: A removed device could end a friendship
+
+**Severity:** Low (Impact L, Exploitability L). **Class:** C. **Fixed in:** 0.14.2 (12cea33b). **Affected:** every release with device removal, through 0.14.1.
+
+**Impact.** A friendship of the identity ended on the friend's devices until one side added the other again. It needed a device the identity's roster removed.
+
+**Description.** Friend requests and our own devices' friend lists were already refused from a removed device, but the live arms that end a friendship (a removal, and a reject when two requests cross) had no such check.
+
+**Fix.** Every live arm that can end a friendship refuses a device any roster removed, or a master id no roster counts as a device, before anything is written.
+
+**Residual.** None known.
+
+**Test.** Harness `sec248_a_removed_device_cannot_end_a_friendship_live`, `sec248_a_removed_device_cannot_end_a_friendship_by_a_reject`; unit `social::tests::a_removal_from_a_removed_device_or_a_bare_master_is_refused`.
+
+### HOL-SEC-249: A channel push wake spent the keys of group messages it did not show
+
+**Severity:** Low (Impact L, Exploitability none needed). **Class:** A. **Fixed in:** 0.14.2 (b2225d7e). **Affected:** every release with channel push wakes, through 0.14.1.
+
+**Impact.** A channel message the wake read but did not show could no longer be decrypted from the app's own copy.
+
+**Description.** A channel push fetch decrypts every group message it meets to learn what it is, and then saved the group state, which had already used the key of every message it did not show.
+
+**Fix.** The copy of the group state that read every frame is dropped unsaved. A fresh copy decrypts only the posts the fetch stored and is saved, so every other key stays for the app.
+
+**Residual.** None known.
+
+**Test.** Harness `sec249_the_app_still_reads_its_ring_copies_after_a_channel_wake`.
+
+### HOL-SEC-267: The GIF metadata strip panicked on a kept block cut short
+
+**Severity:** Low (Impact L, Exploitability L). **Class:** A. **Fixed in:** 0.14.3 (ef8fd4e6). **Affected:** every release with the send-side metadata strip (HOL-SEC-150), through 0.14.2.
+
+**Impact.** Sending, uploading or sharing one crafted GIF someone gave the user failed with a panic instead of a refusal.
+
+**Description.** The strip copied the GIF blocks it keeps up to the end their sub-blocks claimed, with no check that the end was inside the file.
+
+**Fix.** A kept block that runs past the end of the file refuses the file.
+
+**Residual.** None known.
+
+**Test.** `media_strip::tests::a_kept_gif_block_past_the_end_is_refused`, `a_forwarded_crafted_file_is_refused_or_cleaned_in_time`, `strip_answers_as_0_14_did`; harness `fms_a_crafted_file_sent_on_is_refused_or_cleaned_in_time`.
+
+### HOL-SEC-268: The AVI metadata strip recursed without a bound
+
+**Severity:** Medium (Impact M, Exploitability L). **Class:** A. **Fixed in:** 0.14.3 (ef8fd4e6). **Affected:** every release with the send-side metadata strip, through 0.14.2.
+
+**Impact.** Sending a crafted AVI someone gave the user overflowed the stack, which ends the whole app process.
+
+**Description.** The AVI strip stepped one call deeper into every nested header list, and nothing limited how many a file could hold.
+
+**Fix.** Header lists nest at most 16 deep; a deeper one refuses the file. A real AVI nests them once.
+
+**Residual.** None known.
+
+**Test.** `media_strip::tests::a_deeply_nested_avi_is_refused` (200,000 levels refused on a 1 MiB stack), `a_forwarded_crafted_file_is_refused_or_cleaned_in_time`; harness `fms_a_crafted_file_sent_on_is_refused_or_cleaned_in_time`.
+
+### HOL-SEC-269: Crafted MP4 and HEIF tables made the metadata strip run for hours
+
+**Severity:** Low (Impact L, Exploitability L). **Class:** A. **Fixed in:** 0.14.3 (ef8fd4e6, 73f9d9e0). **Affected:** every release with the send-side metadata strip, through 0.14.2.
+
+**Impact.** Sending one crafted video or HEIC never finished and held a thread and a core for hours.
+
+**Description.** Two table walks cost the product of two sizes the file chooses: a GPS track's runs of empty chunks, and a HEIF's metadata items with many empty extents. Samples and extents could also overlap, so a small file could ask for terabytes of zeroing.
+
+**Fix.** Each of those walks takes one step per entry, and one file zeroes at most twice its length plus 4 KiB before it is refused. Every answer for an honest file is the one 0.14 gave.
+
+**Residual.** None known.
+
+**Test.** `media_strip::tests::crafted_tables_take_one_pass`, `metadata_may_cover_the_file_at_most_twice`, `rev_a_heic_whose_exif_extents_overlap_takes_one_pass`, `strip_answers_as_0_14_did`.
+
+### HOL-SEC-301: A WebP of many EXIF chunks made the metadata strip run for hours
+
+**Severity:** Low (Impact L, Exploitability L). **Class:** A. **Fixed in:** 0.14.3 (d2cd7ae4). **Affected:** every release with the send-side metadata strip, through 0.14.2.
+
+**Impact.** Sending one crafted WebP never finished and held a thread and a core for hours.
+
+**Description.** Reading the orientation out of each EXIF chunk walked as many entries as the chunk claimed, up to 65,535, even past the end of the chunk.
+
+**Fix.** The read stops at the first entry that does not fit in the chunk; entries past the end never matched, so every answer is unchanged.
+
+**Residual.** None known.
+
+**Test.** `media_strip::tests::a_webp_of_many_exif_chunks_takes_one_pass`, `strip_answers_as_0_14_did`.
+
+### HOL-SEC-302: The metadata strip held about 24 bytes for every sample of a GPS track
+
+**Severity:** Low (Impact L, Exploitability L). **Class:** A. **Fixed in:** 0.14.3 (d2cd7ae4, 73f9d9e0). **Affected:** every release with the send-side metadata strip, through 0.14.2.
+
+**Impact.** Sending one crafted video took about 24 times its size in memory, enough to end the app on a phone.
+
+**Description.** The strip spread a GPS track's sample tables into a list per sample before zeroing any, and read a table past the end of its box.
+
+**Fix.** Samples are zeroed while the tables are walked, each table is read only inside its own box and held at the width the file wrote it, and a table longer than its box refuses the file.
+
+**Residual.** None known.
+
+**Test.** `media_strip::tests::a_fixed_size_sample_table_is_walked_without_holding_it`, `a_sample_table_longer_than_its_box_is_refused`, `rev_sample_tables_hold_at_most_twice_the_file`, `rev_a_heic_extent_list_holds_at_most_twice_the_file`.
+
+### HOL-SEC-303: The metadata strip's box lists held five times the file
+
+**Severity:** Low (Impact L, Exploitability L). **Class:** A. **Fixed in:** 0.14.3 (73f9d9e0). **Affected:** every release with the send-side metadata strip, through 0.14.2.
+
+**Impact.** Sending one crafted video or HEIC took about five times its size in memory, enough to end the app on a phone.
+
+**Description.** The MP4 and HEIF strips listed each level's boxes at 40 bytes an entry, while a box can be as small as 8.
+
+**Fix.** An entry takes 13 bytes and each list is allocated once at its exact size.
+
+**Residual.** None known.
+
+**Test.** `media_strip::tests::rev_a_box_list_holds_at_most_twice_the_file`, `a_box_list_takes_the_room_it_holds`.
+
+### HOL-SEC-304: A GIF cut inside its header was sent without its metadata removed
+
+**Severity:** Info (Impact L, Exploitability L). **Class:** P. **Fixed in:** 0.14.3 (73f9d9e0). **Affected:** every release with the send-side metadata strip, through 0.14.2.
+
+**Impact.** A GIF of at most 780 bytes went out exactly as it was. Only a vault upload sends such a file.
+
+**Description.** The GIF strip returned a file cut inside its header or colour table unchanged, where every other format refuses a file it cannot read to the end.
+
+**Fix.** Such a GIF is refused.
+
+**Residual.** None known.
+
+**Test.** `media_strip::tests::a_gif_cut_inside_its_header_is_refused`.
+
+### HOL-SEC-305: A fragmented video sent its GPS track's samples untouched
+
+**Severity:** Medium (Impact M, Exploitability none needed). **Class:** P. **Fixed in:** 0.14.3 (68355747, 539f05d5). **Affected:** every release with the send-side metadata strip, through 0.14.2.
+
+**Impact.** The sender's GPS trace reached every recipient of a fragmented video with a timed GPS track.
+
+**Description.** In a fragmented MP4 or MOV most samples sit in the fragments that follow the movie header, and some writers list the first fragment's samples in the header's own tables. The strip walked neither in such a file.
+
+**Fix.** The strip zeroes the samples a timed-metadata track's own tables list and every run its fragments place, as ISO/IEC 14496-12 places them, charged to the file's budget. A run whose place or size cannot be known refuses the file.
+
+**Residual.** None known.
+
+**Test.** `media_strip::tests::a_fragmented_movie_loses_its_gps_samples`, `rev3_a_real_frag_keyframe_movie_loses_its_gps_data_track`, `rev3_overlapping_moof_runs_are_refused`, `a_forwarded_fragment_or_sequence_loses_its_location`.
+
+### HOL-SEC-306: Some places a file keeps a location were never visited by the metadata strip
+
+**Severity:** Low (Impact M, Exploitability none needed). **Class:** P. **Fixed in:** 0.14.3 (68355747, 539f05d5). **Affected:** every release with the send-side metadata strip, through 0.14.2.
+
+**Impact.** A location reached recipients from a few camera and dashcam formats.
+
+**Description.** Google's camera motion tracks carry GPS packets, Novatek dashcams write a `gps ` box, and Matroska files can carry attached files such as a photo with its own Exif. All of them went out as they were.
+
+**Fix.** A camera motion track is treated as a timed-metadata track, a `gps ` box becomes padding of the same size, and a Matroska attachment that is not a font becomes a void element of the same length.
+
+**Residual.** Subtitle tracks some dashcams fill with GPS, the GPS blocks a dashcam keeps inside the media data, and Matroska chapter titles are not removed.
+
+**Test.** `media_strip::tests::other_location_carriers_lose_the_location`, `rev3_an_mkv_keeps_its_subtitle_fonts_and_chapters`, `rev3_an_mkv_image_attachment_is_still_voided`, `rev3_a_real_mkv_keeps_its_font_and_chapters_and_loses_its_cover`.
+
+### HOL-SEC-307: A HEIF-branded file never had its movie walked
+
+**Severity:** Low (Impact M, Exploitability L). **Class:** P. **Fixed in:** 0.14.3 (68355747). **Affected:** every release with the send-side metadata strip, through 0.14.2.
+
+**Impact.** A HEIF image sequence's movie user data and timed GPS track reached every recipient.
+
+**Description.** A HEIF image sequence also holds a movie with tracks and user data of its own, and the HEIF strip never walked it.
+
+**Fix.** When such a file holds a movie, the HEIF strip walks it exactly as the video strip does before it strips the items.
+
+**Residual.** None known.
+
+**Test.** `media_strip::tests::a_heif_with_a_movie_loses_the_movies_location`, `a_forwarded_fragment_or_sequence_loses_its_location`.
+
+### HOL-SEC-308: A HEIC motion photo's clip kept its location
+
+**Severity:** Low (Impact M, Exploitability L). **Class:** P. **Fixed in:** 0.14.3 (c8337ce1). **Affected:** every release with the send-side metadata strip, through 0.14.2.
+
+**Impact.** The place and capture time of a motion photo's clip reached every recipient, on phones that record them into the clip.
+
+**Description.** A HEIC motion photo keeps its short clip, a whole MP4 file, in a top-level box the HEIF strip left as it was. JPEG motion photos were already cleaned on every send path.
+
+**Fix.** The HEIF strip walks each clip as a movie of its own, under the file's one budget; a clip that does not parse refuses the file.
+
+**Residual.** None known.
+
+**Test.** `media_strip::tests::a_heic_motion_photo_clip_loses_its_location`, `a_real_heic_motion_photo_strips_its_clip_as_a_video`, `a_motion_clip_that_does_not_parse_is_refused`; harness `fms308_a_motion_photo_sent_on_leaves_without_its_clips_location`.
+
+### HOL-SEC-309: Samsung's `sefd` box kept the capture time and country code
+
+**Severity:** Low (Impact L, Exploitability L). **Class:** P. **Fixed in:** 0.14.3 (5126de3e). **Affected:** every release with the send-side metadata strip, through 0.14.2.
+
+**Impact.** The capture time, the country code of the phone's network and a hash of the photo's original path reached every recipient of a Samsung phone's video or motion photo.
+
+**Description.** Samsung phones close their videos, motion-photo clips and HEIC photos with a box of extended data that the strip never named.
+
+**Fix.** Every such box where Samsung writes it becomes padding of the same length, so every offset stays valid.
+
+**Residual.** None known.
+
+**Test.** `media_strip::tests::a_samsung_sef_box_becomes_padding`, `a_samsung_photo_and_its_clip_lose_their_sef_box`; harness `fms309_a_samsung_video_sent_on_leaves_without_its_sef_box`.
+
 ## 6. Accepted risks and open items
 
 ### 6.1 Accepted risks
 
 What Hollow knowingly does not defend against, with the reason and a review date, is kept
-in `audit/accepted_risks.md`. Its open rows at the 0.14 release follow, then the entries
+in `audit/accepted_risks.md`. Its open rows at the 0.14.3 release, unchanged since 0.14, follow, then the entries
 closed since they were first accepted.
 
 #### AR-01
@@ -3518,7 +4196,7 @@ These risks were accepted at first and fixed since. They stay in the register fo
 
 ### 6.2 Open items
 
-These are known and not fixed at the 0.14 release. None is a finding. Each is a hardening
+These are known and not fixed at the 0.14.3 release. None is a finding. Each is a hardening
 step, or a residual already stated in a finding or an accepted risk.
 
 - **Media.** Forwarding voice along a large channel's gossip tree ships off, so a voice
@@ -3544,6 +4222,13 @@ step, or a residual already stated in a finding or an accepted risk.
   withhold (HOL-SEC-035, HOL-SEC-156). Under Docker, a TURN port lock that fails at boot
   leaves coturn unlocked until `check-host.sh` flags it. HOL-SEC-187's signed proof ran on
   macOS 26; macOS 12 and 13, which 0.14 still supports, have no signed run.
+- **From the patch releases.** A spare of a first join's ask made before a kick can still
+  re-open a membership when a member writes the admission; the fold change that closes it
+  waits for 0.15, when 0.14.0 replicas no longer share servers (HOL-SEC-207). New servers
+  should get a founding nonce that also commits to the founding clock and name
+  (HOL-SEC-222). The metadata strip leaves GPS in dashcam subtitle tracks and media data,
+  and Matroska chapter titles (HOL-SEC-306). A forwarder-only relay behind NAT confirms a
+  new address by hand (HOL-SEC-214).
 - **Assurance.** An external audit, a formal model of at least one protocol, and property
   tests for the Dart link parsers.
 
@@ -3555,6 +4240,11 @@ author's own judgement. Each category was judged again for this edition against 
 changed since the 0.13 tag: the 0.14 commits, findings HOL-SEC-187 to 206 and the records
 in `audit/`. A rating moved only where there was evidence, and new findings in a category
 counted against raising it. One rating moved, and it moved down.
+
+The ratings were not judged again for 0.14.3. The findings of the patch releases sit
+mostly in authentication and access controls (the phrase recovery and a server's home
+relay), data handling (the send-side metadata strip) and configuration (the relay setup
+and access keys), and they count against raising those ratings when they are next judged.
 
 | Category | Rating |
 |----------------|--------|
@@ -4248,6 +4938,21 @@ fleet run. What it examined and found:
 | Dependency upgrades | vodozemac 0.11.2 and the Olm and MLS saves around it, the zip and SQLCipher updates and the archives they open | HOL-SEC-200, 201, 205, 206; AR-44 | commits `a6cdf8c4`, `bc2c4bdc`, `89d3a85d` |
 | Requirements | Every security rule: where it is enforced, which test proves it | R-RB-02 without a dedicated test, one planned guard (section 6.2) | `audit/requirements.md` |
 
+#### The 0.14 patch releases (2026-11-16 to 2026-11-24)
+
+Each patch track went through a hostile code review and one fix round, its targeted tests
+and the full Rust suite, and a fleet run where it changed behaviour.
+
+| Work | Examined | Found | Source |
+|---|---|---|---|
+| Rejoin asks and Linux toasts (0.14.1) | The leave a rejoin's ask follows; what a toast hands the notification server | HOL-SEC-207, 208 | the finding files, R-PU-05 |
+| A server's home relay (0.14.2, issue #151) | Which relay a server lives on, and what a member elsewhere may send for it | HOL-SEC-211 | `MULTI_RELAY_CLIENT_PLAN.md` section 13, R-CR-18 |
+| Relay setup and access keys (0.14.2, 0.14.3, issue #153) | Host checks on other systems and locales, TURN after an address change, access-key seats and an unreadable key file | HOL-SEC-212 to 214, 219, 220, 226 | R-RS-08, R-RS-21, R-RS-22, R-RS-25 |
+| Push fetch (0.14.2) | What a background fetch reads and what the app still gets afterwards | HOL-SEC-244, 248, 249 | R-PU-07, R-PU-08, R-CH-14 |
+| Phrase restore and recovery (0.14.3) | The Welcome restore, the lost-device settling, recovery holds and the owner's way back into owned servers | HOL-SEC-215 to 218, 221 to 225, 227, 229 to 232 | `PHRASE_RESTORE_DESIGN.md`, `PHRASE_RESTORE_F5_OWNER_REENTRY.md` |
+| Own-device carries (0.14.3) | A change sent to every device of our own identity | HOL-SEC-228 | R-CH-13 |
+| Send-side metadata strip (0.14.3) | What the strip costs on a crafted file, and what it leaves | HOL-SEC-267 to 269, 301 to 309 | R-RB-03 to R-RB-05, R-AR-11 |
+
 #### Exit criteria against the record
 
 | Criterion (PLAN section 6) | State in the record |
@@ -4313,6 +5018,10 @@ fleet run. What it examined and found:
 | 2026-10-22 to 10-24 | Phase G, the 0.13 wave | 26 commits `22116aa5` to `41080e0d`; relay deployed 10-23; merged-tree suites and fleets 10-24 |
 | 2026-10-30 | 0.13.0 released | the 0.13 edition of this report |
 | 2026-10-31 to 11-15 | The 0.14 work | HOL-SEC-187 to 206; AR-12 and AR-39 closed, AR-37, AR-38 and AR-40 to AR-46 new; the HOL-SEC-187 proof by hand 11-15 |
+| 2026-11-16 to 11-19 | 0.14.1 | HOL-SEC-207, 208; released 11-19 |
+| 2026-11-20 to 11-21 | 0.14.2 | HOL-SEC-211 to 214, 244, 248, 249; released 11-21 |
+| 2026-11-21 to 11-24 | 0.14.3 | HOL-SEC-215 to 232, 267 to 269, 301 to 309; released 11-24 |
+| 2026-11-25 | This edition | every number listed in section 4, reserved ones without detail |
 
 ### Appendix B: Whitepaper claims check
 

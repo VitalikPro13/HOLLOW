@@ -1,8 +1,7 @@
-# HOL-SEC-231: a recovery that drops a moderator's device undoes its moderation in the owner's fold
+# HOL-SEC-231: a recovery that dropped a moderator's device undid its moderation in the owner's fold
 
 ```
-ID:          HOL-SEC-231                 Status: Fixed on feat/phrase-restore-f5
-                                          (0.14.3, not released)
+ID:          HOL-SEC-231                 Status: Fixed in 0.14.3
 Severity:    Medium (Impact: a ban, kick, admission or grant a moderator's
                                           device wrote before the loss stops counting at
                                           the owner and every member that hears of the
@@ -17,8 +16,8 @@ Boundary:    TB-2 (co-members of a server)
 Traces to:   DEVICE_PROOF_DESIGN 7, 8.8 ("nothing vanishes"); R-CR-07, R-CR-14
 Found:       2026-11-23 (second hostile design review of F5; proven on this branch)
 Affected:    0.14.0 to 0.14.2
-Fix commit:  feat/phrase-restore-f5 (part A of the F5 design)
-Disclosure:  private until 0.14.3 ships
+Fix commit:  5c1667636
+Disclosure:  published with 0.14.3
 ```
 
 ## Description

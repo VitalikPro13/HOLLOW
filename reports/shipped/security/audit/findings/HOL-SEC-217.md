@@ -1,8 +1,7 @@
 # HOL-SEC-217: a phrase restore beside its own database kept the old device's Olm account
 
 ```
-ID:          HOL-SEC-217                 Status: Open, fix planned for 0.14.3
-                                          (track phrase-restore, S217)
+ID:          HOL-SEC-217                 Status: Fixed in 0.14.3
 Severity:    Low                         (Impact M: two devices encrypting from the same
                                           Olm chains reuse message keys where the relay
                                           sees the ciphertext, and share one-time keys;
@@ -15,8 +14,8 @@ Boundary:    TB-1 (the relay and the network path)
 Traces to:   AR-30, HOL-SEC-076, R-ID-15 (new)
 Found:       2026-11-21 (phrase restore design 8.3; confirmed by the hostile review)
 Affected:    0.12.0 through 0.14.2
-Fix commit:  pending (feat/phrase-restore)
-Disclosure:  private until 0.14.3 ships
+Fix commit:  7fa286cc2
+Disclosure:  published with 0.14.3
 ```
 
 ## Description

@@ -1,8 +1,7 @@
 # HOL-SEC-268: the AVI metadata strip recursed without a bound
 
 ```
-ID:          HOL-SEC-268                 Status: Fixed (track fix-media-strip, 2026-11-24),
-                                          embargoed, rides 0.14.3
+ID:          HOL-SEC-268                 Status: Fixed in 0.14.3
 Severity:    Medium                      (Impact M: the stack overflows and the whole app
                                           process aborts; Exploitability L: the user has to
                                           send or pass on a crafted AVI someone gave them)
@@ -13,8 +12,8 @@ Traces to:   R-RB-03, C-FILES-03
 Attacker:    anyone who can send the user a file
 Found:       2026-11-23 (builder of track S7b, session B)
 Affected:    every client since the strip shipped (HOL-SEC-150), through 0.14.2
-Fix commit:  pending (fix/media-strip-267-269)
-Disclosure:  private until the release
+Fix commit:  ef8fd4e64
+Disclosure:  published with 0.14.3
 ```
 
 ## Description

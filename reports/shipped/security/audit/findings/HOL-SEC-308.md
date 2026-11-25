@@ -1,8 +1,7 @@
 # HOL-SEC-308: a HEIC motion photo's clip kept its location
 
 ```
-ID:          HOL-SEC-308                 Status: Fixed (track fix-media-strip-308, 2026-11-24),
-                                          embargoed, 0.14.3
+ID:          HOL-SEC-308                 Status: Fixed in 0.14.3
 Severity:    Low                         (Impact M: the clip's place and capture time reach
                                           every recipient; Exploitability L: needs a phone
                                           that records location into the clip)
@@ -13,8 +12,8 @@ Traces to:   R-AR-11, C-FILES-03
 Attacker:    any recipient
 Found:       2026-11-24 (track fix-media-strip, made sample)
 Affected:    every client since the strip shipped (HOL-SEC-150), through 0.14.2
-Fix commit:  pending (fix/media-strip-308, on fix/media-strip-267-269)
-Disclosure:  private until the release
+Fix commit:  c8337ce1c
+Disclosure:  published with 0.14.3
 ```
 
 ## Description

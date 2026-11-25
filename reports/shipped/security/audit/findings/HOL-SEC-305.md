@@ -1,8 +1,7 @@
 # HOL-SEC-305: a fragmented video sent its GPS track's samples untouched
 
 ```
-ID:          HOL-SEC-305                 Status: Fixed (track fix-media-strip, 2026-11-24),
-                                          embargoed, 0.14.3 at Vitalik's choice
+ID:          HOL-SEC-305                 Status: Fixed in 0.14.3
 Severity:    Medium                      (Impact M: the sender's GPS trace reaches every
                                           recipient; Exploitability: none needed, it happens
                                           on send for any fragmented video with a timed GPS
@@ -15,8 +14,8 @@ Traces to:   R-AR-11, C-FILES-03
 Attacker:    any recipient
 Found:       2026-11-24 (hostile review of track S7b, pre-existing list)
 Affected:    every client since the strip shipped (HOL-SEC-150), through 0.14.2
-Fix commit:  pending (fix/media-strip-267-269, fourth and fifth commits)
-Disclosure:  private until the release
+Fix commit:  683557472, 539f05d55
+Disclosure:  published with 0.14.3
 ```
 
 ## Description
@@ -26,7 +25,7 @@ it with its samples. In a fragmented MP4 or MOV most samples sit in the `moof` r
 follow the movie header, and some writers list the first fragment's samples in the movie
 header's own sample tables (ffmpeg's `frag_keyframe` does). The strip walked neither in a
 fragmented file. It cleared the track's user data and times and sent its samples as they
-
+were.
 
 ## Fix
 

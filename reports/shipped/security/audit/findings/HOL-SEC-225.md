@@ -1,8 +1,7 @@
 # HOL-SEC-225: a floor mark named the op held at its base's key
 
 ```
-ID:          HOL-SEC-225                 Status: Open, fix planned for 0.14.3
-                                          (track phrase-restore)
+ID:          HOL-SEC-225                 Status: Fixed in 0.14.3
 Severity:    Low                         (Impact L: during an owner recovery a member's
                                           floor mark names the wrong checkpoint or falls
                                           back to its stale base, so the floor it holds
@@ -16,8 +15,8 @@ Boundary:    TB-3 (server members and their replicated state)
 Traces to:   DEVICE_PROOF_DESIGN 8.8 item 1; R-CR-14
 Found:       2026-11-22 (phrase-restore, the HOL-SEC-224 sweep of content_of callers)
 Affected:    0.14.0 to 0.14.2 (the device proof track)
-Fix commit:  pending (feat/phrase-restore)
-Disclosure:  private until 0.14.3 ships
+Fix commit:  0a6e396a9
+Disclosure:  published with 0.14.3
 ```
 
 ## Description

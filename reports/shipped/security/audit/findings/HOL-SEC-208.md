@@ -2,7 +2,6 @@
 
 ```
 ID:          HOL-SEC-208                 Status: Fixed in 0.14.1
-                                          (track t18-linux-notif, 2026-11-19)
 Severity:    Low                         (Impact L: a message or display name renders as
                                           formatting, and on servers that allow them as a
                                           link or a local image, inside a system notification
@@ -17,8 +16,8 @@ Attacker:    a friend or a member of a shared server
 Found:       2026-11-19 (hostile review of track t18-linux-notif)
 Affected:    every Linux build since desktop toasts (local_notifier, libnotify) through
              0.14.0
-Fix commit:  pending (track t18-linux-notif, 0.14.1, embargoed on security/0.14.1)
-Disclosure:  private until 0.14.1 ships
+Fix commit:  250ae2123
+Disclosure:  published with 0.14.1
 ```
 
 ## Description

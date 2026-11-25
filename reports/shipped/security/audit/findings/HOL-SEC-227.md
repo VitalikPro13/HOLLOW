@@ -1,8 +1,7 @@
 # HOL-SEC-227: a device away at an in-app phrase recovery never learned it
 
 ```
-ID:          HOL-SEC-227                 Status: Open, fix planned for 0.14.3
-                                          (track phrase-restore)
+ID:          HOL-SEC-227                 Status: Fixed in 0.14.3
 Severity:    Medium                      (Impact M: a lost or stolen device the
                                           person recovered the identity from keeps
                                           running unlocked and never starts its erase;
@@ -17,8 +16,8 @@ Boundary:    TB-1 (the person's own devices)
 Traces to:   design ID-1; R-ID-18
 Found:       2026-11-22 (phrase-restore review, after the fleet's bug B)
 Affected:    0.14.0 to 0.14.2
-Fix commit:  556dbcc5 (hand-off), bound in the review fix commit (feat/phrase-restore)
-Disclosure:  private until 0.14.3 ships
+Fix commit:  556dbcc5c, 0d028ac75
+Disclosure:  published with 0.14.3
 ```
 
 ## Description

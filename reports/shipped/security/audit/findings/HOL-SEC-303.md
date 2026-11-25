@@ -1,8 +1,7 @@
 # HOL-SEC-303: the metadata strip's box lists held five times the file
 
 ```
-ID:          HOL-SEC-303                 Status: Fixed (track fix-media-strip, 2026-11-24),
-                                          embargoed, rides 0.14.3
+ID:          HOL-SEC-303                 Status: Fixed in 0.14.3
 Severity:    Low                         (Impact L: sending one crafted video or HEIC takes
                                           about five times its size in memory, enough to end
                                           the app on a phone; Exploitability L: the user has
@@ -14,8 +13,8 @@ Traces to:   R-RB-04, C-FILES-03
 Attacker:    anyone who can send the user a file
 Found:       2026-11-24 (hostile review of fix/media-strip-267-269, outside its lines)
 Affected:    every client since the strip shipped (HOL-SEC-150), through 0.14.2
-Fix commit:  pending (fix/media-strip-267-269, third commit)
-Disclosure:  private until the release
+Fix commit:  73f9d9e06
+Disclosure:  published with 0.14.3
 ```
 
 ## Description

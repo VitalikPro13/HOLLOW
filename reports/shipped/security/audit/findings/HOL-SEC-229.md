@@ -1,8 +1,7 @@
 # HOL-SEC-229: a recovery asked the person to approve the device it had just cut off
 
 ```
-ID:          HOL-SEC-229                 Status: Open, fix planned for 0.14.3
-                                          (track phrase-restore)
+ID:          HOL-SEC-229                 Status: Fixed in 0.14.3
 Severity:    Medium                      (Impact M: one tap re-admits a device the
                                           person just said someone else may hold, and
                                           the prompt tells them it is a restored backup
@@ -21,8 +20,8 @@ Found:       2026-11-23 (phrase-restore clean macOS fleet, Yes flow, and the
              Android No flow)
 Affected:    0.12.0 to 0.14.2 (the in-app "Remove devices with your recovery
              phrase"); the Welcome restore (unreleased, 0.14.3)
-Fix commit:  pending (feat/phrase-restore)
-Disclosure:  private until 0.14.3 ships
+Fix commit:  447cfab46, f75f41bb2, 611b3979f
+Disclosure:  published with 0.14.3
 ```
 
 ## Description

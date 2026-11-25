@@ -1,8 +1,7 @@
 # HOL-SEC-215: a device the recovery phrase added raised no warning on the identity's other devices
 
 ```
-ID:          HOL-SEC-215                 Status: Open, fix planned for 0.14.3
-                                          (track phrase-restore, R3)
+ID:          HOL-SEC-215                 Status: Fixed in 0.14.3
 Severity:    Low                         (Impact L: the owner learns of a device added
                                           with the phrase only from the device list or a
                                           contact's warning; Exploitability L: needs the
@@ -13,8 +12,8 @@ Boundary:    TB-2 (the identity's own devices)
 Traces to:   C-IDENTITY-09, R-ID-14 (new)
 Found:       2026-11-21 (phrase restore design, revision 1)
 Affected:    0.12.0 through 0.14.2
-Fix commit:  pending (feat/phrase-restore)
-Disclosure:  private until 0.14.3 ships
+Fix commit:  7fa286cc2
+Disclosure:  published with 0.14.3
 ```
 
 ## Description
