@@ -162,7 +162,9 @@ jobs:
           SHARD: ${{ matrix.shard }}
         run: |
           profdata="$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/^host: //p')/bin/llvm-profdata"
-          "$profdata" merge -sparse ./*.profraw -o "$RUNNER_TEMP/shard-$SHARD.profraw"
+          # A test process killed mid-write (a flaky try nextest retries) leaves a
+          # truncated profile; skip it with a warning rather than fail the shard.
+          "$profdata" merge -sparse --failure-mode=all ./*.profraw -o "$RUNNER_TEMP/shard-$SHARD.profraw"
 
       - name: Publish this shard's coverage profile
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
